@@ -418,7 +418,9 @@ impl App {
             }
             KeyCode::Char('n') => self.create_agent_for_selected_project()?,
             KeyCode::Char('u') => self.refresh_selected_project()?,
-            KeyCode::Char('x') => self.confirm_delete_selected_session()?,
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.confirm_delete_selected_session()?
+            }
             KeyCode::Char('d') => self.cycle_selected_project_provider()?,
             KeyCode::Char('r') => self.reconnect_selected_session()?,
             KeyCode::Char('y') => self.copy_selected_path()?,
@@ -1171,8 +1173,7 @@ impl App {
             self.session_store.upsert_session(session)?;
         }
         self.set_info(format!(
-            "Default provider for project \"{}\" changed to \"{}\"",
-            project.name,
+            "Changed CLI agent to \"{}\"",
             next.as_str()
         ));
         Ok(())
@@ -1872,7 +1873,7 @@ impl App {
             ("a", "Add project"),
             ("y", "Copy path"),
             ("r", "Reconnect"),
-            ("x", "Delete"),
+            ("^D", "Delete"),
             ("^P", "Palette"),
             ("?", "Help"),
         ];
@@ -2003,7 +2004,7 @@ impl App {
                     ("d", "Cycle default provider"),
                     ("u", "Refresh checkout (git pull --ff-only)"),
                     ("r", "Restart agent CLI"),
-                    ("x", "Delete selected session/worktree"),
+                    ("ctrl+d", "Delete selected session/worktree"),
                 ],
             ),
             (
