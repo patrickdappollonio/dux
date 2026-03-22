@@ -500,11 +500,10 @@ impl App {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
                 if session_active {
-                    spans.push(Span::styled("Press ", desc_style));
                     spans.extend(self.theme.dim_key_badge("i", Color::Reset));
                     spans.push(Span::styled(" or ", desc_style));
-                    spans.extend(self.theme.dim_key_badge("enter", Color::Reset));
-                    spans.push(Span::styled(" to interact with the agent. ", desc_style));
+                    spans.extend(self.theme.dim_key_badge("Enter", Color::Reset));
+                    spans.push(Span::styled(" to interact. ", desc_style));
                     spans.extend(self.theme.dim_key_badge("^B", Color::Reset));
                     spans.push(Span::styled("/", desc_style));
                     spans.extend(self.theme.dim_key_badge("PgUp", Color::Reset));
