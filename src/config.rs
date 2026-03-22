@@ -12,7 +12,6 @@ use crate::model::ProviderKind;
 #[serde(default)]
 pub struct Config {
     pub defaults: Defaults,
-    pub shell: ShellConfig,
     pub providers: ProvidersConfig,
     pub logging: LoggingConfig,
     pub projects: Vec<ProjectConfig>,
@@ -23,13 +22,6 @@ pub struct Config {
 #[serde(default)]
 pub struct Defaults {
     pub provider: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ShellConfig {
-    pub command: String,
-    pub args: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -74,10 +66,6 @@ impl Default for Config {
             defaults: Defaults {
                 provider: "codex".to_string(),
             },
-            shell: ShellConfig {
-                command: "/bin/bash".to_string(),
-                args: vec!["-l".to_string()],
-            },
             providers: ProvidersConfig::default(),
             logging: LoggingConfig {
                 level: "info".to_string(),
@@ -97,15 +85,6 @@ impl Default for Defaults {
     fn default() -> Self {
         Self {
             provider: "codex".to_string(),
-        }
-    }
-}
-
-impl Default for ShellConfig {
-    fn default() -> Self {
-        Self {
-            command: "/bin/bash".to_string(),
-            args: vec!["-l".to_string()],
         }
     }
 }
@@ -222,11 +201,6 @@ pub fn render_default_config() -> String {
 # Which provider new sessions use unless a project overrides it.
 provider = "{provider}"
 
-[shell]
-# Manual terminal command for the lower-right pane.
-command = "{shell_command}"
-args = ["{shell_arg}"]
-
 [providers.claude]
 # Command used to launch an ACP-compatible Claude adapter.
 # Example: command = "claude-agent-acp"
@@ -256,8 +230,6 @@ right_top_height_pct = {right_top_height}
 projects = []
 "#,
         provider = default.defaults.provider,
-        shell_command = default.shell.command,
-        shell_arg = default.shell.args.first().cloned().unwrap_or_default(),
         claude_command = default
             .providers
             .get("claude")
@@ -290,13 +262,6 @@ fn render_config(config: &Config) -> String {
     out.push_str("[defaults]\n");
     out.push_str("# Which provider new sessions use unless a project overrides it.\n");
     out.push_str(&format!("provider = \"{}\"\n\n", config.defaults.provider));
-    out.push_str("[shell]\n");
-    out.push_str("# Manual terminal command for the lower-right pane.\n");
-    out.push_str(&format!("command = \"{}\"\n", config.shell.command));
-    out.push_str(&format!(
-        "args = {}\n\n",
-        render_string_list(&config.shell.args)
-    ));
     render_provider_configs(&mut out, &config.providers);
     out.push_str("[logging]\n");
     out.push_str("# Log level can be error, info, or debug.\n");

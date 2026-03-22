@@ -6,7 +6,6 @@ mod logger;
 mod model;
 mod statusline;
 mod storage;
-mod terminal;
 mod theme;
 
 use anyhow::Result;

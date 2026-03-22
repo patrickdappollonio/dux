@@ -27,7 +27,6 @@ use crate::logger;
 use crate::model::{AgentSession, ChangedFile, Project, ProviderKind, SessionStatus};
 use crate::statusline::{StatusLine, StatusTone};
 use crate::storage::SessionStore;
-use crate::terminal::{TerminalKind, TerminalOutput, TerminalSession};
 use crate::theme::Theme;
 
 pub struct App {
@@ -52,13 +51,10 @@ pub struct App {
     input_target: InputTarget,
     provider_tx: Sender<ProviderEvent>,
     provider_rx: Receiver<ProviderEvent>,
-    shell_tx: Sender<TerminalOutput>,
-    shell_rx: Receiver<TerminalOutput>,
     worker_tx: Sender<WorkerEvent>,
     worker_rx: Receiver<WorkerEvent>,
     providers: HashMap<String, AcpClient>,
     provider_buffers: HashMap<String, Vec<String>>,
-    shell_terminals: HashMap<String, TerminalSession>,
     create_agent_in_flight: bool,
     theme: Theme,
 }
@@ -68,7 +64,6 @@ enum FocusPane {
     Left,
     Center,
     Files,
-    Shell,
 }
 
 impl FocusPane {
@@ -76,17 +71,15 @@ impl FocusPane {
         match self {
             Self::Left => Self::Center,
             Self::Center => Self::Files,
-            Self::Files => Self::Shell,
-            Self::Shell => Self::Left,
+            Self::Files => Self::Left,
         }
     }
 
     fn previous(self) -> Self {
         match self {
-            Self::Left => Self::Shell,
+            Self::Left => Self::Files,
             Self::Center => Self::Left,
             Self::Files => Self::Center,
-            Self::Shell => Self::Files,
         }
     }
 }
@@ -137,7 +130,6 @@ struct BrowserEntry {
 enum InputTarget {
     None,
     Agent,
-    Shell,
 }
 
 #[derive(Clone, Debug)]
@@ -159,44 +151,54 @@ enum WorkerEvent {
 struct CommandDef {
     name: &'static str,
     description: &'static str,
+    shortcut: Option<&'static str>,
 }
 
 const COMMANDS: &[CommandDef] = &[
     CommandDef {
         name: "new-agent",
         description: "Create a new agent for the selected project",
+        shortcut: Some("a"),
     },
     CommandDef {
         name: "provider",
         description: "Toggle the selected project's default provider",
+        shortcut: Some("d"),
     },
     CommandDef {
         name: "refresh-project",
         description: "Git pull the selected project checkout",
+        shortcut: Some("u"),
     },
     CommandDef {
         name: "delete-project",
         description: "Remove the selected project and its sessions",
+        shortcut: None,
     },
     CommandDef {
         name: "delete-agent",
         description: "Delete the selected agent session",
+        shortcut: None,
     },
     CommandDef {
         name: "reconnect-agent",
         description: "Reconnect the selected detached agent session",
+        shortcut: None,
     },
     CommandDef {
         name: "add-project",
         description: "Open the project browser",
+        shortcut: Some("p"),
     },
     CommandDef {
         name: "add-project-manual",
         description: "Open manual project entry",
+        shortcut: None,
     },
     CommandDef {
         name: "help",
         description: "Open the help overlay",
+        shortcut: Some("?"),
     },
 ];
 
@@ -210,7 +212,6 @@ impl App {
         let projects = load_projects(&config);
         let sessions = session_store.load_sessions()?;
         let (provider_tx, provider_rx) = mpsc::channel();
-        let (shell_tx, shell_rx) = mpsc::channel();
         let (worker_tx, worker_rx) = mpsc::channel();
         let mut app = Self {
             left_width_pct: config.ui.left_width_pct,
@@ -234,13 +235,10 @@ impl App {
             input_target: InputTarget::None,
             provider_tx,
             provider_rx,
-            shell_tx,
-            shell_rx,
             worker_tx,
             worker_rx,
             providers: HashMap::new(),
             provider_buffers: HashMap::new(),
-            shell_terminals: HashMap::new(),
             create_agent_in_flight: false,
             theme: Theme::default_dark(),
         };
@@ -279,9 +277,6 @@ impl App {
         let existing = self.sessions.clone();
         for session in existing {
             if Path::new(&session.worktree_path).exists() {
-                if let Err(err) = self.spawn_shell_for_session(&session) {
-                    self.push_provider_line(&session.id, format!("shell restore failed: {err}"));
-                }
                 if let Some(acp_session_id) = session.acp_session_id.clone() {
                     match self.connect_provider(&session, true, Some(acp_session_id)) {
                         Ok(client) => {
@@ -379,16 +374,11 @@ impl App {
         if self.input_target == InputTarget::Agent {
             return self.handle_agent_input(key);
         }
-        if self.input_target == InputTarget::Shell {
-            self.handle_shell_input(key)?;
-            return Ok(false);
-        }
 
         match self.focus {
             FocusPane::Left => self.handle_left_key(key)?,
             FocusPane::Center => self.handle_center_key(key)?,
             FocusPane::Files => self.handle_files_key(key)?,
-            FocusPane::Shell => self.handle_shell_key(key)?,
         }
         Ok(false)
     }
@@ -400,12 +390,14 @@ impl App {
                 if self.selected_left + 1 < items.len() {
                     self.selected_left += 1;
                     self.reload_changed_files();
+
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if self.selected_left > 0 {
                     self.selected_left -= 1;
                     self.reload_changed_files();
+
                 }
             }
             KeyCode::Enter => {
@@ -467,14 +459,6 @@ impl App {
         Ok(())
     }
 
-    fn handle_shell_key(&mut self, key: KeyEvent) -> Result<()> {
-        if key.code == KeyCode::Char('i') {
-            self.input_target = InputTarget::Shell;
-            self.set_info("Shell input mode. Esc exits input mode.");
-        }
-        Ok(())
-    }
-
     fn handle_agent_input(&mut self, key: KeyEvent) -> Result<bool> {
         match key.code {
             KeyCode::Esc => {
@@ -501,35 +485,6 @@ impl App {
             _ => {}
         }
         Ok(false)
-    }
-
-    fn handle_shell_input(&mut self, key: KeyEvent) -> Result<()> {
-        if key.code == KeyCode::Esc {
-            self.input_target = InputTarget::None;
-            self.set_info("Shell input mode off.");
-            return Ok(());
-        }
-        let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
-            return Ok(());
-        };
-        if let Some(shell) = self.shell_terminals.get_mut(&session_id) {
-            match key.code {
-                KeyCode::Enter => shell.send("\n")?,
-                KeyCode::Backspace => shell.send("\u{7f}")?,
-                KeyCode::Tab => shell.send("\t")?,
-                KeyCode::Left => shell.send("\u{1b}[D")?,
-                KeyCode::Right => shell.send("\u{1b}[C")?,
-                KeyCode::Up => shell.send("\u{1b}[A")?,
-                KeyCode::Down => shell.send("\u{1b}[B")?,
-                KeyCode::Char(c) => {
-                    if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                        shell.send(&c.to_string())?;
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok(())
     }
 
     fn handle_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -778,6 +733,7 @@ impl App {
                     if self.selected_left + 1 < items.len() {
                         self.selected_left += 1;
                         self.reload_changed_files();
+    
                     }
                 }
                 FocusPane::Files => {
@@ -792,6 +748,7 @@ impl App {
                     if self.selected_left > 0 {
                         self.selected_left -= 1;
                         self.reload_changed_files();
+    
                     }
                 }
                 FocusPane::Files => {
@@ -934,22 +891,6 @@ impl App {
         Ok(client)
     }
 
-    fn spawn_shell_for_session(&mut self, session: &AgentSession) -> Result<()> {
-        if self.shell_terminals.contains_key(&session.id) {
-            return Ok(());
-        }
-        logger::debug(&format!("spawning shell for session {}", session.id));
-        let shell = TerminalSession::spawn(
-            TerminalKind::Shell,
-            Path::new(&session.worktree_path),
-            &self.config.shell.command,
-            &self.config.shell.args,
-            self.shell_tx.clone(),
-        )?;
-        self.shell_terminals.insert(session.id.clone(), shell);
-        Ok(())
-    }
-
     fn refresh_selected_project(&mut self) -> Result<()> {
         let Some(project) = self.selected_project().cloned() else {
             self.set_error("Select a project first.");
@@ -997,7 +938,6 @@ impl App {
             &session.branch_name,
         )?;
         self.providers.remove(&session.id);
-        self.shell_terminals.remove(&session.id);
         self.provider_buffers.remove(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
         self.session_store.delete_session(&session.id)?;
@@ -1157,11 +1097,6 @@ impl App {
                             session.worktree_path
                         )],
                     );
-                    if let Err(err) = self.spawn_shell_for_session(&session) {
-                        logger::error(&format!("shell spawn failed for {}: {err}", session.id));
-                        self.set_error(format!("Shell failed to start: {err}"));
-                        continue;
-                    }
                     if let Err(err) = self.session_store.upsert_session(&session) {
                         logger::error(&format!(
                             "session store upsert failed for {}: {err}",
@@ -1193,9 +1128,6 @@ impl App {
             ));
             self.push_provider_line(&event.session_id, event.message);
             self.mark_session_updated(&event.session_id);
-        }
-        while let Ok(_event) = self.shell_rx.try_recv() {
-            self.reload_changed_files();
         }
         let mut exited = Vec::new();
         for (session_id, provider) in &mut self.providers {
@@ -1245,7 +1177,10 @@ impl App {
         self.render_left(frame, left);
         self.render_center(frame, center);
         self.render_files(frame, files);
-        self.render_shell(frame, shell);
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.theme.border_normal))
+            .render(shell, frame.buffer_mut());
         self.render_footer(frame, footer);
         self.render_overlay(frame);
     }
@@ -1461,23 +1396,6 @@ impl App {
         );
     }
 
-    fn render_shell(&self, frame: &mut Frame, area: Rect) {
-        let mut lines = self
-            .selected_session()
-            .and_then(|session| self.shell_terminals.get(&session.id))
-            .map(TerminalSession::snapshot)
-            .unwrap_or_else(|| vec!["No shell attached to the current session.".to_string()]);
-        if self.input_target == InputTarget::Shell {
-            lines.push(String::new());
-            lines.push("[shell input mode]".to_string());
-        }
-        let focused = self.focus == FocusPane::Shell;
-        Paragraph::new(lines.join("\n"))
-            .block(self.themed_block("Shell", focused))
-            .wrap(Wrap { trim: false })
-            .render(area, frame.buffer_mut());
-    }
-
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
         let hints: &[(&str, &str)] = match self.focus {
             FocusPane::Left => &[
@@ -1505,15 +1423,6 @@ impl App {
                 ("Enter", "Diff"),
                 ("^P", "Palette"),
                 (":", "Cmd"),
-                ("Tab", "Next"),
-                ("?", "Help"),
-                ("q", "Quit"),
-            ],
-            FocusPane::Shell => &[
-                ("i", "Input"),
-                ("^P", "Palette"),
-                (":", "Cmd"),
-                ("Esc", "Leave"),
                 ("Tab", "Next"),
                 ("?", "Help"),
                 ("q", "Quit"),
@@ -1609,10 +1518,6 @@ impl App {
                 "Files pane",
                 &[("Enter", "Open selected file diff")],
             ),
-            (
-                "Shell pane",
-                &[("i", "Send raw input to worktree shell")],
-            ),
         ];
         let mut lines: Vec<Line> = Vec::new();
         for (section_idx, (section, bindings)) in help_bindings.iter().enumerate() {
@@ -1661,7 +1566,7 @@ impl App {
                     commands
                         .iter()
                         .map(|command| {
-                            ListItem::new(Line::from(vec![
+                            let mut spans = vec![
                                 Span::styled(
                                     command.name.to_string(),
                                     Style::default()
@@ -1672,7 +1577,12 @@ impl App {
                                     format!("  {}", command.description),
                                     Style::default().fg(self.theme.hint_desc_fg),
                                 ),
-                            ]))
+                            ];
+                            if let Some(shortcut) = command.shortcut {
+                                spans.push(Span::raw("  "));
+                                spans.extend(self.theme.key_badge(shortcut, Color::Reset));
+                            }
+                            ListItem::new(Line::from(spans))
                         })
                         .collect::<Vec<_>>()
                 };
