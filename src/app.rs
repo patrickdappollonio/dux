@@ -493,6 +493,7 @@ impl App {
             }
             KeyCode::Esc => {
                 self.center_mode = CenterMode::Agent;
+                self.focus = FocusPane::Files;
                 self.set_info("Returned to agent view.");
             }
             _ => {}
