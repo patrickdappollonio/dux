@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.98"
+arboard = "3.4.1"
 chrono = { version = "0.4.41", features = ["serde"] }
 crossterm = "0.29.0"
 home = "0.5.11"

@@ -103,7 +103,6 @@ enum PromptState {
     Command {
         input: String,
         selected: usize,
-        direct: bool,
         searching: bool,
     },
     BrowseProjects {
@@ -200,6 +199,11 @@ const COMMANDS: &[CommandDef] = &[
         name: "toggle-sidebar",
         description: "Collapse or expand the projects sidebar",
         shortcut: Some("["),
+    },
+    CommandDef {
+        name: "copy-path",
+        description: "Copy the selected agent's worktree path",
+        shortcut: Some("y"),
     },
     CommandDef {
         name: "help",
@@ -337,20 +341,9 @@ impl App {
             self.prompt = PromptState::Command {
                 input: String::new(),
                 selected: 0,
-                direct: false,
                 searching: false,
             };
             self.set_info("Command palette opened.");
-            return Ok(false);
-        }
-        if key.code == KeyCode::Char(':') {
-            self.prompt = PromptState::Command {
-                input: String::new(),
-                selected: 0,
-                direct: true,
-                searching: false,
-            };
-            self.set_info("Command mode opened.");
             return Ok(false);
         }
         if key.code == KeyCode::Tab {
@@ -431,6 +424,7 @@ impl App {
             KeyCode::Char('x') => self.delete_selected_session()?,
             KeyCode::Char('d') => self.cycle_selected_project_provider()?,
             KeyCode::Char('r') => self.reconnect_selected_session()?,
+            KeyCode::Char('y') => self.copy_selected_path()?,
             _ => {}
         }
         Ok(())
@@ -502,7 +496,6 @@ impl App {
         if let PromptState::Command {
             input,
             selected,
-            direct: _,
             searching,
         } = &mut self.prompt
         {
@@ -1282,7 +1275,7 @@ impl App {
             let mut state = ListState::default().with_selected(Some(self.selected_left));
             StatefulWidget::render(
                 List::new(items)
-                    .block(self.themed_block("P", focused))
+                    .block(self.themed_block("", focused))
                     .highlight_style(self.theme.selection_style()),
                 area,
                 frame.buffer_mut(),
@@ -1339,10 +1332,7 @@ impl App {
                 }
             })
             .collect::<Vec<_>>();
-        let title = format!(
-            "Projects ({})",
-            self.projects.len()
-        );
+        let title = format!("Projects ({})", self.projects.len());
         let mut state = ListState::default().with_selected(Some(self.selected_left));
         StatefulWidget::render(
             List::new(items)
@@ -1459,7 +1449,6 @@ impl App {
                 ("a", "Agent"),
                 ("p", "Add"),
                 ("^P", "Palette"),
-                (":", "Cmd"),
                 ("d", "Provider"),
                 ("u", "Pull"),
                 ("[", "Sidebar"),
@@ -1469,7 +1458,6 @@ impl App {
             FocusPane::Center => &[
                 ("i", "Prompt"),
                 ("^P", "Palette"),
-                (":", "Cmd"),
                 ("Esc", "Close diff"),
                 ("Tab", "Next"),
                 ("[", "Sidebar"),
@@ -1480,7 +1468,6 @@ impl App {
                 ("j/k", "Move"),
                 ("Enter", "Diff"),
                 ("^P", "Palette"),
-                (":", "Cmd"),
                 ("Tab", "Next"),
                 ("[", "Sidebar"),
                 ("?", "Help"),
@@ -1547,7 +1534,6 @@ impl App {
                 &[
                     ("Tab", "Focus next pane"),
                     ("Ctrl-p", "Open command palette"),
-                    (":", "Open command mode"),
                     ("Ctrl-w", "Resize mode (h/l side, j/k split)"),
                     ("?", "Toggle help"),
                     ("q", "Quit"),
@@ -1612,7 +1598,6 @@ impl App {
             PromptState::Command {
                 input,
                 selected,
-                direct,
                 searching,
             } => {
                 self.render_dim_overlay(frame);
@@ -1625,7 +1610,7 @@ impl App {
                     commands
                         .iter()
                         .map(|command| {
-                            let mut spans = vec![
+                            let mut left_spans = vec![
                                 Span::styled(
                                     command.name.to_string(),
                                     Style::default()
@@ -1638,10 +1623,15 @@ impl App {
                                 ),
                             ];
                             if let Some(shortcut) = command.shortcut {
-                                spans.push(Span::raw("  "));
-                                spans.extend(self.theme.key_badge(shortcut, Color::Reset));
+                                let left_len: usize = left_spans.iter().map(|s| s.width()).sum();
+                                // +3 for badge brackets <k>, +2 for borders, +1 for right padding
+                                let badge_len = shortcut.len() + 3;
+                                let avail = popup.width as usize;
+                                let pad = avail.saturating_sub(left_len + badge_len + 3);
+                                left_spans.push(Span::raw(" ".repeat(pad.max(2))));
+                                left_spans.extend(self.theme.key_badge(shortcut, Color::Reset));
                             }
-                            ListItem::new(Line::from(spans))
+                            ListItem::new(Line::from(left_spans))
                         })
                         .collect::<Vec<_>>()
                 };
@@ -1653,8 +1643,6 @@ impl App {
                     .areas(popup);
                 let title = if *searching {
                     "Command Palette (searching)"
-                } else if *direct {
-                    "Command"
                 } else {
                     "Command Palette"
                 };
@@ -1676,8 +1664,6 @@ impl App {
                 }
                 let prompt_prefix = if *searching {
                     "/ "
-                } else if *direct {
-                    ":"
                 } else {
                     "> "
                 };
@@ -1921,7 +1907,7 @@ impl App {
     }
 
     fn execute_command(&mut self, command: String) -> Result<()> {
-        let command = command.trim().trim_start_matches(':');
+        let command = command.trim();
         match command {
             "new-agent" => self.create_agent_for_selected_project(),
             "provider" => self.cycle_selected_project_provider(),
@@ -1938,6 +1924,7 @@ impl App {
                 };
                 Ok(())
             }
+            "copy-path" => self.copy_selected_path(),
             "toggle-sidebar" => {
                 self.left_collapsed = !self.left_collapsed;
                 Ok(())
@@ -1983,6 +1970,33 @@ impl App {
         match self.left_items().get(self.selected_left) {
             Some(LeftItem::Session(index)) => self.sessions.get(*index),
             _ => None,
+        }
+    }
+
+    fn copy_selected_path(&mut self) -> Result<()> {
+        let path = match self.left_items().get(self.selected_left) {
+            Some(LeftItem::Session(index)) => {
+                self.sessions.get(*index).map(|s| s.worktree_path.clone())
+            }
+            Some(LeftItem::Project(index)) => {
+                self.projects.get(*index).map(|p| p.path.clone())
+            }
+            None => None,
+        };
+        match path {
+            Some(p) => {
+                let mut clipboard = arboard::Clipboard::new()
+                    .map_err(|e| anyhow::anyhow!("Failed to access clipboard: {e}"))?;
+                clipboard
+                    .set_text(&p)
+                    .map_err(|e| anyhow::anyhow!("Failed to copy to clipboard: {e}"))?;
+                self.set_info(format!("Copied: {p}"));
+                Ok(())
+            }
+            None => {
+                self.set_error("No project or agent selected.");
+                Ok(())
+            }
         }
     }
 
@@ -2304,13 +2318,19 @@ fn browser_entries(dir: &Path) -> Vec<BrowserEntry> {
 }
 
 fn filtered_commands(input: &str) -> Vec<&'static CommandDef> {
-    let needle = input.trim().trim_start_matches(':').to_lowercase();
-    COMMANDS
-        .iter()
-        .filter(|command| {
-            needle.is_empty()
-                || command.name.contains(&needle)
-                || command.description.to_lowercase().contains(&needle)
-        })
-        .collect()
+    let needle = input.trim().to_lowercase();
+    if needle.is_empty() {
+        return COMMANDS.iter().collect();
+    }
+    let mut name_matches: Vec<&'static CommandDef> = Vec::new();
+    let mut desc_matches: Vec<&'static CommandDef> = Vec::new();
+    for command in COMMANDS.iter() {
+        if command.name.contains(&needle) {
+            name_matches.push(command);
+        } else if command.description.to_lowercase().contains(&needle) {
+            desc_matches.push(command);
+        }
+    }
+    name_matches.extend(desc_matches);
+    name_matches
 }
