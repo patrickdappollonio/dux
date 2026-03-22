@@ -402,6 +402,14 @@ impl App {
             }
         }
         self.reload_changed_files();
+        // If the section we were in is now empty, move to the other one.
+        if self.right_section == RightSection::Staged && self.staged_files.is_empty() {
+            self.right_section = RightSection::Unstaged;
+            self.clamp_files_cursor();
+        } else if self.right_section == RightSection::Unstaged && self.unstaged_files.is_empty() {
+            self.right_section = RightSection::Staged;
+            self.clamp_files_cursor();
+        }
         Ok(())
     }
 
