@@ -120,8 +120,8 @@ impl Default for LoggingConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            left_width_pct: 20,
-            right_width_pct: 23,
+            left_width_pct: 17,
+            right_width_pct: 19,
         }
     }
 }
