@@ -59,7 +59,7 @@ impl Theme {
             session_active: Color::Green,
             session_detached: Color::Yellow,
             session_exited: Color::Rgb(100, 100, 100),
-            status_info_fg: Color::White,
+            status_info_fg: Color::Rgb(160, 160, 160),
             status_info_bg: Color::Rgb(25, 25, 25),
             status_busy_fg: Color::Yellow,
             status_busy_bg: Color::Rgb(40, 35, 15),
@@ -80,7 +80,7 @@ impl Theme {
             overlay_dim_bg: Color::Rgb(15, 15, 15),
             prompt_cursor: Color::Cyan,
             provider_label_fg: Color::Rgb(100, 100, 100),
-            branch_fg: Color::Rgb(120, 120, 120),
+            branch_fg: Color::Cyan,
         }
     }
 

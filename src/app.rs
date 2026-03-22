@@ -1177,14 +1177,11 @@ impl App {
         let mut spans = vec![
             Span::styled(
                 " dux ",
-                Style::default()
-                    .fg(Color::White)
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(label_fg).bg(bg),
             ),
             Span::styled(
                 format!("v{}", env!("CARGO_PKG_VERSION")),
-                Style::default().fg(label_fg).bg(bg),
+                Style::default().fg(self.theme.branch_fg).bg(bg),
             ),
         ];
         if let Some(project) = self.selected_project() {
@@ -1195,10 +1192,7 @@ impl App {
             ));
             spans.push(Span::styled(
                 project.name.clone(),
-                Style::default()
-                    .fg(Color::White)
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(self.theme.branch_fg).bg(bg),
             ));
             spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
             spans.push(Span::styled(
@@ -1207,7 +1201,7 @@ impl App {
             ));
             spans.push(Span::styled(
                 project.current_branch.clone(),
-                Style::default().fg(Color::Cyan).bg(bg),
+                Style::default().fg(self.theme.branch_fg).bg(bg),
             ));
             spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
             spans.push(Span::styled(
@@ -1216,7 +1210,7 @@ impl App {
             ));
             spans.push(Span::styled(
                 project.default_provider.as_str().to_string(),
-                Style::default().fg(self.theme.provider_label_fg).bg(bg),
+                Style::default().fg(self.theme.branch_fg).bg(bg),
             ));
         }
         Paragraph::new(Line::from(spans))
