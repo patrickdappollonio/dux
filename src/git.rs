@@ -83,8 +83,7 @@ pub fn create_worktree(
     worktrees_root: &Path,
     project_name: &str,
 ) -> Result<(String, PathBuf)> {
-    let source_branch = current_branch(repo_path)?;
-    let branch_name = format!("{}-{}", source_branch, docker_style_name());
+    let branch_name = docker_style_name();
     let project_root = worktrees_root.join(project_name);
     fs::create_dir_all(&project_root)?;
     let worktree_path = project_root.join(&branch_name);
@@ -211,21 +210,11 @@ pub fn ellipsize_middle(input: &str, max_width: usize) -> String {
 }
 
 pub fn docker_style_name() -> String {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
+    use petname::{Generator, Petnames};
 
-    const ADJECTIVES: &[&str] = &[
-        "brisk", "calm", "eager", "fierce", "lively", "mellow", "nimble", "quiet", "rapid",
-        "steady", "tidy", "vivid",
-    ];
-    const ANIMALS: &[&str] = &[
-        "badger", "beaver", "falcon", "heron", "lynx", "otter", "panther", "raven", "seal",
-        "tiger", "walrus", "wolf",
-    ];
-    let random = RandomState::new().build_hasher().finish() as usize;
-    let adj = ADJECTIVES[random % ADJECTIVES.len()];
-    let animal = ANIMALS[(random / ADJECTIVES.len()) % ANIMALS.len()];
-    format!("{adj}-{animal}")
+    Petnames::default()
+        .generate_one(2, "-")
+        .expect("petname generation should not fail")
 }
 
 #[cfg(test)]
