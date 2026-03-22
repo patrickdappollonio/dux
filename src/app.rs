@@ -679,7 +679,9 @@ impl App {
                             input.trim().to_string()
                         };
                         self.prompt = PromptState::None;
-                        self.execute_command(command)?;
+                        if let Err(e) = self.execute_command(command) {
+                            self.set_error(format!("{e:#}"));
+                        }
                     }
                 }
                 KeyCode::Char(c) => {
@@ -932,7 +934,9 @@ impl App {
                     if *confirm_selected {
                         let id = session_id.clone();
                         self.prompt = PromptState::None;
-                        self.do_delete_session(&id)?;
+                        if let Err(e) = self.do_delete_session(&id) {
+                            self.set_error(format!("{e:#}"));
+                        }
                     } else {
                         self.prompt = PromptState::None;
                     }
