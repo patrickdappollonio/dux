@@ -7,16 +7,16 @@
 The current app provides:
 
 - A left pane for projects and agent sessions
-- A center pane for live agent output or diff viewing
+- A center pane showing the agent's terminal output (embedded via PTY) or diff viewing
 - A right pane for changed files and diffs
 - Commented user config in the platform-specific dux config directory (`~/.dux/` on macOS, `~/.config/dux/` on Linux)
 - Session persistence in `sessions.sqlite3` alongside the config
 - Logging in `dux.log` alongside the config
-- ACP-oriented agent startup with timeout handling
+- PTY-based agent startup: spawns CLI tools (`claude`, `codex`) directly in a pseudo-terminal
 
 ## Important Constraints
 
-- The app assumes providers are ACP-compatible adapters, not raw `codex` or `claude` CLIs.
+- The app spawns CLI tools directly via PTY (portable-pty) and renders their output using vt100 terminal emulation. There is no protocol layer (no ACP, no JSON-RPC).
 - Long-running actions should not block the UI thread.
 - User state lives under `~/.dux/` on macOS and `$XDG_CONFIG_HOME/dux/` (or `~/.config/dux/`) on Linux.
 - Worktrees are user data and should not be removed or mutated casually.
@@ -24,24 +24,24 @@ The current app provides:
 
 ## Key Files
 
-- [src/app.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/app.rs): main TUI, event loop, commands, overlays, async agent creation
-- [src/acp.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/acp.rs): ACP stdio JSON-RPC client
-- [src/git.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/git.rs): git/worktree helpers
-- [src/config.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/config.rs): config schema, defaults, rendering
-- [src/storage.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/storage.rs): SQLite session persistence
-- [src/statusline.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/statusline.rs): status line model and spinner behavior
-- [src/theme.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/theme.rs): centralized color palette and semantic styling constants
-- [src/logger.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/logger.rs): runtime logging
+- [src/app.rs](src/app.rs): main TUI, event loop, commands, overlays, terminal rendering
+- [src/pty.rs](src/pty.rs): PTY client — spawns CLI tools, reads output via vt100 parser, writes keystrokes
+- [src/git.rs](src/git.rs): git/worktree helpers
+- [src/config.rs](src/config.rs): config schema, defaults, rendering
+- [src/storage.rs](src/storage.rs): SQLite session persistence
+- [src/statusline.rs](src/statusline.rs): status line model and spinner behavior
+- [src/theme.rs](src/theme.rs): centralized color palette and semantic styling constants
+- [src/logger.rs](src/logger.rs): runtime logging
 
 ## Recommendations For Future Changes
 
 - Keep the status line centralized. New async operations should report progress through the shared status API, not ad hoc strings.
+- Code must be production ready and modular to allow future Open Source contributors to integrate new features with ease. Do not take shortcuts.
 - Route new modal UI through `PromptState` so `Esc` keeps working uniformly.
 - Prefer command-palette actions over adding many more global hotkeys.
+- Keybinding labels shown to the user must be lowercase (e.g. `ctrl+g`, not `Ctrl+G`) to avoid implying that Shift is required. The `^X` notation (e.g. `^P`) is acceptable in footer hint bars since its meaning is explained in the help overlay.
 - Keep agent creation and other blocking git/provider work in background workers.
-- Do not assume a provider speaks ACP just because its executable exists. Detect and fail fast.
-- If ACP support grows, separate provider capability discovery from session creation.
-- If session restore becomes richer, persist more structured runtime metadata instead of inferring from worktree presence alone.
+- The PTY approach is CLI-agnostic: any terminal command can be used as a provider. Keep it generic.
 
 ## Keeping Documentation In Sync
 
@@ -52,12 +52,11 @@ The current app provides:
 ## Recommendations For Debugging
 
 - First check the `dux.log` file in the dux config directory (`~/.dux/` on macOS, `~/.config/dux/` on Linux).
-- Confirm whether the provider command in `config.toml` is a real ACP adapter.
+- Confirm whether the provider command in `config.toml` is installed and on PATH.
 - If agent creation fails, determine whether it stopped in:
   - worktree creation
-  - provider process spawn
-  - ACP `initialize`
-  - ACP `session/new`
+  - PTY spawn (command not found)
+  - PTY process early exit
 - If the UI appears frozen, verify the operation is on a worker path rather than the main event loop.
 
 ## Recommendations For Editing
@@ -76,5 +75,5 @@ Use:
 ```bash
 cargo fmt
 cargo test
-cargo run --bin dux
+cargo run
 ```

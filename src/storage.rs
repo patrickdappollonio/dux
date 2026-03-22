@@ -27,7 +27,6 @@ impl SessionStore {
                 source_branch text not null,
                 branch_name text not null,
                 worktree_path text not null,
-                acp_session_id text,
                 title text,
                 status text not null,
                 created_at text not null,
@@ -35,7 +34,6 @@ impl SessionStore {
             );
             "#,
         )?;
-        ensure_column(&self.conn, "agent_sessions", "acp_session_id", "text")?;
         ensure_column(&self.conn, "agent_sessions", "title", "text")?;
         Ok(())
     }
@@ -44,15 +42,14 @@ impl SessionStore {
         self.conn.execute(
             r#"
             insert into agent_sessions
-                (id, project_id, provider, source_branch, branch_name, worktree_path, acp_session_id, title, status, created_at, updated_at)
+                (id, project_id, provider, source_branch, branch_name, worktree_path, title, status, created_at, updated_at)
             values
-                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             on conflict(id) do update set
                 provider=excluded.provider,
                 source_branch=excluded.source_branch,
                 branch_name=excluded.branch_name,
                 worktree_path=excluded.worktree_path,
-                acp_session_id=excluded.acp_session_id,
                 title=excluded.title,
                 status=excluded.status,
                 updated_at=excluded.updated_at
@@ -64,7 +61,6 @@ impl SessionStore {
                 session.source_branch,
                 session.branch_name,
                 session.worktree_path,
-                session.acp_session_id,
                 session.title,
                 session.status.as_str(),
                 session.created_at.to_rfc3339(),
@@ -77,14 +73,14 @@ impl SessionStore {
     pub fn load_sessions(&self) -> Result<Vec<AgentSession>> {
         let mut stmt = self.conn.prepare(
             r#"
-            select id, project_id, provider, source_branch, branch_name, worktree_path, acp_session_id, title, status, created_at, updated_at
+            select id, project_id, provider, source_branch, branch_name, worktree_path, title, status, created_at, updated_at
             from agent_sessions
             order by updated_at desc
             "#,
         )?;
         let rows = stmt.query_map([], |row| {
-            let created_at: String = row.get(9)?;
-            let updated_at: String = row.get(10)?;
+            let created_at: String = row.get(8)?;
+            let updated_at: String = row.get(9)?;
             Ok(AgentSession {
                 id: row.get(0)?,
                 project_id: row.get(1)?,
@@ -92,9 +88,8 @@ impl SessionStore {
                 source_branch: row.get(3)?,
                 branch_name: row.get(4)?,
                 worktree_path: row.get(5)?,
-                acp_session_id: row.get(6)?,
-                title: row.get(7)?,
-                status: SessionStatus::from_str(row.get::<_, String>(8)?.as_str()),
+                title: row.get(6)?,
+                status: SessionStatus::from_str(row.get::<_, String>(7)?.as_str()),
                 created_at: parse_time(&created_at).unwrap_or_else(Utc::now),
                 updated_at: parse_time(&updated_at).unwrap_or_else(Utc::now),
             })

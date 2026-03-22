@@ -1,9 +1,9 @@
-mod acp;
 mod app;
 mod config;
 mod git;
 mod logger;
 mod model;
+mod pty;
 mod statusline;
 mod storage;
 mod theme;
@@ -23,7 +23,7 @@ fn main() -> Result<()> {
 fn print_help() {
     println!(
         "dux\n\n\
-         Terminal UI for ACP-backed AI worktree sessions.\n\n\
+         Terminal UI for AI worktree sessions.\n\n\
          Usage:\n\
            dux\n\n\
          First run writes a full default config to:\n\

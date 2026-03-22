@@ -18,13 +18,14 @@ use ratatui::widgets::{
 };
 use uuid::Uuid;
 
-use crate::acp::{AcpClient, ProviderEvent};
 use crate::config::{
-    Config, DuxPaths, ProjectConfig, ProviderCommandConfig, ensure_config, save_config,
+    Config, DuxPaths, ProjectConfig, ProviderCommandConfig, check_provider_available,
+    ensure_config, save_config,
 };
 use crate::git;
 use crate::logger;
 use crate::model::{AgentSession, ChangedFile, Project, ProviderKind, SessionStatus};
+use crate::pty::PtyClient;
 use crate::statusline::{StatusLine, StatusTone};
 use crate::storage::SessionStore;
 use crate::theme::Theme;
@@ -48,16 +49,14 @@ pub struct App {
     help_overlay: bool,
     status: StatusLine,
     prompt: PromptState,
-    input_buffer: String,
     input_target: InputTarget,
-    provider_tx: Sender<ProviderEvent>,
-    provider_rx: Receiver<ProviderEvent>,
     worker_tx: Sender<WorkerEvent>,
     worker_rx: Receiver<WorkerEvent>,
-    providers: HashMap<String, AcpClient>,
-    provider_buffers: HashMap<String, Vec<String>>,
+    providers: HashMap<String, PtyClient>,
     create_agent_in_flight: bool,
+    last_pty_size: (u16, u16),
     theme: Theme,
+    tick_count: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,7 +141,7 @@ enum WorkerEvent {
     CreateAgentProgress(String),
     CreateAgentReady {
         session: AgentSession,
-        client: AcpClient,
+        client: PtyClient,
     },
     CreateAgentFailed(String),
 }
@@ -221,7 +220,6 @@ impl App {
         let session_store = SessionStore::open(&paths.sessions_db_path)?;
         let projects = load_projects(&config);
         let sessions = session_store.load_sessions()?;
-        let (provider_tx, provider_rx) = mpsc::channel();
         let (worker_tx, worker_rx) = mpsc::channel();
         let mut app = Self {
             left_width_pct: config.ui.left_width_pct,
@@ -242,16 +240,14 @@ impl App {
             help_overlay: false,
             status: StatusLine::new("Press p to add a project, a to create an agent, ? for help."),
             prompt: PromptState::None,
-            input_buffer: String::new(),
             input_target: InputTarget::None,
-            provider_tx,
-            provider_rx,
             worker_tx,
             worker_rx,
             providers: HashMap::new(),
-            provider_buffers: HashMap::new(),
             create_agent_in_flight: false,
+            last_pty_size: (0, 0),
             theme: Theme::default_dark(),
+            tick_count: 0,
         };
         app.restore_sessions();
         app.reload_changed_files();
@@ -262,6 +258,7 @@ impl App {
         let mut terminal = ratatui::init();
         loop {
             self.drain_events();
+            self.tick_count = self.tick_count.wrapping_add(1);
             terminal.draw(|frame| self.render(frame))?;
             if event::poll(Duration::from_millis(100))? {
                 match event::read()? {
@@ -285,37 +282,16 @@ impl App {
             "restoring {} persisted sessions",
             self.sessions.len()
         ));
-        let existing = self.sessions.clone();
-        for session in existing {
-            if Path::new(&session.worktree_path).exists() {
-                if let Some(acp_session_id) = session.acp_session_id.clone() {
-                    match self.connect_provider(&session, true, Some(acp_session_id)) {
-                        Ok(client) => {
-                            self.providers.insert(session.id.clone(), client);
-                            self.mark_session_status(&session.id, SessionStatus::Active);
-                        }
-                        Err(err) => {
-                            self.mark_session_status(&session.id, SessionStatus::Detached);
-                            self.push_provider_line(
-                                &session.id,
-                                format!("restore failed, session kept detached: {err}"),
-                            );
-                        }
-                    }
-                } else {
-                    self.mark_session_status(&session.id, SessionStatus::Detached);
-                    self.push_provider_line(
-                        &session.id,
-                        "No ACP session id was stored. Start a new agent for this project."
-                            .to_string(),
-                    );
-                }
+        let ids: Vec<(String, bool)> = self
+            .sessions
+            .iter()
+            .map(|s| (s.id.clone(), Path::new(&s.worktree_path).exists()))
+            .collect();
+        for (id, exists) in ids {
+            if exists {
+                self.mark_session_status(&id, SessionStatus::Detached);
             } else {
-                self.mark_session_status(&session.id, SessionStatus::Exited);
-                self.push_provider_line(
-                    &session.id,
-                    "Stored worktree path no longer exists.".to_string(),
-                );
+                self.mark_session_status(&id, SessionStatus::Exited);
             }
         }
     }
@@ -333,7 +309,7 @@ impl App {
         if key.code == KeyCode::Char('q') {
             return Ok(true);
         }
-        if key.code == KeyCode::Char('?') {
+        if key.code == KeyCode::Char('?') && self.input_target != InputTarget::Agent {
             self.help_overlay = !self.help_overlay;
             return Ok(false);
         }
@@ -349,13 +325,13 @@ impl App {
         if key.code == KeyCode::Tab {
             self.focus = self.focus.next();
             self.input_target = InputTarget::None;
-            self.input_buffer.clear();
+
             return Ok(false);
         }
         if key.code == KeyCode::BackTab {
             self.focus = self.focus.previous();
             self.input_target = InputTarget::None;
-            self.input_buffer.clear();
+
             return Ok(false);
         }
         if key.code == KeyCode::Char('[') {
@@ -394,14 +370,12 @@ impl App {
                 if self.selected_left + 1 < items.len() {
                     self.selected_left += 1;
                     self.reload_changed_files();
-
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if self.selected_left > 0 {
                     self.selected_left -= 1;
                     self.reload_changed_files();
-
                 }
             }
             KeyCode::Enter => {
@@ -433,9 +407,17 @@ impl App {
     fn handle_center_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Char('i') => {
-                self.input_target = InputTarget::Agent;
-                self.input_buffer.clear();
-                self.set_info("Agent prompt mode. Type a prompt and press Enter. Esc cancels.");
+                if self.selected_session().is_some()
+                    && self
+                        .selected_session()
+                        .map(|s| self.providers.contains_key(&s.id))
+                        .unwrap_or(false)
+                {
+                    self.input_target = InputTarget::Agent;
+                    self.set_info("Interactive mode. Keys forwarded to agent. Esc exits.");
+                } else {
+                    self.set_error("No active agent. Press r to reconnect or a to create.");
+                }
             }
             KeyCode::Esc => {
                 self.center_mode = CenterMode::Agent;
@@ -465,27 +447,71 @@ impl App {
     }
 
     fn handle_agent_input(&mut self, key: KeyEvent) -> Result<bool> {
+        let session_id = match self.selected_session() {
+            Some(s) => s.id.clone(),
+            None => {
+                self.input_target = InputTarget::None;
+                return Ok(false);
+            }
+        };
+        let provider = match self.providers.get(&session_id) {
+            Some(p) => p,
+            None => {
+                self.input_target = InputTarget::None;
+                self.set_error("Agent disconnected.");
+                return Ok(false);
+            }
+        };
+
         match key.code {
             KeyCode::Esc => {
                 self.input_target = InputTarget::None;
-                self.input_buffer.clear();
-                self.set_info("Agent prompt cancelled.");
+                self.set_info("Exited interactive mode.");
+                return Ok(false);
             }
-            KeyCode::Backspace => {
-                self.input_buffer.pop();
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let _ = provider.write_bytes(b"\x03");
             }
-            KeyCode::Enter => {
-                let prompt = self.input_buffer.trim().to_string();
-                if !prompt.is_empty() {
-                    self.submit_prompt(prompt)?;
-                }
-                self.input_buffer.clear();
-                self.input_target = InputTarget::None;
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let _ = provider.write_bytes(b"\x04");
+            }
+            KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let _ = provider.write_bytes(b"\x1a");
             }
             KeyCode::Char(c) => {
-                if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                    self.input_buffer.push(c);
-                }
+                let mut buf = [0u8; 4];
+                let bytes = c.encode_utf8(&mut buf);
+                let _ = provider.write_bytes(bytes.as_bytes());
+            }
+            KeyCode::Enter => {
+                let _ = provider.write_bytes(b"\r");
+            }
+            KeyCode::Backspace => {
+                let _ = provider.write_bytes(b"\x7f");
+            }
+            KeyCode::Tab => {
+                let _ = provider.write_bytes(b"\t");
+            }
+            KeyCode::Up => {
+                let _ = provider.write_bytes(b"\x1b[A");
+            }
+            KeyCode::Down => {
+                let _ = provider.write_bytes(b"\x1b[B");
+            }
+            KeyCode::Right => {
+                let _ = provider.write_bytes(b"\x1b[C");
+            }
+            KeyCode::Left => {
+                let _ = provider.write_bytes(b"\x1b[D");
+            }
+            KeyCode::Home => {
+                let _ = provider.write_bytes(b"\x1b[H");
+            }
+            KeyCode::End => {
+                let _ = provider.write_bytes(b"\x1b[F");
+            }
+            KeyCode::Delete => {
+                let _ = provider.write_bytes(b"\x1b[3~");
             }
             _ => {}
         }
@@ -546,12 +572,12 @@ impl App {
                     if *searching {
                         *searching = false;
                     } else {
-                        let command =
-                            if let Some(command) = filtered_commands(input).get(*selected) {
-                                command.name.to_string()
-                            } else {
-                                input.trim().to_string()
-                            };
+                        let command = if let Some(command) = filtered_commands(input).get(*selected)
+                        {
+                            command.name.to_string()
+                        } else {
+                            input.trim().to_string()
+                        };
                         self.prompt = PromptState::None;
                         self.execute_command(command)?;
                     }
@@ -737,7 +763,6 @@ impl App {
                     if self.selected_left + 1 < items.len() {
                         self.selected_left += 1;
                         self.reload_changed_files();
-    
                     }
                 }
                 FocusPane::Files => {
@@ -752,7 +777,6 @@ impl App {
                     if self.selected_left > 0 {
                         self.selected_left -= 1;
                         self.reload_changed_files();
-    
                     }
                 }
                 FocusPane::Files => {
@@ -852,47 +876,31 @@ impl App {
         self.set_busy(format!("Creating worktree for {}...", project.name));
         let paths = self.paths.clone();
         let config = self.config.clone();
-        let provider_tx = self.provider_tx.clone();
         let worker_tx = self.worker_tx.clone();
         thread::spawn(move || {
-            run_create_agent_job(project, paths, config, provider_tx, worker_tx);
+            run_create_agent_job(project, paths, config, worker_tx);
         });
         Ok(())
     }
 
-    fn connect_provider(
-        &self,
-        session: &AgentSession,
-        restore: bool,
-        acp_session_id: Option<String>,
-    ) -> Result<AcpClient> {
-        let provider_config = provider_config(&self.config, &session.provider);
+    fn spawn_pty_for_session(&self, session: &AgentSession) -> Result<PtyClient> {
+        let cfg = provider_config(&self.config, &session.provider);
+        let (rows, cols) = if self.last_pty_size != (0, 0) {
+            self.last_pty_size
+        } else {
+            (24, 80)
+        };
         logger::debug(&format!(
-            "spawning provider command {:?} {:?} in {}",
-            provider_config.command, provider_config.args, session.worktree_path
+            "spawning PTY {:?} {:?} in {} ({}x{})",
+            cfg.command, cfg.args, session.worktree_path, cols, rows
         ));
-        let client = AcpClient::spawn(
-            &provider_config.command,
-            &provider_config.args,
+        PtyClient::spawn(
+            &cfg.command,
+            &cfg.args,
             Path::new(&session.worktree_path),
-            &session.id,
-            self.provider_tx.clone(),
-        )?;
-        client.initialize()?;
-        logger::debug(&format!(
-            "initialized ACP provider for session {}",
-            session.id
-        ));
-        if restore {
-            if let Some(acp_session_id) = acp_session_id {
-                logger::info(&format!(
-                    "loading ACP session {} for app session {}",
-                    acp_session_id, session.id
-                ));
-                let _ = client.load_session(Path::new(&session.worktree_path), &acp_session_id)?;
-            }
-        }
-        Ok(client)
+            rows,
+            cols,
+        )
     }
 
     fn refresh_selected_project(&mut self) -> Result<()> {
@@ -942,7 +950,6 @@ impl App {
             &session.branch_name,
         )?;
         self.providers.remove(&session.id);
-        self.provider_buffers.remove(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
         self.session_store.delete_session(&session.id)?;
         self.selected_left = self.selected_left.saturating_sub(1);
@@ -1033,43 +1040,20 @@ impl App {
             self.set_info("Session is already connected.");
             return Ok(());
         }
-        let Some(acp_session_id) = session.acp_session_id.clone() else {
-            self.set_error("This session has no stored ACP id.");
-            return Ok(());
-        };
-        let client = self.connect_provider(&session, true, Some(acp_session_id))?;
-        self.providers.insert(session.id.clone(), client);
-        self.mark_session_status(&session.id, SessionStatus::Active);
-        self.set_info(format!("Reconnected {}", session.branch_name));
-        Ok(())
-    }
-
-    fn submit_prompt(&mut self, prompt: String) -> Result<()> {
-        let Some(session) = self.selected_session().cloned() else {
-            self.set_error("Select an agent session first.");
-            return Ok(());
-        };
-        logger::info(&format!("submitting prompt for session {}", session.id));
-        let Some(acp_session_id) = session.acp_session_id.clone() else {
-            self.set_error("Selected session has no ACP id.");
-            return Ok(());
-        };
-        if !self.providers.contains_key(&session.id) {
-            self.set_error("Selected session is detached. Press r to reconnect.");
+        if !Path::new(&session.worktree_path).exists() {
+            self.set_error("Worktree no longer exists. Delete and re-create the agent.");
             return Ok(());
         }
-        self.push_provider_line(&session.id, format!("> {prompt}"));
-        let provider = self
-            .providers
-            .get(&session.id)
-            .expect("provider must exist after contains_key");
-        provider.prompt(
-            acp_session_id,
-            prompt,
-            self.provider_tx.clone(),
-            session.id.clone(),
-        );
-        self.set_info("Prompt sent.");
+        match self.spawn_pty_for_session(&session) {
+            Ok(client) => {
+                self.providers.insert(session.id.clone(), client);
+                self.mark_session_status(&session.id, SessionStatus::Active);
+                self.set_info(format!("Reconnected {}", session.branch_name));
+            }
+            Err(err) => {
+                self.set_error(format!("Reconnect failed: {err}"));
+            }
+        }
         Ok(())
     }
 
@@ -1093,14 +1077,6 @@ impl App {
                 WorkerEvent::CreateAgentProgress(message) => self.set_busy(message),
                 WorkerEvent::CreateAgentReady { session, client } => {
                     self.create_agent_in_flight = false;
-                    self.provider_buffers.insert(
-                        session.id.clone(),
-                        vec![format!(
-                            "{} session ready in {}",
-                            session.provider.as_str(),
-                            session.worktree_path
-                        )],
-                    );
                     if let Err(err) = self.session_store.upsert_session(&session) {
                         logger::error(&format!(
                             "session store upsert failed for {}: {err}",
@@ -1125,31 +1101,20 @@ impl App {
                 }
             }
         }
-        while let Ok(event) = self.provider_rx.try_recv() {
-            logger::debug(&format!(
-                "provider event for {}: {}",
-                event.session_id, event.message
-            ));
-            self.push_provider_line(&event.session_id, event.message);
-            self.mark_session_updated(&event.session_id);
-        }
+        // Detect PTY exits.
         let mut exited = Vec::new();
         for (session_id, provider) in &mut self.providers {
-            if provider.try_wait().ok().flatten().is_some() {
+            if provider.is_exited() || provider.try_wait().is_some() {
                 exited.push(session_id.clone());
             }
         }
         for session_id in exited {
             self.providers.remove(&session_id);
             self.mark_session_status(&session_id, SessionStatus::Detached);
-            self.push_provider_line(
-                &session_id,
-                "Provider process exited; session is now detached.".to_string(),
-            );
         }
     }
 
-    fn render(&self, frame: &mut Frame) {
+    fn render(&mut self, frame: &mut Frame) {
         let term_w = frame.area().width as usize;
         let status_text_len = self.status.text().len() + 3; // " ● " prefix
         let status_lines: u16 = if term_w > 0 && status_text_len > term_w { 2 } else { 1 };
@@ -1209,10 +1174,7 @@ impl App {
         let sep_fg = self.theme.header_separator_fg;
         let label_fg = self.theme.header_label_fg;
         let mut spans = vec![
-            Span::styled(
-                " dux ",
-                Style::default().fg(label_fg).bg(bg),
-            ),
+            Span::styled(" dux ", Style::default().fg(label_fg).bg(bg)),
             Span::styled(
                 format!("v{}", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(self.theme.branch_fg).bg(bg),
@@ -1260,12 +1222,10 @@ impl App {
                 .left_items()
                 .into_iter()
                 .map(|item| match item {
-                    LeftItem::Project(_) => {
-                        ListItem::new(Line::from(Span::styled(
-                            "▸",
-                            Style::default().fg(self.theme.project_icon),
-                        )))
-                    }
+                    LeftItem::Project(_) => ListItem::new(Line::from(Span::styled(
+                        "▸",
+                        Style::default().fg(self.theme.project_icon),
+                    ))),
                     LeftItem::Session(index) => {
                         let session = &self.sessions[index];
                         let (dot, dot_color) = self.theme.session_dot(&session.status);
@@ -1323,10 +1283,7 @@ impl App {
                     let (dot, dot_color) = self.theme.session_dot(&session.status);
                     ListItem::new(Line::from(vec![
                         Span::raw("  "),
-                        Span::styled(
-                            format!("{dot} "),
-                            Style::default().fg(dot_color),
-                        ),
+                        Span::styled(format!("{dot} "), Style::default().fg(dot_color)),
                         Span::styled(label, Style::default().fg(dot_color)),
                         Span::styled(
                             format!(" ({})", session.provider.as_str()),
@@ -1348,7 +1305,7 @@ impl App {
         );
     }
 
-    fn render_center(&self, frame: &mut Frame, area: Rect) {
+    fn render_center(&mut self, frame: &mut Frame, area: Rect) {
         let title = match self.center_mode {
             CenterMode::Agent => "Agent",
             CenterMode::Diff(_) => "Diff",
@@ -1395,20 +1352,117 @@ impl App {
                     .render(area, frame.buffer_mut());
             }
             CenterMode::Agent => {
-                let mut lines = self
-                    .selected_session()
-                    .and_then(|session| self.provider_buffers.get(&session.id))
-                    .cloned()
-                    .unwrap_or_else(|| vec!["No active agent session selected.".to_string()]);
-                if self.input_target == InputTarget::Agent {
-                    lines.push(String::new());
-                    lines.push(format!("Prompt> {}", self.input_buffer));
-                }
-                Paragraph::new(lines.join("\n"))
-                    .block(self.themed_block(title, focused))
-                    .wrap(Wrap { trim: false })
-                    .render(area, frame.buffer_mut());
+                self.render_agent_terminal(frame, area, title, focused);
             }
+        }
+    }
+
+    fn render_agent_terminal(&mut self, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
+        let outer_block = self.themed_block(title, focused);
+        let inner = outer_block.inner(area);
+        outer_block.render(area, frame.buffer_mut());
+
+        if inner.height < 2 || inner.width < 4 {
+            return;
+        }
+
+        let is_input = self.input_target == InputTarget::Agent;
+
+        // Reserve 1 line at the bottom for the hint bar.
+        let hint_height = if is_input { 0 } else { 1 };
+        let [term_area, hint_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
+            .areas(inner);
+
+        // Get the selected session's PTY screen.
+        let session_id = self.selected_session().map(|s| s.id.clone());
+        let session_active = session_id
+            .as_ref()
+            .map(|id| self.providers.contains_key(id))
+            .unwrap_or(false);
+
+        if let Some(ref sid) = session_id {
+            if let Some(provider) = self.providers.get(sid) {
+                // Resize PTY if needed.
+                let new_size = (term_area.height, term_area.width);
+                if new_size != self.last_pty_size && new_size.0 > 0 && new_size.1 > 0 {
+                    let _ = provider.resize(new_size.0, new_size.1);
+                    self.last_pty_size = new_size;
+                }
+
+                // Render vt100 screen into ratatui buffer.
+                let screen = provider.screen();
+                let buf = frame.buffer_mut();
+                let (screen_rows, screen_cols) = screen.size();
+                for row in 0..screen_rows.min(term_area.height) {
+                    for col in 0..screen_cols.min(term_area.width) {
+                        let cell = screen.cell(row, col);
+                        if let Some(cell) = cell {
+                            if cell.is_wide_continuation() {
+                                continue;
+                            }
+                            let x = term_area.x + col;
+                            let y = term_area.y + row;
+                            let fg = convert_vt100_color(cell.fgcolor());
+                            let bg = convert_vt100_color(cell.bgcolor());
+                            let mut modifier = Modifier::empty();
+                            if cell.bold() {
+                                modifier |= Modifier::BOLD;
+                            }
+                            if cell.italic() {
+                                modifier |= Modifier::ITALIC;
+                            }
+                            if cell.underline() {
+                                modifier |= Modifier::UNDERLINED;
+                            }
+                            if cell.inverse() {
+                                modifier |= Modifier::REVERSED;
+                            }
+                            let style = Style::default().fg(fg).bg(bg).add_modifier(modifier);
+                            let contents = cell.contents();
+                            let ratatui_cell = &mut buf[(x, y)];
+                            if contents.is_empty() {
+                                ratatui_cell.set_symbol(" ");
+                            } else {
+                                ratatui_cell.set_symbol(&contents);
+                            }
+                            ratatui_cell.set_style(style);
+                        }
+                    }
+                }
+
+                // Render cursor if in input mode.
+                if is_input && !screen.hide_cursor() {
+                    let (cursor_row, cursor_col) = screen.cursor_position();
+                    let cx = term_area.x + cursor_col;
+                    let cy = term_area.y + cursor_row;
+                    if cx < term_area.x + term_area.width && cy < term_area.y + term_area.height {
+                        let cursor_cell = &mut buf[(cx, cy)];
+                        cursor_cell.set_style(
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(self.theme.prompt_cursor),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Hint bar when not in input mode.
+        if !is_input && hint_area.height > 0 {
+            let hint_text = if session_active {
+                " Press i to interact with the agent"
+            } else if session_id.is_some() {
+                " Session detached. Press r to reconnect."
+            } else {
+                " No agent session selected."
+            };
+            Paragraph::new(Span::styled(
+                hint_text,
+                Style::default().fg(self.theme.terminal_hint_fg),
+            ))
+            .render(hint_area, frame.buffer_mut());
         }
     }
 
@@ -1479,7 +1533,7 @@ impl App {
                 }
             }
             FocusPane::Center => &[
-                ("i", "Prompt"),
+                ("i", "Interact"),
                 ("Esc", "Close diff"),
                 ("Tab", "Next"),
                 ("^P", "Palette"),
@@ -1704,24 +1758,38 @@ impl App {
                 let mut bottom_spans = vec![Span::raw(" ")];
                 if *searching {
                     bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
-                    bottom_spans.push(Span::styled(" done  ", Style::default().fg(self.theme.hint_desc_fg)));
+                    bottom_spans.push(Span::styled(
+                        " done  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
                     bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
-                    bottom_spans.push(Span::styled(" clear", Style::default().fg(self.theme.hint_desc_fg)));
+                    bottom_spans.push(Span::styled(
+                        " clear",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
                 } else {
                     bottom_spans.extend(self.theme.key_badge("/", Color::Reset));
-                    bottom_spans.push(Span::styled(" search  ", Style::default().fg(self.theme.hint_desc_fg)));
+                    bottom_spans.push(Span::styled(
+                        " search  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
                     bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
-                    bottom_spans.push(Span::styled(" run  ", Style::default().fg(self.theme.hint_desc_fg)));
+                    bottom_spans.push(Span::styled(
+                        " run  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
                     bottom_spans.extend(self.theme.key_badge("Tab", Color::Reset));
-                    bottom_spans.push(Span::styled(" complete  ", Style::default().fg(self.theme.hint_desc_fg)));
+                    bottom_spans.push(Span::styled(
+                        " complete  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
                     bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
-                    bottom_spans.push(Span::styled(" cancel", Style::default().fg(self.theme.hint_desc_fg)));
+                    bottom_spans.push(Span::styled(
+                        " cancel",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
                 }
-                let prompt_prefix = if *searching {
-                    "/ "
-                } else {
-                    "> "
-                };
+                let prompt_prefix = if *searching { "/ " } else { "> " };
                 Paragraph::new(format!("{}{}", prompt_prefix, input))
                     .block(
                         self.themed_overlay_block(title)
@@ -1809,18 +1877,36 @@ impl App {
                     let mut bottom_spans = vec![Span::raw(" ")];
                     if *searching {
                         bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
-                        bottom_spans.push(Span::styled(" done  ", Style::default().fg(self.theme.hint_desc_fg)));
+                        bottom_spans.push(Span::styled(
+                            " done  ",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ));
                         bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
-                        bottom_spans.push(Span::styled(" clear", Style::default().fg(self.theme.hint_desc_fg)));
+                        bottom_spans.push(Span::styled(
+                            " clear",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ));
                     } else {
                         bottom_spans.extend(self.theme.key_badge("/", Color::Reset));
-                        bottom_spans.push(Span::styled(" search  ", Style::default().fg(self.theme.hint_desc_fg)));
+                        bottom_spans.push(Span::styled(
+                            " search  ",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ));
                         bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
-                        bottom_spans.push(Span::styled(" open  ", Style::default().fg(self.theme.hint_desc_fg)));
+                        bottom_spans.push(Span::styled(
+                            " open  ",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ));
                         bottom_spans.extend(self.theme.key_badge("m", Color::Reset));
-                        bottom_spans.push(Span::styled(" manual  ", Style::default().fg(self.theme.hint_desc_fg)));
+                        bottom_spans.push(Span::styled(
+                            " manual  ",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ));
                         bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
-                        bottom_spans.push(Span::styled(" cancel", Style::default().fg(self.theme.hint_desc_fg)));
+                        bottom_spans.push(Span::styled(
+                            " cancel",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ));
                     }
                     StatefulWidget::render(
                         List::new(items)
@@ -1838,13 +1924,25 @@ impl App {
                 } else {
                     let mut bottom_spans = vec![Span::raw(" ")];
                     bottom_spans.extend(self.theme.key_badge("/", Color::Reset));
-                    bottom_spans.push(Span::styled(" search  ", Style::default().fg(self.theme.hint_desc_fg)));
+                    bottom_spans.push(Span::styled(
+                        " search  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
                     bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
-                    bottom_spans.push(Span::styled(" open  ", Style::default().fg(self.theme.hint_desc_fg)));
+                    bottom_spans.push(Span::styled(
+                        " open  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
                     bottom_spans.extend(self.theme.key_badge("m", Color::Reset));
-                    bottom_spans.push(Span::styled(" manual  ", Style::default().fg(self.theme.hint_desc_fg)));
+                    bottom_spans.push(Span::styled(
+                        " manual  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
                     bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
-                    bottom_spans.push(Span::styled(" cancel", Style::default().fg(self.theme.hint_desc_fg)));
+                    bottom_spans.push(Span::styled(
+                        " cancel",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
                     StatefulWidget::render(
                         List::new(items)
                             .block(
@@ -1908,11 +2006,20 @@ impl App {
                     Line::from({
                         let mut s: Vec<Span> = vec![Span::raw("  ")];
                         s.extend(self.theme.key_badge("Tab", Color::Reset));
-                        s.push(Span::styled(" switch fields  ", Style::default().fg(self.theme.hint_desc_fg)));
+                        s.push(Span::styled(
+                            " switch fields  ",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ));
                         s.extend(self.theme.key_badge("Enter", Color::Reset));
-                        s.push(Span::styled(" save  ", Style::default().fg(self.theme.hint_desc_fg)));
+                        s.push(Span::styled(
+                            " save  ",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ));
                         s.extend(self.theme.key_badge("Esc", Color::Reset));
-                        s.push(Span::styled(" cancel", Style::default().fg(self.theme.hint_desc_fg)));
+                        s.push(Span::styled(
+                            " cancel",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ));
                         s
                     }),
                 ];
@@ -2033,9 +2140,7 @@ impl App {
             Some(LeftItem::Session(index)) => {
                 self.sessions.get(*index).map(|s| s.worktree_path.clone())
             }
-            Some(LeftItem::Project(index)) => {
-                self.projects.get(*index).map(|p| p.path.clone())
-            }
+            Some(LeftItem::Project(index)) => self.projects.get(*index).map(|p| p.path.clone()),
             None => None,
         };
         match path {
@@ -2077,18 +2182,6 @@ impl App {
         }
     }
 
-    fn mark_session_updated(&mut self, session_id: &str) {
-        if let Some(session) = self
-            .sessions
-            .iter_mut()
-            .find(|candidate| candidate.id == session_id)
-        {
-            session.updated_at = Utc::now();
-            let _ = self.session_store.upsert_session(session);
-        }
-        self.reload_changed_files();
-    }
-
     fn themed_block<'a>(&self, title: &'a str, focused: bool) -> Block<'a> {
         Block::default()
             .title(Line::from(Span::styled(title, self.theme.title_style(focused))))
@@ -2121,36 +2214,12 @@ impl App {
             }
         }
     }
-
-    fn push_provider_line(&mut self, session_id: &str, line: String) {
-        if let Some(title) = line.strip_prefix("session: ") {
-            if let Some(session) = self
-                .sessions
-                .iter_mut()
-                .find(|candidate| candidate.id == session_id)
-            {
-                session.title = Some(title.to_string());
-                let _ = self.session_store.upsert_session(session);
-            }
-        }
-        let buffer = self
-            .provider_buffers
-            .entry(session_id.to_string())
-            .or_default();
-        for physical_line in line.lines() {
-            if buffer.len() >= 500 {
-                buffer.remove(0);
-            }
-            buffer.push(physical_line.to_string());
-        }
-    }
 }
 
 fn run_create_agent_job(
     project: Project,
     paths: DuxPaths,
     config: Config,
-    provider_tx: Sender<ProviderEvent>,
     worker_tx: Sender<WorkerEvent>,
 ) {
     let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
@@ -2177,92 +2246,57 @@ fn run_create_agent_job(
         worktree_path.display(),
         branch_name
     ));
-    let mut session = AgentSession {
+    let session = AgentSession {
         id: Uuid::new_v4().to_string(),
         project_id: project.id,
         provider: project.default_provider.clone(),
         source_branch: project.current_branch.clone(),
         branch_name,
         worktree_path: worktree_path.to_string_lossy().to_string(),
-        acp_session_id: None,
         title: None,
         status: SessionStatus::Active,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
+    let provider_cfg = provider_config(&config, &session.provider);
+    if let Err(hint) = check_provider_available(session.provider.as_str(), &provider_cfg.command) {
+        logger::error(&format!("provider not found for {}: {hint}", session.id));
+        let _ = git::remove_worktree(
+            &repo_path,
+            Path::new(&session.worktree_path),
+            &session.branch_name,
+        );
+        let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(hint));
+        return;
+    }
     let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
-        "Launching {} adapter...",
+        "Launching {}...",
         session.provider.as_str()
     )));
-    let client = match connect_provider_background(&config, &session, provider_tx) {
+    let client = match PtyClient::spawn(
+        &provider_cfg.command,
+        &provider_cfg.args,
+        &worktree_path,
+        24,
+        80,
+    ) {
         Ok(client) => client,
         Err(err) => {
-            logger::error(&format!(
-                "provider startup failed for {}: {err}",
-                session.id
-            ));
+            logger::error(&format!("PTY spawn failed for {}: {err}", session.id));
             let _ = git::remove_worktree(
                 &repo_path,
                 Path::new(&session.worktree_path),
                 &session.branch_name,
             );
             let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
-                "Provider failed to start: {err}. Check {} and configure an ACP adapter.",
-                paths.root.display()
+                "Failed to start {}: {err}",
+                provider_cfg.command
             )));
             return;
         }
     };
-    let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(
-        "Requesting ACP session...".to_string(),
-    ));
-    let acp_session_id = match client.new_session(Path::new(&session.worktree_path)) {
-        Ok(session_id) => session_id,
-        Err(err) => {
-            logger::error(&format!("session/new failed for {}: {err}", session.id));
-            let _ = git::remove_worktree(
-                &repo_path,
-                Path::new(&session.worktree_path),
-                &session.branch_name,
-            );
-            let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
-                "ACP session creation failed: {err}. Check {} and configure an ACP adapter.",
-                paths.root.display()
-            )));
-            return;
-        }
-    };
-    logger::info(&format!(
-        "provider session created for {} with acp id {}",
-        session.id, acp_session_id
-    ));
-    session.acp_session_id = Some(acp_session_id);
+    logger::info(&format!("PTY session started for {}", session.id));
     let _ = worker_tx.send(WorkerEvent::CreateAgentReady { session, client });
-}
-
-fn connect_provider_background(
-    config: &Config,
-    session: &AgentSession,
-    provider_tx: Sender<ProviderEvent>,
-) -> Result<AcpClient> {
-    let provider_config = provider_config(config, &session.provider);
-    logger::debug(&format!(
-        "spawning provider command {:?} {:?} in {}",
-        provider_config.command, provider_config.args, session.worktree_path
-    ));
-    let client = AcpClient::spawn(
-        &provider_config.command,
-        &provider_config.args,
-        Path::new(&session.worktree_path),
-        &session.id,
-        provider_tx,
-    )?;
-    client.initialize()?;
-    logger::debug(&format!(
-        "initialized ACP provider for session {}",
-        session.id
-    ));
-    Ok(client)
 }
 
 fn load_projects(config: &Config) -> Vec<Project> {
@@ -2299,9 +2333,17 @@ fn provider_config(config: &Config, provider: &ProviderKind) -> ProviderCommandC
         .get(provider.as_str())
         .cloned()
         .unwrap_or_else(|| ProviderCommandConfig {
-            command: format!("{}-acp", provider.as_str()),
+            command: provider.as_str().to_string(),
             args: Vec::new(),
         })
+}
+
+fn convert_vt100_color(color: vt100::Color) -> Color {
+    match color {
+        vt100::Color::Default => Color::Reset,
+        vt100::Color::Idx(n) => Color::Indexed(n),
+        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
