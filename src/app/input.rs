@@ -619,21 +619,20 @@ impl App {
                             .collect()
                     };
                     if let Some(entry) = visible.get(*selected).cloned() {
-                        if entry.is_git_repo {
-                            let path = entry.path.to_string_lossy().to_string();
-                            self.prompt = PromptState::None;
-                            if let Err(e) = self.add_project(path, String::new()) {
-                                self.set_error(format!("{e:#}"));
-                            }
-                        } else {
-                            let new_dir = entry.path.clone();
-                            *current_dir = new_dir.clone();
-                            entries.clear();
-                            *loading = true;
-                            *selected = 0;
-                            filter.clear();
-                            browse_to = Some(new_dir);
-                        }
+                        let new_dir = entry.path.clone();
+                        *current_dir = new_dir.clone();
+                        entries.clear();
+                        *loading = true;
+                        *selected = 0;
+                        filter.clear();
+                        browse_to = Some(new_dir);
+                    }
+                }
+                KeyCode::Char('o') if !*searching => {
+                    let path = current_dir.to_string_lossy().to_string();
+                    self.prompt = PromptState::None;
+                    if let Err(e) = self.add_project(path, String::new()) {
+                        self.set_error(format!("{e:#}"));
                     }
                 }
                 KeyCode::Char(c) if *searching => {

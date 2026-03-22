@@ -30,7 +30,7 @@ impl App {
         };
         self.spawn_browser_entries(&start_dir);
         self.set_info(
-            "Project browser: Enter opens or adds a repo, / to search, g to go to a path.",
+            "Project browser: Enter opens folders, o adds current dir, / to search, g to go to a path.",
         );
         Ok(())
     }
