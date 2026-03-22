@@ -110,6 +110,8 @@ enum PromptState {
         selected: usize,
         filter: String,
         searching: bool,
+        editing_path: bool,
+        path_input: String,
     },
     AddProject {
         path: String,
@@ -645,8 +647,47 @@ impl App {
             selected,
             filter,
             searching,
+            editing_path,
+            path_input,
         } = &mut self.prompt
         {
+            if *editing_path {
+                let mut error_msg = None;
+                match key.code {
+                    KeyCode::Esc => {
+                        *editing_path = false;
+                        path_input.clear();
+                    }
+                    KeyCode::Backspace => {
+                        path_input.pop();
+                    }
+                    KeyCode::Enter => {
+                        let new_dir = PathBuf::from(path_input.trim());
+                        if new_dir.is_dir() {
+                            *current_dir = new_dir;
+                            *entries = browser_entries(current_dir);
+                            *selected = 0;
+                            filter.clear();
+                        } else {
+                            error_msg =
+                                Some(format!("{} is not a directory.", path_input.trim()));
+                        }
+                        *editing_path = false;
+                        path_input.clear();
+                    }
+                    KeyCode::Char(c) => {
+                        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                            path_input.push(c);
+                        }
+                    }
+                    _ => {}
+                }
+                if let Some(msg) = error_msg {
+                    self.set_error(msg);
+                }
+                return Ok(false);
+            }
+
             let filtered_len = if filter.is_empty() {
                 entries.len()
             } else {
@@ -700,6 +741,10 @@ impl App {
                         name: String::new(),
                         field: PromptField::Path,
                     };
+                }
+                KeyCode::Char('g') if !*searching => {
+                    *editing_path = true;
+                    *path_input = current_dir.to_string_lossy().to_string();
                 }
                 KeyCode::Enter if *searching => {
                     *searching = false;
@@ -882,9 +927,20 @@ impl App {
     }
 
     fn open_project_browser(&mut self) -> Result<()> {
-        let start_dir = std::env::var("HOME")
+        let start_dir = self
+            .config
+            .defaults
+            .start_directory
+            .as_ref()
             .map(PathBuf::from)
-            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            .filter(|p| p.is_dir())
+            .unwrap_or_else(|| {
+                std::env::var("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| {
+                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                    })
+            });
         let entries = browser_entries(&start_dir);
         logger::debug(&format!(
             "opened project browser at {} with {} entries",
@@ -897,6 +953,8 @@ impl App {
             selected: 0,
             filter: String::new(),
             searching: false,
+            editing_path: false,
+            path_input: String::new(),
         };
         self.set_info(
             "Project browser: Enter opens or adds a repo, / to search, m switches to manual entry.",
@@ -2047,6 +2105,8 @@ impl App {
                 selected,
                 filter,
                 searching,
+                editing_path,
+                path_input,
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(72, 70, frame.area());
@@ -2092,7 +2152,8 @@ impl App {
                 let mut state = ListState::default()
                     .with_selected(Some((*selected).min(visible.len().saturating_sub(1))));
                 let has_filter = !filter.is_empty();
-                let (top_areas, list_render_area) = if *searching || has_filter {
+                let show_top_input = *searching || has_filter || *editing_path;
+                let (top_areas, list_render_area) = if show_top_input {
                     let [filter_area, list_area] = Layout::default()
                         .direction(Direction::Vertical)
                         .constraints([Constraint::Length(3), Constraint::Min(3)])
@@ -2103,11 +2164,21 @@ impl App {
                 };
                 if let Some(filter_area) = top_areas {
                     let title = format!("Add Project: {}", current_dir.display());
-                    Paragraph::new(format!("/ {}", filter))
+                    let input_text = if *editing_path {
+                        format!("go: {}█", path_input)
+                    } else {
+                        format!("/ {}", filter)
+                    };
+                    Paragraph::new(input_text)
                         .block(self.themed_overlay_block(&title))
                         .render(filter_area, frame.buffer_mut());
                     let mut bottom_spans = vec![Span::raw(" ")];
-                    if *searching {
+                    if *editing_path {
+                        bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
+                        bottom_spans.push(Span::styled(" go  ", Style::default().fg(self.theme.hint_desc_fg)));
+                        bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
+                        bottom_spans.push(Span::styled(" cancel", Style::default().fg(self.theme.hint_desc_fg)));
+                    } else if *searching {
                         bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
                         bottom_spans.push(Span::styled(
                             " done  ",
@@ -2127,6 +2198,11 @@ impl App {
                         bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
                         bottom_spans.push(Span::styled(
                             " open  ",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ));
+                        bottom_spans.extend(self.theme.key_badge("g", Color::Reset));
+                        bottom_spans.push(Span::styled(
+                            " go to  ",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
                         bottom_spans.extend(self.theme.key_badge("m", Color::Reset));
@@ -2163,6 +2239,11 @@ impl App {
                     bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
                     bottom_spans.push(Span::styled(
                         " open  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                    bottom_spans.extend(self.theme.key_badge("g", Color::Reset));
+                    bottom_spans.push(Span::styled(
+                        " go to  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
                     bottom_spans.extend(self.theme.key_badge("m", Color::Reset));

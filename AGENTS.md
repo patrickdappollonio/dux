@@ -66,6 +66,7 @@ The current app provides:
 - Use `theme.rs` constants for all colors and styles — never use raw `Color::*` values in rendering code.
 - When adding new UI elements, define semantic color names in `Theme` rather than picking ad-hoc colors. `theme.rs` is the single source of truth for visual styling.
 - Preserve the fully materialized commented config behavior.
+- When a setting can have a sensible default at first boot (e.g., the user's home directory, platform-specific paths), resolve and store the concrete value in `config.toml` right away — do not leave it commented out or empty. Users should see a working value they can edit, not a placeholder they have to fill in.
 - Preserve safe failure behavior around project refresh and failed agent startup.
 
 ## Verification
