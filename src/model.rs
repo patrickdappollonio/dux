@@ -71,10 +71,17 @@ pub struct AgentSession {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileStage {
+    Staged,
+    Unstaged,
+}
+
 #[derive(Clone, Debug)]
 pub struct ChangedFile {
     pub status: String,
     pub path: String,
     pub additions: usize,
     pub deletions: usize,
+    pub stage: FileStage,
 }

@@ -5,7 +5,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
 
-use crate::model::ChangedFile;
+use crate::model::{ChangedFile, FileStage};
 
 pub fn current_branch(repo_path: &Path) -> Result<String> {
     let output = Command::new("git")
@@ -160,10 +160,9 @@ pub fn remove_worktree(
     })
 }
 
-pub fn changed_files(worktree_path: &Path) -> Result<Vec<ChangedFile>> {
+pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<ChangedFile>)> {
     let wt = worktree_path.to_string_lossy();
 
-    // 1. Get file statuses via porcelain (config-immune).
     let output = Command::new("git")
         .args(["-C", wt.as_ref(), "status", "--porcelain"])
         .output()?;
@@ -173,39 +172,58 @@ pub fn changed_files(worktree_path: &Path) -> Result<Vec<ChangedFile>> {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    let mut files = Vec::new();
+
+    let mut staged = Vec::new();
+    let mut unstaged = Vec::new();
+
     for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if line.trim().is_empty() || line.len() < 4 {
+        if line.len() < 4 {
             continue;
         }
-        let status = line[..2].trim().to_string();
+        let bytes = line.as_bytes();
+        let index_status = bytes[0] as char;
+        let worktree_status = bytes[1] as char;
         let path = line[3..].to_string();
-        files.push(ChangedFile {
-            status,
-            path,
-            additions: 0,
-            deletions: 0,
-        });
+
+        if index_status == '?' && worktree_status == '?' {
+            unstaged.push(ChangedFile {
+                status: "?".to_string(),
+                path,
+                additions: 0,
+                deletions: 0,
+                stage: FileStage::Unstaged,
+            });
+            continue;
+        }
+
+        if index_status != ' ' {
+            staged.push(ChangedFile {
+                status: index_status.to_string(),
+                path: path.clone(),
+                additions: 0,
+                deletions: 0,
+                stage: FileStage::Staged,
+            });
+        }
+
+        if worktree_status != ' ' {
+            unstaged.push(ChangedFile {
+                status: worktree_status.to_string(),
+                path: path.clone(),
+                additions: 0,
+                deletions: 0,
+                stage: FileStage::Unstaged,
+            });
+        }
     }
 
-    // 2. Get line-level stats via diff --numstat (plumbing-style output).
     if let Ok(ns) = Command::new("git")
         .args(["-C", wt.as_ref(), "diff", "--numstat"])
         .output()
     {
         if ns.status.success() {
-            let text = String::from_utf8_lossy(&ns.stdout);
-            let stats: HashMap<String, (usize, usize)> = text
-                .lines()
-                .filter_map(|line| {
-                    let mut parts = line.split('\t');
-                    let add = parts.next()?.parse::<usize>().ok()?;
-                    let del = parts.next()?.parse::<usize>().ok()?;
-                    let path = parts.next()?.to_string();
-                    Some((path, (add, del)))
-                })
-                .collect();
-            for file in &mut files {
+            let stats = parse_numstat(&ns.stdout);
+            for file in &mut unstaged {
                 if let Some(&(a, d)) = stats.get(&file.path) {
                     file.additions = a;
                     file.deletions = d;
@@ -214,7 +232,129 @@ pub fn changed_files(worktree_path: &Path) -> Result<Vec<ChangedFile>> {
         }
     }
 
-    Ok(files)
+    if let Ok(ns) = Command::new("git")
+        .args(["-C", wt.as_ref(), "diff", "--cached", "--numstat"])
+        .output()
+    {
+        if ns.status.success() {
+            let stats = parse_numstat(&ns.stdout);
+            for file in &mut staged {
+                if let Some(&(a, d)) = stats.get(&file.path) {
+                    file.additions = a;
+                    file.deletions = d;
+                }
+            }
+        }
+    }
+
+    Ok((staged, unstaged))
+}
+
+fn parse_numstat(raw: &[u8]) -> HashMap<String, (usize, usize)> {
+    String::from_utf8_lossy(raw)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let add = parts.next()?.parse::<usize>().ok()?;
+            let del = parts.next()?.parse::<usize>().ok()?;
+            let path = parts.next()?.to_string();
+            Some((path, (add, del)))
+        })
+        .collect()
+}
+
+pub fn stage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
+    let wt = worktree_path.to_string_lossy();
+    let output = Command::new("git")
+        .args(["-C", wt.as_ref(), "add", "--", file_path])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+pub fn unstage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
+    let wt = worktree_path.to_string_lossy();
+    let output = Command::new("git")
+        .args(["-C", wt.as_ref(), "reset", "HEAD", "--", file_path])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git reset failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -> Result<()> {
+    if is_untracked {
+        let full = worktree_path.join(file_path);
+        if full.is_dir() {
+            fs::remove_dir_all(&full)?;
+        } else {
+            fs::remove_file(&full)?;
+        }
+        return Ok(());
+    }
+    let wt = worktree_path.to_string_lossy();
+    let output = Command::new("git")
+        .args(["-C", wt.as_ref(), "checkout", "--", file_path])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git checkout failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+pub fn commit(worktree_path: &Path, message: &str) -> Result<String> {
+    let wt = worktree_path.to_string_lossy();
+    let output = Command::new("git")
+        .args(["-C", wt.as_ref(), "commit", "-m", message])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub fn staged_diff(worktree_path: &Path) -> Result<String> {
+    let wt = worktree_path.to_string_lossy();
+    let output = Command::new("git")
+        .args(["-C", wt.as_ref(), "diff", "--cached"])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git diff --cached failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+pub fn push(worktree_path: &Path) -> Result<String> {
+    let wt = worktree_path.to_string_lossy();
+    let branch = current_branch(worktree_path)?;
+    let output = Command::new("git")
+        .args(["-C", wt.as_ref(), "push", "-u", "origin", &branch])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git push failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 /// Return the contents of a file as it exists at HEAD, or `None` for new

@@ -37,6 +37,7 @@ When making changes, edit only the relevant submodule. If you need to add a new 
 ## Recommendations For Future Changes
 
 - Keep the status line centralized. New async operations should report progress through the shared status API, not ad hoc strings.
+- Status line messages must be verbose and actionable. Do not write terse messages like "Done." or "Pushed." — instead explain what happened and, when relevant, what the user can do next. Example: "Changes committed successfully. Press ^U to push to remote." rather than "Committed."
 - Code must be production ready and modular to allow future Open Source contributors to integrate new features with ease. Do not take shortcuts.
 - Route new modal UI through `PromptState` so `Esc` keeps working uniformly.
 - Prefer command-palette actions over adding many more global hotkeys.

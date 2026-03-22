@@ -5,6 +5,7 @@ mod git;
 mod keybindings;
 mod logger;
 mod model;
+mod provider;
 mod pty;
 mod statusline;
 mod storage;

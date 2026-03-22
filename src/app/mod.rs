@@ -27,6 +27,7 @@ use crate::config::{
 use crate::git;
 use crate::keybindings::{self, Action, BindingScope, HintContext};
 use crate::logger;
+use crate::provider;
 use crate::model::{AgentSession, ChangedFile, Project, ProviderKind, SessionStatus};
 use crate::pty::PtyClient;
 use crate::statusline::{StatusLine, StatusTone};
@@ -39,9 +40,15 @@ pub struct App {
     pub(crate) session_store: SessionStore,
     pub(crate) projects: Vec<Project>,
     pub(crate) sessions: Vec<AgentSession>,
-    pub(crate) changed_files: Vec<ChangedFile>,
+    pub(crate) staged_files: Vec<ChangedFile>,
+    pub(crate) unstaged_files: Vec<ChangedFile>,
     pub(crate) selected_left: usize,
-    pub(crate) selected_file: usize,
+    pub(crate) right_section: RightSection,
+    pub(crate) files_index: usize,
+    pub(crate) commit_input: String,
+    pub(crate) commit_input_cursor: usize,
+    pub(crate) commit_scroll: u16,
+    pub(crate) commit_generating: bool,
     pub(crate) left_width_pct: u16,
     pub(crate) right_width_pct: u16,
     pub(crate) focus: FocusPane,
@@ -91,6 +98,48 @@ impl FocusPane {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RightSection {
+    Unstaged,
+    Staged,
+    CommitInput,
+}
+
+impl RightSection {
+    /// Returns the next section, or `None` to exit the pane.
+    /// Order: Unstaged → Staged → CommitInput.
+    pub(crate) fn next(self, has_staged: bool) -> Option<Self> {
+        match self {
+            Self::Unstaged if has_staged => Some(Self::Staged),
+            Self::Unstaged => None,
+            Self::Staged => Some(Self::CommitInput),
+            Self::CommitInput => None,
+        }
+    }
+
+    /// Returns the previous section, or `None` to exit the pane.
+    pub(crate) fn previous(self) -> Option<Self> {
+        match self {
+            Self::CommitInput => Some(Self::Staged),
+            Self::Staged => Some(Self::Unstaged),
+            Self::Unstaged => None,
+        }
+    }
+
+    /// First section when entering the pane (always Changes/Unstaged on top).
+    pub(crate) fn first() -> Self {
+        Self::Unstaged
+    }
+
+    pub(crate) fn last(has_staged: bool) -> Self {
+        if has_staged {
+            Self::CommitInput
+        } else {
+            Self::Unstaged
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum CenterMode {
     Agent,
@@ -129,6 +178,11 @@ pub(crate) enum PromptState {
         active_count: usize,
         confirm_selected: bool, // false = Cancel (default), true = Quit
     },
+    ConfirmDiscardFile {
+        file_path: String,
+        is_untracked: bool,
+        confirm_selected: bool, // false = Cancel (default), true = Discard
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -142,6 +196,7 @@ pub(crate) struct BrowserEntry {
 pub(crate) enum InputTarget {
     None,
     Agent,
+    CommitMessage,
 }
 
 #[derive(Clone, Copy)]
@@ -164,7 +219,14 @@ pub(crate) enum WorkerEvent {
         pty_size: (u16, u16), // (rows, cols) the PTY was spawned with
     },
     CreateAgentFailed(String),
-    ChangedFilesReady(Vec<ChangedFile>),
+    ChangedFilesReady {
+        staged: Vec<ChangedFile>,
+        unstaged: Vec<ChangedFile>,
+    },
+    CommitMessageGenerated(String),
+    CommitMessageFailed(String),
+    PushCompleted(Result<(), String>),
+    PullCompleted(Result<(), String>),
     BrowserEntriesReady {
         dir: PathBuf,
         entries: Vec<BrowserEntry>,
@@ -195,9 +257,15 @@ impl App {
             session_store,
             projects,
             sessions,
-            changed_files: Vec::new(),
+            staged_files: Vec::new(),
+            unstaged_files: Vec::new(),
             selected_left: 0,
-            selected_file: 0,
+            right_section: RightSection::Unstaged,
+            files_index: 0,
+            commit_input: String::new(),
+            commit_input_cursor: 0,
+            commit_scroll: 0,
+            commit_generating: false,
             left_collapsed: false,
             focus: FocusPane::Left,
             center_mode: CenterMode::Agent,
@@ -399,11 +467,39 @@ impl App {
         if let Ok(mut guard) = self.watched_worktree.lock() {
             *guard = worktree.clone();
         }
-        self.changed_files = worktree
+        let (staged, unstaged) = worktree
             .and_then(|p| git::changed_files(&p).ok())
             .unwrap_or_default();
-        if self.selected_file >= self.changed_files.len() {
-            self.selected_file = self.changed_files.len().saturating_sub(1);
+        self.staged_files = staged;
+        self.unstaged_files = unstaged;
+        self.clamp_files_cursor();
+    }
+
+    pub(crate) fn selected_changed_file(&self) -> Option<&ChangedFile> {
+        match self.right_section {
+            RightSection::Staged => self.staged_files.get(self.files_index),
+            RightSection::Unstaged => self.unstaged_files.get(self.files_index),
+            RightSection::CommitInput => None,
+        }
+    }
+
+    pub(crate) fn current_files_len(&self) -> usize {
+        match self.right_section {
+            RightSection::Staged => self.staged_files.len(),
+            RightSection::Unstaged => self.unstaged_files.len(),
+            RightSection::CommitInput => 0,
+        }
+    }
+
+    pub(crate) fn clamp_files_cursor(&mut self) {
+        if self.right_section == RightSection::CommitInput {
+            return;
+        }
+        let len = self.current_files_len();
+        if len == 0 {
+            self.files_index = 0;
+        } else if self.files_index >= len {
+            self.files_index = len.saturating_sub(1);
         }
     }
 

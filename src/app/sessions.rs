@@ -366,7 +366,7 @@ impl App {
             self.set_error("Select a session first.");
             return Ok(());
         };
-        let Some(file) = self.changed_files.get(self.selected_file) else {
+        let Some(file) = self.selected_changed_file() else {
             return Ok(());
         };
         let output =

@@ -44,12 +44,42 @@ impl App {
                     self.create_agent_in_flight = false;
                     self.set_error(message);
                 }
-                WorkerEvent::ChangedFilesReady(files) => {
-                    self.changed_files = files;
-                    if self.selected_file >= self.changed_files.len() {
-                        self.selected_file = self.changed_files.len().saturating_sub(1);
-                    }
+                WorkerEvent::ChangedFilesReady { staged, unstaged } => {
+                    self.staged_files = staged;
+                    self.unstaged_files = unstaged;
+                    self.clamp_files_cursor();
                 }
+                WorkerEvent::CommitMessageGenerated(msg) => {
+                    self.commit_input = msg;
+                    self.commit_input_cursor = self.commit_input.len();
+                    self.commit_generating = false;
+                    self.input_target = InputTarget::CommitMessage;
+                    self.set_info(
+                        "AI commit message generated. Press Esc to exit, then c to commit.",
+                    );
+                }
+                WorkerEvent::CommitMessageFailed(err) => {
+                    self.commit_generating = false;
+                    self.set_error(format!(
+                        "Failed to generate AI commit message: {err}. \
+                         You can write one manually or retry with ^G.",
+                    ));
+                }
+                WorkerEvent::PushCompleted(result) => match result {
+                    Ok(()) => self.set_info(
+                        "Pushed to remote successfully. Your changes are now available to collaborators.",
+                    ),
+                    Err(e) => self.set_error(format!("Push to remote failed: {e}")),
+                },
+                WorkerEvent::PullCompleted(result) => match result {
+                    Ok(()) => {
+                        self.set_info(
+                            "Pulled latest changes from remote successfully. Local branch is up to date.",
+                        );
+                        self.reload_changed_files();
+                    }
+                    Err(e) => self.set_error(format!("Pull from remote failed: {e}")),
+                },
                 WorkerEvent::BrowserEntriesReady { dir, entries } => {
                     if let PromptState::BrowseProjects {
                         current_dir,
@@ -125,8 +155,8 @@ impl App {
                 thread::sleep(interval);
                 let path = watched.lock().ok().and_then(|guard| guard.clone());
                 if let Some(worktree_path) = path {
-                    if let Ok(files) = git::changed_files(&worktree_path) {
-                        if tx.send(WorkerEvent::ChangedFilesReady(files)).is_err() {
+                    if let Ok((staged, unstaged)) = git::changed_files(&worktree_path) {
+                        if tx.send(WorkerEvent::ChangedFilesReady { staged, unstaged }).is_err() {
                             break; // receiver dropped, app is shutting down
                         }
                     }

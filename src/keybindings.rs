@@ -27,6 +27,10 @@ pub enum Action {
     Quit,
     DeleteProject,
     RemoveProject,
+    // ── Commit input (native / informational) ─────────────────────
+    GenerateCommitMessage,
+    InsertNewline,
+    CommitChanges,
 }
 
 /// Where a binding's key combo is matched.
@@ -45,6 +49,8 @@ pub enum HintContext {
     LeftSession,
     Center,
     Files,
+    /// In-pane hint bar inside the commit message area.
+    CommitInput,
 }
 
 /// A physical key combination to match against.
@@ -94,6 +100,10 @@ pub struct Binding {
     pub help: Option<HelpEntry>,
     pub hints: &'static [(HintContext, &'static str, &'static str)],
     pub palette: Option<PaletteEntry>,
+    /// When `true`, the key combo is handled natively by the input handler
+    /// (not via the `lookup()` dispatch). The binding exists only for
+    /// documentation, hints, and the help overlay.
+    pub native: bool,
 }
 
 impl Binding {
@@ -138,6 +148,7 @@ pub const BINDINGS: &[Binding] = &[
             (HintContext::Files, "j/k", "Move"),
         ],
         palette: None,
+        native: false,
     },
     Binding {
         action: Action::MoveUp,
@@ -146,6 +157,7 @@ pub const BINDINGS: &[Binding] = &[
         help: None, // covered by MoveDown's "j/k" label
         hints: &[],
         palette: None,
+        native: false,
     },
     Binding {
         action: Action::ToggleProject,
@@ -162,6 +174,7 @@ pub const BINDINGS: &[Binding] = &[
             description: "Collapse or expand the selected project's agents",
             shortcut: Some("Space"),
         }),
+        native: false,
     },
     Binding {
         action: Action::NewAgent,
@@ -178,6 +191,7 @@ pub const BINDINGS: &[Binding] = &[
             description: "Create a new agent for the selected project",
             shortcut: Some("n"),
         }),
+        native: false,
     },
     Binding {
         action: Action::FocusAgent,
@@ -186,6 +200,7 @@ pub const BINDINGS: &[Binding] = &[
         help: None,
         hints: &[(HintContext::LeftSession, "Enter", "Focus")],
         palette: None,
+        native: false,
     },
     Binding {
         action: Action::OpenProjectBrowser,
@@ -205,6 +220,7 @@ pub const BINDINGS: &[Binding] = &[
             description: "Open the project browser",
             shortcut: Some("a"),
         }),
+        native: false,
     },
     Binding {
         action: Action::CopyPath,
@@ -220,6 +236,7 @@ pub const BINDINGS: &[Binding] = &[
             description: "Copy the selected agent's worktree path",
             shortcut: Some("y"),
         }),
+        native: false,
     },
     Binding {
         action: Action::CycleProvider,
@@ -236,6 +253,7 @@ pub const BINDINGS: &[Binding] = &[
             description: "Toggle the selected project's default provider",
             shortcut: Some("d"),
         }),
+        native: false,
     },
     Binding {
         action: Action::RefreshProject,
@@ -252,6 +270,7 @@ pub const BINDINGS: &[Binding] = &[
             description: "Git pull the selected project checkout",
             shortcut: Some("u"),
         }),
+        native: false,
     },
     Binding {
         action: Action::ReconnectAgent,
@@ -268,6 +287,7 @@ pub const BINDINGS: &[Binding] = &[
             description: "Restart the CLI for the selected agent",
             shortcut: None,
         }),
+        native: false,
     },
     Binding {
         action: Action::DeleteSession,
@@ -284,6 +304,7 @@ pub const BINDINGS: &[Binding] = &[
             description: "Delete the selected agent session",
             shortcut: None,
         }),
+        native: false,
     },
     // ── Center pane ────────────────────────────────────────────────
     Binding {
@@ -297,6 +318,7 @@ pub const BINDINGS: &[Binding] = &[
         }),
         hints: &[(HintContext::Center, "i", "Interact")],
         palette: None,
+        native: false,
     },
     Binding {
         action: Action::ScrollPageUp,
@@ -309,6 +331,7 @@ pub const BINDINGS: &[Binding] = &[
         }),
         hints: &[],
         palette: None,
+        native: false,
     },
     Binding {
         action: Action::ScrollPageDown,
@@ -321,6 +344,7 @@ pub const BINDINGS: &[Binding] = &[
         }),
         hints: &[],
         palette: None,
+        native: false,
     },
     // ── Files pane ─────────────────────────────────────────────────
     Binding {
@@ -334,6 +358,7 @@ pub const BINDINGS: &[Binding] = &[
         }),
         hints: &[(HintContext::Files, "Enter", "Diff")],
         palette: None,
+        native: false,
     },
     // ── Global ─────────────────────────────────────────────────────
     // (placed after pane bindings so ^P / ? appear last in hints)
@@ -351,6 +376,7 @@ pub const BINDINGS: &[Binding] = &[
             (HintContext::Files, "Tab", "Next"),
         ],
         palette: None,
+        native: false,
     },
     Binding {
         action: Action::FocusPrev,
@@ -359,6 +385,7 @@ pub const BINDINGS: &[Binding] = &[
         help: None,
         hints: &[],
         palette: None,
+        native: false,
     },
     Binding {
         action: Action::OpenPalette,
@@ -376,6 +403,7 @@ pub const BINDINGS: &[Binding] = &[
             (HintContext::Files, "^P", "Palette"),
         ],
         palette: None,
+        native: false,
     },
     Binding {
         action: Action::ToggleResizeMode,
@@ -388,6 +416,7 @@ pub const BINDINGS: &[Binding] = &[
         }),
         hints: &[],
         palette: None,
+        native: false,
     },
     Binding {
         action: Action::ToggleSidebar,
@@ -404,6 +433,7 @@ pub const BINDINGS: &[Binding] = &[
             description: "Collapse or expand the projects sidebar",
             shortcut: Some("["),
         }),
+        native: false,
     },
     Binding {
         action: Action::ToggleHelp,
@@ -425,6 +455,7 @@ pub const BINDINGS: &[Binding] = &[
             description: "Open the help overlay",
             shortcut: Some("?"),
         }),
+        native: false,
     },
     Binding {
         action: Action::Quit,
@@ -437,6 +468,7 @@ pub const BINDINGS: &[Binding] = &[
         }),
         hints: &[],
         palette: None,
+        native: false,
     },
     // ── Palette-only (no direct keybinding) ────────────────────────
     Binding {
@@ -450,6 +482,100 @@ pub const BINDINGS: &[Binding] = &[
             description: "Remove the selected project and its sessions",
             shortcut: None,
         }),
+        native: false,
+    },
+    // ── Files pane (native — handled directly in handle_files_key) ──────
+    Binding {
+        action: Action::ToggleProject, // reused: Space in files = stage/unstage
+        keys: &[KeyCombo::char(' ')],
+        scopes: &[],
+        help: Some(HelpEntry {
+            section: "Files pane",
+            label: "Space",
+            description: "Stage or unstage selected file",
+        }),
+        hints: &[(HintContext::Files, "Space", "Stage/Unstage")],
+        palette: None,
+        native: true,
+    },
+    Binding {
+        action: Action::CommitChanges,
+        keys: &[KeyCombo::char('c')],
+        scopes: &[],
+        help: Some(HelpEntry {
+            section: "Files pane",
+            label: "c",
+            description: "Commit staged changes",
+        }),
+        hints: &[(HintContext::Files, "c", "Commit")],
+        palette: None,
+        native: true,
+    },
+    Binding {
+        action: Action::GenerateCommitMessage,
+        keys: &[KeyCombo::ctrl('g')],
+        scopes: &[],
+        help: Some(HelpEntry {
+            section: "Files pane",
+            label: "^G",
+            description: "Generate AI commit message",
+        }),
+        hints: &[(HintContext::Files, "^G", "AI msg")],
+        palette: None,
+        native: true,
+    },
+    Binding {
+        action: Action::DeleteSession, // reused: ^D in files = discard
+        keys: &[KeyCombo::ctrl('d')],
+        scopes: &[],
+        help: Some(HelpEntry {
+            section: "Files pane",
+            label: "^D",
+            description: "Discard changes to selected file",
+        }),
+        hints: &[(HintContext::Files, "^D", "Discard")],
+        palette: None,
+        native: true,
+    },
+    Binding {
+        action: Action::InteractAgent, // reused: i in files = engage commit input
+        keys: &[KeyCombo::char('i')],
+        scopes: &[],
+        help: Some(HelpEntry {
+            section: "Files pane",
+            label: "i",
+            description: "Write a commit message",
+        }),
+        hints: &[(HintContext::Files, "i", "Commit msg")],
+        palette: None,
+        native: true,
+    },
+    // ── Commit input (native keybindings — handled directly, not via lookup) ──
+    Binding {
+        action: Action::GenerateCommitMessage, // ^G exits commit input
+        keys: &[KeyCombo::ctrl('g')],
+        scopes: &[],
+        help: Some(HelpEntry {
+            section: "Commit input",
+            label: "^G",
+            description: "Exit commit input",
+        }),
+        hints: &[], // works but not shown in hint bar
+        palette: None,
+        native: true,
+    },
+    Binding {
+        action: Action::InsertNewline,
+        keys: &[KeyCombo::key(KeyCode::Esc)],
+        scopes: &[],
+        help: Some(HelpEntry {
+            section: "Commit input",
+            label: "Esc",
+            description: "Exit commit input",
+        }),
+        hints: &[(HintContext::CommitInput, "Esc", "Exit")],
+        palette: None,
+        native: true,
     },
     Binding {
         action: Action::RemoveProject,
@@ -462,10 +588,11 @@ pub const BINDINGS: &[Binding] = &[
             description: "Remove project from app (keeps files on disk)",
             shortcut: None,
         }),
+        native: false,
     },
 ];
 
-const HELP_SECTION_ORDER: &[&str] = &["Global", "Projects pane", "Agent pane", "Files pane"];
+const HELP_SECTION_ORDER: &[&str] = &["Global", "Projects pane", "Agent pane", "Files pane", "Commit input"];
 
 /// Find the action for a key event in the given scope.
 pub fn lookup(key: &KeyEvent, scope: BindingScope) -> Option<Action> {
