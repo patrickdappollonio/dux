@@ -10,6 +10,8 @@ use std::time::Duration;
 use anyhow::Result;
 use chrono::Utc;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+
+use crate::keybindings::{self, Action, BindingScope, HintContext};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::prelude::{Color, Modifier, Style};
@@ -166,70 +168,6 @@ enum WorkerEvent {
     },
 }
 
-#[derive(Clone, Copy)]
-struct CommandDef {
-    name: &'static str,
-    description: &'static str,
-    shortcut: Option<&'static str>,
-}
-
-const COMMANDS: &[CommandDef] = &[
-    CommandDef {
-        name: "new-agent",
-        description: "Create a new agent for the selected project",
-        shortcut: Some("n"),
-    },
-    CommandDef {
-        name: "provider",
-        description: "Toggle the selected project's default provider",
-        shortcut: Some("d"),
-    },
-    CommandDef {
-        name: "refresh-project",
-        description: "Git pull the selected project checkout",
-        shortcut: Some("u"),
-    },
-    CommandDef {
-        name: "delete-project",
-        description: "Remove the selected project and its sessions",
-        shortcut: None,
-    },
-    CommandDef {
-        name: "delete-agent",
-        description: "Delete the selected agent session",
-        shortcut: None,
-    },
-    CommandDef {
-        name: "reconnect-agent",
-        description: "Restart the CLI for the selected agent",
-        shortcut: None,
-    },
-    CommandDef {
-        name: "add-project",
-        description: "Open the project browser",
-        shortcut: Some("a"),
-    },
-    CommandDef {
-        name: "toggle-sidebar",
-        description: "Collapse or expand the projects sidebar",
-        shortcut: Some("["),
-    },
-    CommandDef {
-        name: "toggle-project",
-        description: "Collapse or expand the selected project's agents",
-        shortcut: Some("Space"),
-    },
-    CommandDef {
-        name: "copy-path",
-        description: "Copy the selected agent's worktree path",
-        shortcut: Some("y"),
-    },
-    CommandDef {
-        name: "help",
-        description: "Open the help overlay",
-        shortcut: Some("?"),
-    },
-];
 
 impl App {
     pub fn bootstrap() -> Result<Self> {
@@ -335,51 +273,49 @@ impl App {
         if self.input_target == InputTarget::Agent {
             return self.handle_agent_input(key);
         }
-        if (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c'))
-            || key.code == KeyCode::Char('q')
-        {
-            let active_count = self.providers.len();
-            if active_count > 0 {
-                self.prompt = PromptState::ConfirmQuit {
-                    active_count,
-                    confirm_selected: false,
-                };
-                return Ok(false);
-            }
-            return Ok(true);
-        }
-        if key.code == KeyCode::Char('?') {
-            self.help_overlay = !self.help_overlay;
-            return Ok(false);
-        }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
-            self.prompt = PromptState::Command {
-                input: String::new(),
-                selected: 0,
-                searching: false,
-            };
-            self.set_info("Command palette opened.");
-            return Ok(false);
-        }
-        if key.code == KeyCode::Tab {
-            self.focus = self.focus.next();
-            return Ok(false);
-        }
-        if key.code == KeyCode::BackTab {
-            self.focus = self.focus.previous();
-            return Ok(false);
-        }
-        if key.code == KeyCode::Char('[') {
-            self.left_collapsed = !self.left_collapsed;
-            return Ok(false);
-        }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('w') {
-            self.resize_mode = !self.resize_mode;
-            if self.resize_mode {
-                self.set_info("Resize mode on: h/l/←/→ resize side panes.");
-            } else {
-                self.persist_pane_widths();
-                self.set_info("Resize mode off.");
+        if let Some(action) = keybindings::lookup(&key, BindingScope::Global) {
+            match action {
+                Action::Quit => {
+                    let active_count = self.providers.len();
+                    if active_count > 0 {
+                        self.prompt = PromptState::ConfirmQuit {
+                            active_count,
+                            confirm_selected: false,
+                        };
+                        return Ok(false);
+                    }
+                    return Ok(true);
+                }
+                Action::ToggleHelp => {
+                    self.help_overlay = !self.help_overlay;
+                }
+                Action::OpenPalette => {
+                    self.prompt = PromptState::Command {
+                        input: String::new(),
+                        selected: 0,
+                        searching: false,
+                    };
+                    self.set_info("Command palette opened.");
+                }
+                Action::FocusNext => {
+                    self.focus = self.focus.next();
+                }
+                Action::FocusPrev => {
+                    self.focus = self.focus.previous();
+                }
+                Action::ToggleSidebar => {
+                    self.left_collapsed = !self.left_collapsed;
+                }
+                Action::ToggleResizeMode => {
+                    self.resize_mode = !self.resize_mode;
+                    if self.resize_mode {
+                        self.set_info("Resize mode on: h/l/←/→ resize side panes.");
+                    } else {
+                        self.persist_pane_widths();
+                        self.set_info("Resize mode off.");
+                    }
+                }
+                _ => {}
             }
             return Ok(false);
         }
@@ -397,151 +333,146 @@ impl App {
     }
 
     fn handle_left_key(&mut self, key: KeyEvent) -> Result<()> {
-        let items = self.left_items();
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                if self.selected_left + 1 < items.len() {
-                    self.selected_left += 1;
-                    self.reload_changed_files();
-                }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if self.selected_left > 0 {
-                    self.selected_left -= 1;
-                    self.reload_changed_files();
-                }
-            }
-            KeyCode::Enter => {
-                match self.left_items().get(self.selected_left) {
-                    Some(LeftItem::Project(project_index)) => {
-                        let project_id = self.projects[*project_index].id.clone();
-                        let has_sessions = self.sessions.iter().any(|s| s.project_id == project_id);
-                        if has_sessions {
-                            // Expand the project if collapsed so the session items are visible
-                            if self.collapsed_projects.contains(&project_id) {
-                                self.collapsed_projects.remove(&project_id);
-                                self.rebuild_left_items();
-                            }
-                            // Find the first session belonging to this project
-                            if let Some(pos) = self.left_items().iter().position(|item| {
-                                matches!(item, LeftItem::Session(si) if self.sessions[*si].project_id == project_id)
-                            }) {
-                                self.selected_left = pos;
-                                self.center_mode = CenterMode::Agent;
-                                self.focus = FocusPane::Center;
-                                self.reload_changed_files();
-                                if self.selected_session()
-                                    .map(|s| self.providers.contains_key(&s.id))
-                                    .unwrap_or(false)
-                                {
-                                    self.input_target = InputTarget::Agent;
-                                }
-                            }
-                        } else {
-                            // Project has no agents: create one
-                            self.create_agent_for_selected_project()?;
-                        }
-                    }
-                    Some(LeftItem::Session(_)) => {
-                        self.center_mode = CenterMode::Agent;
-                        self.focus = FocusPane::Center;
+        let item_count = self.left_items().len();
+        if let Some(action) = keybindings::lookup(&key, BindingScope::Left) {
+            match action {
+                Action::MoveDown => {
+                    if self.selected_left + 1 < item_count {
+                        self.selected_left += 1;
                         self.reload_changed_files();
-                        if self.selected_session()
+                    }
+                }
+                Action::MoveUp => {
+                    if self.selected_left > 0 {
+                        self.selected_left -= 1;
+                        self.reload_changed_files();
+                    }
+                }
+                Action::FocusAgent => {
+                    match self.left_items().get(self.selected_left) {
+                        Some(LeftItem::Project(project_index)) => {
+                            let project_id = self.projects[*project_index].id.clone();
+                            let has_sessions =
+                                self.sessions.iter().any(|s| s.project_id == project_id);
+                            if has_sessions {
+                                if self.collapsed_projects.contains(&project_id) {
+                                    self.collapsed_projects.remove(&project_id);
+                                    self.rebuild_left_items();
+                                }
+                                if let Some(pos) =
+                                    self.left_items().iter().position(|item| {
+                                        matches!(item, LeftItem::Session(si) if self.sessions[*si].project_id == project_id)
+                                    })
+                                {
+                                    self.selected_left = pos;
+                                    self.center_mode = CenterMode::Agent;
+                                    self.focus = FocusPane::Center;
+                                    self.reload_changed_files();
+                                    if self
+                                        .selected_session()
+                                        .map(|s| self.providers.contains_key(&s.id))
+                                        .unwrap_or(false)
+                                    {
+                                        self.input_target = InputTarget::Agent;
+                                    }
+                                }
+                            } else {
+                                self.create_agent_for_selected_project()?;
+                            }
+                        }
+                        Some(LeftItem::Session(_)) => {
+                            self.center_mode = CenterMode::Agent;
+                            self.focus = FocusPane::Center;
+                            self.reload_changed_files();
+                            if self
+                                .selected_session()
+                                .map(|s| self.providers.contains_key(&s.id))
+                                .unwrap_or(false)
+                            {
+                                self.input_target = InputTarget::Agent;
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                Action::OpenProjectBrowser => {
+                    self.open_project_browser()?;
+                }
+                Action::NewAgent => self.create_agent_for_selected_project()?,
+                Action::RefreshProject => self.refresh_selected_project()?,
+                Action::DeleteSession => self.confirm_delete_selected_session()?,
+                Action::CycleProvider => self.cycle_selected_project_provider()?,
+                Action::ReconnectAgent => self.reconnect_selected_session()?,
+                Action::CopyPath => self.copy_selected_path()?,
+                Action::ToggleProject => self.toggle_collapse_selected_project(),
+                Action::InteractAgent => {
+                    if self.selected_session().is_some()
+                        && self
+                            .selected_session()
                             .map(|s| self.providers.contains_key(&s.id))
                             .unwrap_or(false)
-                        {
-                            self.input_target = InputTarget::Agent;
-                        }
+                    {
+                        self.focus = FocusPane::Center;
+                        self.center_mode = CenterMode::Agent;
+                        self.input_target = InputTarget::Agent;
+                        self.set_info(
+                            "Interactive mode. Keys forwarded to agent. ctrl+g exits.",
+                        );
+                    } else {
+                        self.set_error(
+                            "No active agent. Press \"r\" to restart or \"n\" to create a new one.",
+                        );
                     }
-                    None => {}
                 }
+                _ => {}
             }
-            KeyCode::Char('a') => {
-                self.open_project_browser()?;
-            }
-            KeyCode::Char('n') => self.create_agent_for_selected_project()?,
-            KeyCode::Char('u') => self.refresh_selected_project()?,
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.confirm_delete_selected_session()?
-            }
-            KeyCode::Char('d') => self.cycle_selected_project_provider()?,
-            KeyCode::Char('r') => self.reconnect_selected_session()?,
-            KeyCode::Char('y') => self.copy_selected_path()?,
-            KeyCode::Char(' ') => self.toggle_collapse_selected_project(),
-            KeyCode::Char('i') => {
-                if self.selected_session().is_some()
-                    && self
-                        .selected_session()
-                        .map(|s| self.providers.contains_key(&s.id))
-                        .unwrap_or(false)
-                {
-                    self.focus = FocusPane::Center;
-                    self.center_mode = CenterMode::Agent;
-                    self.input_target = InputTarget::Agent;
-                    self.set_info("Interactive mode. Keys forwarded to agent. ctrl+g exits.");
-                } else {
-                    self.set_error(
-                        "No active agent. Press \"r\" to restart or \"n\" to create a new one.",
-                    );
-                }
-            }
-            _ => {}
         }
         Ok(())
     }
 
     fn handle_center_key(&mut self, key: KeyEvent) -> Result<()> {
-        match key.code {
-            KeyCode::Char('i') => {
-                if self.selected_session().is_some()
-                    && self
+        if let Some(action) = keybindings::lookup(&key, BindingScope::Center) {
+            match action {
+                Action::InteractAgent => {
+                    if self.selected_session().is_some()
+                        && self
+                            .selected_session()
+                            .map(|s| self.providers.contains_key(&s.id))
+                            .unwrap_or(false)
+                    {
+                        self.reset_pty_scrollback();
+                        self.input_target = InputTarget::Agent;
+                        self.set_info(
+                            "Interactive mode. Keys forwarded to agent. ctrl+g exits.",
+                        );
+                    } else {
+                        self.set_error(
+                            "No active agent. Press \"r\" to restart or \"n\" to create a new one.",
+                        );
+                    }
+                }
+                Action::ReconnectAgent => {
+                    // Allow relaunching an exited agent from the center pane,
+                    // or entering interactive mode if the agent is active.
+                    let has_provider = self
                         .selected_session()
                         .map(|s| self.providers.contains_key(&s.id))
-                        .unwrap_or(false)
-                {
-                    self.reset_pty_scrollback();
-                    self.input_target = InputTarget::Agent;
-                    self.set_info("Interactive mode. Keys forwarded to agent. ctrl+g exits.");
-                } else {
-                    self.set_error(
-                        "No active agent. Press \"r\" to restart or \"n\" to create a new one.",
-                    );
+                        .unwrap_or(false);
+                    if has_provider {
+                        self.reset_pty_scrollback();
+                        self.input_target = InputTarget::Agent;
+                    } else if self.selected_session().is_some() {
+                        self.reconnect_selected_session()?;
+                    }
                 }
-            }
-            KeyCode::Char('r') | KeyCode::Enter => {
-                // Allow relaunching an exited agent from the center pane,
-                // or entering interactive mode if the agent is active.
-                let has_provider = self
-                    .selected_session()
-                    .map(|s| self.providers.contains_key(&s.id))
-                    .unwrap_or(false);
-                if has_provider {
-                    self.reset_pty_scrollback();
-                    self.input_target = InputTarget::Agent;
-                } else if self.selected_session().is_some() {
-                    self.reconnect_selected_session()?;
+                Action::ScrollPageUp => {
+                    self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
                 }
+                Action::ScrollPageDown => {
+                    self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
+                }
+                _ => {}
             }
-            KeyCode::Esc => {
-                // When no diff is open, ESC from the center pane is a no-op.
-                // Diff closing is handled globally by close_top_overlay so it
-                // works regardless of which pane is focused.
-            }
-            // Page-up style scrolling: ctrl+b or PageUp
-            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
-            }
-            KeyCode::PageUp => {
-                self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
-            }
-            // Page-down style scrolling: ctrl+f or PageDown
-            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
-            }
-            KeyCode::PageDown => {
-                self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
-            }
-            _ => {}
         }
         Ok(())
     }
@@ -568,19 +499,21 @@ impl App {
     }
 
     fn handle_files_key(&mut self, key: KeyEvent) -> Result<()> {
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                if self.selected_file + 1 < self.changed_files.len() {
-                    self.selected_file += 1;
+        if let Some(action) = keybindings::lookup(&key, BindingScope::Files) {
+            match action {
+                Action::MoveDown => {
+                    if self.selected_file + 1 < self.changed_files.len() {
+                        self.selected_file += 1;
+                    }
                 }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if self.selected_file > 0 {
-                    self.selected_file -= 1;
+                Action::MoveUp => {
+                    if self.selected_file > 0 {
+                        self.selected_file -= 1;
+                    }
                 }
+                Action::OpenDiff => self.open_diff_for_selected_file()?,
+                _ => {}
             }
-            KeyCode::Enter => self.open_diff_for_selected_file()?,
-            _ => {}
         }
         Ok(())
     }
@@ -685,7 +618,7 @@ impl App {
                     *searching = true;
                 }
                 KeyCode::Char('j') | KeyCode::Down if !*searching => {
-                    let count = filtered_commands(input).len();
+                    let count = keybindings::filtered_palette(input).len();
                     if *selected + 1 < count {
                         *selected += 1;
                     }
@@ -696,7 +629,7 @@ impl App {
                     }
                 }
                 KeyCode::Down if *searching => {
-                    let count = filtered_commands(input).len();
+                    let count = keybindings::filtered_palette(input).len();
                     if *selected + 1 < count {
                         *selected += 1;
                     }
@@ -711,8 +644,8 @@ impl App {
                     *selected = 0;
                 }
                 KeyCode::Tab => {
-                    if let Some(command) = filtered_commands(input).get(*selected) {
-                        *input = command.name.to_string();
+                    if let Some(binding) = keybindings::filtered_palette(input).get(*selected) {
+                        *input = binding.palette.as_ref().unwrap().name.to_string();
                         *selected = 0;
                     }
                 }
@@ -720,9 +653,9 @@ impl App {
                     if *searching {
                         *searching = false;
                     } else {
-                        let command = if let Some(command) = filtered_commands(input).get(*selected)
+                        let command = if let Some(binding) = keybindings::filtered_palette(input).get(*selected)
                         {
-                            command.name.to_string()
+                            binding.palette.as_ref().unwrap().name.to_string()
                         } else {
                             input.trim().to_string()
                         };
@@ -1956,7 +1889,7 @@ impl App {
                     format!("{capitalized} is holding focus. Press "),
                     desc_style,
                 ));
-                spans.extend(self.theme.dim_key_badge("ctrl+g", Color::Reset));
+                spans.extend(self.theme.dim_key_badge("^G", Color::Reset));
                 spans.push(Span::styled(
                     " to bring the focus back to dux.",
                     desc_style,
@@ -2092,50 +2025,13 @@ impl App {
             self.left_items().get(self.selected_left),
             Some(LeftItem::Session(_))
         );
-        let left_project_hints: &[(&str, &str)] = &[
-            ("j/k", "Move"),
-            ("Space", "Toggle"),
-            ("n", "New agent"),
-            ("a", "Add project"),
-            ("y", "Copy path"),
-            ("d", "Provider"),
-            ("u", "Pull"),
-            ("^P", "Palette"),
-            ("?", "Help"),
-        ];
-        let left_session_hints: &[(&str, &str)] = &[
-            ("j/k", "Move"),
-            ("Enter", "Focus"),
-            ("a", "Add project"),
-            ("y", "Copy path"),
-            ("r", "Reconnect"),
-            ("^D", "Delete"),
-            ("^P", "Palette"),
-            ("?", "Help"),
-        ];
-        let hints: &[(&str, &str)] = match self.focus {
-            FocusPane::Left => {
-                if is_on_project {
-                    left_project_hints
-                } else {
-                    left_session_hints
-                }
-            }
-            FocusPane::Center => &[
-                ("i", "Interact"),
-                ("Esc", "Close diff"),
-                ("Tab", "Next"),
-                ("^P", "Palette"),
-                ("?", "Help"),
-            ],
-            FocusPane::Files => &[
-                ("j/k", "Move"),
-                ("Enter", "Diff"),
-                ("Tab", "Next"),
-                ("^P", "Palette"),
-                ("?", "Help"),
-            ],
+        let ctx = match self.focus {
+            FocusPane::Left if is_on_project => HintContext::LeftProject,
+            FocusPane::Left => HintContext::LeftSession,
+            FocusPane::Center => HintContext::Center,
+            FocusPane::Files => HintContext::Files,
         };
+        let hints = keybindings::hints_for(ctx);
         let [hints_area, status_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(1)])
@@ -2211,47 +2107,7 @@ impl App {
         self.render_dim_overlay(frame);
         let area = centered_rect(72, 70, frame.area());
         Clear.render(area, frame.buffer_mut());
-        let help_bindings: &[(&str, &[(&str, &str)])] = &[
-            (
-                "Global",
-                &[
-                    ("Tab", "Focus next pane"),
-                    ("^P", "Open command palette"),
-                    ("^W", "Resize mode (h/l side panes)"),
-                    ("[", "Toggle sidebar"),
-                    ("?", "Toggle help"),
-                    ("q", "Quit"),
-                ],
-            ),
-            (
-                "Projects pane",
-                &[
-                    ("j/k", "Move through projects and sessions"),
-                    ("space", "Collapse/expand project"),
-                    ("a", "Open project browser"),
-                    ("A", "Manual path entry"),
-                    ("n", "New agent session (creates worktree)"),
-                    ("d", "Cycle default provider"),
-                    ("u", "Refresh checkout (git pull --ff-only)"),
-                    ("r", "Restart agent CLI"),
-                    ("ctrl+d", "Delete selected session/worktree"),
-                ],
-            ),
-            (
-                "Agent pane",
-                &[
-                    ("i", "Start a prompt turn for the agent"),
-                    ("^B/PgUp", "Scroll up one page"),
-                    ("^F/PgDn", "Scroll down one page"),
-                    ("Esc", "Close diff view"),
-                ],
-            ),
-            ("Files pane", &[("Enter", "Open selected file diff")]),
-            (
-                "Key notation",
-                &[("^X", "Hold Ctrl and press X (e.g. ^P = Ctrl+P)")],
-            ),
-        ];
+        let help_bindings = keybindings::help_sections();
         let mut lines: Vec<Line> = Vec::new();
         for (section_idx, (section, bindings)) in help_bindings.iter().enumerate() {
             if section_idx > 0 {
@@ -2263,7 +2119,7 @@ impl App {
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             )));
-            for (key, desc) in *bindings {
+            for (key, desc) in bindings {
                 let padding = 14usize.saturating_sub(key.len() + 2);
                 let mut spans = vec![Span::raw("  ")];
                 spans.extend(self.theme.key_badge(key, Color::Reset));
@@ -2274,6 +2130,27 @@ impl App {
                 ));
                 lines.push(Line::from(spans));
             }
+        }
+        // Key notation legend
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Key notation",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )));
+        {
+            let key = "^X";
+            let desc = "Hold Ctrl and press X (e.g. ^P = Ctrl+P)";
+            let padding = 14usize.saturating_sub(key.len() + 2);
+            let mut spans = vec![Span::raw("  ")];
+            spans.extend(self.theme.key_badge(key, Color::Reset));
+            spans.push(Span::raw(" ".repeat(padding)));
+            spans.push(Span::styled(
+                desc,
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+            lines.push(Line::from(spans));
         }
         // Session state legend
         lines.push(Line::from(""));
@@ -2323,26 +2200,27 @@ impl App {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(72, 40, frame.area());
                 Clear.render(popup, frame.buffer_mut());
-                let commands = filtered_commands(input);
+                let commands = keybindings::filtered_palette(input);
                 let items = if commands.is_empty() {
                     vec![ListItem::new("No matching commands.")]
                 } else {
                     commands
                         .iter()
-                        .map(|command| {
+                        .map(|binding| {
+                            let p = binding.palette.as_ref().unwrap();
                             let mut left_spans = vec![
                                 Span::styled(
-                                    command.name.to_string(),
+                                    p.name.to_string(),
                                     Style::default()
                                         .fg(Color::Cyan)
                                         .add_modifier(Modifier::BOLD),
                                 ),
                                 Span::styled(
-                                    format!("  {}", command.description),
+                                    format!("  {}", p.description),
                                     Style::default().fg(self.theme.hint_desc_fg),
                                 ),
                             ];
-                            if let Some(shortcut) = command.shortcut {
+                            if let Some(shortcut) = p.shortcut {
                                 let left_len: usize = left_spans.iter().map(|s| s.width()).sum();
                                 // +3 for badge brackets <k>, +2 for borders, +1 for right padding
                                 let badge_len = shortcut.len() + 3;
@@ -3300,20 +3178,3 @@ fn browser_entries(dir: &Path) -> Vec<BrowserEntry> {
     entries
 }
 
-fn filtered_commands(input: &str) -> Vec<&'static CommandDef> {
-    let needle = input.trim().to_lowercase();
-    if needle.is_empty() {
-        return COMMANDS.iter().collect();
-    }
-    let mut name_matches: Vec<&'static CommandDef> = Vec::new();
-    let mut desc_matches: Vec<&'static CommandDef> = Vec::new();
-    for command in COMMANDS.iter() {
-        if command.name.contains(&needle) {
-            name_matches.push(command);
-        } else if command.description.to_lowercase().contains(&needle) {
-            desc_matches.push(command);
-        }
-    }
-    name_matches.extend(desc_matches);
-    name_matches
-}

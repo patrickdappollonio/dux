@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod diff;
 mod git;
+mod keybindings;
 mod logger;
 mod model;
 mod pty;
