@@ -1150,12 +1150,16 @@ impl App {
     }
 
     fn render(&self, frame: &mut Frame) {
+        let term_w = frame.area().width as usize;
+        let status_text_len = self.status.text().len() + 3; // " ● " prefix
+        let status_lines: u16 = if term_w > 0 && status_text_len > term_w { 2 } else { 1 };
+        let footer_h = 1 + status_lines; // 1 for hints + status lines
         let [header, body, footer] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
                 Constraint::Min(4),
-                Constraint::Length(3),
+                Constraint::Length(footer_h),
             ])
             .areas(frame.area());
         self.render_header(frame, header);
@@ -1491,9 +1495,30 @@ impl App {
                 ("q", "Quit"),
             ],
         };
+        let [hints_area, status_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .areas(area);
+        let max_w = hints_area.width as usize;
+        let ellipsis = "…";
+        let ellipsis_w = 1;
+
         let mut hint_spans: Vec<Span> = Vec::new();
         let bar_bg = self.theme.hint_bar_bg;
+        let mut used = 0usize;
         for (i, (key, desc)) in hints.iter().enumerate() {
+            // width of this hint: separator + <key> + space + desc
+            let sep = if i > 0 { 1 } else { 0 };
+            let hint_w = sep + key.len() + 2 + 1 + desc.len();
+            if used + hint_w > max_w {
+                if used + ellipsis_w <= max_w {
+                    hint_spans.push(Span::styled(
+                        ellipsis,
+                        Style::default().fg(self.theme.hint_desc_fg).bg(bar_bg),
+                    ));
+                }
+                break;
+            }
             if i > 0 {
                 hint_spans.push(Span::styled(" ", Style::default().bg(bar_bg)));
             }
@@ -1502,12 +1527,9 @@ impl App {
                 format!(" {desc}"),
                 Style::default().fg(self.theme.hint_desc_fg).bg(bar_bg),
             ));
+            used += hint_w;
         }
 
-        let [hints_area, status_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Length(2)])
-            .areas(area);
         Paragraph::new(Line::from(hint_spans))
             .style(Style::default().bg(self.theme.hint_bar_bg))
             .render(hints_area, frame.buffer_mut());
@@ -1525,13 +1547,22 @@ impl App {
             StatusTone::Busy => self.theme.status_busy_bg,
             StatusTone::Error => self.theme.status_error_bg,
         };
+        let prefix = format!(" {dot} ");
+        let prefix_w = prefix.len();
+        let max_status_chars = (status_area.width as usize) * (status_area.height as usize);
+        let available = max_status_chars.saturating_sub(prefix_w);
+        let truncated = if status_text.len() > available && available > 1 {
+            format!("{}…", &status_text[..available - 1])
+        } else {
+            status_text
+        };
         let status_line = Line::from(vec![
             Span::styled(
-                format!(" {dot} "),
+                prefix,
                 Style::default().fg(dot_color).bg(status_bg),
             ),
             Span::styled(
-                status_text,
+                truncated,
                 Style::default().fg(msg_color).bg(status_bg),
             ),
         ]);
