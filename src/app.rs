@@ -116,6 +116,11 @@ enum PromptState {
         name: String,
         field: PromptField,
     },
+    ConfirmDeleteAgent {
+        session_id: String,
+        branch_name: String,
+        confirm_selected: bool, // false = Cancel (default), true = Delete
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -142,6 +147,7 @@ enum WorkerEvent {
     CreateAgentReady {
         session: AgentSession,
         client: PtyClient,
+        pty_size: (u16, u16), // (rows, cols) the PTY was spawned with
     },
     CreateAgentFailed(String),
 }
@@ -322,16 +328,15 @@ impl App {
             self.set_info("Command palette opened.");
             return Ok(false);
         }
+        if self.input_target == InputTarget::Agent {
+            return self.handle_agent_input(key);
+        }
         if key.code == KeyCode::Tab {
             self.focus = self.focus.next();
-            self.input_target = InputTarget::None;
-
             return Ok(false);
         }
         if key.code == KeyCode::BackTab {
             self.focus = self.focus.previous();
-            self.input_target = InputTarget::None;
-
             return Ok(false);
         }
         if key.code == KeyCode::Char('[') {
@@ -350,9 +355,6 @@ impl App {
         if self.resize_mode {
             self.handle_resize_key(key);
             return Ok(false);
-        }
-        if self.input_target == InputTarget::Agent {
-            return self.handle_agent_input(key);
         }
 
         match self.focus {
@@ -395,7 +397,7 @@ impl App {
             }
             KeyCode::Char('n') => self.create_agent_for_selected_project()?,
             KeyCode::Char('u') => self.refresh_selected_project()?,
-            KeyCode::Char('x') => self.delete_selected_session()?,
+            KeyCode::Char('x') => self.confirm_delete_selected_session()?,
             KeyCode::Char('d') => self.cycle_selected_project_provider()?,
             KeyCode::Char('r') => self.reconnect_selected_session()?,
             KeyCode::Char('y') => self.copy_selected_path()?,
@@ -414,7 +416,7 @@ impl App {
                         .unwrap_or(false)
                 {
                     self.input_target = InputTarget::Agent;
-                    self.set_info("Interactive mode. Keys forwarded to agent. Esc exits.");
+                    self.set_info("Interactive mode. Keys forwarded to agent. ctrl+g exits.");
                 } else {
                     self.set_error("No active agent. Press r to reconnect or a to create.");
                 }
@@ -463,11 +465,16 @@ impl App {
             }
         };
 
+        // ctrl+g exits interactive mode (like classic terminal escape).
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('g') {
+            self.input_target = InputTarget::None;
+            self.set_info("Exited interactive mode.");
+            return Ok(false);
+        }
+
         match key.code {
             KeyCode::Esc => {
-                self.input_target = InputTarget::None;
-                self.set_info("Exited interactive mode.");
-                return Ok(false);
+                let _ = provider.write_bytes(b"\x1b");
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let _ = provider.write_bytes(b"\x03");
@@ -729,6 +736,31 @@ impl App {
             self.add_project(path, name)?;
             self.prompt = PromptState::None;
         }
+
+        if let PromptState::ConfirmDeleteAgent {
+            session_id,
+            confirm_selected,
+            ..
+        } = &mut self.prompt
+        {
+            match key.code {
+                KeyCode::Esc => self.prompt = PromptState::None,
+                KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::Char('h') | KeyCode::Char('l') => {
+                    *confirm_selected = !*confirm_selected;
+                }
+                KeyCode::Enter => {
+                    if *confirm_selected {
+                        let id = session_id.clone();
+                        self.prompt = PromptState::None;
+                        self.do_delete_session(&id)?;
+                    } else {
+                        self.prompt = PromptState::None;
+                    }
+                }
+                _ => {}
+            }
+        }
+
         Ok(false)
     }
 
@@ -877,8 +909,9 @@ impl App {
         let paths = self.paths.clone();
         let config = self.config.clone();
         let worker_tx = self.worker_tx.clone();
+        let term_size = crossterm::terminal::size().unwrap_or((80, 24));
         thread::spawn(move || {
-            run_create_agent_job(project, paths, config, worker_tx);
+            run_create_agent_job(project, paths, config, worker_tx, term_size);
         });
         Ok(())
     }
@@ -927,9 +960,26 @@ impl App {
         Ok(())
     }
 
-    fn delete_selected_session(&mut self) -> Result<()> {
+    fn confirm_delete_selected_session(&mut self) -> Result<()> {
         let Some(session) = self.selected_session().cloned() else {
             self.set_error("Select a session first.");
+            return Ok(());
+        };
+        self.prompt = PromptState::ConfirmDeleteAgent {
+            session_id: session.id.clone(),
+            branch_name: session.branch_name.clone(),
+            confirm_selected: false, // Cancel is default
+        };
+        Ok(())
+    }
+
+    fn do_delete_session(&mut self, session_id: &str) -> Result<()> {
+        let Some(session) = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .cloned()
+        else {
             return Ok(());
         };
         logger::info(&format!(
@@ -1016,7 +1066,7 @@ impl App {
                         |item| matches!(item, LeftItem::Session(session_index) if *session_index == index),
                     )
                     .unwrap_or(self.selected_left);
-                self.delete_selected_session()?;
+                self.do_delete_session(&session_id)?;
             }
         }
         self.projects.retain(|candidate| candidate.id != project.id);
@@ -1075,8 +1125,9 @@ impl App {
         while let Ok(event) = self.worker_rx.try_recv() {
             match event {
                 WorkerEvent::CreateAgentProgress(message) => self.set_busy(message),
-                WorkerEvent::CreateAgentReady { session, client } => {
+                WorkerEvent::CreateAgentReady { session, client, pty_size } => {
                     self.create_agent_in_flight = false;
+                    self.last_pty_size = pty_size;
                     if let Err(err) = self.session_store.upsert_session(&session) {
                         logger::error(&format!(
                             "session store upsert failed for {}: {err}",
@@ -1093,6 +1144,9 @@ impl App {
                         .position(|item| matches!(item, LeftItem::Session(index) if self.sessions.get(*index).map(|candidate| candidate.id.as_str()) == Some(session.id.as_str())))
                         .unwrap_or(0);
                     self.reload_changed_files();
+                    self.focus = FocusPane::Center;
+                    self.center_mode = CenterMode::Agent;
+                    self.input_target = InputTarget::Agent;
                     self.set_info(format!("Created {}", session.branch_name));
                 }
                 WorkerEvent::CreateAgentFailed(message) => {
@@ -1368,8 +1422,8 @@ impl App {
 
         let is_input = self.input_target == InputTarget::Agent;
 
-        // Reserve 1 line at the bottom for the hint bar.
-        let hint_height = if is_input { 0 } else { 1 };
+        // Reserve 2 lines at the bottom for the hint bar (top border + text).
+        let hint_height = 2;
         let [term_area, hint_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
@@ -1449,19 +1503,26 @@ impl App {
             }
         }
 
-        // Hint bar when not in input mode.
-        if !is_input && hint_area.height > 0 {
-            let hint_text = if session_active {
-                " Press i to interact with the agent"
+        // Hint bar with top border.
+        if hint_area.height > 0 {
+            let hint_text = if is_input {
+                "ctrl+g to exit interactive mode"
+            } else if session_active {
+                "Press i to interact with the agent"
             } else if session_id.is_some() {
-                " Session detached. Press r to reconnect."
+                "Session detached. Press r to reconnect."
             } else {
-                " No agent session selected."
+                "No agent session selected."
             };
             Paragraph::new(Span::styled(
                 hint_text,
                 Style::default().fg(self.theme.terminal_hint_fg),
             ))
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(self.theme.border_normal)),
+            )
             .render(hint_area, frame.buffer_mut());
         }
     }
@@ -1501,9 +1562,9 @@ impl App {
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
-        let is_on_project = matches!(
+        let is_on_project = !matches!(
             self.left_items().get(self.selected_left),
-            Some(LeftItem::Project(_))
+            Some(LeftItem::Session(_))
         );
         let left_project_hints: &[(&str, &str)] = &[
             ("j/k", "Move"),
@@ -1518,6 +1579,7 @@ impl App {
         let left_session_hints: &[(&str, &str)] = &[
             ("j/k", "Move"),
             ("Enter", "Focus"),
+            ("a", "Add project"),
             ("r", "Reconnect"),
             ("x", "Delete"),
             ("^P", "Palette"),
@@ -2028,6 +2090,112 @@ impl App {
                     .wrap(Wrap { trim: false })
                     .render(area, frame.buffer_mut());
             }
+            PromptState::ConfirmDeleteAgent {
+                branch_name,
+                confirm_selected,
+                ..
+            } => {
+                self.render_dim_overlay(frame);
+                // Outer dialog: border + title.
+                let area = centered_rect(56, 30, frame.area());
+                Clear.render(area, frame.buffer_mut());
+                let outer = self.themed_overlay_block("Delete Agent");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                // Body text.
+                let [body_area, _, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                let lines = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw(" Are you sure you want to delete "),
+                        Span::styled(
+                            branch_name.as_str(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("?"),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " All uncommitted and unpushed changes in this",
+                        Style::default().fg(Color::Yellow),
+                    )),
+                    Line::from(Span::styled(
+                        " worktree will be permanently lost.",
+                        Style::default().fg(Color::Yellow),
+                    )),
+                ];
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                // Button area: two bordered panels side by side.
+                let btn_width = 16u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area
+                    .width
+                    .saturating_sub(total)
+                    / 2;
+
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let delete_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                let (cancel_border, cancel_fg) = if !confirm_selected {
+                    (Color::Cyan, Color::White)
+                } else {
+                    (self.theme.border_normal, self.theme.hint_desc_fg)
+                };
+                let (delete_border, delete_fg) = if *confirm_selected {
+                    (Color::Red, Color::White)
+                } else {
+                    (self.theme.border_normal, self.theme.hint_desc_fg)
+                };
+
+                Paragraph::new(Line::from(Span::styled(
+                    "Cancel",
+                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED)
+                        .border_style(Style::default().fg(cancel_border)),
+                )
+                .render(cancel_area, frame.buffer_mut());
+
+                Paragraph::new(Line::from(Span::styled(
+                    "Delete",
+                    Style::default().fg(delete_fg).add_modifier(Modifier::BOLD),
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED)
+                        .border_style(Style::default().fg(delete_border)),
+                )
+                .render(delete_area, frame.buffer_mut());
+            }
             PromptState::None => {}
         }
     }
@@ -2075,7 +2243,7 @@ impl App {
             "provider" => self.cycle_selected_project_provider(),
             "refresh-project" => self.refresh_selected_project(),
             "delete-project" => self.delete_selected_project(),
-            "delete-agent" => self.delete_selected_session(),
+            "delete-agent" => self.confirm_delete_selected_session(),
             "reconnect-agent" => self.reconnect_selected_session(),
             "add-project" => self.open_project_browser(),
             "add-project-manual" => {
@@ -2221,6 +2389,7 @@ fn run_create_agent_job(
     paths: DuxPaths,
     config: Config,
     worker_tx: Sender<WorkerEvent>,
+    term_size: (u16, u16),
 ) {
     let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
         "Creating worktree for {}...",
@@ -2273,12 +2442,14 @@ fn run_create_agent_job(
         "Launching {}...",
         session.provider.as_str()
     )));
+    // crossterm::terminal::size() returns (cols, rows).
+    let (cols, rows) = term_size;
     let client = match PtyClient::spawn(
         &provider_cfg.command,
         &provider_cfg.args,
         &worktree_path,
-        24,
-        80,
+        rows,
+        cols,
     ) {
         Ok(client) => client,
         Err(err) => {
@@ -2296,7 +2467,7 @@ fn run_create_agent_job(
         }
     };
     logger::info(&format!("PTY session started for {}", session.id));
-    let _ = worker_tx.send(WorkerEvent::CreateAgentReady { session, client });
+    let _ = worker_tx.send(WorkerEvent::CreateAgentReady { session, client, pty_size: (rows, cols) });
 }
 
 fn load_projects(config: &Config) -> Vec<Project> {

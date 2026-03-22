@@ -120,6 +120,10 @@ impl PtyClient {
     }
 
     /// Resize the PTY and the internal terminal parser.
+    ///
+    /// The parser is resized by creating a fresh parser at the new dimensions
+    /// and replaying the current screen contents, which avoids clearing the
+    /// display (as `set_size` would) while keeping cursor maths correct.
     pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
         self.master
             .resize(PtySize {
@@ -130,7 +134,10 @@ impl PtyClient {
             })
             .context("failed to resize PTY")?;
         if let Ok(mut p) = self.parser.lock() {
-            p.set_size(rows, cols);
+            let contents = p.screen().contents_formatted();
+            let mut fresh = vt100::Parser::new(rows, cols, 200);
+            fresh.process(&contents);
+            *p = fresh;
         }
         Ok(())
     }
