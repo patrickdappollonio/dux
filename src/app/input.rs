@@ -172,9 +172,10 @@ impl App {
     }
 
     fn handle_center_key(&mut self, key: KeyEvent) -> Result<()> {
+        let in_diff = matches!(self.center_mode, CenterMode::Diff { .. });
         if let Some(action) = keybindings::lookup(&key, BindingScope::Center) {
             match action {
-                Action::InteractAgent => {
+                Action::InteractAgent if !in_diff => {
                     if self.selected_session().is_some()
                         && self
                             .selected_session()
@@ -192,7 +193,7 @@ impl App {
                         );
                     }
                 }
-                Action::ReconnectAgent => {
+                Action::ReconnectAgent if !in_diff => {
                     // Allow relaunching an exited agent from the center pane,
                     // or entering interactive mode if the agent is active.
                     let has_provider = self
@@ -207,10 +208,21 @@ impl App {
                     }
                 }
                 Action::ScrollPageUp => {
-                    self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
+                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
+                        let page = self.last_diff_height.max(1);
+                        *scroll = scroll.saturating_sub(page);
+                    } else if self.last_pty_size.0 > 0 {
+                        self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
+                    }
                 }
                 Action::ScrollPageDown => {
-                    self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
+                    if let CenterMode::Diff { ref lines, ref mut scroll } = self.center_mode {
+                        let page = self.last_diff_height.max(1);
+                        let max_scroll = (lines.len() as u16).saturating_sub(1);
+                        *scroll = (*scroll + page).min(max_scroll);
+                    } else if self.last_pty_size.0 > 0 {
+                        self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
+                    }
                 }
                 _ => {}
             }
@@ -732,12 +744,17 @@ impl App {
                         self.reload_changed_files();
                     }
                 }
+                FocusPane::Center => {
+                    if let CenterMode::Diff { ref lines, ref mut scroll } = self.center_mode {
+                        let max_scroll = (lines.len() as u16).saturating_sub(1);
+                        *scroll = (*scroll + 3).min(max_scroll);
+                    }
+                }
                 FocusPane::Files => {
                     if self.selected_file + 1 < self.changed_files.len() {
                         self.selected_file += 1;
                     }
                 }
-                _ => {}
             },
             MouseEventKind::ScrollUp => match self.focus {
                 FocusPane::Left => {
@@ -746,12 +763,16 @@ impl App {
                         self.reload_changed_files();
                     }
                 }
+                FocusPane::Center => {
+                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
+                        *scroll = scroll.saturating_sub(3);
+                    }
+                }
                 FocusPane::Files => {
                     if self.selected_file > 0 {
                         self.selected_file -= 1;
                     }
                 }
-                _ => {}
             },
             _ => {}
         }
