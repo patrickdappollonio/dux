@@ -514,9 +514,9 @@ impl App {
                 }
             }
             KeyCode::Esc => {
-                self.center_mode = CenterMode::Agent;
-                self.focus = FocusPane::Files;
-                self.set_info("Returned to agent view.");
+                // When no diff is open, ESC from the center pane is a no-op.
+                // Diff closing is handled globally by close_top_overlay so it
+                // works regardless of which pane is focused.
             }
             _ => {}
         }
@@ -2742,6 +2742,12 @@ impl App {
         if self.help_overlay {
             self.help_overlay = false;
             self.set_info("Closed overlay.");
+            return true;
+        }
+        if matches!(self.center_mode, CenterMode::Diff(_)) {
+            self.center_mode = CenterMode::Agent;
+            self.focus = FocusPane::Files;
+            self.set_info("Returned to agent view.");
             return true;
         }
         false
