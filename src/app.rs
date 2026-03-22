@@ -139,6 +139,12 @@ enum InputTarget {
     Agent,
 }
 
+#[derive(Clone, Copy)]
+enum ScrollDirection {
+    Up,
+    Down,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum LeftItem {
     Project(usize),
@@ -493,6 +499,7 @@ impl App {
                         .map(|s| self.providers.contains_key(&s.id))
                         .unwrap_or(false)
                 {
+                    self.reset_pty_scrollback();
                     self.input_target = InputTarget::Agent;
                     self.set_info("Interactive mode. Keys forwarded to agent. ctrl+g exits.");
                 } else {
@@ -509,6 +516,7 @@ impl App {
                     .map(|s| self.providers.contains_key(&s.id))
                     .unwrap_or(false);
                 if has_provider {
+                    self.reset_pty_scrollback();
                     self.input_target = InputTarget::Agent;
                 } else if self.selected_session().is_some() {
                     self.reconnect_selected_session()?;
@@ -519,9 +527,44 @@ impl App {
                 // Diff closing is handled globally by close_top_overlay so it
                 // works regardless of which pane is focused.
             }
+            // Page-up style scrolling: ctrl+b or PageUp
+            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
+            }
+            KeyCode::PageUp => {
+                self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
+            }
+            // Page-down style scrolling: ctrl+f or PageDown
+            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
+            }
+            KeyCode::PageDown => {
+                self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
+            }
             _ => {}
         }
         Ok(())
+    }
+
+    fn scroll_pty(&mut self, direction: ScrollDirection, amount: usize) {
+        let sid = match self.selected_session() {
+            Some(s) => s.id.clone(),
+            None => return,
+        };
+        let provider = match self.providers.get(&sid) {
+            Some(p) => p,
+            None => return,
+        };
+        let up = matches!(direction, ScrollDirection::Up);
+        provider.scroll(up, amount);
+    }
+
+    fn reset_pty_scrollback(&self) {
+        if let Some(session) = self.selected_session() {
+            if let Some(provider) = self.providers.get(&session.id) {
+                provider.set_scrollback(0);
+            }
+        }
     }
 
     fn handle_files_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -570,14 +613,12 @@ impl App {
             KeyCode::Esc => {
                 let _ = provider.write_bytes(b"\x1b");
             }
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                let _ = provider.write_bytes(b"\x03");
-            }
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                let _ = provider.write_bytes(b"\x04");
-            }
-            KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                let _ = provider.write_bytes(b"\x1a");
+            KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Map ctrl+a..=ctrl+z to the corresponding control character (0x01..=0x1a).
+                if c.is_ascii_lowercase() {
+                    let ctrl_byte = c as u8 - b'a' + 1;
+                    let _ = provider.write_bytes(&[ctrl_byte]);
+                }
             }
             KeyCode::Char(c) => {
                 let mut buf = [0u8; 4];
@@ -613,6 +654,12 @@ impl App {
             }
             KeyCode::Delete => {
                 let _ = provider.write_bytes(b"\x1b[3~");
+            }
+            KeyCode::PageUp => {
+                let _ = provider.write_bytes(b"\x1b[5~");
+            }
+            KeyCode::PageDown => {
+                let _ = provider.write_bytes(b"\x1b[6~");
             }
             _ => {}
         }
@@ -1729,6 +1776,7 @@ impl App {
         }
 
         let is_input = self.input_target == InputTarget::Agent;
+        let mut scrollback_offset: usize = 0;
 
         // Reserve 2 lines at the bottom for the hint bar (top border + text).
         let hint_height = 2;
@@ -1828,7 +1876,11 @@ impl App {
                     }
                 } else {
                     // Render vt100 screen into ratatui buffer.
-                    let screen = provider.screen();
+                    // Use a single lock to get both screen and scrollback
+                    // offset atomically, avoiding race conditions with the
+                    // background reader thread.
+                    let (screen, sb_offset) = provider.screen_and_scrollback();
+                    scrollback_offset = sb_offset;
                     let buf = frame.buffer_mut();
                     let (screen_rows, screen_cols) = screen.size();
                     for row in 0..screen_rows.min(term_area.height) {
@@ -1910,6 +1962,22 @@ impl App {
                     desc_style,
                 ));
                 Line::from(spans)
+            } else if scrollback_offset > 0 {
+                let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+                let mut spans: Vec<Span> = Vec::new();
+                spans.push(Span::styled(
+                    format!("Scrolled back {scrollback_offset} lines. "),
+                    Style::default().fg(self.theme.hint_key_fg),
+                ));
+                spans.extend(self.theme.dim_key_badge("ctrl+f", Color::Reset));
+                spans.push(Span::styled("/", desc_style));
+                spans.extend(self.theme.dim_key_badge("PgDn", Color::Reset));
+                spans.push(Span::styled(" down, ", desc_style));
+                spans.extend(self.theme.dim_key_badge("ctrl+b", Color::Reset));
+                spans.push(Span::styled("/", desc_style));
+                spans.extend(self.theme.dim_key_badge("PgUp", Color::Reset));
+                spans.push(Span::styled(" up.", desc_style));
+                Line::from(spans)
             } else {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
@@ -1918,7 +1986,15 @@ impl App {
                     spans.extend(self.theme.dim_key_badge("i", Color::Reset));
                     spans.push(Span::styled(" or ", desc_style));
                     spans.extend(self.theme.dim_key_badge("enter", Color::Reset));
-                    spans.push(Span::styled(" to interact with the agent.", desc_style));
+                    spans.push(Span::styled(" to interact with the agent. ", desc_style));
+                    spans.extend(self.theme.dim_key_badge("^B", Color::Reset));
+                    spans.push(Span::styled("/", desc_style));
+                    spans.extend(self.theme.dim_key_badge("PgUp", Color::Reset));
+                    spans.push(Span::styled(" ", desc_style));
+                    spans.extend(self.theme.dim_key_badge("^F", Color::Reset));
+                    spans.push(Span::styled("/", desc_style));
+                    spans.extend(self.theme.dim_key_badge("PgDn", Color::Reset));
+                    spans.push(Span::styled(" to scroll.", desc_style));
                 } else if session_id.is_some() {
                     spans.push(Span::styled("Agent CLI exited. Press ", desc_style));
                     spans.extend(self.theme.dim_key_badge("r", Color::Reset));
@@ -2165,6 +2241,8 @@ impl App {
                 "Agent pane",
                 &[
                     ("i", "Start a prompt turn for the agent"),
+                    ("^B/PgUp", "Scroll up one page"),
+                    ("^F/PgDn", "Scroll down one page"),
                     ("Esc", "Close diff view"),
                 ],
             ),

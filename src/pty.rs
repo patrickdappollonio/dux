@@ -58,7 +58,7 @@ impl PtyClient {
             .take_writer()
             .context("failed to take PTY writer")?;
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 200)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 10_000)));
         let writer = Arc::new(Mutex::new(writer));
         let exited = Arc::new(AtomicBool::new(false));
         let has_output = Arc::new(AtomicBool::new(false));
@@ -188,13 +188,36 @@ impl PtyClient {
         Ok(())
     }
 
-    /// Get a snapshot of the current terminal screen.
-    pub fn screen(&self) -> vt100::Screen {
-        self.parser
-            .lock()
-            .expect("parser mutex poisoned")
-            .screen()
-            .clone()
+    /// Get a snapshot of the terminal screen together with its scrollback
+    /// offset in a single lock acquisition, avoiding race conditions with the
+    /// background reader thread.
+    pub fn screen_and_scrollback(&self) -> (vt100::Screen, usize) {
+        let p = self.parser.lock().expect("parser mutex poisoned");
+        let screen = p.screen().clone();
+        let offset = screen.scrollback();
+        (screen, offset)
+    }
+
+    /// Atomically adjust the scrollback offset by the given amount in the
+    /// given direction, returning the new offset. Uses a single lock to avoid
+    /// races between reading the current offset and writing the new one.
+    pub fn scroll(&self, up: bool, amount: usize) {
+        if let Ok(mut p) = self.parser.lock() {
+            let current = p.screen().scrollback();
+            let new_offset = if up {
+                current.saturating_add(amount)
+            } else {
+                current.saturating_sub(amount)
+            };
+            p.set_scrollback(new_offset);
+        }
+    }
+
+    /// Set the scrollback offset (0 = normal view, positive = scrolled back).
+    pub fn set_scrollback(&self, rows: usize) {
+        if let Ok(mut p) = self.parser.lock() {
+            p.set_scrollback(rows);
+        }
     }
 
     /// Resize the PTY and the internal terminal parser.
@@ -213,7 +236,7 @@ impl PtyClient {
             .context("failed to resize PTY")?;
         if let Ok(mut p) = self.parser.lock() {
             let contents = p.screen().contents_formatted();
-            let mut fresh = vt100::Parser::new(rows, cols, 200);
+            let mut fresh = vt100::Parser::new(rows, cols, 10_000);
             fresh.process(&contents);
             *p = fresh;
         }
