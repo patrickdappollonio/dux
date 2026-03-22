@@ -2048,6 +2048,30 @@ impl App {
                 lines.push(Line::from(spans));
             }
         }
+        // Session state legend
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Session states",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )));
+        let session_states: &[(&str, Color, &str)] = &[
+            ("●", self.theme.session_active, "Active — agent is running"),
+            ("◐", self.theme.session_detached, "Detached — agent process disconnected"),
+            ("○", self.theme.session_exited, "Exited — agent has finished"),
+        ];
+        for (dot, color, desc) in session_states {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(*dot, Style::default().fg(*color)),
+                Span::raw("  "),
+                Span::styled(
+                    desc.to_string(),
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ),
+            ]));
+        }
         Paragraph::new(lines)
             .block(self.themed_overlay_block("Help"))
             .wrap(Wrap { trim: false })
