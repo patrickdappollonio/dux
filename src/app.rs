@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -56,6 +56,7 @@ pub struct App {
     last_pty_size: (u16, u16),
     theme: Theme,
     tick_count: u64,
+    collapsed_projects: HashSet<i64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,6 +212,11 @@ const COMMANDS: &[CommandDef] = &[
         shortcut: Some("["),
     },
     CommandDef {
+        name: "toggle-project",
+        description: "Collapse or expand the selected project's agents",
+        shortcut: Some("Space"),
+    },
+    CommandDef {
         name: "copy-path",
         description: "Copy the selected agent's worktree path",
         shortcut: Some("y"),
@@ -258,6 +264,7 @@ impl App {
             last_pty_size: (0, 0),
             theme: Theme::default_dark(),
             tick_count: 0,
+            collapsed_projects: HashSet::new(),
         };
         app.restore_sessions();
         app.reload_changed_files();
@@ -415,6 +422,7 @@ impl App {
             KeyCode::Char('d') => self.cycle_selected_project_provider()?,
             KeyCode::Char('r') => self.reconnect_selected_session()?,
             KeyCode::Char('y') => self.copy_selected_path()?,
+            KeyCode::Char(' ') => self.toggle_collapse_selected_project(),
             KeyCode::Char('i') => {
                 if self.selected_session().is_some()
                     && self
@@ -1390,21 +1398,37 @@ impl App {
         let focused = self.focus == FocusPane::Left;
 
         if self.left_collapsed {
-            let items = self
-                .left_items()
-                .into_iter()
-                .map(|item| match item {
-                    LeftItem::Project(_) => ListItem::new(Line::from(Span::styled(
-                        "▸",
-                        Style::default().fg(self.theme.project_icon),
-                    ))),
-                    LeftItem::Session(index) => {
-                        let session = &self.sessions[index];
-                        let (dot, dot_color) = self.theme.session_dot(&session.status);
+            let collapsed_left_items = self.left_items();
+            let items = collapsed_left_items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| match item {
+                    LeftItem::Project(index) => {
+                        let project = &self.projects[*index];
+                        let icon = if self.collapsed_projects.contains(&project.id) {
+                            "▸"
+                        } else {
+                            "▾"
+                        };
                         ListItem::new(Line::from(Span::styled(
-                            dot.to_string(),
-                            Style::default().fg(dot_color),
+                            icon,
+                            Style::default().fg(self.theme.project_icon),
                         )))
+                    }
+                    LeftItem::Session(index) => {
+                        let session = &self.sessions[*index];
+                        let (dot, dot_color) = self.theme.session_dot(&session.status);
+                        let is_last = !collapsed_left_items
+                            .get(i + 1)
+                            .is_some_and(|next| matches!(next, LeftItem::Session(_)));
+                        let connector = if is_last { "└" } else { "├" };
+                        ListItem::new(Line::from(vec![
+                            Span::styled(
+                                connector,
+                                Style::default().fg(self.theme.project_icon),
+                            ),
+                            Span::styled(dot.to_string(), Style::default().fg(dot_color)),
+                        ]))
                     }
                 })
                 .collect::<Vec<_>>();
@@ -1427,15 +1451,21 @@ impl App {
             }
             counts
         };
-        let items = self
-            .left_items()
-            .into_iter()
-            .map(|item| match item {
+        let left_items = self.left_items();
+        let items = left_items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| match item {
                 LeftItem::Project(index) => {
-                    let project = &self.projects[index];
+                    let project = &self.projects[*index];
                     let count = session_counts.get(&project.id).copied().unwrap_or(0);
+                    let icon = if self.collapsed_projects.contains(&project.id) {
+                        "▸ "
+                    } else {
+                        "▾ "
+                    };
                     let mut spans = vec![
-                        Span::styled("▸ ", Style::default().fg(self.theme.project_icon)),
+                        Span::styled(icon, Style::default().fg(self.theme.project_icon)),
                         Span::raw(project.name.clone()),
                     ];
                     if count > 0 {
@@ -1447,14 +1477,21 @@ impl App {
                     ListItem::new(Line::from(spans))
                 }
                 LeftItem::Session(index) => {
-                    let session = &self.sessions[index];
+                    let session = &self.sessions[*index];
+                    let is_last = !left_items
+                        .get(i + 1)
+                        .is_some_and(|next| matches!(next, LeftItem::Session(_)));
+                    let connector = if is_last { "└ " } else { "├ " };
                     let label = session
                         .title
                         .clone()
                         .unwrap_or_else(|| session.branch_name.clone());
                     let (dot, dot_color) = self.theme.session_dot(&session.status);
                     ListItem::new(Line::from(vec![
-                        Span::raw("  "),
+                        Span::styled(
+                            connector,
+                            Style::default().fg(self.theme.project_icon),
+                        ),
                         Span::styled(format!("{dot} "), Style::default().fg(dot_color)),
                         Span::styled(label, Style::default().fg(dot_color)),
                         Span::styled(
@@ -1784,6 +1821,7 @@ impl App {
         );
         let left_project_hints: &[(&str, &str)] = &[
             ("j/k", "Move"),
+            ("Space", "Toggle"),
             ("n", "New agent"),
             ("a", "Add project"),
             ("y", "Copy path"),
@@ -1791,7 +1829,6 @@ impl App {
             ("u", "Pull"),
             ("^P", "Palette"),
             ("?", "Help"),
-            ("q", "Quit"),
         ];
         let left_session_hints: &[(&str, &str)] = &[
             ("j/k", "Move"),
@@ -1802,7 +1839,6 @@ impl App {
             ("x", "Delete"),
             ("^P", "Palette"),
             ("?", "Help"),
-            ("q", "Quit"),
         ];
         let hints: &[(&str, &str)] = match self.focus {
             FocusPane::Left => {
@@ -1818,7 +1854,6 @@ impl App {
                 ("Tab", "Next"),
                 ("^P", "Palette"),
                 ("?", "Help"),
-                ("q", "Quit"),
             ],
             FocusPane::Files => &[
                 ("j/k", "Move"),
@@ -1826,7 +1861,6 @@ impl App {
                 ("Tab", "Next"),
                 ("^P", "Palette"),
                 ("?", "Help"),
-                ("q", "Quit"),
             ],
         };
         let [hints_area, status_area] = Layout::default()
@@ -1926,6 +1960,7 @@ impl App {
                 "Projects pane",
                 &[
                     ("j/k", "Move through projects and sessions"),
+                    ("space", "Collapse/expand project"),
                     ("a", "Open project browser"),
                     ("A", "Manual path entry"),
                     ("n", "New agent session (creates worktree)"),
@@ -2593,6 +2628,10 @@ impl App {
                 Ok(())
             }
             "copy-path" => self.copy_selected_path(),
+            "toggle-project" => {
+                self.toggle_collapse_selected_project();
+                Ok(())
+            }
             "toggle-sidebar" => {
                 self.left_collapsed = !self.left_collapsed;
                 Ok(())
@@ -2613,6 +2652,9 @@ impl App {
         let mut items = Vec::new();
         for (project_index, project) in self.projects.iter().enumerate() {
             items.push(LeftItem::Project(project_index));
+            if self.collapsed_projects.contains(&project.id) {
+                continue;
+            }
             for (session_index, session) in self.sessions.iter().enumerate() {
                 if session.project_id == project.id {
                     items.push(LeftItem::Session(session_index));
@@ -2620,6 +2662,17 @@ impl App {
             }
         }
         items
+    }
+
+    fn toggle_collapse_selected_project(&mut self) {
+        if let Some(project) = self.selected_project() {
+            let id = project.id;
+            if self.collapsed_projects.contains(&id) {
+                self.collapsed_projects.remove(&id);
+            } else {
+                self.collapsed_projects.insert(id);
+            }
+        }
     }
 
     fn selected_project(&self) -> Option<&Project> {
