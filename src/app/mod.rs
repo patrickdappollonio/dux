@@ -22,10 +22,10 @@ use uuid::Uuid;
 
 use crate::config::{
     Config, DuxPaths, ProjectConfig, ProviderCommandConfig, check_provider_available,
-    ensure_config, save_config,
+    ensure_config, save_config, validate_keys,
 };
 use crate::git;
-use crate::keybindings::{self, Action, BindingScope, HintContext};
+use crate::keybindings::{Action, BindingScope, HintContext, RuntimeBindings};
 use crate::logger;
 use crate::provider;
 use crate::model::{AgentSession, ChangedFile, Project, ProviderKind, SessionStatus};
@@ -37,6 +37,7 @@ use crate::theme::Theme;
 pub struct App {
     pub(crate) config: Config,
     pub(crate) paths: DuxPaths,
+    pub(crate) bindings: RuntimeBindings,
     pub(crate) session_store: SessionStore,
     pub(crate) projects: Vec<Project>,
     pub(crate) sessions: Vec<AgentSession>,
@@ -244,6 +245,14 @@ impl App {
         let config = ensure_config(&paths)?;
         logger::init(&config.logging, &paths);
         logger::info("bootstrapping dux");
+
+        // Validate and build runtime keybindings from config.
+        if let Err(msg) = validate_keys(&config.keys) {
+            eprintln!("Configuration error in {}: {msg}", paths.config_path.display());
+            std::process::exit(1);
+        }
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+
         let session_store = SessionStore::open(&paths.sessions_db_path)?;
         let projects = load_projects(&config);
         let sessions = session_store.load_sessions()?;
@@ -252,6 +261,7 @@ impl App {
         let mut app = Self {
             left_width_pct: config.ui.left_width_pct,
             right_width_pct: config.ui.right_width_pct,
+            bindings,
             config,
             paths,
             session_store,

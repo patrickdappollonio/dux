@@ -44,3 +44,27 @@ To use a different CLI tool, set the `command` field in the `[providers.<name>]`
 - `level = "error" | "info" | "debug"`
 - `path = "dux.log"` uses a path relative to the config directory
 - absolute paths also work if you want the log elsewhere
+
+## Keybindings
+
+All keybindings are configured in the `[keys]` section of `config.toml`. On first launch, every binding is written out with its default value and a description comment.
+
+Key format: single characters (`"j"`), special names (`"enter"`, `"space"`, `"pageup"`, `"shift-tab"`, `"esc"`), or modifier combos (`"ctrl-d"`, `"ctrl-p"`).
+
+Each action maps to an array of key combos. For example, to rebind quit from `q`/`ctrl-c` to just `ctrl-q`:
+
+```toml
+[keys]
+quit = ["ctrl-q"]
+```
+
+The `show_terminal_keys` option controls whether hints for terminal-native keys (like `ctrl-j` for newline) appear in the UI. These keys work regardless of this setting — dux documents them but does not control them.
+
+```toml
+[keys]
+show_terminal_keys = false
+```
+
+Text input keys (Backspace, typing characters, Enter in the commit editor) and PTY passthrough keys in interactive mode are not rebindable.
+
+Invalid key strings cause the app to refuse to start with a clear error pointing to the broken entry.

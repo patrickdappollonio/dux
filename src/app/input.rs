@@ -2,7 +2,9 @@ use super::*;
 
 impl App {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
-        if key.code == KeyCode::Esc && self.close_top_overlay() {
+        if self.bindings.lookup(&key, BindingScope::Global) == Some(Action::CloseOverlay)
+            && self.close_top_overlay()
+        {
             return Ok(false);
         }
         if !matches!(self.prompt, PromptState::None) {
@@ -21,7 +23,7 @@ impl App {
             self.handle_commit_input_key(key)?;
             return Ok(false);
         }
-        if let Some(action) = keybindings::lookup(&key, BindingScope::Global) {
+        if let Some(action) = self.bindings.lookup(&key, BindingScope::Global) {
             match action {
                 Action::Quit => {
                     let active_count = self.providers.len();
@@ -93,7 +95,9 @@ impl App {
                 Action::ToggleResizeMode => {
                     self.resize_mode = !self.resize_mode;
                     if self.resize_mode {
-                        self.set_info("Resize mode on: h/l/←/→ resize side panes.");
+                        let grow = self.bindings.labels_for(Action::ResizeGrow);
+                        let shrink = self.bindings.labels_for(Action::ResizeShrink);
+                        self.set_info(format!("Resize mode on: {shrink}/{grow} resize side panes."));
                     } else {
                         self.persist_pane_widths();
                         self.set_info("Resize mode off.");
@@ -118,7 +122,7 @@ impl App {
 
     fn handle_left_key(&mut self, key: KeyEvent) -> Result<()> {
         let item_count = self.left_items().len();
-        if let Some(action) = keybindings::lookup(&key, BindingScope::Left) {
+        if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
             match action {
                 Action::MoveDown => {
                     if self.selected_left + 1 < item_count {
@@ -196,10 +200,13 @@ impl App {
                         self.focus = FocusPane::Center;
                         self.center_mode = CenterMode::Agent;
                         self.input_target = InputTarget::Agent;
-                        self.set_info("Interactive mode. Keys forwarded to agent. ctrl+g exits.");
+                        let exit_key = self.bindings.label_for(Action::ExitInteractive);
+                        self.set_info(format!("Interactive mode. Keys forwarded to agent. {exit_key} exits."));
                     } else {
+                        let r = self.bindings.label_for(Action::ReconnectAgent);
+                        let n = self.bindings.label_for(Action::NewAgent);
                         self.set_error(
-                            "No active agent. Press \"r\" to restart or \"n\" to create a new one.",
+                            format!("No active agent. Press \"{r}\" to restart or \"{n}\" to create a new one."),
                         );
                     }
                 }
@@ -211,7 +218,7 @@ impl App {
 
     fn handle_center_key(&mut self, key: KeyEvent) -> Result<()> {
         let in_diff = matches!(self.center_mode, CenterMode::Diff { .. });
-        if let Some(action) = keybindings::lookup(&key, BindingScope::Center) {
+        if let Some(action) = self.bindings.lookup(&key, BindingScope::Center) {
             match action {
                 Action::InteractAgent if !in_diff => {
                     if self.selected_session().is_some()
@@ -222,10 +229,13 @@ impl App {
                     {
                         self.reset_pty_scrollback();
                         self.input_target = InputTarget::Agent;
-                        self.set_info("Interactive mode. Keys forwarded to agent. ctrl+g exits.");
+                        let exit_key = self.bindings.label_for(Action::ExitInteractive);
+                        self.set_info(format!("Interactive mode. Keys forwarded to agent. {exit_key} exits."));
                     } else {
+                        let r = self.bindings.label_for(Action::ReconnectAgent);
+                        let n = self.bindings.label_for(Action::NewAgent);
                         self.set_error(
-                            "No active agent. Press \"r\" to restart or \"n\" to create a new one.",
+                            format!("No active agent. Press \"{r}\" to restart or \"{n}\" to create a new one."),
                         );
                     }
                 }
@@ -292,76 +302,72 @@ impl App {
     }
 
     fn handle_files_key(&mut self, key: KeyEvent) -> Result<()> {
-        // When hovering over the commit input section, i/Enter engages it.
-        if self.right_section == RightSection::CommitInput {
-            match key.code {
-                KeyCode::Char('i') | KeyCode::Enter => {
-                    self.input_target = InputTarget::CommitMessage;
+        if let Some(action) = self.bindings.lookup(&key, BindingScope::Files) {
+            match action {
+                Action::MoveDown => {
+                    if self.right_section != RightSection::CommitInput {
+                        let len = self.current_files_len();
+                        if self.files_index + 1 < len {
+                            self.files_index += 1;
+                        }
+                    }
                 }
-                KeyCode::Char('c') if !self.staged_files.is_empty() => {
+                Action::MoveUp => {
+                    if self.right_section != RightSection::CommitInput {
+                        if self.files_index > 0 {
+                            self.files_index -= 1;
+                        }
+                    }
+                }
+                Action::StageUnstage => {
+                    if self.right_section != RightSection::CommitInput {
+                        self.toggle_stage_selected_file()?;
+                    }
+                }
+                Action::CommitChanges if !self.staged_files.is_empty() => {
                     self.execute_commit()?;
                 }
-                KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::OpenDiff => {
+                    if self.right_section == RightSection::CommitInput {
+                        if !self.staged_files.is_empty() {
+                            self.input_target = InputTarget::CommitMessage;
+                        }
+                    } else {
+                        self.open_diff_for_selected_file()?;
+                    }
+                }
+                Action::DiscardChanges => {
+                    if self.right_section != RightSection::CommitInput {
+                        self.confirm_discard_selected_file()?;
+                    }
+                }
+                Action::GenerateCommitMessage => {
                     self.trigger_ai_commit_message()?;
                 }
-                KeyCode::Char('u') => {
+                Action::EngageCommitInput if !self.staged_files.is_empty() => {
+                    self.input_target = InputTarget::CommitMessage;
+                }
+                Action::PushToRemote => {
                     self.push_to_remote()?;
                 }
-                KeyCode::Char('p') => {
+                Action::PullFromRemote => {
                     self.pull_from_remote()?;
                 }
                 _ => {}
             }
-            return Ok(());
-        }
-
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                let len = self.current_files_len();
-                if self.files_index + 1 < len {
-                    self.files_index += 1;
-                }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if self.files_index > 0 {
-                    self.files_index -= 1;
-                }
-            }
-            KeyCode::Char(' ') => {
-                self.toggle_stage_selected_file()?;
-            }
-            KeyCode::Char('c') if !self.staged_files.is_empty() => {
-                self.execute_commit()?;
-            }
-            KeyCode::Enter => self.open_diff_for_selected_file()?,
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.confirm_discard_selected_file()?;
-            }
-            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.trigger_ai_commit_message()?;
-            }
-            KeyCode::Char('i') if !self.staged_files.is_empty() => {
-                self.input_target = InputTarget::CommitMessage;
-            }
-            KeyCode::Char('u') => {
-                self.push_to_remote()?;
-            }
-            KeyCode::Char('p') => {
-                self.pull_from_remote()?;
-            }
-            _ => {}
         }
         Ok(())
     }
 
     fn handle_commit_input_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Exit actions are dispatched via bindings; text input stays hardcoded.
+        if let Some(Action::ExitCommitInput) =
+            self.bindings.lookup(&key, BindingScope::CommitInput)
+        {
+            self.input_target = InputTarget::None;
+            return Ok(());
+        }
         match key.code {
-            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.input_target = InputTarget::None;
-            }
-            KeyCode::Esc => {
-                self.input_target = InputTarget::None;
-            }
             KeyCode::Enter => {
                 self.commit_input.insert(self.commit_input_cursor, '\n');
                 self.commit_input_cursor += 1;
@@ -524,7 +530,9 @@ impl App {
                 self.commit_input.clear();
                 self.commit_input_cursor = 0;
                 self.commit_scroll = 0;
-                self.set_info("Changes committed successfully. Press u to push to remote, or ^G to generate an AI message.");
+                let push_key = self.bindings.label_for(Action::PushToRemote);
+                let ai_key = self.bindings.label_for(Action::GenerateCommitMessage);
+                self.set_info(format!("Changes committed successfully. Press {push_key} to push to remote, or {ai_key} to generate an AI message."));
                 self.reload_changed_files();
             }
             Err(e) => self.set_error(format!("Commit failed: {e}")),
@@ -579,8 +587,10 @@ impl App {
             }
         };
 
-        // ctrl+g exits interactive mode (like classic terminal escape).
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('g') {
+        // Exit interactive mode via configured binding (default: ctrl-g).
+        if let Some(Action::ExitInteractive) =
+            self.bindings.lookup(&key, BindingScope::Interactive)
+        {
             self.input_target = InputTarget::None;
             self.set_info("Exited interactive mode.");
             return Ok(false);
@@ -662,7 +672,7 @@ impl App {
                     *searching = true;
                 }
                 KeyCode::Char('j') | KeyCode::Down if !*searching => {
-                    let count = keybindings::filtered_palette(input).len();
+                    let count = self.bindings.filtered_palette(input).len();
                     if *selected + 1 < count {
                         *selected += 1;
                     }
@@ -673,7 +683,7 @@ impl App {
                     }
                 }
                 KeyCode::Down if *searching => {
-                    let count = keybindings::filtered_palette(input).len();
+                    let count = self.bindings.filtered_palette(input).len();
                     if *selected + 1 < count {
                         *selected += 1;
                     }
@@ -688,8 +698,8 @@ impl App {
                     *selected = 0;
                 }
                 KeyCode::Tab => {
-                    if let Some(binding) = keybindings::filtered_palette(input).get(*selected) {
-                        *input = binding.palette.as_ref().unwrap().name.to_string();
+                    if let Some(binding) = self.bindings.filtered_palette(input).get(*selected) {
+                        *input = binding.palette_name.unwrap().to_string();
                         *selected = 0;
                     }
                 }
@@ -698,9 +708,9 @@ impl App {
                         *searching = false;
                     } else {
                         let command = if let Some(binding) =
-                            keybindings::filtered_palette(input).get(*selected)
+                            self.bindings.filtered_palette(input).get(*selected)
                         {
-                            binding.palette.as_ref().unwrap().name.to_string()
+                            binding.palette_name.unwrap().to_string()
                         } else {
                             input.trim().to_string()
                         };
@@ -1034,26 +1044,27 @@ impl App {
     }
 
     fn handle_resize_key(&mut self, key: KeyEvent) {
-        if self.focus == FocusPane::Files {
-            // When focused on the right pane, resize it instead of the left.
-            match key.code {
-                KeyCode::Char('h') | KeyCode::Left => {
-                    self.right_width_pct = self.right_width_pct.saturating_add(2).min(50)
+        if let Some(action) = self.bindings.lookup(&key, BindingScope::Resize) {
+            if self.focus == FocusPane::Files {
+                match action {
+                    Action::ResizeShrink => {
+                        self.right_width_pct = self.right_width_pct.saturating_add(2).min(50)
+                    }
+                    Action::ResizeGrow => {
+                        self.right_width_pct = self.right_width_pct.saturating_sub(2).max(14)
+                    }
+                    _ => {}
                 }
-                KeyCode::Char('l') | KeyCode::Right => {
-                    self.right_width_pct = self.right_width_pct.saturating_sub(2).max(14)
+            } else {
+                match action {
+                    Action::ResizeShrink => {
+                        self.left_width_pct = self.left_width_pct.saturating_sub(2).max(14)
+                    }
+                    Action::ResizeGrow => {
+                        self.left_width_pct = self.left_width_pct.saturating_add(2).min(38)
+                    }
+                    _ => {}
                 }
-                _ => {}
-            }
-        } else {
-            match key.code {
-                KeyCode::Char('h') | KeyCode::Left => {
-                    self.left_width_pct = self.left_width_pct.saturating_sub(2).max(14)
-                }
-                KeyCode::Char('l') | KeyCode::Right => {
-                    self.left_width_pct = self.left_width_pct.saturating_add(2).min(38)
-                }
-                _ => {}
             }
         }
     }

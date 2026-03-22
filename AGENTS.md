@@ -49,7 +49,7 @@ When making changes, edit only the relevant submodule. If you need to add a new 
 
 - When adding, removing, or changing keybindings, update `README.md` if it documents controls or shortcuts.
 - When changing features, pane layouts, config paths, or provider behavior, verify that `README.md` still accurately describes the application.
-- The README intentionally omits a full keybinding reference to avoid staleness. Do not add a Controls or Keybindings section back to it. The in-app `?` help overlay is the authoritative reference for key combinations.
+- The README intentionally omits a full keybinding reference to avoid staleness. Do not add a section listing specific key combinations back to it. The in-app `?` help overlay is the authoritative reference for key combinations. Documenting how to configure keybindings (the `[keys]` config format, syntax, and examples) is acceptable — just avoid enumerating individual bindings that would go stale.
 
 ## Recommendations For Debugging
 

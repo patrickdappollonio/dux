@@ -249,6 +249,9 @@ impl App {
         // Hint bar with top border (same style as agent terminal).
         if hint_area.height > 0 {
             let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+            let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
+            let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
+            let close = self.bindings.label_for(Action::CloseOverlay);
             let mut spans: Vec<Span> = Vec::new();
 
             if scroll > 0 {
@@ -256,25 +259,17 @@ impl App {
                     format!("Scrolled back {scroll} lines. "),
                     Style::default().fg(self.theme.hint_key_fg),
                 ));
-                spans.extend(self.theme.dim_key_badge("ctrl+f", Color::Reset));
-                spans.push(Span::styled("/", desc_style));
-                spans.extend(self.theme.dim_key_badge("PgDn", Color::Reset));
+                spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
                 spans.push(Span::styled(" down, ", desc_style));
-                spans.extend(self.theme.dim_key_badge("ctrl+b", Color::Reset));
-                spans.push(Span::styled("/", desc_style));
-                spans.extend(self.theme.dim_key_badge("PgUp", Color::Reset));
+                spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
                 spans.push(Span::styled(" up. ", desc_style));
             } else {
-                spans.extend(self.theme.dim_key_badge("^B", Color::Reset));
-                spans.push(Span::styled("/", desc_style));
-                spans.extend(self.theme.dim_key_badge("PgUp", Color::Reset));
+                spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
                 spans.push(Span::styled(" ", desc_style));
-                spans.extend(self.theme.dim_key_badge("^F", Color::Reset));
-                spans.push(Span::styled("/", desc_style));
-                spans.extend(self.theme.dim_key_badge("PgDn", Color::Reset));
+                spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
                 spans.push(Span::styled(" to scroll. ", desc_style));
             }
-            spans.extend(self.theme.dim_key_badge("Esc", Color::Reset));
+            spans.extend(self.theme.dim_key_badge(&close, Color::Reset));
             spans.push(Span::styled(" close diff.", desc_style));
 
             Paragraph::new(Line::from(spans))
@@ -462,6 +457,13 @@ impl App {
 
         // Hint bar with top border.
         if hint_area.height > 0 {
+            // Pre-compute all key labels so they outlive the Span borrows.
+            let exit_key = self.bindings.label_for(Action::ExitInteractive);
+            let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
+            let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
+            let interact = self.bindings.labels_for(Action::InteractAgent);
+            let reconnect = self.bindings.labels_for(Action::ReconnectAgent);
+
             let hint_line = if is_input {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
@@ -477,7 +479,7 @@ impl App {
                     format!("{capitalized} is holding focus. Press "),
                     desc_style,
                 ));
-                spans.extend(self.theme.dim_key_badge("^G", Color::Reset));
+                spans.extend(self.theme.dim_key_badge(&exit_key, Color::Reset));
                 spans.push(Span::styled(" to bring the focus back.", desc_style));
                 Line::from(spans)
             } else if scrollback_offset > 0 {
@@ -487,36 +489,24 @@ impl App {
                     format!("Scrolled back {scrollback_offset} lines. "),
                     Style::default().fg(self.theme.hint_key_fg),
                 ));
-                spans.extend(self.theme.dim_key_badge("ctrl+f", Color::Reset));
-                spans.push(Span::styled("/", desc_style));
-                spans.extend(self.theme.dim_key_badge("PgDn", Color::Reset));
+                spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
                 spans.push(Span::styled(" down, ", desc_style));
-                spans.extend(self.theme.dim_key_badge("ctrl+b", Color::Reset));
-                spans.push(Span::styled("/", desc_style));
-                spans.extend(self.theme.dim_key_badge("PgUp", Color::Reset));
+                spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
                 spans.push(Span::styled(" up.", desc_style));
                 Line::from(spans)
             } else {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
                 if session_active {
-                    spans.extend(self.theme.dim_key_badge("i", Color::Reset));
-                    spans.push(Span::styled(" or ", desc_style));
-                    spans.extend(self.theme.dim_key_badge("Enter", Color::Reset));
+                    spans.extend(self.theme.dim_key_badge(&interact, Color::Reset));
                     spans.push(Span::styled(" to interact. ", desc_style));
-                    spans.extend(self.theme.dim_key_badge("^B", Color::Reset));
-                    spans.push(Span::styled("/", desc_style));
-                    spans.extend(self.theme.dim_key_badge("PgUp", Color::Reset));
+                    spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
                     spans.push(Span::styled(" ", desc_style));
-                    spans.extend(self.theme.dim_key_badge("^F", Color::Reset));
-                    spans.push(Span::styled("/", desc_style));
-                    spans.extend(self.theme.dim_key_badge("PgDn", Color::Reset));
+                    spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
                     spans.push(Span::styled(" to scroll.", desc_style));
                 } else if session_id.is_some() {
                     spans.push(Span::styled("Agent CLI exited. Press ", desc_style));
-                    spans.extend(self.theme.dim_key_badge("r", Color::Reset));
-                    spans.push(Span::styled(" or ", desc_style));
-                    spans.extend(self.theme.dim_key_badge("enter", Color::Reset));
+                    spans.extend(self.theme.dim_key_badge(&reconnect, Color::Reset));
                     spans.push(Span::styled(" to relaunch.", desc_style));
                 } else {
                     spans.push(Span::styled("No agent selected.", desc_style));
@@ -774,16 +764,20 @@ impl App {
         // Hint bar.
         if hint_area.height > 0 {
             let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+            let exit = self.bindings.labels_for(Action::ExitCommitInput);
+            let engage = self.bindings.labels_for(Action::EngageCommitInput);
+            let ai_msg = self.bindings.label_for(Action::GenerateCommitMessage);
+            let commit = self.bindings.label_for(Action::CommitChanges);
             let mut spans: Vec<Span> = Vec::new();
             if focused {
-                spans.extend(self.theme.dim_key_badge("Esc", Color::Reset));
+                spans.extend(self.theme.dim_key_badge(&exit, Color::Reset));
                 spans.push(Span::styled(" Exit", desc_style));
             } else {
-                spans.extend(self.theme.dim_key_badge("i/Enter", Color::Reset));
+                spans.extend(self.theme.dim_key_badge(&engage, Color::Reset));
                 spans.push(Span::styled(" Edit  ", desc_style));
-                spans.extend(self.theme.dim_key_badge("^G", Color::Reset));
+                spans.extend(self.theme.dim_key_badge(&ai_msg, Color::Reset));
                 spans.push(Span::styled(" AI msg  ", desc_style));
-                spans.extend(self.theme.dim_key_badge("c", Color::Reset));
+                spans.extend(self.theme.dim_key_badge(&commit, Color::Reset));
                 spans.push(Span::styled(" Commit", desc_style));
             }
             Paragraph::new(Line::from(spans)).render(hint_area, frame.buffer_mut());
@@ -801,7 +795,7 @@ impl App {
             FocusPane::Center => HintContext::Center,
             FocusPane::Files => HintContext::Files,
         };
-        let hints = keybindings::hints_for(ctx);
+        let hints = self.bindings.hints_for(ctx);
         let [hints_area, status_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(1)])
@@ -877,7 +871,7 @@ impl App {
         self.render_dim_overlay(frame);
         let area = centered_rect(72, 70, frame.area());
         Clear.render(area, frame.buffer_mut());
-        let help_bindings = keybindings::help_sections();
+        let help_bindings = self.bindings.help_sections();
         let mut lines: Vec<Line> = Vec::new();
         for (section_idx, (section, bindings)) in help_bindings.iter().enumerate() {
             if section_idx > 0 {
@@ -910,8 +904,8 @@ impl App {
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         )));
         {
-            let key = "^X";
-            let desc = "Hold Ctrl and press X (e.g. ^P = Ctrl+P)";
+            let key = "Ctrl-x";
+            let desc = "Hold Ctrl and press X (e.g. Ctrl-p)";
             let padding = 14usize.saturating_sub(key.len() + 2);
             let mut spans = vec![Span::raw("  ")];
             spans.extend(self.theme.key_badge(key, Color::Reset));
@@ -970,44 +964,30 @@ impl App {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(72, 40, frame.area());
                 Clear.render(popup, frame.buffer_mut());
-                let commands = keybindings::filtered_palette(input);
+                let commands = self.bindings.filtered_palette(input);
                 let items = if commands.is_empty() {
                     vec![ListItem::new("No matching commands.")]
                 } else {
-                    // Compute column widths for aligned layout
                     let name_col = commands
                         .iter()
-                        .map(|b| b.palette.as_ref().unwrap().name.len())
+                        .map(|b| b.palette_name.unwrap().len())
                         .max()
                         .unwrap_or(0);
-                    let badge_col = commands
-                        .iter()
-                        .filter_map(|b| {
-                            b.palette.as_ref().unwrap().shortcut.map(|s| s.len() + 3) // <key>
-                        })
-                        .max()
-                        .unwrap_or(0);
-                    // Available width inside borders: popup.width - 2 (borders) - 1 (left pad)
                     let inner_w = popup.width as usize - 3;
-                    // Gap between columns
                     let gap = 2usize;
                     commands
                         .iter()
                         .map(|binding| {
-                            let p = binding.palette.as_ref().unwrap();
-                            // Pad name to fixed column width
-                            let name_padded = format!("{:width$}", p.name, width = name_col);
+                            let name = binding.palette_name.unwrap();
+                            let name_padded = format!("{:width$}", name, width = name_col);
                             let mut spans = vec![Span::styled(
                                 name_padded,
                                 Style::default()
                                     .fg(Color::Cyan)
                                     .add_modifier(Modifier::BOLD),
                             )];
-                            // Description column: fill the space between name and badge
-                            let desc_avail = inner_w
-                                .saturating_sub(name_col + gap)
-                                .saturating_sub(if badge_col > 0 { badge_col + gap } else { 0 });
-                            let desc = p.description;
+                            let desc_avail = inner_w.saturating_sub(name_col + gap);
+                            let desc = binding.palette_description.unwrap_or("");
                             let desc_display = if desc.len() > desc_avail && desc_avail > 1 {
                                 format!("  {}\u{2026}", &desc[..desc_avail - 1])
                             } else {
@@ -1017,18 +997,6 @@ impl App {
                                 desc_display,
                                 Style::default().fg(self.theme.hint_desc_fg),
                             ));
-                            // Right-aligned key badge
-                            if badge_col > 0 {
-                                if let Some(shortcut) = p.shortcut {
-                                    // Right-pad the gap, then the badge
-                                    let badge_len = shortcut.len() + 3;
-                                    let pre_pad = gap + badge_col - badge_len;
-                                    spans.push(Span::raw(" ".repeat(pre_pad)));
-                                    spans.extend(self.theme.key_badge(shortcut, Color::Reset));
-                                } else {
-                                    spans.push(Span::raw(" ".repeat(gap + badge_col)));
-                                }
-                            }
                             ListItem::new(Line::from(spans))
                         })
                         .collect::<Vec<_>>()
