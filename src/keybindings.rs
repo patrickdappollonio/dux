@@ -49,6 +49,7 @@ pub enum HintContext {
     LeftSession,
     Center,
     Files,
+    /// In-pane hint bar inside the commit message area.
     CommitInput,
 }
 

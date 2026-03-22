@@ -485,6 +485,7 @@ impl App {
             Ok(_) => {
                 self.commit_input.clear();
                 self.commit_input_cursor = 0;
+                self.commit_scroll = 0;
                 self.set_info("Changes committed successfully. Press u to push to remote.");
                 self.reload_changed_files();
             }
