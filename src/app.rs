@@ -370,8 +370,9 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('w') {
             self.resize_mode = !self.resize_mode;
             if self.resize_mode {
-                self.set_info("Resize mode on: h/l resize side panes.");
+                self.set_info("Resize mode on: h/l/←/→ resize side panes.");
             } else {
+                self.persist_pane_widths();
                 self.set_info("Resize mode off.");
             }
             return Ok(false);
@@ -970,13 +971,23 @@ impl App {
 
     fn handle_resize_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('h') => {
+            KeyCode::Char('h') | KeyCode::Left => {
                 self.left_width_pct = self.left_width_pct.saturating_sub(2).max(14)
             }
-            KeyCode::Char('l') => {
+            KeyCode::Char('l') | KeyCode::Right => {
                 self.left_width_pct = self.left_width_pct.saturating_add(2).min(38)
             }
             _ => {}
+        }
+    }
+
+    fn persist_pane_widths(&mut self) {
+        if self.config.ui.left_width_pct != self.left_width_pct
+            || self.config.ui.right_width_pct != self.right_width_pct
+        {
+            self.config.ui.left_width_pct = self.left_width_pct;
+            self.config.ui.right_width_pct = self.right_width_pct;
+            let _ = save_config(&self.paths.config_path, &self.config);
         }
     }
 
