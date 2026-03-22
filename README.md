@@ -8,8 +8,9 @@
 - Center pane for live ACP agent output or file diffs
 - Right pane split into changed files and a manual shell
 - Resizable panes with keyboard shortcuts
-- Config written to `~/.config/dux/config.toml`
-- Session metadata stored in `~/.config/dux/sessions.sqlite3`
+- Config written to `~/.dux/config.toml` on macOS
+- Config written to `$XDG_CONFIG_HOME/dux/config.toml` or `~/.config/dux/config.toml` on Linux
+- Session metadata stored alongside the config directory
 - Per-session git worktrees with Docker-style branch names
 - ACP session restore when the provider adapter supports `session/load`
 
@@ -28,7 +29,7 @@ There is also a helper script:
 ./scripts/install.sh
 ```
 
-On first launch, `dux` creates `~/.config/dux/config.toml` with the full default configuration and comments.
+On first launch, `dux` creates the config file in the platform-specific dux config directory with the full default configuration and comments.
 
 ## Controls
 
@@ -70,12 +71,12 @@ On first launch, `dux` creates `~/.config/dux/config.toml` with the full default
 
 ## Provider setup
 
-The provider commands in `~/.config/dux/config.toml` must point to ACP-compatible adapters for Claude and Codex. `dux` launches those adapters over stdio, initializes ACP, creates or reloads sessions, and streams `session/update` events into the center pane.
+The provider commands in the dux config file must point to ACP-compatible adapters for Claude and Codex. `dux` launches those adapters over stdio, initializes ACP, creates or reloads sessions, and streams `session/update` events into the center pane.
 
 ## Logging
 
-`dux` writes runtime logs under `~/.config/dux/` and the log settings live in the `[logging]` section of `~/.config/dux/config.toml`.
+`dux` writes runtime logs under the dux config directory and the log settings live in the `[logging]` section of the config file.
 
 - `level = "error" | "info" | "debug"`
-- `path = "dux.log"` uses a path relative to `~/.config/dux/`
+- `path = "dux.log"` uses a path relative to the dux config directory
 - absolute paths also work if you want the log elsewhere

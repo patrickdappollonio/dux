@@ -10,7 +10,7 @@ use chrono::Utc;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::prelude::{Alignment, Color, Modifier, Style};
+use ratatui::prelude::{Color, Modifier, Style};
 use ratatui::symbols::border;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -28,6 +28,7 @@ use crate::model::{AgentSession, ChangedFile, Project, ProviderKind, SessionStat
 use crate::statusline::{StatusLine, StatusTone};
 use crate::storage::SessionStore;
 use crate::terminal::{TerminalKind, TerminalOutput, TerminalSession};
+use crate::theme::Theme;
 
 pub struct App {
     config: Config,
@@ -59,6 +60,7 @@ pub struct App {
     provider_buffers: HashMap<String, Vec<String>>,
     shell_terminals: HashMap<String, TerminalSession>,
     create_agent_in_flight: bool,
+    theme: Theme,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,6 +239,7 @@ impl App {
             provider_buffers: HashMap::new(),
             shell_terminals: HashMap::new(),
             create_agent_in_flight: false,
+            theme: Theme::default_dark(),
         };
         app.restore_sessions();
         app.reload_changed_files();
@@ -1131,10 +1134,15 @@ impl App {
     }
 
     fn render(&self, frame: &mut Frame) {
-        let [body, footer] = Layout::default()
+        let [header, body, footer] = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(4), Constraint::Length(3)])
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(4),
+                Constraint::Length(3),
+            ])
             .areas(frame.area());
+        self.render_header(frame, header);
         let center_pct = 100u16
             .saturating_sub(self.left_width_pct + self.right_width_pct)
             .max(20);
@@ -1162,22 +1170,86 @@ impl App {
         self.render_overlay(frame);
     }
 
+    fn render_header(&self, frame: &mut Frame, area: Rect) {
+        let bg = self.theme.header_bg;
+        let sep_fg = self.theme.header_separator_fg;
+        let label_fg = self.theme.header_label_fg;
+        let mut spans = vec![
+            Span::styled(
+                " dux ",
+                Style::default()
+                    .fg(Color::White)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("v{}", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(label_fg).bg(bg),
+            ),
+        ];
+        if let Some(project) = self.selected_project() {
+            spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
+            spans.push(Span::styled(
+                "project: ",
+                Style::default().fg(label_fg).bg(bg),
+            ));
+            spans.push(Span::styled(
+                project.name.clone(),
+                Style::default()
+                    .fg(Color::White)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
+            spans.push(Span::styled(
+                "branch: ",
+                Style::default().fg(label_fg).bg(bg),
+            ));
+            spans.push(Span::styled(
+                project.current_branch.clone(),
+                Style::default().fg(Color::Cyan).bg(bg),
+            ));
+            spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
+            spans.push(Span::styled(
+                "provider: ",
+                Style::default().fg(label_fg).bg(bg),
+            ));
+            spans.push(Span::styled(
+                project.default_provider.as_str().to_string(),
+                Style::default().fg(self.theme.provider_label_fg).bg(bg),
+            ));
+        }
+        Paragraph::new(Line::from(spans))
+            .style(self.theme.header_style())
+            .render(area, frame.buffer_mut());
+    }
+
     fn render_left(&self, frame: &mut Frame, area: Rect) {
+        let session_counts: HashMap<i64, usize> = {
+            let mut counts = HashMap::new();
+            for session in &self.sessions {
+                *counts.entry(session.project_id).or_insert(0) += 1;
+            }
+            counts
+        };
         let items = self
             .left_items()
             .into_iter()
             .map(|item| match item {
                 LeftItem::Project(index) => {
                     let project = &self.projects[index];
-                    let provider = project.default_provider.as_str();
-                    ListItem::new(Line::from(vec![
-                        Span::styled("▸ ", Style::default().fg(Color::Blue)),
+                    let count = session_counts.get(&project.id).copied().unwrap_or(0);
+                    let mut spans = vec![
+                        Span::styled("▸ ", Style::default().fg(self.theme.project_icon)),
                         Span::raw(project.name.clone()),
-                        Span::styled(
-                            format!(" [{provider}]"),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                    ]))
+                    ];
+                    if count > 0 {
+                        spans.push(Span::styled(
+                            format!(" ({count})"),
+                            Style::default().fg(self.theme.provider_label_fg),
+                        ));
+                    }
+                    ListItem::new(Line::from(spans))
                 }
                 LeftItem::Session(index) => {
                     let session = &self.sessions[index];
@@ -1185,32 +1257,32 @@ impl App {
                         .title
                         .clone()
                         .unwrap_or_else(|| session.branch_name.clone());
-                    let status_color = match session.status {
-                        SessionStatus::Active => Color::Green,
-                        SessionStatus::Detached => Color::Yellow,
-                        SessionStatus::Exited => Color::DarkGray,
-                    };
+                    let (dot, dot_color) = self.theme.session_dot(&session.status);
                     ListItem::new(Line::from(vec![
-                        Span::raw("  └ "),
-                        Span::styled(label, Style::default().fg(status_color)),
+                        Span::raw("  "),
+                        Span::styled(
+                            format!("{dot} "),
+                            Style::default().fg(dot_color),
+                        ),
+                        Span::styled(label, Style::default().fg(dot_color)),
                         Span::styled(
                             format!(" ({})", session.provider.as_str()),
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(self.theme.provider_label_fg),
                         ),
                     ]))
                 }
             })
             .collect::<Vec<_>>();
+        let focused = self.focus == FocusPane::Left;
+        let title = format!(
+            "Projects ({})",
+            self.projects.len()
+        );
         let mut state = ListState::default().with_selected(Some(self.selected_left));
         StatefulWidget::render(
             List::new(items)
-                .block(pane_block("Projects", self.focus == FocusPane::Left))
-                .highlight_style(
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                .block(self.themed_block(&title, focused))
+                .highlight_style(self.theme.selection_style()),
             area,
             frame.buffer_mut(),
             &mut state,
@@ -1222,28 +1294,63 @@ impl App {
             CenterMode::Agent => "Agent",
             CenterMode::Diff(_) => "Diff",
         };
-        let mut lines = match &self.center_mode {
+        let focused = self.focus == FocusPane::Center;
+        match &self.center_mode {
             CenterMode::Diff(diff) => {
-                if diff.trim().is_empty() {
-                    vec!["No diff for this file.".to_string()]
+                let styled_lines: Vec<Line> = if diff.trim().is_empty() {
+                    vec![Line::from("No diff for this file.")]
                 } else {
-                    diff.lines().map(ToOwned::to_owned).collect()
-                }
+                    diff.lines()
+                        .map(|line| {
+                            if line.starts_with("+++") || line.starts_with("---") {
+                                Line::from(Span::styled(
+                                    line.to_string(),
+                                    Style::default()
+                                        .fg(self.theme.diff_file_header)
+                                        .add_modifier(Modifier::BOLD),
+                                ))
+                            } else if line.starts_with("@@") {
+                                Line::from(Span::styled(
+                                    line.to_string(),
+                                    Style::default().fg(self.theme.diff_hunk),
+                                ))
+                            } else if line.starts_with('+') {
+                                Line::from(Span::styled(
+                                    line.to_string(),
+                                    Style::default().fg(self.theme.diff_add),
+                                ))
+                            } else if line.starts_with('-') {
+                                Line::from(Span::styled(
+                                    line.to_string(),
+                                    Style::default().fg(self.theme.diff_remove),
+                                ))
+                            } else {
+                                Line::from(line.to_string())
+                            }
+                        })
+                        .collect()
+                };
+                Paragraph::new(styled_lines)
+                    .block(self.themed_block(title, focused))
+                    .wrap(Wrap { trim: false })
+                    .render(area, frame.buffer_mut());
             }
-            CenterMode::Agent => self
-                .selected_session()
-                .and_then(|session| self.provider_buffers.get(&session.id))
-                .cloned()
-                .unwrap_or_else(|| vec!["No active agent session selected.".to_string()]),
-        };
-        if self.input_target == InputTarget::Agent {
-            lines.push(String::new());
-            lines.push(format!("Prompt> {}", self.input_buffer));
+            CenterMode::Agent => {
+                let mut lines = self
+                    .selected_session()
+                    .and_then(|session| self.provider_buffers.get(&session.id))
+                    .cloned()
+                    .unwrap_or_else(|| vec!["No active agent session selected.".to_string()]);
+                if self.input_target == InputTarget::Agent {
+                    lines.push(String::new());
+                    lines.push(format!("Prompt> {}", self.input_buffer));
+                }
+                Paragraph::new(lines.join("\n"))
+                    .block(self.themed_block(title, focused))
+                    .wrap(Wrap { trim: false })
+                    .render(area, frame.buffer_mut());
+            }
         }
-        Paragraph::new(lines.join("\n"))
-            .block(pane_block(title, self.focus == FocusPane::Center))
-            .wrap(Wrap { trim: false })
-            .render(area, frame.buffer_mut());
     }
 
     fn render_files(&self, frame: &mut Frame, area: Rect) {
@@ -1261,17 +1368,19 @@ impl App {
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("{:>2} ", file.status),
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(self.theme.file_status_fg),
                     ),
                     Span::raw(path),
                 ]))
             })
             .collect::<Vec<_>>();
+        let focused = self.focus == FocusPane::Files;
+        let title = format!("Changed Files ({})", self.changed_files.len());
         let mut state = ListState::default().with_selected(Some(self.selected_file));
         StatefulWidget::render(
             List::new(items)
-                .block(pane_block("Changed Files", self.focus == FocusPane::Files))
-                .highlight_style(Style::default().bg(Color::Blue)),
+                .block(self.themed_block(&title, focused))
+                .highlight_style(self.theme.selection_style()),
             area,
             frame.buffer_mut(),
             &mut state,
@@ -1288,78 +1397,195 @@ impl App {
             lines.push(String::new());
             lines.push("[shell input mode]".to_string());
         }
+        let focused = self.focus == FocusPane::Shell;
         Paragraph::new(lines.join("\n"))
-            .block(pane_block("Shell", self.focus == FocusPane::Shell))
+            .block(self.themed_block("Shell", focused))
             .wrap(Wrap { trim: false })
             .render(area, frame.buffer_mut());
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
-        let help = match self.focus {
-            FocusPane::Left => {
-                "Left: j/k move  a agent  p add  ^p palette  : command  d provider  u pull"
-            }
-            FocusPane::Center => {
-                "Center: i prompt  ^p palette  : command  Esc close diff  Tab next pane"
-            }
-            FocusPane::Files => "Files: j/k move  Enter diff  ^p palette  : command  Tab next pane",
-            FocusPane::Shell => {
-                "Shell: i raw input  ^p palette  : command  Esc leave input  Tab next pane"
-            }
+        let hints: &[(&str, &str)] = match self.focus {
+            FocusPane::Left => &[
+                ("j/k", "Move"),
+                ("a", "Agent"),
+                ("p", "Add"),
+                ("^P", "Palette"),
+                (":", "Cmd"),
+                ("d", "Provider"),
+                ("u", "Pull"),
+                ("?", "Help"),
+                ("q", "Quit"),
+            ],
+            FocusPane::Center => &[
+                ("i", "Prompt"),
+                ("^P", "Palette"),
+                (":", "Cmd"),
+                ("Esc", "Close diff"),
+                ("Tab", "Next"),
+                ("?", "Help"),
+                ("q", "Quit"),
+            ],
+            FocusPane::Files => &[
+                ("j/k", "Move"),
+                ("Enter", "Diff"),
+                ("^P", "Palette"),
+                (":", "Cmd"),
+                ("Tab", "Next"),
+                ("?", "Help"),
+                ("q", "Quit"),
+            ],
+            FocusPane::Shell => &[
+                ("i", "Input"),
+                ("^P", "Palette"),
+                (":", "Cmd"),
+                ("Esc", "Leave"),
+                ("Tab", "Next"),
+                ("?", "Help"),
+                ("q", "Quit"),
+            ],
         };
+        let mut hint_spans: Vec<Span> = Vec::new();
+        let bar_bg = self.theme.hint_bar_bg;
+        for (i, (key, desc)) in hints.iter().enumerate() {
+            if i > 0 {
+                hint_spans.push(Span::styled(" ", Style::default().bg(bar_bg)));
+            }
+            hint_spans.extend(self.theme.key_badge(key, bar_bg));
+            hint_spans.push(Span::styled(
+                format!(" {desc}"),
+                Style::default().fg(self.theme.hint_desc_fg).bg(bar_bg),
+            ));
+        }
+
         let [hints_area, status_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Length(2)])
             .areas(area);
-        Paragraph::new(help)
-            .alignment(Alignment::Left)
-            .style(Style::default().fg(Color::Black).bg(Color::Gray))
+        Paragraph::new(Line::from(hint_spans))
+            .style(Style::default().bg(self.theme.hint_bar_bg))
             .render(hints_area, frame.buffer_mut());
-        let status_style = match self.status.tone() {
-            StatusTone::Info => Style::default().fg(Color::White).bg(Color::DarkGray),
-            StatusTone::Busy => Style::default().fg(Color::Black).bg(Color::Yellow),
-            StatusTone::Error => Style::default().fg(Color::White).bg(Color::Red),
+
+        let tone = self.status.tone();
+        let (dot, dot_color) = self.theme.status_dot(tone);
+        let status_text = self.status.text();
+        let msg_color = match tone {
+            StatusTone::Info => self.theme.status_info_fg,
+            StatusTone::Busy => self.theme.status_busy_fg,
+            StatusTone::Error => self.theme.status_error_fg,
         };
-        Paragraph::new(format!(
-            "Ctrl-w resize  ? help  q quit  |  {}",
-            self.status.text()
-        ))
-        .alignment(Alignment::Left)
-        .style(status_style)
-        .render(status_area, frame.buffer_mut());
+        let status_bg = match tone {
+            StatusTone::Info => self.theme.status_info_bg,
+            StatusTone::Busy => self.theme.status_busy_bg,
+            StatusTone::Error => self.theme.status_error_bg,
+        };
+        let branding = format!("dux v{}", env!("CARGO_PKG_VERSION"));
+        let status_line = Line::from(vec![
+            Span::styled(
+                format!(" {dot} "),
+                Style::default().fg(dot_color).bg(status_bg),
+            ),
+            Span::styled(
+                status_text,
+                Style::default().fg(msg_color).bg(status_bg),
+            ),
+        ]);
+        let branding_line = Line::from(vec![Span::styled(
+            format!("{branding} "),
+            Style::default()
+                .fg(self.theme.branding_fg)
+                .bg(status_bg),
+        )]);
+        // Render status on first row, branding right-aligned on same row
+        Paragraph::new(status_line)
+            .style(Style::default().bg(status_bg))
+            .wrap(Wrap { trim: false })
+            .render(status_area, frame.buffer_mut());
+        // Overlay branding in top-right of status area
+        let branding_width = branding.len() as u16 + 1;
+        if status_area.width > branding_width {
+            let branding_area = Rect {
+                x: status_area.x + status_area.width - branding_width,
+                y: status_area.y,
+                width: branding_width,
+                height: 1,
+            };
+            Paragraph::new(branding_line).render(branding_area, frame.buffer_mut());
+        }
     }
 
     fn render_help(&self, frame: &mut Frame) {
+        self.render_dim_overlay(frame);
         let area = centered_rect(72, 70, frame.area());
         Clear.render(area, frame.buffer_mut());
-        Paragraph::new(
-            "Global\n\
-             Tab focus next pane\n\
-             Ctrl-p open command palette\n\
-             : open command mode\n\
-             Ctrl-w resize mode, then h/l resize side panes and j/k resize the right split\n\
-             ? toggle help\n\
-             q quit\n\n\
-             Left pane\n\
-             j/k move through projects and sessions\n\
-             p open the project browser\n\
-             P open manual path entry\n\
-             a create a worktree-backed agent session\n\
-             d cycle the project's default provider\n\
-             u refresh the original checkout with git pull --ff-only\n\
-             r reconnect a detached ACP session\n\
-             x delete the selected session/worktree\n\n\
-             Center pane\n\
-             i start a prompt turn for the selected agent\n\
-             Esc close diff view\n\n\
-             Files pane\n\
-             Enter open the selected file diff\n\n\
-             Shell pane\n\
-             i send raw input to the worktree shell",
-        )
-        .block(pane_block("Help", true))
-        .wrap(Wrap { trim: false })
-        .render(area, frame.buffer_mut());
+        let help_bindings: &[(&str, &[(&str, &str)])] = &[
+            (
+                "Global",
+                &[
+                    ("Tab", "Focus next pane"),
+                    ("Ctrl-p", "Open command palette"),
+                    (":", "Open command mode"),
+                    ("Ctrl-w", "Resize mode (h/l side, j/k split)"),
+                    ("?", "Toggle help"),
+                    ("q", "Quit"),
+                ],
+            ),
+            (
+                "Left pane",
+                &[
+                    ("j/k", "Move through projects and sessions"),
+                    ("p", "Open project browser"),
+                    ("P", "Open manual path entry"),
+                    ("a", "Create worktree-backed agent session"),
+                    ("d", "Cycle default provider"),
+                    ("u", "Refresh checkout (git pull --ff-only)"),
+                    ("r", "Reconnect detached ACP session"),
+                    ("x", "Delete selected session/worktree"),
+                ],
+            ),
+            (
+                "Center pane",
+                &[
+                    ("i", "Start a prompt turn for the agent"),
+                    ("Esc", "Close diff view"),
+                ],
+            ),
+            (
+                "Files pane",
+                &[("Enter", "Open selected file diff")],
+            ),
+            (
+                "Shell pane",
+                &[("i", "Send raw input to worktree shell")],
+            ),
+        ];
+        let mut lines: Vec<Line> = Vec::new();
+        for (section_idx, (section, bindings)) in help_bindings.iter().enumerate() {
+            if section_idx > 0 {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(
+                section.to_string(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            )));
+            for (key, desc) in *bindings {
+                let padding = 14usize.saturating_sub(key.len() + 2);
+                let mut spans = vec![Span::raw("  ")];
+                spans.extend(self.theme.key_badge(key, Color::Reset));
+                spans.push(Span::raw(" ".repeat(padding)));
+                spans.push(Span::styled(
+                    desc.to_string(),
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                lines.push(Line::from(spans));
+            }
+        }
+        Paragraph::new(lines)
+            .block(self.themed_overlay_block("Help"))
+            .wrap(Wrap { trim: false })
+            .render(area, frame.buffer_mut());
     }
 
     fn render_prompt(&self, frame: &mut Frame) {
@@ -1369,6 +1595,7 @@ impl App {
                 selected,
                 direct,
             } => {
+                self.render_dim_overlay(frame);
                 let popup = centered_rect(72, 40, frame.area());
                 Clear.render(popup, frame.buffer_mut());
                 let commands = filtered_commands(input);
@@ -1378,7 +1605,18 @@ impl App {
                     commands
                         .iter()
                         .map(|command| {
-                            ListItem::new(format!("{}  {}", command.name, command.description))
+                            ListItem::new(Line::from(vec![
+                                Span::styled(
+                                    command.name.to_string(),
+                                    Style::default()
+                                        .fg(Color::Cyan)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(
+                                    format!("  {}", command.description),
+                                    Style::default().fg(self.theme.hint_desc_fg),
+                                ),
+                            ]))
                         })
                         .collect::<Vec<_>>()
                 };
@@ -1388,31 +1626,32 @@ impl App {
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Length(3), Constraint::Min(3)])
                     .areas(popup);
+                let title = if *direct {
+                    "Command"
+                } else {
+                    "Command Palette"
+                };
+                let mut bottom_spans = vec![Span::raw(" ")];
+                bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
+                bottom_spans.push(Span::styled(" run  ", Style::default().fg(self.theme.hint_desc_fg)));
+                bottom_spans.extend(self.theme.key_badge("Tab", Color::Reset));
+                bottom_spans.push(Span::styled(" complete  ", Style::default().fg(self.theme.hint_desc_fg)));
+                bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
+                bottom_spans.push(Span::styled(" cancel", Style::default().fg(self.theme.hint_desc_fg)));
                 Paragraph::new(format!("{}{}", if *direct { ":" } else { "> " }, input))
                     .block(
-                        pane_block(
-                            if *direct {
-                                "Command"
-                            } else {
-                                "Command Palette"
-                            },
-                            true,
-                        )
-                        .title_bottom(Line::from("Enter run  Tab complete  j/k move  Esc cancel")),
+                        self.themed_overlay_block(title)
+                            .title_bottom(Line::from(bottom_spans)),
                     )
                     .render(input_area, frame.buffer_mut());
                 StatefulWidget::render(
                     List::new(items)
                         .block(
                             Block::default()
-                                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM),
+                                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                                .border_style(Style::default().fg(self.theme.overlay_border)),
                         )
-                        .highlight_style(
-                            Style::default()
-                                .fg(Color::Black)
-                                .bg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD),
-                        ),
+                        .highlight_style(self.theme.selection_style()),
                     list_area,
                     frame.buffer_mut(),
                     &mut state,
@@ -1423,6 +1662,7 @@ impl App {
                 entries,
                 selected,
             } => {
+                self.render_dim_overlay(frame);
                 let area = centered_rect(72, 70, frame.area());
                 Clear.render(area, frame.buffer_mut());
                 let items = if entries.is_empty() {
@@ -1431,12 +1671,18 @@ impl App {
                     entries
                         .iter()
                         .map(|entry| {
-                            let prefix = if entry.is_git_repo {
-                                "[repo]"
+                            let (prefix, prefix_color) = if entry.is_git_repo {
+                                ("●", Color::Green)
                             } else {
-                                "[dir ]"
+                                ("○", self.theme.provider_label_fg)
                             };
-                            ListItem::new(format!("{prefix} {}", entry.label))
+                            ListItem::new(Line::from(vec![
+                                Span::styled(
+                                    format!("{prefix} "),
+                                    Style::default().fg(prefix_color),
+                                ),
+                                Span::raw(entry.label.clone()),
+                            ]))
                         })
                         .collect::<Vec<_>>()
                 };
@@ -1445,45 +1691,86 @@ impl App {
                 StatefulWidget::render(
                     List::new(items)
                         .block(
-                            pane_block(&format!("Add Project: {}", current_dir.display()), true)
-                                .title_bottom(Line::from(
-                                    "Enter/open  h/backspace up  m manual path  Esc cancel",
-                                )),
+                            self.themed_overlay_block(&format!(
+                                "Add Project: {}",
+                                current_dir.display()
+                            ))
+                            .title_bottom({
+                                let mut s = vec![Span::raw(" ")];
+                                s.extend(self.theme.key_badge("Enter", Color::Reset));
+                                s.push(Span::styled(" open  ", Style::default().fg(self.theme.hint_desc_fg)));
+                                s.extend(self.theme.key_badge("h", Color::Reset));
+                                s.push(Span::styled(" up  ", Style::default().fg(self.theme.hint_desc_fg)));
+                                s.extend(self.theme.key_badge("m", Color::Reset));
+                                s.push(Span::styled(" manual  ", Style::default().fg(self.theme.hint_desc_fg)));
+                                s.extend(self.theme.key_badge("Esc", Color::Reset));
+                                s.push(Span::styled(" cancel", Style::default().fg(self.theme.hint_desc_fg)));
+                                Line::from(s)
+                            }),
                         )
-                        .highlight_style(
-                            Style::default()
-                                .fg(Color::Black)
-                                .bg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD),
-                        ),
+                        .highlight_style(self.theme.selection_style()),
                     area,
                     frame.buffer_mut(),
                     &mut state,
                 );
             }
             PromptState::AddProject { path, name, field } => {
+                self.render_dim_overlay(frame);
                 let area = centered_rect(72, 70, frame.area());
                 Clear.render(area, frame.buffer_mut());
-                let body = format!(
-                    "Add Project\n\nPath{}: {}\nName{}: {}\n\nTab switches fields. Enter saves. Esc cancels.",
-                    if matches!(field, PromptField::Path) {
-                        "*"
-                    } else {
-                        ""
-                    },
-                    path,
-                    if matches!(field, PromptField::Name) {
-                        "*"
-                    } else {
-                        ""
-                    },
-                    name,
-                );
-                Paragraph::new(body)
-                    .block(
-                        pane_block("Manual Project Entry", true)
-                            .title_bottom(Line::from("Use p for repo browser next time")),
-                    )
+                let cursor = "█";
+                let path_cursor = if matches!(field, PromptField::Path) {
+                    cursor
+                } else {
+                    ""
+                };
+                let name_cursor = if matches!(field, PromptField::Name) {
+                    cursor
+                } else {
+                    ""
+                };
+                let lines = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled(
+                            "  Path: ",
+                            Style::default()
+                                .fg(if matches!(field, PromptField::Path) {
+                                    Color::Cyan
+                                } else {
+                                    self.theme.hint_desc_fg
+                                })
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(format!("{path}{path_cursor}")),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(
+                            "  Name: ",
+                            Style::default()
+                                .fg(if matches!(field, PromptField::Name) {
+                                    Color::Cyan
+                                } else {
+                                    self.theme.hint_desc_fg
+                                })
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(format!("{name}{name_cursor}")),
+                    ]),
+                    Line::from(""),
+                    Line::from({
+                        let mut s: Vec<Span> = vec![Span::raw("  ")];
+                        s.extend(self.theme.key_badge("Tab", Color::Reset));
+                        s.push(Span::styled(" switch fields  ", Style::default().fg(self.theme.hint_desc_fg)));
+                        s.extend(self.theme.key_badge("Enter", Color::Reset));
+                        s.push(Span::styled(" save  ", Style::default().fg(self.theme.hint_desc_fg)));
+                        s.extend(self.theme.key_badge("Esc", Color::Reset));
+                        s.push(Span::styled(" cancel", Style::default().fg(self.theme.hint_desc_fg)));
+                        s
+                    }),
+                ];
+                Paragraph::new(lines)
+                    .block(self.themed_overlay_block("Manual Project Entry"))
                     .wrap(Wrap { trim: false })
                     .render(area, frame.buffer_mut());
             }
@@ -1623,6 +1910,43 @@ impl App {
         self.reload_changed_files();
     }
 
+    fn themed_block<'a>(&self, title: &'a str, focused: bool) -> Block<'a> {
+        let focus_indicator = if focused { " █" } else { "" };
+        Block::default()
+            .title(Line::from(vec![
+                Span::styled(title, self.theme.title_style(focused)),
+                Span::styled(focus_indicator, Style::default().fg(self.theme.border_focused)),
+            ]))
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
+            .border_style(self.theme.border_style(focused))
+    }
+
+    fn themed_overlay_block<'a>(&self, title: &'a str) -> Block<'a> {
+        Block::default()
+            .title(Line::from(Span::styled(
+                title,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
+            .border_style(Style::default().fg(self.theme.overlay_border))
+    }
+
+    fn render_dim_overlay(&self, frame: &mut Frame) {
+        let area = frame.area();
+        let buf = frame.buffer_mut();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let cell = &mut buf[(x, y)];
+                cell.set_fg(Color::DarkGray);
+                cell.set_bg(Color::Rgb(10, 10, 10));
+            }
+        }
+    }
+
     fn push_provider_line(&mut self, session_id: &str, line: String) {
         if let Some(title) = line.strip_prefix("session: ") {
             if let Some(session) = self
@@ -1708,7 +2032,8 @@ fn run_create_agent_job(
                 &session.branch_name,
             );
             let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
-                "Provider failed to start: {err}. Check ~/.config/dux/dux.log and configure an ACP adapter."
+                "Provider failed to start: {err}. Check {} and configure an ACP adapter.",
+                paths.root.display()
             )));
             return;
         }
@@ -1726,7 +2051,8 @@ fn run_create_agent_job(
                 &session.branch_name,
             );
             let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
-                "ACP session creation failed: {err}. Check ~/.config/dux/dux.log and configure an ACP adapter."
+                "ACP session creation failed: {err}. Check {} and configure an ACP adapter.",
+                paths.root.display()
             )));
             return;
         }
@@ -1792,28 +2118,15 @@ fn load_projects(config: &Config) -> Vec<Project> {
     projects
 }
 
-fn provider_config<'a>(config: &'a Config, provider: &ProviderKind) -> &'a ProviderCommandConfig {
-    match provider {
-        ProviderKind::Claude => &config.providers.claude,
-        ProviderKind::Codex => &config.providers.codex,
-    }
-}
-
-fn pane_block<'a>(title: &'a str, focused: bool) -> Block<'a> {
-    Block::default()
-        .title(Line::from(vec![
-            Span::styled(
-                title,
-                Style::default().fg(if focused { Color::Cyan } else { Color::White }),
-            ),
-            if focused {
-                Span::styled(" *", Style::default().fg(Color::Cyan))
-            } else {
-                Span::raw("")
-            },
-        ]))
-        .borders(Borders::ALL)
-        .border_set(border::ROUNDED)
+fn provider_config(config: &Config, provider: &ProviderKind) -> ProviderCommandConfig {
+    config
+        .providers
+        .get(provider.as_str())
+        .cloned()
+        .unwrap_or_else(|| ProviderCommandConfig {
+            command: format!("{}-acp", provider.as_str()),
+            args: Vec::new(),
+        })
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {

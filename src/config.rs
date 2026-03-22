@@ -1,8 +1,9 @@
+use std::collections::BTreeMap;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 use crate::model::ProviderKind;
@@ -34,8 +35,8 @@ pub struct ShellConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProvidersConfig {
-    pub claude: ProviderCommandConfig,
-    pub codex: ProviderCommandConfig,
+    #[serde(flatten)]
+    pub adapters: BTreeMap<String, ProviderCommandConfig>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -77,16 +78,7 @@ impl Default for Config {
                 command: "/bin/bash".to_string(),
                 args: vec!["-l".to_string()],
             },
-            providers: ProvidersConfig {
-                claude: ProviderCommandConfig {
-                    command: "claude".to_string(),
-                    args: Vec::new(),
-                },
-                codex: ProviderCommandConfig {
-                    command: "codex".to_string(),
-                    args: Vec::new(),
-                },
-            },
+            providers: ProvidersConfig::default(),
             logging: LoggingConfig {
                 level: "info".to_string(),
                 path: "dux.log".to_string(),
@@ -120,16 +112,11 @@ impl Default for ShellConfig {
 
 impl Default for ProvidersConfig {
     fn default() -> Self {
-        Self {
-            claude: ProviderCommandConfig {
-                command: "claude".to_string(),
-                args: Vec::new(),
-            },
-            codex: ProviderCommandConfig {
-                command: "codex".to_string(),
-                args: Vec::new(),
-            },
-        }
+        let adapters = default_provider_adapters()
+            .into_iter()
+            .map(|(name, config)| (name.to_string(), config))
+            .collect();
+        Self { adapters }
     }
 }
 
@@ -167,6 +154,18 @@ impl Config {
     }
 }
 
+impl ProvidersConfig {
+    pub fn get(&self, name: &str) -> Option<&ProviderCommandConfig> {
+        self.adapters.get(name)
+    }
+
+    pub fn ensure_defaults(&mut self) {
+        for (name, config) in default_provider_adapters() {
+            self.adapters.entry(name.to_string()).or_insert(config);
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DuxPaths {
     pub root: PathBuf,
@@ -177,9 +176,9 @@ pub struct DuxPaths {
 
 impl DuxPaths {
     pub fn discover() -> Result<Self> {
-        let dirs = ProjectDirs::from("", "", "dux")
-            .ok_or_else(|| anyhow!("failed to determine user config directory"))?;
-        let root = dirs.config_dir().to_path_buf();
+        let home =
+            home::home_dir().ok_or_else(|| anyhow!("failed to determine user home directory"))?;
+        let root = discover_root(&home, env::var_os("XDG_CONFIG_HOME"));
         Ok(Self {
             config_path: root.join("config.toml"),
             sessions_db_path: root.join("sessions.sqlite3"),
@@ -206,8 +205,9 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
 
     let raw = fs::read_to_string(&paths.config_path)
         .with_context(|| format!("failed to read {}", paths.config_path.display()))?;
-    let config: Config = toml::from_str(&raw)
+    let mut config: Config = toml::from_str(&raw)
         .with_context(|| format!("failed to parse {}", paths.config_path.display()))?;
+    config.providers.ensure_defaults();
     let _ = save_config(&paths.config_path, &config);
     Ok(config)
 }
@@ -242,7 +242,7 @@ args = []
 [logging]
 # Log level can be error, info, or debug.
 level = "{log_level}"
-# Relative paths are resolved from ~/.config/dux/.
+# Relative paths are resolved from the dux config directory.
 path = "{log_path}"
 
 [ui]
@@ -258,8 +258,16 @@ projects = []
         provider = default.defaults.provider,
         shell_command = default.shell.command,
         shell_arg = default.shell.args.first().cloned().unwrap_or_default(),
-        claude_command = default.providers.claude.command,
-        codex_command = default.providers.codex.command,
+        claude_command = default
+            .providers
+            .get("claude")
+            .map(|config| config.command.as_str())
+            .unwrap_or("claude-agent-acp"),
+        codex_command = default
+            .providers
+            .get("codex")
+            .map(|config| config.command.as_str())
+            .unwrap_or("codex-acp"),
         log_level = default.logging.level,
         log_path = default.logging.path,
         left_width = default.ui.left_width_pct,
@@ -289,32 +297,11 @@ fn render_config(config: &Config) -> String {
         "args = {}\n\n",
         render_string_list(&config.shell.args)
     ));
-    out.push_str("[providers.claude]\n");
-    out.push_str("# Command used to launch an ACP-compatible Claude adapter.\n");
-    out.push_str("# Example: command = \"claude-agent-acp\"\n");
-    out.push_str(&format!(
-        "command = \"{}\"\n",
-        config.providers.claude.command
-    ));
-    out.push_str(&format!(
-        "args = {}\n\n",
-        render_string_list(&config.providers.claude.args)
-    ));
-    out.push_str("[providers.codex]\n");
-    out.push_str("# Command used to launch an ACP-compatible Codex adapter.\n");
-    out.push_str("# Example: command = \"codex-acp\"\n");
-    out.push_str(&format!(
-        "command = \"{}\"\n",
-        config.providers.codex.command
-    ));
-    out.push_str(&format!(
-        "args = {}\n\n",
-        render_string_list(&config.providers.codex.args)
-    ));
+    render_provider_configs(&mut out, &config.providers);
     out.push_str("[logging]\n");
     out.push_str("# Log level can be error, info, or debug.\n");
     out.push_str(&format!("level = \"{}\"\n", config.logging.level));
-    out.push_str("# Relative paths are resolved from ~/.config/dux/.\n");
+    out.push_str("# Relative paths are resolved from the dux config directory.\n");
     out.push_str(&format!("path = \"{}\"\n\n", config.logging.path));
     out.push_str("[ui]\n");
     out.push_str("# Initial pane sizing percentages. They can still be resized at runtime.\n");
@@ -357,6 +344,71 @@ fn render_string_list(values: &[String]) -> String {
     format!("[{rendered}]")
 }
 
+fn default_provider_adapters() -> [(&'static str, ProviderCommandConfig); 2] {
+    [
+        (
+            "claude",
+            ProviderCommandConfig {
+                command: "claude-agent-acp".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "codex",
+            ProviderCommandConfig {
+                command: "codex-acp".to_string(),
+                args: Vec::new(),
+            },
+        ),
+    ]
+}
+
+fn render_provider_configs(out: &mut String, providers: &ProvidersConfig) {
+    for name in ["claude", "codex"] {
+        if let Some(config) = providers.get(name) {
+            render_provider_config(out, name, config);
+        }
+    }
+    for (name, config) in &providers.adapters {
+        if matches!(name.as_str(), "claude" | "codex") {
+            continue;
+        }
+        render_provider_config(out, name, config);
+    }
+}
+
+fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommandConfig) {
+    out.push_str(&format!("[providers.{name}]\n"));
+    out.push_str(&format!(
+        "# Command used to launch the ACP-compatible {name} adapter.\n"
+    ));
+    if name == "claude" {
+        out.push_str("# Example: command = \"claude-agent-acp\"\n");
+    } else if name == "codex" {
+        out.push_str("# Example: command = \"codex-acp\"\n");
+    }
+    out.push_str(&format!("command = \"{}\"\n", config.command));
+    out.push_str(&format!("args = {}\n\n", render_string_list(&config.args)));
+}
+
+fn discover_root(home: &Path, xdg_config_home: Option<std::ffi::OsString>) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = xdg_config_home;
+        return home.join(".dux");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(xdg) = xdg_config_home.map(PathBuf::from) {
+            if xdg.is_absolute() {
+                return xdg.join("dux");
+            }
+        }
+        home.join(".config").join("dux")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,5 +421,33 @@ mod tests {
         assert!(rendered.contains("[providers.claude]"));
         assert!(rendered.contains("[providers.codex]"));
         assert!(rendered.contains("[ui]"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn config_root_uses_hidden_home_dir_on_macos() {
+        let root = discover_root(Path::new("/example/home"), Some("/tmp/ignored".into()));
+        assert_eq!(root, PathBuf::from("/example/home/.dux"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn config_root_uses_xdg_config_home_when_absolute() {
+        let root = discover_root(Path::new("/example/home"), Some("/tmp/xdg".into()));
+        assert_eq!(root, PathBuf::from("/tmp/xdg/dux"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn config_root_falls_back_to_dot_config_when_xdg_missing() {
+        let root = discover_root(Path::new("/example/home"), None);
+        assert_eq!(root, PathBuf::from("/example/home/.config/dux"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn config_root_ignores_relative_xdg_config_home() {
+        let root = discover_root(Path::new("/example/home"), Some("relative/path".into()));
+        assert_eq!(root, PathBuf::from("/example/home/.config/dux"));
     }
 }

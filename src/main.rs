@@ -7,6 +7,7 @@ mod model;
 mod statusline;
 mod storage;
 mod terminal;
+mod theme;
 
 use anyhow::Result;
 
@@ -27,8 +28,10 @@ fn print_help() {
          Usage:\n\
            dux\n\n\
          First run writes a full default config to:\n\
-           ~/.config/dux/config.toml\n\
+           macOS: ~/.dux/config.toml\n\
+           Linux: $XDG_CONFIG_HOME/dux/config.toml or ~/.config/dux/config.toml\n\
          Session state is stored in:\n\
-           ~/.config/dux/sessions.sqlite3"
+           macOS: ~/.dux/sessions.sqlite3\n\
+           Linux: $XDG_CONFIG_HOME/dux/sessions.sqlite3 or ~/.config/dux/sessions.sqlite3"
     );
 }

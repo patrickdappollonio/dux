@@ -72,6 +72,7 @@ The top section is read-only review. Git actions can happen in the shell or thro
 - [src/storage.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/storage.rs): SQLite persistence
 - [src/config.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/config.rs): user config schema and rendering
 - [src/statusline.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/statusline.rs): UI status model
+- [src/theme.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/theme.rs): centralized color palette with semantic color names
 - [src/logger.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/logger.rs): log file integration
 
 ## UX Model
@@ -100,18 +101,33 @@ Current command entry modes:
 - `Ctrl-P`: floating command palette
 - `:`: direct command mode
 
+### Header Bar
+
+A 1-line header bar at the top of the screen shows:
+
+- app name and version
+- currently selected project name
+- current branch
+- default provider
+
+Uses a deep navy background with bold white/cyan text for context-at-a-glance.
+
 ### Status Presentation
 
-The footer is split into two lines:
+The footer is a 3-line area split into:
 
-- key-hint line
-- status line
+- **Line 1 — Key hint badges:** context-aware key bindings rendered as styled badge pairs (bold key on dark background, description in muted text). Hints change per focused pane.
+- **Lines 2–3 — Status area:** a colored status dot (green/yellow/red) with the message, plus right-aligned branding. Uses `Wrap` so long error messages flow to the second line instead of being truncated.
 
 The status line supports:
 
-- info state
-- busy state with spinner
-- error state
+- info state (green dot)
+- busy state with braille spinner (yellow dot)
+- error state (red dot, wrapping to second line for long messages)
+
+### Theme System
+
+All colors are defined in `src/theme.rs` via a `Theme` struct with semantic field names (e.g., `border_focused`, `selection_bg`, `diff_add`). The default theme uses a k9s-inspired dark palette with deep navy headers, cyan accents, and muted grays for unfocused elements.
 
 ## Config and State
 
@@ -191,8 +207,7 @@ These remain good follow-on improvements:
 - better project deletion UX with confirmation overlay
 - more robust session restore and history handling
 - mouse-based pane resizing
-- better diff rendering with scroll position and syntax/color awareness
-- separate module extraction from `src/app.rs` as UI complexity grows
+- diff rendering with scroll position tracking
 
 ## Design Recommendations
 

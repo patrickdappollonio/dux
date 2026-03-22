@@ -53,8 +53,8 @@ impl StatusLine {
     }
 
     fn spinner_frame(&self) -> &'static str {
-        const FRAMES: &[&str] = &["[   ]", "[.  ]", "[.. ]", "[...]", "[ ..]", "[  .]"];
-        let index = ((self.since.elapsed().as_millis() / 160) as usize) % FRAMES.len();
+        const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let index = ((self.since.elapsed().as_millis() / 100) as usize) % FRAMES.len();
         FRAMES[index]
     }
 }

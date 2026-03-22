@@ -30,6 +30,7 @@ The current app provides:
 - [src/config.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/config.rs): config schema, defaults, rendering
 - [src/storage.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/storage.rs): SQLite session persistence
 - [src/statusline.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/statusline.rs): status line model and spinner behavior
+- [src/theme.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/theme.rs): centralized color palette and semantic styling constants
 - [src/logger.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/logger.rs): runtime logging
 
 ## Recommendations For Future Changes
@@ -57,6 +58,8 @@ The current app provides:
 
 - Keep changes small and composable in `src/app.rs`; it is large enough that unrelated edits can conflict.
 - Prefer extracting helper types/modules when adding new UI modes or async workflows.
+- Use `theme.rs` constants for all colors and styles — never use raw `Color::*` values in rendering code.
+- When adding new UI elements, define semantic color names in `Theme` rather than picking ad-hoc colors. `theme.rs` is the single source of truth for visual styling.
 - Preserve the fully materialized commented config behavior.
 - Preserve safe failure behavior around project refresh and failed agent startup.
 
