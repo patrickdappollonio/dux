@@ -1034,14 +1034,27 @@ impl App {
     }
 
     fn handle_resize_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('h') | KeyCode::Left => {
-                self.left_width_pct = self.left_width_pct.saturating_sub(2).max(14)
+        if self.focus == FocusPane::Files {
+            // When focused on the right pane, resize it instead of the left.
+            match key.code {
+                KeyCode::Char('h') | KeyCode::Left => {
+                    self.right_width_pct = self.right_width_pct.saturating_add(2).min(50)
+                }
+                KeyCode::Char('l') | KeyCode::Right => {
+                    self.right_width_pct = self.right_width_pct.saturating_sub(2).max(14)
+                }
+                _ => {}
             }
-            KeyCode::Char('l') | KeyCode::Right => {
-                self.left_width_pct = self.left_width_pct.saturating_add(2).min(38)
+        } else {
+            match key.code {
+                KeyCode::Char('h') | KeyCode::Left => {
+                    self.left_width_pct = self.left_width_pct.saturating_sub(2).max(14)
+                }
+                KeyCode::Char('l') | KeyCode::Right => {
+                    self.left_width_pct = self.left_width_pct.saturating_add(2).min(38)
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
 
