@@ -780,8 +780,8 @@ impl App {
                 spans.extend(self.theme.dim_key_badge("Esc", Color::Reset));
                 spans.push(Span::styled(" Exit", desc_style));
             } else {
-                spans.extend(self.theme.dim_key_badge("i", Color::Reset));
-                spans.push(Span::styled(" Commit msg  ", desc_style));
+                spans.extend(self.theme.dim_key_badge("i/Enter", Color::Reset));
+                spans.push(Span::styled(" Edit  ", desc_style));
                 spans.extend(self.theme.dim_key_badge("^G", Color::Reset));
                 spans.push(Span::styled(" AI msg  ", desc_style));
                 spans.extend(self.theme.dim_key_badge("c", Color::Reset));
