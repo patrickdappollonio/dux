@@ -109,7 +109,15 @@ pub fn create_worktree(
     Ok((branch_name, canonical))
 }
 
-pub fn remove_worktree(repo_path: &Path, worktree_path: &Path, branch_name: &str) -> Result<()> {
+pub struct RemoveResult {
+    pub branch_already_deleted: bool,
+}
+
+pub fn remove_worktree(
+    repo_path: &Path,
+    worktree_path: &Path,
+    branch_name: &str,
+) -> Result<RemoveResult> {
     let output = Command::new("git")
         .args([
             "-C",
@@ -121,12 +129,24 @@ pub fn remove_worktree(repo_path: &Path, worktree_path: &Path, branch_name: &str
         ])
         .output()?;
     if !output.status.success() {
-        return Err(anyhow!(
-            "git worktree remove failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        if worktree_path.exists() {
+            return Err(anyhow!(
+                "git worktree remove failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        // Worktree already gone from disk — prune stale git refs.
+        let _ = Command::new("git")
+            .args([
+                "-C",
+                repo_path.to_string_lossy().as_ref(),
+                "worktree",
+                "prune",
+            ])
+            .output();
     }
-    let output = Command::new("git")
+    // Best-effort branch deletion.
+    let branch_output = Command::new("git")
         .args([
             "-C",
             repo_path.to_string_lossy().as_ref(),
@@ -135,13 +155,9 @@ pub fn remove_worktree(repo_path: &Path, worktree_path: &Path, branch_name: &str
             branch_name,
         ])
         .output()?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "git branch delete failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(())
+    Ok(RemoveResult {
+        branch_already_deleted: !branch_output.status.success(),
+    })
 }
 
 pub fn changed_files(worktree_path: &Path) -> Result<Vec<ChangedFile>> {

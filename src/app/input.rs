@@ -89,18 +89,16 @@ impl App {
                         self.reload_changed_files();
                     }
                 }
-                Action::FocusAgent => {
-                    match self.left_items().get(self.selected_left) {
-                        Some(LeftItem::Project(project_index)) => {
-                            let project_id = self.projects[*project_index].id.clone();
-                            let has_sessions =
-                                self.sessions.iter().any(|s| s.project_id == project_id);
-                            if has_sessions {
-                                if self.collapsed_projects.contains(&project_id) {
-                                    self.collapsed_projects.remove(&project_id);
-                                    self.rebuild_left_items();
-                                }
-                                if let Some(pos) =
+                Action::FocusAgent => match self.left_items().get(self.selected_left) {
+                    Some(LeftItem::Project(project_index)) => {
+                        let project_id = self.projects[*project_index].id.clone();
+                        let has_sessions = self.sessions.iter().any(|s| s.project_id == project_id);
+                        if has_sessions {
+                            if self.collapsed_projects.contains(&project_id) {
+                                self.collapsed_projects.remove(&project_id);
+                                self.rebuild_left_items();
+                            }
+                            if let Some(pos) =
                                     self.left_items().iter().position(|item| {
                                         matches!(item, LeftItem::Session(si) if self.sessions[*si].project_id == project_id)
                                     })
@@ -117,25 +115,24 @@ impl App {
                                         self.input_target = InputTarget::Agent;
                                     }
                                 }
-                            } else {
-                                self.create_agent_for_selected_project()?;
-                            }
+                        } else {
+                            self.create_agent_for_selected_project()?;
                         }
-                        Some(LeftItem::Session(_)) => {
-                            self.center_mode = CenterMode::Agent;
-                            self.focus = FocusPane::Center;
-                            self.reload_changed_files();
-                            if self
-                                .selected_session()
-                                .map(|s| self.providers.contains_key(&s.id))
-                                .unwrap_or(false)
-                            {
-                                self.input_target = InputTarget::Agent;
-                            }
-                        }
-                        None => {}
                     }
-                }
+                    Some(LeftItem::Session(_)) => {
+                        self.center_mode = CenterMode::Agent;
+                        self.focus = FocusPane::Center;
+                        self.reload_changed_files();
+                        if self
+                            .selected_session()
+                            .map(|s| self.providers.contains_key(&s.id))
+                            .unwrap_or(false)
+                        {
+                            self.input_target = InputTarget::Agent;
+                        }
+                    }
+                    None => {}
+                },
                 Action::OpenProjectBrowser => {
                     self.open_project_browser()?;
                 }
@@ -156,9 +153,7 @@ impl App {
                         self.focus = FocusPane::Center;
                         self.center_mode = CenterMode::Agent;
                         self.input_target = InputTarget::Agent;
-                        self.set_info(
-                            "Interactive mode. Keys forwarded to agent. ctrl+g exits.",
-                        );
+                        self.set_info("Interactive mode. Keys forwarded to agent. ctrl+g exits.");
                     } else {
                         self.set_error(
                             "No active agent. Press \"r\" to restart or \"n\" to create a new one.",
@@ -184,9 +179,7 @@ impl App {
                     {
                         self.reset_pty_scrollback();
                         self.input_target = InputTarget::Agent;
-                        self.set_info(
-                            "Interactive mode. Keys forwarded to agent. ctrl+g exits.",
-                        );
+                        self.set_info("Interactive mode. Keys forwarded to agent. ctrl+g exits.");
                     } else {
                         self.set_error(
                             "No active agent. Press \"r\" to restart or \"n\" to create a new one.",
@@ -216,7 +209,11 @@ impl App {
                     }
                 }
                 Action::ScrollPageDown => {
-                    if let CenterMode::Diff { ref lines, ref mut scroll } = self.center_mode {
+                    if let CenterMode::Diff {
+                        ref lines,
+                        ref mut scroll,
+                    } = self.center_mode
+                    {
                         let page = self.last_diff_height.max(1);
                         let max_scroll = (lines.len() as u16).saturating_sub(1);
                         *scroll = (*scroll + page).min(max_scroll);
@@ -406,7 +403,8 @@ impl App {
                     if *searching {
                         *searching = false;
                     } else {
-                        let command = if let Some(binding) = keybindings::filtered_palette(input).get(*selected)
+                        let command = if let Some(binding) =
+                            keybindings::filtered_palette(input).get(*selected)
                         {
                             binding.palette.as_ref().unwrap().name.to_string()
                         } else {
@@ -744,7 +742,11 @@ impl App {
                     }
                 }
                 FocusPane::Center => {
-                    if let CenterMode::Diff { ref lines, ref mut scroll } = self.center_mode {
+                    if let CenterMode::Diff {
+                        ref lines,
+                        ref mut scroll,
+                    } = self.center_mode
+                    {
                         let max_scroll = (lines.len() as u16).saturating_sub(1);
                         *scroll = (*scroll + 3).min(max_scroll);
                     }

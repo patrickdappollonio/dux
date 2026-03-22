@@ -307,6 +307,7 @@ impl App {
             "provider" => self.cycle_selected_project_provider(),
             "refresh-project" => self.refresh_selected_project(),
             "delete-project" => self.delete_selected_project(),
+            "remove-project" => self.remove_selected_project(),
             "delete-agent" => self.confirm_delete_selected_session(),
             "reconnect-agent" => self.reconnect_selected_session(),
             "add-project" => self.open_project_browser(),
@@ -457,4 +458,3 @@ pub(crate) fn provider_config(config: &Config, provider: &ProviderKind) -> Provi
             args: Vec::new(),
         })
 }
-
