@@ -478,7 +478,7 @@ impl App {
                     desc_style,
                 ));
                 spans.extend(self.theme.dim_key_badge("^G", Color::Reset));
-                spans.push(Span::styled(" to bring the focus back to dux.", desc_style));
+                spans.push(Span::styled(" to bring the focus back.", desc_style));
                 Line::from(spans)
             } else if scrollback_offset > 0 {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
