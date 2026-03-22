@@ -211,7 +211,7 @@ pub(crate) fn run_create_agent_job(
         updated_at: Utc::now(),
     };
     let provider_cfg = provider_config(&config, &session.provider);
-    if let Err(hint) = check_provider_available(session.provider.as_str(), &provider_cfg.command) {
+    if let Err(hint) = check_provider_available(&provider_cfg) {
         logger::error(&format!("provider not found for {}: {hint}", session.id));
         let _ = git::remove_worktree(
             &repo_path,

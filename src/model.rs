@@ -1,24 +1,19 @@
 use chrono::{DateTime, Utc};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProviderKind {
-    Claude,
-    Codex,
-}
+pub struct ProviderKind(String);
 
 impl ProviderKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-        }
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 
     pub fn from_str(value: &str) -> Self {
-        match value {
-            "claude" => Self::Claude,
-            _ => Self::Codex,
-        }
+        Self(value.to_string())
     }
 }
 

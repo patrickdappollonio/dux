@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -41,7 +42,7 @@ pub struct Defaults {
 #[serde(default)]
 pub struct ProvidersConfig {
     #[serde(flatten)]
-    pub commands: BTreeMap<String, ProviderCommandConfig>,
+    pub commands: IndexMap<String, ProviderCommandConfig>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -52,10 +53,20 @@ pub struct LoggingConfig {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OneshotOutput {
+    Stdout,
+    Tempfile,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderCommandConfig {
     pub command: String,
     pub args: Vec<String>,
+    pub oneshot_args: Vec<String>,
+    pub oneshot_output: OneshotOutput,
+    pub install_hint: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -143,6 +154,9 @@ impl Default for ProviderCommandConfig {
         Self {
             command: String::new(),
             args: Vec::new(),
+            oneshot_args: Vec::new(),
+            oneshot_output: OneshotOutput::Stdout,
+            install_hint: None,
         }
     }
 }
@@ -483,6 +497,11 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 2] {
             ProviderCommandConfig {
                 command: "claude".to_string(),
                 args: Vec::new(),
+                oneshot_args: vec!["-p".to_string(), "{prompt}".to_string()],
+                oneshot_output: OneshotOutput::Stdout,
+                install_hint: Some(
+                    "npm install -g @anthropic-ai/claude-code".to_string(),
+                ),
             },
         ),
         (
@@ -490,21 +509,21 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 2] {
             ProviderCommandConfig {
                 command: "codex".to_string(),
                 args: Vec::new(),
+                oneshot_args: vec![
+                    "exec".to_string(),
+                    "-o".to_string(),
+                    "{tempfile}".to_string(),
+                    "{prompt}".to_string(),
+                ],
+                oneshot_output: OneshotOutput::Tempfile,
+                install_hint: Some("npm install -g @openai/codex".to_string()),
             },
         ),
     ]
 }
 
 fn render_provider_configs(out: &mut String, providers: &ProvidersConfig) {
-    for name in ["claude", "codex"] {
-        if let Some(config) = providers.get(name) {
-            render_provider_config(out, name, config);
-        }
-    }
     for (name, config) in &providers.commands {
-        if matches!(name.as_str(), "claude" | "codex") {
-            continue;
-        }
         render_provider_config(out, name, config);
     }
 }
@@ -512,16 +531,29 @@ fn render_provider_configs(out: &mut String, providers: &ProvidersConfig) {
 fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommandConfig) {
     out.push_str(&format!("[providers.{name}]\n"));
     out.push_str(&format!("# CLI command for {name} sessions.\n"));
-    if name == "claude" {
-        out.push_str("# Example: command = \"claude\"\n");
-    } else if name == "codex" {
-        out.push_str("# Example: command = \"codex\"\n");
-    }
     out.push_str(&format!(
         "command = \"{}\"\n",
         escape_toml_string(&config.command)
     ));
-    out.push_str(&format!("args = {}\n\n", render_string_list(&config.args)));
+    out.push_str(&format!("args = {}\n", render_string_list(&config.args)));
+    out.push_str("# Oneshot args for non-interactive use (e.g. AI commit messages).\n");
+    out.push_str("# Placeholders: {prompt} = the prompt text, {tempfile} = temp file path.\n");
+    out.push_str(&format!(
+        "oneshot_args = {}\n",
+        render_string_list(&config.oneshot_args)
+    ));
+    let output_str = match config.oneshot_output {
+        OneshotOutput::Stdout => "stdout",
+        OneshotOutput::Tempfile => "tempfile",
+    };
+    out.push_str(&format!("oneshot_output = \"{output_str}\"\n"));
+    if let Some(hint) = &config.install_hint {
+        out.push_str(&format!(
+            "install_hint = \"{}\"\n",
+            escape_toml_string(hint)
+        ));
+    }
+    out.push('\n');
 }
 
 /// Validate all key bindings in the config. Returns a descriptive error on failure.
@@ -545,26 +577,24 @@ pub fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
 /// Check whether a provider command is available on PATH.
 /// Returns `Ok(())` if found, or `Err(message)` with a user-friendly install hint.
 pub fn check_provider_available(
-    provider_name: &str,
-    command: &str,
+    config: &ProviderCommandConfig,
 ) -> std::result::Result<(), String> {
     use std::process::Command as StdCommand;
-    match StdCommand::new("which").arg(command).output() {
+    match StdCommand::new("which").arg(&config.command).output() {
         Ok(output) if output.status.success() => Ok(()),
         _ => {
-            let hint = install_hint(provider_name, command);
-            Err(format!("CLI tool '{command}' not found on PATH. {hint}"))
+            let hint = config
+                .install_hint
+                .as_ref()
+                .map(|h| format!("Install with: {h}"))
+                .unwrap_or_else(|| {
+                    format!("Make sure '{}' is installed and on your PATH.", config.command)
+                });
+            Err(format!(
+                "CLI tool '{}' not found on PATH. {hint}",
+                config.command
+            ))
         }
-    }
-}
-
-fn install_hint(provider_name: &str, command: &str) -> String {
-    match provider_name {
-        "claude" if command == "claude" => {
-            "Install with: npm install -g @anthropic-ai/claude-code".to_string()
-        }
-        "codex" if command == "codex" => "Install with: npm install -g @openai/codex".to_string(),
-        _ => format!("Make sure '{command}' is installed and on your PATH."),
     }
 }
 
@@ -597,6 +627,8 @@ mod tests {
         assert!(rendered.contains("[defaults]"));
         assert!(rendered.contains("[providers.claude]"));
         assert!(rendered.contains("[providers.codex]"));
+        assert!(rendered.contains("oneshot_args = "));
+        assert!(rendered.contains("oneshot_output = "));
         assert!(rendered.contains("[ui]"));
         assert!(rendered.contains("[keys]"));
         assert!(rendered.contains("show_terminal_keys = true"));

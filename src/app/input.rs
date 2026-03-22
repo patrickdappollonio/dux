@@ -486,7 +486,7 @@ impl App {
             diff
         };
         let cfg = provider_config(&self.config, &session.provider);
-        let prov = provider::create_provider(&session.provider, cfg);
+        let prov = provider::create_provider(session.provider.as_str(), cfg);
         let tx = self.worker_tx.clone();
         self.commit_generating = true;
         self.set_busy("Generating AI commit message from staged diff…");
