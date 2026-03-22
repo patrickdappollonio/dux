@@ -586,8 +586,8 @@ impl App {
             pane_focused,
         );
 
-        // Commit input — untitled block.
-        self.render_commit_input_inner(frame, commit_area);
+        // Commit input block.
+        self.render_commit_input_inner(frame, commit_area, pane_focused);
     }
 
     fn render_file_list(
@@ -676,11 +676,12 @@ impl App {
         );
     }
 
-    /// Render the commit input as its own bordered block (no title).
-    fn render_commit_input_inner(&mut self, frame: &mut Frame, area: Rect) {
+    /// Render the commit input as its own bordered block.
+    fn render_commit_input_inner(&mut self, frame: &mut Frame, area: Rect, pane_focused: bool) {
+        let is_active_section = pane_focused && self.right_section == RightSection::CommitInput;
         let focused = self.input_target == InputTarget::CommitMessage;
 
-        let block = self.themed_block("", focused);
+        let block = self.themed_block("Commit Message", is_active_section || focused);
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
 

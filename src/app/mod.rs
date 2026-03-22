@@ -100,23 +100,27 @@ impl FocusPane {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RightSection {
-    Staged,
     Unstaged,
+    Staged,
+    CommitInput,
 }
 
 impl RightSection {
     /// Returns the next section, or `None` to exit the pane.
-    /// Order: Unstaged (top) → Staged (bottom).
+    /// Order: Unstaged → Staged → CommitInput.
     pub(crate) fn next(self, has_staged: bool) -> Option<Self> {
         match self {
             Self::Unstaged if has_staged => Some(Self::Staged),
-            Self::Unstaged | Self::Staged => None,
+            Self::Unstaged => None,
+            Self::Staged => Some(Self::CommitInput),
+            Self::CommitInput => None,
         }
     }
 
     /// Returns the previous section, or `None` to exit the pane.
     pub(crate) fn previous(self) -> Option<Self> {
         match self {
+            Self::CommitInput => Some(Self::Staged),
             Self::Staged => Some(Self::Unstaged),
             Self::Unstaged => None,
         }
@@ -129,7 +133,7 @@ impl RightSection {
 
     pub(crate) fn last(has_staged: bool) -> Self {
         if has_staged {
-            Self::Staged
+            Self::CommitInput
         } else {
             Self::Unstaged
         }
@@ -475,6 +479,7 @@ impl App {
         match self.right_section {
             RightSection::Staged => self.staged_files.get(self.files_index),
             RightSection::Unstaged => self.unstaged_files.get(self.files_index),
+            RightSection::CommitInput => None,
         }
     }
 
@@ -482,10 +487,14 @@ impl App {
         match self.right_section {
             RightSection::Staged => self.staged_files.len(),
             RightSection::Unstaged => self.unstaged_files.len(),
+            RightSection::CommitInput => 0,
         }
     }
 
     pub(crate) fn clamp_files_cursor(&mut self) {
+        if self.right_section == RightSection::CommitInput {
+            return;
+        }
         let len = self.current_files_len();
         if len == 0 {
             self.files_index = 0;

@@ -390,6 +390,7 @@ impl App {
         let file = match self.right_section {
             RightSection::Staged => self.staged_files.get(self.files_index),
             RightSection::Unstaged => self.unstaged_files.get(self.files_index),
+            RightSection::CommitInput => return Ok(()),
         };
         let Some(file) = file else { return Ok(()) };
         let path = file.path.clone();
@@ -400,6 +401,7 @@ impl App {
             RightSection::Staged => {
                 git::unstage_file(&worktree, &path)?;
             }
+            RightSection::CommitInput => {}
         }
         self.reload_changed_files();
         // If the section we were in is now empty, move to the other one.
@@ -420,6 +422,7 @@ impl App {
                 self.set_error("Unstage the file first to discard changes.");
                 return Ok(());
             }
+            RightSection::CommitInput => return Ok(()),
         };
         let Some(file) = file else { return Ok(()) };
         self.prompt = PromptState::ConfirmDiscardFile {
