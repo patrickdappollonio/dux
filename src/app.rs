@@ -376,8 +376,9 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('w') {
             self.resize_mode = !self.resize_mode;
             if self.resize_mode {
-                self.set_info("Resize mode on: h/l resize side panes.");
+                self.set_info("Resize mode on: h/l/←/→ resize side panes.");
             } else {
+                self.persist_pane_widths();
                 self.set_info("Resize mode off.");
             }
             return Ok(false);
@@ -522,9 +523,9 @@ impl App {
                 }
             }
             KeyCode::Esc => {
-                self.center_mode = CenterMode::Agent;
-                self.focus = FocusPane::Files;
-                self.set_info("Returned to agent view.");
+                // When no diff is open, ESC from the center pane is a no-op.
+                // Diff closing is handled globally by close_top_overlay so it
+                // works regardless of which pane is focused.
             }
             // Page-up style scrolling: ctrl+b or PageUp
             KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1017,13 +1018,23 @@ impl App {
 
     fn handle_resize_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('h') => {
+            KeyCode::Char('h') | KeyCode::Left => {
                 self.left_width_pct = self.left_width_pct.saturating_sub(2).max(14)
             }
-            KeyCode::Char('l') => {
+            KeyCode::Char('l') | KeyCode::Right => {
                 self.left_width_pct = self.left_width_pct.saturating_add(2).min(38)
             }
             _ => {}
+        }
+    }
+
+    fn persist_pane_widths(&mut self) {
+        if self.config.ui.left_width_pct != self.left_width_pct
+            || self.config.ui.right_width_pct != self.right_width_pct
+        {
+            self.config.ui.left_width_pct = self.left_width_pct;
+            self.config.ui.right_width_pct = self.right_width_pct;
+            let _ = save_config(&self.paths.config_path, &self.config);
         }
     }
 
@@ -2001,11 +2012,14 @@ impl App {
 
     fn render_files(&self, frame: &mut Frame, area: Rect) {
         let inner_width = area.width.saturating_sub(2) as usize; // minus borders
+        let sel_style = self.theme.selection_style();
         let items = self
             .changed_files
             .iter()
             .enumerate()
             .map(|(index, file)| {
+                let is_selected = index == self.selected_file;
+
                 // Build the right-aligned stats string, e.g. "+12 -3".
                 let stats = format_line_stats(file.additions, file.deletions);
                 let stats_width = stats.iter().map(|s| s.width()).sum::<usize>();
@@ -2018,7 +2032,7 @@ impl App {
                     .saturating_sub(stats_width)
                     .saturating_sub(1);
 
-                let path = if index == self.selected_file {
+                let path = if is_selected {
                     file.path.clone()
                 } else {
                     git::ellipsize_middle(&file.path, path_budget.max(10))
@@ -2030,15 +2044,28 @@ impl App {
                     .saturating_sub(path_display_width)
                     .saturating_sub(stats_width);
 
+                let base_style = if is_selected { sel_style } else { Style::default() };
+
                 let mut spans = vec![
                     Span::styled(
                         format!("{:>2} ", file.status),
-                        Style::default().fg(self.theme.file_status_fg),
+                        base_style.fg(self.theme.file_status_fg),
                     ),
-                    Span::raw(path),
-                    Span::raw(" ".repeat(padding)),
+                    Span::styled(path, base_style),
+                    Span::styled(" ".repeat(padding), base_style),
                 ];
-                spans.extend(stats);
+                // For stats spans, keep their green/red fg but apply selection bg when selected.
+                let stats_base = if is_selected {
+                    Style::default()
+                        .bg(self.theme.selection_bg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                spans.extend(stats.into_iter().map(|s| {
+                    let fg = s.style.fg.unwrap_or(Color::Reset);
+                    Span::styled(s.content, stats_base.fg(fg))
+                }));
                 ListItem::new(Line::from(spans))
             })
             .collect::<Vec<_>>();
@@ -2047,8 +2074,7 @@ impl App {
         let mut state = ListState::default().with_selected(Some(self.selected_file));
         StatefulWidget::render(
             List::new(items)
-                .block(self.themed_block(&title, focused))
-                .highlight_style(self.theme.selection_style()),
+                .block(self.themed_block(&title, focused)),
             area,
             frame.buffer_mut(),
             &mut state,
@@ -2805,6 +2831,12 @@ impl App {
         if self.help_overlay {
             self.help_overlay = false;
             self.set_info("Closed overlay.");
+            return true;
+        }
+        if matches!(self.center_mode, CenterMode::Diff(_)) {
+            self.center_mode = CenterMode::Agent;
+            self.focus = FocusPane::Files;
+            self.set_info("Returned to agent view.");
             return true;
         }
         false

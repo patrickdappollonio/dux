@@ -59,20 +59,22 @@ impl PtyClient {
             .context("failed to take PTY writer")?;
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 10_000)));
+        let writer = Arc::new(Mutex::new(writer));
         let exited = Arc::new(AtomicBool::new(false));
         let has_output = Arc::new(AtomicBool::new(false));
 
         // Background reader thread.
         let parser_ref = Arc::clone(&parser);
+        let writer_ref = Arc::clone(&writer);
         let exited_ref = Arc::clone(&exited);
         let has_output_ref = Arc::clone(&has_output);
         thread::spawn(move || {
-            Self::reader_loop(reader, parser_ref, exited_ref, has_output_ref);
+            Self::reader_loop(reader, parser_ref, writer_ref, exited_ref, has_output_ref);
         });
 
         Ok(Self {
             master: pair.master,
-            writer: Arc::new(Mutex::new(writer)),
+            writer,
             parser,
             child,
             exited,
@@ -83,6 +85,7 @@ impl PtyClient {
     fn reader_loop(
         mut reader: Box<dyn std::io::Read + Send>,
         parser: Arc<Mutex<vt100::Parser>>,
+        writer: Arc<Mutex<Box<dyn Write + Send>>>,
         exited: Arc<AtomicBool>,
         has_output: Arc<AtomicBool>,
     ) {
@@ -94,8 +97,17 @@ impl PtyClient {
                     break;
                 }
                 Ok(n) => {
+                    let data = &buf[..n];
+
+                    // Respond to terminal capability queries from the child.
+                    // The vt100 crate is a parser only — it doesn't write
+                    // responses back, so CLI tools that probe the terminal
+                    // (DA1, DA2, DSR) would get no reply and fall back to
+                    // minimal colour output.
+                    Self::respond_to_queries(data, &writer);
+
                     if let Ok(mut p) = parser.lock() {
-                        p.process(&buf[..n]);
+                        p.process(data);
                         // Only mark output once the screen contains visible
                         // (non-whitespace) characters, so ANSI setup sequences
                         // don't prematurely hide the loading indicator.
@@ -113,6 +125,58 @@ impl PtyClient {
                     break;
                 }
             }
+        }
+    }
+
+    /// Scan the output stream for terminal queries and write back appropriate
+    /// responses. This makes the PTY behave like a real terminal emulator
+    /// rather than a black hole for capability probes.
+    fn respond_to_queries(data: &[u8], writer: &Arc<Mutex<Box<dyn Write + Send>>>) {
+        let mut i = 0;
+        while i + 2 < data.len() {
+            if data[i] != 0x1b || data[i + 1] != b'[' {
+                i += 1;
+                continue;
+            }
+            let rest = &data[i + 2..];
+            match rest {
+                // DA1: CSI c  or  CSI 0 c
+                // Reply as VT220 with ANSI colour.
+                [b'c', ..] | [b'0', b'c', ..] => {
+                    if let Ok(mut w) = writer.lock() {
+                        let _ = w.write_all(b"\x1b[?62;22c");
+                        let _ = w.flush();
+                    }
+                }
+                // DA2: CSI > c  or  CSI > 0 c
+                // Reply as VT220, firmware version 0.
+                [b'>', b'c', ..] | [b'>', b'0', b'c', ..] => {
+                    if let Ok(mut w) = writer.lock() {
+                        let _ = w.write_all(b"\x1b[>1;0;0c");
+                        let _ = w.flush();
+                    }
+                }
+                // DSR: CSI 5 n  (device status report — "are you OK?")
+                // Reply: CSI 0 n  ("terminal OK").
+                [b'5', b'n', ..] => {
+                    if let Ok(mut w) = writer.lock() {
+                        let _ = w.write_all(b"\x1b[0n");
+                        let _ = w.flush();
+                    }
+                }
+                // DSR-CPR: CSI 6 n  (cursor position report)
+                // Reply with current cursor position from the parser.
+                [b'6', b'n', ..] => {
+                    // We don't hold the parser lock here, so report 1;1.
+                    // This is close enough for capability probing.
+                    if let Ok(mut w) = writer.lock() {
+                        let _ = w.write_all(b"\x1b[1;1R");
+                        let _ = w.flush();
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
         }
     }
 
