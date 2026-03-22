@@ -188,7 +188,7 @@ impl App {
         else {
             return Ok(());
         };
-        git::remove_worktree(
+        let result = git::remove_worktree(
             Path::new(&project.path),
             Path::new(&session.worktree_path),
             &session.branch_name,
@@ -199,12 +199,19 @@ impl App {
         self.rebuild_left_items();
         self.selected_left = self.selected_left.saturating_sub(1);
         self.reload_changed_files();
-        self.set_info(format!(
-            "Deleted {} agent from project \"{}\" with branch \"{}\"",
-            session.provider.as_str(),
-            project.name,
-            session.branch_name
-        ));
+        if result.branch_already_deleted {
+            self.set_info(format!(
+                "Deleted agent (branch \"{}\" was already removed)",
+                session.branch_name
+            ));
+        } else {
+            self.set_info(format!(
+                "Deleted {} agent from project \"{}\" with branch \"{}\"",
+                session.provider.as_str(),
+                project.name,
+                session.branch_name
+            ));
+        }
         Ok(())
     }
 
@@ -242,6 +249,27 @@ impl App {
             self.session_store.upsert_session(session)?;
         }
         self.set_info(format!("Changed CLI agent to \"{}\"", next.as_str()));
+        Ok(())
+    }
+
+    pub(crate) fn remove_selected_project(&mut self) -> Result<()> {
+        let Some(project) = self.selected_project().cloned() else {
+            self.set_error("Select a project first.");
+            return Ok(());
+        };
+        let has_sessions = self.sessions.iter().any(|s| s.project_id == project.id);
+        if has_sessions {
+            self.set_error("Delete all agents in this project first.");
+            return Ok(());
+        }
+        self.projects.retain(|p| p.id != project.id);
+        self.config
+            .projects
+            .retain(|p| Path::new(&p.path) != Path::new(&project.path));
+        save_config(&self.paths.config_path, &self.config)?;
+        self.rebuild_left_items();
+        self.selected_left = self.selected_left.saturating_sub(1);
+        self.set_info(format!("Removed project \"{}\" from app", project.name));
         Ok(())
     }
 
@@ -343,7 +371,10 @@ impl App {
         };
         let output =
             crate::diff::diff_file(Path::new(&session.worktree_path), &file.path, &self.theme)?;
-        self.center_mode = CenterMode::Diff { lines: output.lines, scroll: 0 };
+        self.center_mode = CenterMode::Diff {
+            lines: output.lines,
+            scroll: 0,
+        };
         self.focus = FocusPane::Center;
         Ok(())
     }

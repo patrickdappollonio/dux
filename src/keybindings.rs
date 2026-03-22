@@ -26,6 +26,7 @@ pub enum Action {
     ToggleHelp,
     Quit,
     DeleteProject,
+    RemoveProject,
 }
 
 /// Where a binding's key combo is matched.
@@ -299,10 +300,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         action: Action::ScrollPageUp,
-        keys: &[
-            KeyCombo::ctrl('b'),
-            KeyCombo::key(KeyCode::PageUp),
-        ],
+        keys: &[KeyCombo::ctrl('b'), KeyCombo::key(KeyCode::PageUp)],
         scopes: &[BindingScope::Center],
         help: Some(HelpEntry {
             section: "Agent pane",
@@ -314,10 +312,7 @@ pub const BINDINGS: &[Binding] = &[
     },
     Binding {
         action: Action::ScrollPageDown,
-        keys: &[
-            KeyCombo::ctrl('f'),
-            KeyCombo::key(KeyCode::PageDown),
-        ],
+        keys: &[KeyCombo::ctrl('f'), KeyCombo::key(KeyCode::PageDown)],
         scopes: &[BindingScope::Center],
         help: Some(HelpEntry {
             section: "Agent pane",
@@ -453,6 +448,18 @@ pub const BINDINGS: &[Binding] = &[
         palette: Some(PaletteEntry {
             name: "delete-project",
             description: "Remove the selected project and its sessions",
+            shortcut: None,
+        }),
+    },
+    Binding {
+        action: Action::RemoveProject,
+        keys: &[],
+        scopes: &[],
+        help: None,
+        hints: &[],
+        palette: Some(PaletteEntry {
+            name: "remove-project",
+            description: "Remove project from app (keeps files on disk)",
             shortcut: None,
         }),
     },

@@ -801,11 +801,7 @@ impl App {
                     let badge_col = commands
                         .iter()
                         .filter_map(|b| {
-                            b.palette
-                                .as_ref()
-                                .unwrap()
-                                .shortcut
-                                .map(|s| s.len() + 3) // <key>
+                            b.palette.as_ref().unwrap().shortcut.map(|s| s.len() + 3) // <key>
                         })
                         .max()
                         .unwrap_or(0);
@@ -846,9 +842,7 @@ impl App {
                                     let badge_len = shortcut.len() + 3;
                                     let pre_pad = gap + badge_col - badge_len;
                                     spans.push(Span::raw(" ".repeat(pre_pad)));
-                                    spans.extend(
-                                        self.theme.key_badge(shortcut, Color::Reset),
-                                    );
+                                    spans.extend(self.theme.key_badge(shortcut, Color::Reset));
                                 } else {
                                     spans.push(Span::raw(" ".repeat(gap + badge_col)));
                                 }
