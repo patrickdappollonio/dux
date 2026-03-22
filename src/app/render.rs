@@ -416,7 +416,7 @@ impl App {
                     format!("{capitalized} is holding focus. Press "),
                     desc_style,
                 ));
-                spans.extend(self.theme.dim_key_badge("ctrl+g", Color::Reset));
+                spans.extend(self.theme.dim_key_badge("^G", Color::Reset));
                 spans.push(Span::styled(" to bring the focus back to dux.", desc_style));
                 Line::from(spans)
             } else if scrollback_offset > 0 {
@@ -552,50 +552,13 @@ impl App {
             self.left_items().get(self.selected_left),
             Some(LeftItem::Session(_))
         );
-        let left_project_hints: &[(&str, &str)] = &[
-            ("j/k", "Move"),
-            ("Space", "Toggle"),
-            ("n", "New agent"),
-            ("a", "Add project"),
-            ("y", "Copy path"),
-            ("d", "Provider"),
-            ("u", "Pull"),
-            ("^P", "Palette"),
-            ("?", "Help"),
-        ];
-        let left_session_hints: &[(&str, &str)] = &[
-            ("j/k", "Move"),
-            ("Enter", "Focus"),
-            ("a", "Add project"),
-            ("y", "Copy path"),
-            ("r", "Reconnect"),
-            ("^D", "Delete"),
-            ("^P", "Palette"),
-            ("?", "Help"),
-        ];
-        let hints: &[(&str, &str)] = match self.focus {
-            FocusPane::Left => {
-                if is_on_project {
-                    left_project_hints
-                } else {
-                    left_session_hints
-                }
-            }
-            FocusPane::Center => &[
-                ("i", "Interact"),
-                ("Esc", "Close diff"),
-                ("Tab", "Next"),
-                ("^P", "Palette"),
-                ("?", "Help"),
-            ],
-            FocusPane::Files => &[
-                ("j/k", "Move"),
-                ("Enter", "Diff"),
-                ("Tab", "Next"),
-                ("^P", "Palette"),
-                ("?", "Help"),
-            ],
+        let ctx = match self.focus {
+            FocusPane::Left if is_on_project => HintContext::LeftProject,
+            FocusPane::Left => HintContext::LeftSession,
+            FocusPane::Center => HintContext::Center,
+            FocusPane::Files => HintContext::Files,
         };
+        let hints = keybindings::hints_for(ctx);
         let [hints_area, status_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(1)])
@@ -671,47 +634,7 @@ impl App {
         self.render_dim_overlay(frame);
         let area = centered_rect(72, 70, frame.area());
         Clear.render(area, frame.buffer_mut());
-        let help_bindings: &[(&str, &[(&str, &str)])] = &[
-            (
-                "Global",
-                &[
-                    ("Tab", "Focus next pane"),
-                    ("^P", "Open command palette"),
-                    ("^W", "Resize mode (h/l side panes)"),
-                    ("[", "Toggle sidebar"),
-                    ("?", "Toggle help"),
-                    ("q", "Quit"),
-                ],
-            ),
-            (
-                "Projects pane",
-                &[
-                    ("j/k", "Move through projects and sessions"),
-                    ("space", "Collapse/expand project"),
-                    ("a", "Open project browser"),
-                    ("A", "Manual path entry"),
-                    ("n", "New agent session (creates worktree)"),
-                    ("d", "Cycle default provider"),
-                    ("u", "Refresh checkout (git pull --ff-only)"),
-                    ("r", "Restart agent CLI"),
-                    ("ctrl+d", "Delete selected session/worktree"),
-                ],
-            ),
-            (
-                "Agent pane",
-                &[
-                    ("i", "Start a prompt turn for the agent"),
-                    ("^B/PgUp", "Scroll up one page"),
-                    ("^F/PgDn", "Scroll down one page"),
-                    ("Esc", "Close diff view"),
-                ],
-            ),
-            ("Files pane", &[("Enter", "Open selected file diff")]),
-            (
-                "Key notation",
-                &[("^X", "Hold Ctrl and press X (e.g. ^P = Ctrl+P)")],
-            ),
-        ];
+        let help_bindings = keybindings::help_sections();
         let mut lines: Vec<Line> = Vec::new();
         for (section_idx, (section, bindings)) in help_bindings.iter().enumerate() {
             if section_idx > 0 {
@@ -723,7 +646,7 @@ impl App {
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             )));
-            for (key, desc) in *bindings {
+            for (key, desc) in bindings {
                 let padding = 14usize.saturating_sub(key.len() + 2);
                 let mut spans = vec![Span::raw("  ")];
                 spans.extend(self.theme.key_badge(key, Color::Reset));
@@ -734,6 +657,27 @@ impl App {
                 ));
                 lines.push(Line::from(spans));
             }
+        }
+        // Key notation legend
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Key notation",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )));
+        {
+            let key = "^X";
+            let desc = "Hold Ctrl and press X (e.g. ^P = Ctrl+P)";
+            let padding = 14usize.saturating_sub(key.len() + 2);
+            let mut spans = vec![Span::raw("  ")];
+            spans.extend(self.theme.key_badge(key, Color::Reset));
+            spans.push(Span::raw(" ".repeat(padding)));
+            spans.push(Span::styled(
+                desc,
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+            lines.push(Line::from(spans));
         }
         // Session state legend
         lines.push(Line::from(""));
@@ -783,26 +727,27 @@ impl App {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(72, 40, frame.area());
                 Clear.render(popup, frame.buffer_mut());
-                let commands = filtered_commands(input);
+                let commands = keybindings::filtered_palette(input);
                 let items = if commands.is_empty() {
                     vec![ListItem::new("No matching commands.")]
                 } else {
                     commands
                         .iter()
-                        .map(|command| {
+                        .map(|binding| {
+                            let p = binding.palette.as_ref().unwrap();
                             let mut left_spans = vec![
                                 Span::styled(
-                                    command.name.to_string(),
+                                    p.name.to_string(),
                                     Style::default()
                                         .fg(Color::Cyan)
                                         .add_modifier(Modifier::BOLD),
                                 ),
                                 Span::styled(
-                                    format!("  {}", command.description),
+                                    format!("  {}", p.description),
                                     Style::default().fg(self.theme.hint_desc_fg),
                                 ),
                             ];
-                            if let Some(shortcut) = command.shortcut {
+                            if let Some(shortcut) = p.shortcut {
                                 let left_len: usize = left_spans.iter().map(|s| s.width()).sum();
                                 // +3 for badge brackets <k>, +2 for borders, +1 for right padding
                                 let badge_len = shortcut.len() + 3;

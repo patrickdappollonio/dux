@@ -14,51 +14,49 @@ impl App {
         if self.input_target == InputTarget::Agent {
             return self.handle_agent_input(key);
         }
-        if (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c'))
-            || key.code == KeyCode::Char('q')
-        {
-            let active_count = self.providers.len();
-            if active_count > 0 {
-                self.prompt = PromptState::ConfirmQuit {
-                    active_count,
-                    confirm_selected: false,
-                };
-                return Ok(false);
-            }
-            return Ok(true);
-        }
-        if key.code == KeyCode::Char('?') {
-            self.help_overlay = !self.help_overlay;
-            return Ok(false);
-        }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
-            self.prompt = PromptState::Command {
-                input: String::new(),
-                selected: 0,
-                searching: false,
-            };
-            self.set_info("Command palette opened.");
-            return Ok(false);
-        }
-        if key.code == KeyCode::Tab {
-            self.focus = self.focus.next();
-            return Ok(false);
-        }
-        if key.code == KeyCode::BackTab {
-            self.focus = self.focus.previous();
-            return Ok(false);
-        }
-        if key.code == KeyCode::Char('[') {
-            self.left_collapsed = !self.left_collapsed;
-            return Ok(false);
-        }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('w') {
-            self.resize_mode = !self.resize_mode;
-            if self.resize_mode {
-                self.set_info("Resize mode on: h/l/←/→ resize side panes.");
-            } else {
-                self.persist_pane_widths();
-                self.set_info("Resize mode off.");
+        if let Some(action) = keybindings::lookup(&key, BindingScope::Global) {
+            match action {
+                Action::Quit => {
+                    let active_count = self.providers.len();
+                    if active_count > 0 {
+                        self.prompt = PromptState::ConfirmQuit {
+                            active_count,
+                            confirm_selected: false,
+                        };
+                        return Ok(false);
+                    }
+                    return Ok(true);
+                }
+                Action::ToggleHelp => {
+                    self.help_overlay = !self.help_overlay;
+                }
+                Action::OpenPalette => {
+                    self.prompt = PromptState::Command {
+                        input: String::new(),
+                        selected: 0,
+                        searching: false,
+                    };
+                    self.set_info("Command palette opened.");
+                }
+                Action::FocusNext => {
+                    self.focus = self.focus.next();
+                }
+                Action::FocusPrev => {
+                    self.focus = self.focus.previous();
+                }
+                Action::ToggleSidebar => {
+                    self.left_collapsed = !self.left_collapsed;
+                }
+                Action::ToggleResizeMode => {
+                    self.resize_mode = !self.resize_mode;
+                    if self.resize_mode {
+                        self.set_info("Resize mode on: h/l/←/→ resize side panes.");
+                    } else {
+                        self.persist_pane_widths();
+                        self.set_info("Resize mode off.");
+                    }
+                }
+                _ => {}
             }
             return Ok(false);
         }
@@ -76,152 +74,146 @@ impl App {
     }
 
     fn handle_left_key(&mut self, key: KeyEvent) -> Result<()> {
-        let items = self.left_items();
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                if self.selected_left + 1 < items.len() {
-                    self.selected_left += 1;
-                    self.reload_changed_files();
-                }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if self.selected_left > 0 {
-                    self.selected_left -= 1;
-                    self.reload_changed_files();
-                }
-            }
-            KeyCode::Enter => {
-                match self.left_items().get(self.selected_left) {
-                    Some(LeftItem::Project(project_index)) => {
-                        let project_id = self.projects[*project_index].id.clone();
-                        let has_sessions = self.sessions.iter().any(|s| s.project_id == project_id);
-                        if has_sessions {
-                            // Expand the project if collapsed so the session items are visible
-                            if self.collapsed_projects.contains(&project_id) {
-                                self.collapsed_projects.remove(&project_id);
-                                self.rebuild_left_items();
-                            }
-                            // Find the first session belonging to this project
-                            if let Some(pos) = self.left_items().iter().position(|item| {
-                                matches!(item, LeftItem::Session(si) if self.sessions[*si].project_id == project_id)
-                            }) {
-                                self.selected_left = pos;
-                                self.center_mode = CenterMode::Agent;
-                                self.focus = FocusPane::Center;
-                                self.reload_changed_files();
-                                if self.selected_session()
-                                    .map(|s| self.providers.contains_key(&s.id))
-                                    .unwrap_or(false)
-                                {
-                                    self.input_target = InputTarget::Agent;
-                                }
-                            }
-                        } else {
-                            // Project has no agents: create one
-                            self.create_agent_for_selected_project()?;
-                        }
-                    }
-                    Some(LeftItem::Session(_)) => {
-                        self.center_mode = CenterMode::Agent;
-                        self.focus = FocusPane::Center;
+        let item_count = self.left_items().len();
+        if let Some(action) = keybindings::lookup(&key, BindingScope::Left) {
+            match action {
+                Action::MoveDown => {
+                    if self.selected_left + 1 < item_count {
+                        self.selected_left += 1;
                         self.reload_changed_files();
-                        if self
+                    }
+                }
+                Action::MoveUp => {
+                    if self.selected_left > 0 {
+                        self.selected_left -= 1;
+                        self.reload_changed_files();
+                    }
+                }
+                Action::FocusAgent => {
+                    match self.left_items().get(self.selected_left) {
+                        Some(LeftItem::Project(project_index)) => {
+                            let project_id = self.projects[*project_index].id.clone();
+                            let has_sessions =
+                                self.sessions.iter().any(|s| s.project_id == project_id);
+                            if has_sessions {
+                                if self.collapsed_projects.contains(&project_id) {
+                                    self.collapsed_projects.remove(&project_id);
+                                    self.rebuild_left_items();
+                                }
+                                if let Some(pos) =
+                                    self.left_items().iter().position(|item| {
+                                        matches!(item, LeftItem::Session(si) if self.sessions[*si].project_id == project_id)
+                                    })
+                                {
+                                    self.selected_left = pos;
+                                    self.center_mode = CenterMode::Agent;
+                                    self.focus = FocusPane::Center;
+                                    self.reload_changed_files();
+                                    if self
+                                        .selected_session()
+                                        .map(|s| self.providers.contains_key(&s.id))
+                                        .unwrap_or(false)
+                                    {
+                                        self.input_target = InputTarget::Agent;
+                                    }
+                                }
+                            } else {
+                                self.create_agent_for_selected_project()?;
+                            }
+                        }
+                        Some(LeftItem::Session(_)) => {
+                            self.center_mode = CenterMode::Agent;
+                            self.focus = FocusPane::Center;
+                            self.reload_changed_files();
+                            if self
+                                .selected_session()
+                                .map(|s| self.providers.contains_key(&s.id))
+                                .unwrap_or(false)
+                            {
+                                self.input_target = InputTarget::Agent;
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                Action::OpenProjectBrowser => {
+                    self.open_project_browser()?;
+                }
+                Action::NewAgent => self.create_agent_for_selected_project()?,
+                Action::RefreshProject => self.refresh_selected_project()?,
+                Action::DeleteSession => self.confirm_delete_selected_session()?,
+                Action::CycleProvider => self.cycle_selected_project_provider()?,
+                Action::ReconnectAgent => self.reconnect_selected_session()?,
+                Action::CopyPath => self.copy_selected_path()?,
+                Action::ToggleProject => self.toggle_collapse_selected_project(),
+                Action::InteractAgent => {
+                    if self.selected_session().is_some()
+                        && self
                             .selected_session()
                             .map(|s| self.providers.contains_key(&s.id))
                             .unwrap_or(false)
-                        {
-                            self.input_target = InputTarget::Agent;
-                        }
+                    {
+                        self.focus = FocusPane::Center;
+                        self.center_mode = CenterMode::Agent;
+                        self.input_target = InputTarget::Agent;
+                        self.set_info(
+                            "Interactive mode. Keys forwarded to agent. ctrl+g exits.",
+                        );
+                    } else {
+                        self.set_error(
+                            "No active agent. Press \"r\" to restart or \"n\" to create a new one.",
+                        );
                     }
-                    None => {}
                 }
+                _ => {}
             }
-            KeyCode::Char('a') => {
-                self.open_project_browser()?;
-            }
-            KeyCode::Char('n') => self.create_agent_for_selected_project()?,
-            KeyCode::Char('u') => self.refresh_selected_project()?,
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.confirm_delete_selected_session()?
-            }
-            KeyCode::Char('d') => self.cycle_selected_project_provider()?,
-            KeyCode::Char('r') => self.reconnect_selected_session()?,
-            KeyCode::Char('y') => self.copy_selected_path()?,
-            KeyCode::Char(' ') => self.toggle_collapse_selected_project(),
-            KeyCode::Char('i') => {
-                if self.selected_session().is_some()
-                    && self
-                        .selected_session()
-                        .map(|s| self.providers.contains_key(&s.id))
-                        .unwrap_or(false)
-                {
-                    self.focus = FocusPane::Center;
-                    self.center_mode = CenterMode::Agent;
-                    self.input_target = InputTarget::Agent;
-                    self.set_info("Interactive mode. Keys forwarded to agent. ctrl+g exits.");
-                } else {
-                    self.set_error(
-                        "No active agent. Press \"r\" to restart or \"n\" to create a new one.",
-                    );
-                }
-            }
-            _ => {}
         }
         Ok(())
     }
 
     fn handle_center_key(&mut self, key: KeyEvent) -> Result<()> {
-        match key.code {
-            KeyCode::Char('i') => {
-                if self.selected_session().is_some()
-                    && self
+        if let Some(action) = keybindings::lookup(&key, BindingScope::Center) {
+            match action {
+                Action::InteractAgent => {
+                    if self.selected_session().is_some()
+                        && self
+                            .selected_session()
+                            .map(|s| self.providers.contains_key(&s.id))
+                            .unwrap_or(false)
+                    {
+                        self.reset_pty_scrollback();
+                        self.input_target = InputTarget::Agent;
+                        self.set_info(
+                            "Interactive mode. Keys forwarded to agent. ctrl+g exits.",
+                        );
+                    } else {
+                        self.set_error(
+                            "No active agent. Press \"r\" to restart or \"n\" to create a new one.",
+                        );
+                    }
+                }
+                Action::ReconnectAgent => {
+                    // Allow relaunching an exited agent from the center pane,
+                    // or entering interactive mode if the agent is active.
+                    let has_provider = self
                         .selected_session()
                         .map(|s| self.providers.contains_key(&s.id))
-                        .unwrap_or(false)
-                {
-                    self.reset_pty_scrollback();
-                    self.input_target = InputTarget::Agent;
-                    self.set_info("Interactive mode. Keys forwarded to agent. ctrl+g exits.");
-                } else {
-                    self.set_error(
-                        "No active agent. Press \"r\" to restart or \"n\" to create a new one.",
-                    );
+                        .unwrap_or(false);
+                    if has_provider {
+                        self.reset_pty_scrollback();
+                        self.input_target = InputTarget::Agent;
+                    } else if self.selected_session().is_some() {
+                        self.reconnect_selected_session()?;
+                    }
                 }
-            }
-            KeyCode::Char('r') | KeyCode::Enter => {
-                // Allow relaunching an exited agent from the center pane,
-                // or entering interactive mode if the agent is active.
-                let has_provider = self
-                    .selected_session()
-                    .map(|s| self.providers.contains_key(&s.id))
-                    .unwrap_or(false);
-                if has_provider {
-                    self.reset_pty_scrollback();
-                    self.input_target = InputTarget::Agent;
-                } else if self.selected_session().is_some() {
-                    self.reconnect_selected_session()?;
+                Action::ScrollPageUp => {
+                    self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
                 }
+                Action::ScrollPageDown => {
+                    self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
+                }
+                _ => {}
             }
-            KeyCode::Esc => {
-                // When no diff is open, ESC from the center pane is a no-op.
-                // Diff closing is handled globally by close_top_overlay so it
-                // works regardless of which pane is focused.
-            }
-            // Page-up style scrolling: ctrl+b or PageUp
-            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
-            }
-            KeyCode::PageUp => {
-                self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
-            }
-            // Page-down style scrolling: ctrl+f or PageDown
-            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
-            }
-            KeyCode::PageDown => {
-                self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
-            }
-            _ => {}
         }
         Ok(())
     }
@@ -248,19 +240,21 @@ impl App {
     }
 
     fn handle_files_key(&mut self, key: KeyEvent) -> Result<()> {
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => {
-                if self.selected_file + 1 < self.changed_files.len() {
-                    self.selected_file += 1;
+        if let Some(action) = keybindings::lookup(&key, BindingScope::Files) {
+            match action {
+                Action::MoveDown => {
+                    if self.selected_file + 1 < self.changed_files.len() {
+                        self.selected_file += 1;
+                    }
                 }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if self.selected_file > 0 {
-                    self.selected_file -= 1;
+                Action::MoveUp => {
+                    if self.selected_file > 0 {
+                        self.selected_file -= 1;
+                    }
                 }
+                Action::OpenDiff => self.open_diff_for_selected_file()?,
+                _ => {}
             }
-            KeyCode::Enter => self.open_diff_for_selected_file()?,
-            _ => {}
         }
         Ok(())
     }
@@ -365,7 +359,7 @@ impl App {
                     *searching = true;
                 }
                 KeyCode::Char('j') | KeyCode::Down if !*searching => {
-                    let count = filtered_commands(input).len();
+                    let count = keybindings::filtered_palette(input).len();
                     if *selected + 1 < count {
                         *selected += 1;
                     }
@@ -376,7 +370,7 @@ impl App {
                     }
                 }
                 KeyCode::Down if *searching => {
-                    let count = filtered_commands(input).len();
+                    let count = keybindings::filtered_palette(input).len();
                     if *selected + 1 < count {
                         *selected += 1;
                     }
@@ -391,8 +385,8 @@ impl App {
                     *selected = 0;
                 }
                 KeyCode::Tab => {
-                    if let Some(command) = filtered_commands(input).get(*selected) {
-                        *input = command.name.to_string();
+                    if let Some(binding) = keybindings::filtered_palette(input).get(*selected) {
+                        *input = binding.palette.as_ref().unwrap().name.to_string();
                         *selected = 0;
                     }
                 }
@@ -400,9 +394,9 @@ impl App {
                     if *searching {
                         *searching = false;
                     } else {
-                        let command = if let Some(command) = filtered_commands(input).get(*selected)
+                        let command = if let Some(binding) = keybindings::filtered_palette(input).get(*selected)
                         {
-                            command.name.to_string()
+                            binding.palette.as_ref().unwrap().name.to_string()
                         } else {
                             input.trim().to_string()
                         };

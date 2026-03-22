@@ -25,6 +25,7 @@ use crate::config::{
     ensure_config, save_config,
 };
 use crate::git;
+use crate::keybindings::{self, Action, BindingScope, HintContext};
 use crate::logger;
 use crate::model::{AgentSession, ChangedFile, Project, ProviderKind, SessionStatus};
 use crate::pty::PtyClient;
@@ -165,71 +166,6 @@ pub(crate) enum WorkerEvent {
         entries: Vec<BrowserEntry>,
     },
 }
-
-#[derive(Clone, Copy)]
-pub(crate) struct CommandDef {
-    pub(crate) name: &'static str,
-    pub(crate) description: &'static str,
-    pub(crate) shortcut: Option<&'static str>,
-}
-
-pub(crate) const COMMANDS: &[CommandDef] = &[
-    CommandDef {
-        name: "new-agent",
-        description: "Create a new agent for the selected project",
-        shortcut: Some("n"),
-    },
-    CommandDef {
-        name: "provider",
-        description: "Toggle the selected project's default provider",
-        shortcut: Some("d"),
-    },
-    CommandDef {
-        name: "refresh-project",
-        description: "Git pull the selected project checkout",
-        shortcut: Some("u"),
-    },
-    CommandDef {
-        name: "delete-project",
-        description: "Remove the selected project and its sessions",
-        shortcut: None,
-    },
-    CommandDef {
-        name: "delete-agent",
-        description: "Delete the selected agent session",
-        shortcut: None,
-    },
-    CommandDef {
-        name: "reconnect-agent",
-        description: "Restart the CLI for the selected agent",
-        shortcut: None,
-    },
-    CommandDef {
-        name: "add-project",
-        description: "Open the project browser",
-        shortcut: Some("a"),
-    },
-    CommandDef {
-        name: "toggle-sidebar",
-        description: "Collapse or expand the projects sidebar",
-        shortcut: Some("["),
-    },
-    CommandDef {
-        name: "toggle-project",
-        description: "Collapse or expand the selected project's agents",
-        shortcut: Some("Space"),
-    },
-    CommandDef {
-        name: "copy-path",
-        description: "Copy the selected agent's worktree path",
-        shortcut: Some("y"),
-    },
-    CommandDef {
-        name: "help",
-        description: "Open the help overlay",
-        shortcut: Some("?"),
-    },
-];
 
 mod input;
 mod render;
@@ -517,20 +453,3 @@ pub(crate) fn provider_config(config: &Config, provider: &ProviderKind) -> Provi
         })
 }
 
-pub(crate) fn filtered_commands(input: &str) -> Vec<&'static CommandDef> {
-    let needle = input.trim().to_lowercase();
-    if needle.is_empty() {
-        return COMMANDS.iter().collect();
-    }
-    let mut name_matches: Vec<&'static CommandDef> = Vec::new();
-    let mut desc_matches: Vec<&'static CommandDef> = Vec::new();
-    for command in COMMANDS.iter() {
-        if command.name.contains(&needle) {
-            name_matches.push(command);
-        } else if command.description.to_lowercase().contains(&needle) {
-            desc_matches.push(command);
-        }
-    }
-    name_matches.extend(desc_matches);
-    name_matches
-}
