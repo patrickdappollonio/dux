@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -56,6 +57,7 @@ pub struct App {
     last_pty_size: (u16, u16),
     theme: Theme,
     tick_count: u64,
+    watched_worktree: Arc<Mutex<Option<PathBuf>>>,
     collapsed_projects: HashSet<String>,
     left_items_cache: Vec<LeftItem>,
 }
@@ -88,7 +90,7 @@ impl FocusPane {
 #[derive(Clone, Debug)]
 enum CenterMode {
     Agent,
-    Diff(String),
+    Diff(Vec<Line<'static>>),
 }
 
 #[derive(Clone, Debug)]
@@ -157,6 +159,7 @@ enum WorkerEvent {
         pty_size: (u16, u16), // (rows, cols) the PTY was spawned with
     },
     CreateAgentFailed(String),
+    ChangedFilesReady(Vec<ChangedFile>),
 }
 
 #[derive(Clone, Copy)]
@@ -239,6 +242,7 @@ impl App {
         let projects = load_projects(&config);
         let sessions = session_store.load_sessions()?;
         let (worker_tx, worker_rx) = mpsc::channel();
+        let watched_worktree: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
         let mut app = Self {
             left_width_pct: config.ui.left_width_pct,
             right_width_pct: config.ui.right_width_pct,
@@ -265,6 +269,7 @@ impl App {
             last_pty_size: (0, 0),
             theme: Theme::default_dark(),
             tick_count: 0,
+            watched_worktree: Arc::clone(&watched_worktree),
             collapsed_projects: HashSet::new(),
             left_items_cache: Vec::new(),
         };
@@ -275,6 +280,7 @@ impl App {
     }
 
     pub fn run(&mut self) -> Result<()> {
+        self.spawn_changed_files_poller();
         let mut terminal = ratatui::init();
         loop {
             self.drain_events();
@@ -1284,8 +1290,9 @@ impl App {
         let Some(file) = self.changed_files.get(self.selected_file) else {
             return Ok(());
         };
-        let diff = git::diff_for_file(Path::new(&session.worktree_path), &file.path)?;
-        self.center_mode = CenterMode::Diff(diff);
+        let output =
+            crate::diff::diff_file(Path::new(&session.worktree_path), &file.path, &self.theme)?;
+        self.center_mode = CenterMode::Diff(output.lines);
         self.focus = FocusPane::Center;
         Ok(())
     }
@@ -1332,6 +1339,12 @@ impl App {
                 WorkerEvent::CreateAgentFailed(message) => {
                     self.create_agent_in_flight = false;
                     self.set_error(message);
+                }
+                WorkerEvent::ChangedFilesReady(files) => {
+                    self.changed_files = files;
+                    if self.selected_file >= self.changed_files.len() {
+                        self.selected_file = self.changed_files.len().saturating_sub(1);
+                    }
                 }
             }
         }
@@ -1571,41 +1584,8 @@ impl App {
         };
         let focused = self.focus == FocusPane::Center;
         match &self.center_mode {
-            CenterMode::Diff(diff) => {
-                let styled_lines: Vec<Line> = if diff.trim().is_empty() {
-                    vec![Line::from("No diff for this file.")]
-                } else {
-                    diff.lines()
-                        .map(|line| {
-                            if line.starts_with("+++") || line.starts_with("---") {
-                                Line::from(Span::styled(
-                                    line.to_string(),
-                                    Style::default()
-                                        .fg(self.theme.diff_file_header)
-                                        .add_modifier(Modifier::BOLD),
-                                ))
-                            } else if line.starts_with("@@") {
-                                Line::from(Span::styled(
-                                    line.to_string(),
-                                    Style::default().fg(self.theme.diff_hunk),
-                                ))
-                            } else if line.starts_with('+') {
-                                Line::from(Span::styled(
-                                    line.to_string(),
-                                    Style::default().fg(self.theme.diff_add),
-                                ))
-                            } else if line.starts_with('-') {
-                                Line::from(Span::styled(
-                                    line.to_string(),
-                                    Style::default().fg(self.theme.diff_remove),
-                                ))
-                            } else {
-                                Line::from(line.to_string())
-                            }
-                        })
-                        .collect()
-                };
-                Paragraph::new(styled_lines)
+            CenterMode::Diff(diff_lines) => {
+                Paragraph::new(diff_lines.clone())
                     .block(self.themed_block(title, focused))
                     .wrap(Wrap { trim: false })
                     .render(area, frame.buffer_mut());
@@ -1824,24 +1804,46 @@ impl App {
     }
 
     fn render_files(&self, frame: &mut Frame, area: Rect) {
-        let width = area.width.saturating_sub(6) as usize;
+        let inner_width = area.width.saturating_sub(2) as usize; // minus borders
         let items = self
             .changed_files
             .iter()
             .enumerate()
             .map(|(index, file)| {
+                // Build the right-aligned stats string, e.g. "+12 -3".
+                let stats = format_line_stats(file.additions, file.deletions);
+                let stats_width = stats.iter().map(|s| s.width()).sum::<usize>();
+
+                // Status prefix takes 3 chars ("M  ").
+                let prefix_width = 3;
+                // Leave 1 char gap between path and stats.
+                let path_budget = inner_width
+                    .saturating_sub(prefix_width)
+                    .saturating_sub(stats_width)
+                    .saturating_sub(1);
+
                 let path = if index == self.selected_file {
                     file.path.clone()
                 } else {
-                    git::ellipsize_middle(&file.path, width.max(10))
+                    git::ellipsize_middle(&file.path, path_budget.max(10))
                 };
-                ListItem::new(Line::from(vec![
+
+                let path_display_width = path.chars().count();
+                let padding = inner_width
+                    .saturating_sub(prefix_width)
+                    .saturating_sub(path_display_width)
+                    .saturating_sub(stats_width);
+
+                let mut spans = vec![
                     Span::styled(
                         format!("{:>2} ", file.status),
                         Style::default().fg(self.theme.file_status_fg),
                     ),
                     Span::raw(path),
-                ]))
+                    Span::raw(" ".repeat(padding)),
+                ];
+                spans.extend(stats);
+                ListItem::new(Line::from(spans))
             })
             .collect::<Vec<_>>();
         let focused = self.focus == FocusPane::Files;
@@ -2807,13 +2809,37 @@ impl App {
     }
 
     fn reload_changed_files(&mut self) {
-        self.changed_files = self
+        let worktree = self
             .selected_session()
-            .and_then(|session| git::changed_files(Path::new(&session.worktree_path)).ok())
+            .map(|s| PathBuf::from(&s.worktree_path));
+        // Keep the background poller in sync with the currently selected session.
+        if let Ok(mut guard) = self.watched_worktree.lock() {
+            *guard = worktree.clone();
+        }
+        self.changed_files = worktree
+            .and_then(|p| git::changed_files(&p).ok())
             .unwrap_or_default();
         if self.selected_file >= self.changed_files.len() {
             self.selected_file = self.changed_files.len().saturating_sub(1);
         }
+    }
+
+    fn spawn_changed_files_poller(&self) {
+        let tx = self.worker_tx.clone();
+        let watched = Arc::clone(&self.watched_worktree);
+        thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_secs(2));
+                let path = watched.lock().ok().and_then(|guard| guard.clone());
+                if let Some(worktree_path) = path {
+                    if let Ok(files) = git::changed_files(&worktree_path) {
+                        if tx.send(WorkerEvent::ChangedFilesReady(files)).is_err() {
+                            break; // receiver dropped, app is shutting down
+                        }
+                    }
+                }
+            }
+        });
     }
 
     fn mark_session_status(&mut self, session_id: &str, status: SessionStatus) {
@@ -2954,6 +2980,31 @@ fn run_create_agent_job(
         client,
         pty_size: (rows, cols),
     });
+}
+
+/// Format additions/deletions as right-aligned colored spans.
+/// Returns an empty vec when both counts are zero.
+fn format_line_stats(additions: usize, deletions: usize) -> Vec<Span<'static>> {
+    if additions == 0 && deletions == 0 {
+        return Vec::new();
+    }
+    let mut spans = Vec::new();
+    if additions > 0 {
+        spans.push(Span::styled(
+            format!("+{additions}"),
+            Style::default().fg(Color::Green),
+        ));
+    }
+    if additions > 0 && deletions > 0 {
+        spans.push(Span::raw(" "));
+    }
+    if deletions > 0 {
+        spans.push(Span::styled(
+            format!("-{deletions}"),
+            Style::default().fg(Color::Red),
+        ));
+    }
+    spans
 }
 
 fn load_projects(config: &Config) -> Vec<Project> {

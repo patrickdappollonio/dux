@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -196,67 +197,134 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     Ok(config)
 }
 
+// ---------------------------------------------------------------------------
+// Config schema: defines the layout, comments, and value accessors for the
+// TOML config file. Adding a new setting means adding a struct field, its
+// Default value, and one entry here — comments live in exactly one place.
+// ---------------------------------------------------------------------------
+
+/// A value extracted from [`Config`] for rendering into TOML.
+enum FieldValue {
+    Str(String),
+    OptStr(Option<String>),
+    U16(u16),
+}
+
+/// One entry in the config file layout.
+enum ConfigEntry {
+    /// A comment line (must include the leading `#`).
+    Comment(&'static str),
+    /// A blank line for spacing.
+    Blank,
+    /// A TOML section header, e.g. `[defaults]`.
+    Section(&'static str),
+    /// A key = value line with an optional comment above it.
+    Field {
+        key: &'static str,
+        comment: Option<&'static str>,
+        value_fn: fn(&Config) -> FieldValue,
+    },
+    /// Renders all `[providers.*]` sub-tables dynamically.
+    Providers,
+    /// Renders the `[[projects]]` array.
+    Projects,
+}
+
+fn config_schema() -> Vec<ConfigEntry> {
+    vec![
+        ConfigEntry::Comment("# dux configuration"),
+        ConfigEntry::Comment(
+            "# Every value is materialized here so the file doubles as documentation.",
+        ),
+        ConfigEntry::Blank,
+        ConfigEntry::Section("defaults"),
+        ConfigEntry::Field {
+            key: "provider",
+            comment: Some("# Which provider new sessions use unless a project overrides it."),
+            value_fn: |c| FieldValue::Str(c.defaults.provider.clone()),
+        },
+        ConfigEntry::Field {
+            key: "start_directory",
+            comment: Some("# Starting directory for the project browser."),
+            value_fn: |c| FieldValue::OptStr(c.defaults.start_directory.clone()),
+        },
+        ConfigEntry::Blank,
+        ConfigEntry::Providers,
+        ConfigEntry::Section("logging"),
+        ConfigEntry::Field {
+            key: "level",
+            comment: Some("# Log level can be error, info, or debug."),
+            value_fn: |c| FieldValue::Str(c.logging.level.clone()),
+        },
+        ConfigEntry::Field {
+            key: "path",
+            comment: Some("# Relative paths are resolved from the dux config directory."),
+            value_fn: |c| FieldValue::Str(c.logging.path.clone()),
+        },
+        ConfigEntry::Blank,
+        ConfigEntry::Section("ui"),
+        ConfigEntry::Field {
+            key: "left_width_pct",
+            comment: Some(
+                "# Initial pane sizing percentages. They can still be resized at runtime.",
+            ),
+            value_fn: |c| FieldValue::U16(c.ui.left_width_pct),
+        },
+        ConfigEntry::Field {
+            key: "right_width_pct",
+            comment: None,
+            value_fn: |c| FieldValue::U16(c.ui.right_width_pct),
+        },
+        ConfigEntry::Blank,
+        ConfigEntry::Projects,
+    ]
+}
+
+fn render_config(config: &Config) -> String {
+    let mut out = String::new();
+    for entry in config_schema() {
+        match entry {
+            ConfigEntry::Comment(text) => {
+                out.push_str(text);
+                out.push('\n');
+            }
+            ConfigEntry::Blank => out.push('\n'),
+            ConfigEntry::Section(name) => {
+                let _ = writeln!(out, "[{name}]");
+            }
+            ConfigEntry::Field {
+                key,
+                comment,
+                value_fn,
+            } => {
+                if let Some(c) = comment {
+                    out.push_str(c);
+                    out.push('\n');
+                }
+                match value_fn(config) {
+                    FieldValue::Str(s) => {
+                        let _ = writeln!(out, "{key} = \"{}\"", escape_toml_string(&s));
+                    }
+                    FieldValue::OptStr(Some(s)) => {
+                        let _ = writeln!(out, "{key} = \"{}\"", escape_toml_string(&s));
+                    }
+                    FieldValue::OptStr(None) => {
+                        let _ = writeln!(out, "{key} = \"\"");
+                    }
+                    FieldValue::U16(n) => {
+                        let _ = writeln!(out, "{key} = {n}");
+                    }
+                }
+            }
+            ConfigEntry::Providers => render_provider_configs(&mut out, &config.providers),
+            ConfigEntry::Projects => render_projects(&mut out, &config.projects),
+        }
+    }
+    out
+}
+
 pub fn render_default_config() -> String {
-    let default = Config::default();
-    format!(
-        r#"# dux configuration
-# Every value is materialized here so the file doubles as documentation.
-
-[defaults]
-# Which provider new sessions use unless a project overrides it.
-provider = "{provider}"
-# Starting directory for the project browser.
-start_directory = "{start_directory}"
-
-[providers.claude]
-# CLI command for Claude sessions.
-# Example: command = "claude"
-command = "{claude_command}"
-args = []
-
-[providers.codex]
-# CLI command for Codex sessions.
-# Example: command = "codex"
-command = "{codex_command}"
-args = []
-
-[logging]
-# Log level can be error, info, or debug.
-level = "{log_level}"
-# Relative paths are resolved from the dux config directory.
-path = "{log_path}"
-
-[ui]
-# Initial pane sizing percentages. They can still be resized at runtime.
-left_width_pct = {left_width}
-right_width_pct = {right_width}
-
-# Projects are registered here by the UI. The folder name is used when name is omitted.
-# default_provider can override the global default for one project.
-projects = []
-"#,
-        provider = escape_toml_string(&default.defaults.provider),
-        start_directory =
-            escape_toml_string(default.defaults.start_directory.as_deref().unwrap_or("")),
-        claude_command = escape_toml_string(
-            default
-                .providers
-                .get("claude")
-                .map(|config| config.command.as_str())
-                .unwrap_or("claude")
-        ),
-        codex_command = escape_toml_string(
-            default
-                .providers
-                .get("codex")
-                .map(|config| config.command.as_str())
-                .unwrap_or("codex")
-        ),
-        log_level = escape_toml_string(&default.logging.level),
-        log_path = escape_toml_string(&default.logging.path),
-        left_width = default.ui.left_width_pct,
-        right_width = default.ui.right_width_pct,
-    )
+    render_config(&Config::default())
 }
 
 pub fn save_config(config_path: &Path, config: &Config) -> Result<()> {
@@ -266,70 +334,31 @@ pub fn save_config(config_path: &Path, config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn render_config(config: &Config) -> String {
-    let mut out = String::new();
-    out.push_str("# dux configuration\n");
-    out.push_str("# Every value is materialized here so the file doubles as documentation.\n\n");
-    out.push_str("[defaults]\n");
-    out.push_str("# Which provider new sessions use unless a project overrides it.\n");
-    out.push_str(&format!(
-        "provider = \"{}\"\n",
-        escape_toml_string(&config.defaults.provider)
-    ));
-    out.push_str("# Starting directory for the project browser.\n");
-    if let Some(dir) = &config.defaults.start_directory {
-        out.push_str(&format!(
-            "start_directory = \"{}\"\n\n",
-            escape_toml_string(dir)
-        ));
-    } else {
-        out.push_str("start_directory = \"\"\n\n");
-    }
-    render_provider_configs(&mut out, &config.providers);
-    out.push_str("[logging]\n");
-    out.push_str("# Log level can be error, info, or debug.\n");
-    out.push_str(&format!(
-        "level = \"{}\"\n",
-        escape_toml_string(&config.logging.level)
-    ));
-    out.push_str("# Relative paths are resolved from the dux config directory.\n");
-    out.push_str(&format!(
-        "path = \"{}\"\n\n",
-        escape_toml_string(&config.logging.path)
-    ));
-    out.push_str("[ui]\n");
-    out.push_str("# Initial pane sizing percentages. They can still be resized at runtime.\n");
-    out.push_str(&format!("left_width_pct = {}\n", config.ui.left_width_pct));
-    out.push_str(&format!(
-        "right_width_pct = {}\n\n",
-        config.ui.right_width_pct
-    ));
+fn render_projects(out: &mut String, projects: &[ProjectConfig]) {
     out.push_str(
         "# Projects are registered here by the UI. The folder name is used when name is omitted.\n",
     );
     out.push_str("# default_provider can override the global default for one project.\n");
-    for project in &config.projects {
-        out.push_str("[[projects]]\n");
-        out.push_str(&format!("id = \"{}\"\n", escape_toml_string(&project.id)));
-        out.push_str(&format!(
-            "path = \"{}\"\n",
-            escape_toml_string(&project.path)
-        ));
-        if let Some(name) = &project.name {
-            out.push_str(&format!("name = \"{}\"\n", escape_toml_string(name)));
-        }
-        if let Some(provider) = &project.default_provider {
-            out.push_str(&format!(
-                "default_provider = \"{}\"\n",
-                escape_toml_string(provider)
-            ));
-        }
-        out.push('\n');
-    }
-    if config.projects.is_empty() {
+    if projects.is_empty() {
         out.push_str("projects = []\n");
+    } else {
+        for project in projects {
+            out.push_str("[[projects]]\n");
+            let _ = writeln!(out, "id = \"{}\"", escape_toml_string(&project.id));
+            let _ = writeln!(out, "path = \"{}\"", escape_toml_string(&project.path));
+            if let Some(name) = &project.name {
+                let _ = writeln!(out, "name = \"{}\"", escape_toml_string(name));
+            }
+            if let Some(provider) = &project.default_provider {
+                let _ = writeln!(
+                    out,
+                    "default_provider = \"{}\"",
+                    escape_toml_string(provider)
+                );
+            }
+            out.push('\n');
+        }
     }
-    out
 }
 
 fn escape_toml_string(value: &str) -> String {
@@ -493,6 +522,17 @@ mod tests {
         let parsed: Config = toml::from_str(&rendered).expect("should parse back");
         assert_eq!(parsed.projects[0].path, config.projects[0].path);
         assert_eq!(parsed.projects[0].name, config.projects[0].name);
+    }
+
+    #[test]
+    fn default_config_round_trips_through_toml() {
+        let rendered = render_default_config();
+        let parsed: Config = toml::from_str(&rendered).expect("default config should parse");
+        let re_rendered = render_config(&parsed);
+        assert_eq!(
+            rendered, re_rendered,
+            "render → parse → render should be stable"
+        );
     }
 
     #[cfg(target_os = "macos")]
