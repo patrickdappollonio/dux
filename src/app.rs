@@ -888,8 +888,10 @@ impl App {
                     if let Some(entry) = visible.get(*selected).cloned() {
                         if entry.is_git_repo {
                             let path = entry.path.to_string_lossy().to_string();
-                            self.add_project(path, String::new())?;
                             self.prompt = PromptState::None;
+                            if let Err(e) = self.add_project(path, String::new()) {
+                                self.set_error(format!("{e:#}"));
+                            }
                         } else {
                             let new_dir = entry.path.clone();
                             *current_dir = new_dir.clone();
