@@ -40,6 +40,7 @@ pub struct Theme {
     pub prompt_cursor: Color,
     pub provider_label_fg: Color,
     pub branch_fg: Color,
+    pub terminal_hint_fg: Color,
 }
 
 impl Theme {
@@ -81,6 +82,7 @@ impl Theme {
             prompt_cursor: Color::Cyan,
             provider_label_fg: Color::Rgb(100, 100, 100),
             branch_fg: Color::Cyan,
+            terminal_hint_fg: Color::Rgb(80, 80, 80),
         }
     }
 
@@ -115,17 +117,15 @@ impl Theme {
 
     pub fn status_style(&self, tone: crate::statusline::StatusTone) -> Style {
         match tone {
-            crate::statusline::StatusTone::Info => {
-                Style::default().fg(self.status_info_fg).bg(self.status_info_bg)
-            }
-            crate::statusline::StatusTone::Busy => {
-                Style::default().fg(self.status_busy_fg).bg(self.status_busy_bg)
-            }
-            crate::statusline::StatusTone::Error => {
-                Style::default()
-                    .fg(self.status_error_fg)
-                    .bg(self.status_error_bg)
-            }
+            crate::statusline::StatusTone::Info => Style::default()
+                .fg(self.status_info_fg)
+                .bg(self.status_info_bg),
+            crate::statusline::StatusTone::Busy => Style::default()
+                .fg(self.status_busy_fg)
+                .bg(self.status_busy_bg),
+            crate::statusline::StatusTone::Error => Style::default()
+                .fg(self.status_error_fg)
+                .bg(self.status_error_bg),
         }
     }
 
@@ -149,12 +149,7 @@ impl Theme {
     /// and the key name in bold. Returns 3 spans.
     pub fn key_badge<'a>(&self, key: &'a str, bg: Color) -> Vec<Span<'a>> {
         vec![
-            Span::styled(
-                "<",
-                Style::default()
-                    .fg(self.hint_bracket_fg)
-                    .bg(bg),
-            ),
+            Span::styled("<", Style::default().fg(self.hint_bracket_fg).bg(bg)),
             Span::styled(
                 key,
                 Style::default()
@@ -162,12 +157,7 @@ impl Theme {
                     .bg(bg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                ">",
-                Style::default()
-                    .fg(self.hint_bracket_fg)
-                    .bg(bg),
-            ),
+            Span::styled(">", Style::default().fg(self.hint_bracket_fg).bg(bg)),
         ]
     }
 }

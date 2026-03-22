@@ -2,12 +2,23 @@
 
 ## Goal
 
-`dux` is a terminal-first orchestrator for AI coding agents, inspired by multi-agent tools like Claude Squad, but centered around:
+`dux` is a terminal-first orchestrator for AI coding agents, inspired by tools like Claude Squad, centered around:
 
 - one git worktree per agent
 - a persistent TUI for managing projects and sessions
 - a live agent pane plus a diff/shell review workflow
-- ACP-based provider integration where possible
+- direct CLI execution via PTY — no protocol layer, no adapters
+
+## How Agents Run
+
+dux spawns AI CLI tools directly in a pseudo-terminal using `portable-pty` and renders their output using `vt100` terminal emulation. The CLI tool runs exactly as it would in a normal terminal — all prompts, tool calls, thinking indicators, permission dialogs, hooks, MCP servers, and skills work natively.
+
+This design means:
+
+- **Any CLI works.** Configure the command in `config.toml` and dux will spawn it.
+- **No banning risks.** The official CLI binary is used directly — same auth, same API calls.
+- **No protocol maintenance.** There is no JSON-RPC, no adapter binaries, no custom message format.
+- **Crash-safe.** If dux crashes, the agent dies — but the worktree and all file changes are preserved. Just start a new session.
 
 ## Product Model
 
@@ -31,7 +42,7 @@ Each agent session:
 - starts from a project
 - creates a dedicated git branch
 - creates a dedicated git worktree
-- launches one provider process for that worktree
+- launches one CLI process in a PTY for that worktree
 - persists metadata in SQLite
 
 Sessions render under their project in the left tree.
@@ -40,10 +51,10 @@ Sessions render under their project in the left tree.
 
 The center pane is intentionally dual-purpose:
 
-- live agent output
+- live agent terminal output (PTY screen rendered via vt100)
 - diff viewer
 
-The user should be able to inspect diffs without killing the running agent session.
+The user can inspect diffs without killing the running agent session.
 
 ### Right Pane
 
@@ -60,27 +71,27 @@ The top section is read-only review. Git actions can happen in the shell or thro
 
 - Rust
 - `ratatui` + `crossterm` for TUI
-- `portable-pty` for manual shell sessions
+- `portable-pty` for PTY spawning (both agent sessions and manual shell)
+- `vt100` for ANSI terminal emulation of agent output
 - `rusqlite` for persisted session state
-- ACP over stdio for agent providers
 
 ### Main Modules
 
-- [src/app.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/app.rs): TUI state and workflow
-- [src/acp.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/acp.rs): ACP transport and request/notification handling
-- [src/git.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/git.rs): git and worktree operations
-- [src/storage.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/storage.rs): SQLite persistence
-- [src/config.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/config.rs): user config schema and rendering
-- [src/statusline.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/statusline.rs): UI status model
-- [src/theme.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/theme.rs): centralized color palette with semantic color names
-- [src/logger.rs](/home/patrick/Golang/src/github.com/patrickdappollonio/dux/src/logger.rs): log file integration
+- [src/app.rs](src/app.rs): TUI state, event loop, commands, overlays, terminal rendering
+- [src/pty.rs](src/pty.rs): PTY client — spawns CLI tools, reads output via vt100 parser, writes keystrokes
+- [src/git.rs](src/git.rs): git and worktree operations
+- [src/storage.rs](src/storage.rs): SQLite persistence
+- [src/config.rs](src/config.rs): user config schema and rendering
+- [src/statusline.rs](src/statusline.rs): UI status model
+- [src/theme.rs](src/theme.rs): centralized color palette with semantic color names
+- [src/logger.rs](src/logger.rs): log file integration
 
 ## UX Model
 
 ### Navigation
 
 - `Tab` and `Shift-Tab` move across panes
-- `Esc` closes the topmost overlay
+- `Esc` closes the topmost overlay or exits interactive mode
 - overlays are the consistent home for modal interaction
 
 ### Action Entry
@@ -90,7 +101,7 @@ The app supports both:
 - key combos
 - command-driven interaction
 
-Command-driven interaction now matters because:
+Command-driven interaction matters because:
 
 - terminal apps and shells can compete for keybindings
 - users should not need to memorize many shortcuts
@@ -98,14 +109,13 @@ Command-driven interaction now matters because:
 
 Current command entry modes:
 
-- `Ctrl-P`: floating command palette
-- `:`: direct command mode
+- `Ctrl-P`: floating command palette with fuzzy search
 
 ### Header Bar
 
 A 1-line header bar at the top of the screen shows:
 
-- app name and version
+- app name
 - currently selected project name
 - current branch
 - default provider
@@ -135,7 +145,8 @@ All colors are defined in `src/theme.rs` via a `Theme` struct with semantic fiel
 
 Location:
 
-- `~/.config/dux/config.toml`
+- `~/.config/dux/config.toml` (Linux)
+- `~/.dux/config.toml` (macOS)
 
 Properties:
 
@@ -155,7 +166,6 @@ Stores:
 - session metadata
 - worktree path
 - provider
-- ACP session id
 - status
 - timestamps
 
@@ -183,19 +193,19 @@ Configurable in `[logging]`:
 - runs asynchronously
 - shows progress in the status line
 - creates worktree first
-- launches provider second
-- performs ACP initialize and `session/new`
-- fails fast on provider/ACP timeout
+- spawns the configured CLI tool in a PTY second
+- fails fast on command-not-found or early process exit
 - cleans up the new worktree on startup failure
 
-### Session Restore
+### Session Recovery
 
 On startup, persisted sessions are loaded and:
 
 - worktree existence is checked
-- shell sessions are recreated when possible
-- ACP sessions are reloaded when an ACP session id exists and reload succeeds
-- otherwise the session is marked detached
+- sessions with existing worktrees are marked as detached (PTY sessions cannot be restored)
+- user presses `r` to reconnect — this spawns a fresh CLI on the existing worktree
+
+If dux crashes, the agent process dies with it. This is by design — worktree changes are preserved and a new agent can be started on the same worktree at any time.
 
 ## Intended Direction
 
@@ -205,7 +215,6 @@ These remain good follow-on improvements:
 - richer command palette actions and fuzzy search
 - explicit project editing/rename support
 - better project deletion UX with confirmation overlay
-- more robust session restore and history handling
 - mouse-based pane resizing
 - diff rendering with scroll position tracking
 
