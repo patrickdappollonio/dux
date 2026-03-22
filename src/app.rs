@@ -1925,11 +1925,14 @@ impl App {
 
     fn render_files(&self, frame: &mut Frame, area: Rect) {
         let inner_width = area.width.saturating_sub(2) as usize; // minus borders
+        let sel_style = self.theme.selection_style();
         let items = self
             .changed_files
             .iter()
             .enumerate()
             .map(|(index, file)| {
+                let is_selected = index == self.selected_file;
+
                 // Build the right-aligned stats string, e.g. "+12 -3".
                 let stats = format_line_stats(file.additions, file.deletions);
                 let stats_width = stats.iter().map(|s| s.width()).sum::<usize>();
@@ -1942,7 +1945,7 @@ impl App {
                     .saturating_sub(stats_width)
                     .saturating_sub(1);
 
-                let path = if index == self.selected_file {
+                let path = if is_selected {
                     file.path.clone()
                 } else {
                     git::ellipsize_middle(&file.path, path_budget.max(10))
@@ -1954,15 +1957,28 @@ impl App {
                     .saturating_sub(path_display_width)
                     .saturating_sub(stats_width);
 
+                let base_style = if is_selected { sel_style } else { Style::default() };
+
                 let mut spans = vec![
                     Span::styled(
                         format!("{:>2} ", file.status),
-                        Style::default().fg(self.theme.file_status_fg),
+                        base_style.fg(self.theme.file_status_fg),
                     ),
-                    Span::raw(path),
-                    Span::raw(" ".repeat(padding)),
+                    Span::styled(path, base_style),
+                    Span::styled(" ".repeat(padding), base_style),
                 ];
-                spans.extend(stats);
+                // For stats spans, keep their green/red fg but apply selection bg when selected.
+                let stats_base = if is_selected {
+                    Style::default()
+                        .bg(self.theme.selection_bg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                spans.extend(stats.into_iter().map(|s| {
+                    let fg = s.style.fg.unwrap_or(Color::Reset);
+                    Span::styled(s.content, stats_base.fg(fg))
+                }));
                 ListItem::new(Line::from(spans))
             })
             .collect::<Vec<_>>();
@@ -1971,8 +1987,7 @@ impl App {
         let mut state = ListState::default().with_selected(Some(self.selected_file));
         StatefulWidget::render(
             List::new(items)
-                .block(self.themed_block(&title, focused))
-                .highlight_style(self.theme.selection_style()),
+                .block(self.themed_block(&title, focused)),
             area,
             frame.buffer_mut(),
             &mut state,
