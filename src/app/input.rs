@@ -292,6 +292,29 @@ impl App {
     }
 
     fn handle_files_key(&mut self, key: KeyEvent) -> Result<()> {
+        // When hovering over the commit input section, i/Enter engages it.
+        if self.right_section == RightSection::CommitInput {
+            match key.code {
+                KeyCode::Char('i') | KeyCode::Enter => {
+                    self.input_target = InputTarget::CommitMessage;
+                }
+                KeyCode::Char('c') if !self.staged_files.is_empty() => {
+                    self.execute_commit()?;
+                }
+                KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.trigger_ai_commit_message()?;
+                }
+                KeyCode::Char('u') => {
+                    self.push_to_remote()?;
+                }
+                KeyCode::Char('p') => {
+                    self.pull_from_remote()?;
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
                 let len = self.current_files_len();
