@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -58,6 +58,7 @@ pub struct App {
     theme: Theme,
     tick_count: u64,
     watched_worktree: Arc<Mutex<Option<PathBuf>>>,
+    collapsed_projects: HashSet<i64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,6 +215,11 @@ const COMMANDS: &[CommandDef] = &[
         shortcut: Some("["),
     },
     CommandDef {
+        name: "toggle-project",
+        description: "Collapse or expand the selected project's agents",
+        shortcut: Some("Space"),
+    },
+    CommandDef {
         name: "copy-path",
         description: "Copy the selected agent's worktree path",
         shortcut: Some("y"),
@@ -263,6 +269,7 @@ impl App {
             theme: Theme::default_dark(),
             tick_count: 0,
             watched_worktree: Arc::clone(&watched_worktree),
+            collapsed_projects: HashSet::new(),
         };
         app.restore_sessions();
         app.reload_changed_files();
@@ -417,10 +424,13 @@ impl App {
             }
             KeyCode::Char('n') => self.create_agent_for_selected_project()?,
             KeyCode::Char('u') => self.refresh_selected_project()?,
-            KeyCode::Char('x') => self.confirm_delete_selected_session()?,
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.confirm_delete_selected_session()?
+            }
             KeyCode::Char('d') => self.cycle_selected_project_provider()?,
             KeyCode::Char('r') => self.reconnect_selected_session()?,
             KeyCode::Char('y') => self.copy_selected_path()?,
+            KeyCode::Char(' ') => self.toggle_collapse_selected_project(),
             KeyCode::Char('i') => {
                 if self.selected_session().is_some()
                     && self
@@ -433,7 +443,7 @@ impl App {
                     self.input_target = InputTarget::Agent;
                     self.set_info("Interactive mode. Keys forwarded to agent. ctrl+g exits.");
                 } else {
-                    self.set_error("No active agent. Press r to restart or n to create.");
+                    self.set_error("No active agent. Press \"r\" to restart or \"n\" to create a new one.");
                 }
             }
             _ => {}
@@ -453,7 +463,7 @@ impl App {
                     self.input_target = InputTarget::Agent;
                     self.set_info("Interactive mode. Keys forwarded to agent. ctrl+g exits.");
                 } else {
-                    self.set_error("No active agent. Press r to restart or n to create.");
+                    self.set_error("No active agent. Press \"r\" to restart or \"n\" to create a new one.");
                 }
             }
             KeyCode::Char('r') => {
@@ -965,7 +975,7 @@ impl App {
         logger::info(&format!("attempting to add project {}", path.display()));
         if !path.exists() || !git::is_git_repo(&path) {
             logger::error(&format!("add project rejected for {}", path.display()));
-            self.set_error(format!("{} is not a git repository.", path.display()));
+            self.set_error(format!("\"{}\" is not a git repository.", path.display()));
             return Ok(());
         }
         if self
@@ -973,7 +983,7 @@ impl App {
             .iter()
             .any(|project| Path::new(&project.path) == path.as_path())
         {
-            self.set_error(format!("{} is already registered.", path.display()));
+            self.set_error(format!("\"{}\" is already registered as a project.", path.display()));
             return Ok(());
         }
         let branch = git::current_branch(&path)?;
@@ -1005,7 +1015,7 @@ impl App {
             current_branch: branch,
         });
         logger::info(&format!("registered project {}", path.display()));
-        self.set_info(format!("Added project {display_name}"));
+        self.set_info(format!("Added project \"{}\" to workspace", display_name));
         Ok(())
     }
 
@@ -1020,7 +1030,10 @@ impl App {
         };
         logger::info(&format!("creating agent for project {}", project.path));
         self.create_agent_in_flight = true;
-        self.set_busy(format!("Creating worktree for {}...", project.name));
+        self.set_busy(format!(
+            "Creating worktree for project \"{}\"...",
+            project.name
+        ));
         let paths = self.paths.clone();
         let config = self.config.clone();
         let worker_tx = self.worker_tx.clone();
@@ -1071,7 +1084,11 @@ impl App {
             existing.current_branch =
                 git::current_branch(path).unwrap_or_else(|_| existing.current_branch.clone());
         }
-        self.set_info(format!("Refreshed {}: {}", project.name, output.trim()));
+        self.set_info(format!(
+            "Refreshed project \"{}\": {}",
+            project.name,
+            output.trim()
+        ));
         Ok(())
     }
 
@@ -1119,7 +1136,12 @@ impl App {
         self.session_store.delete_session(&session.id)?;
         self.selected_left = self.selected_left.saturating_sub(1);
         self.reload_changed_files();
-        self.set_info(format!("Deleted {}", session.branch_name));
+        self.set_info(format!(
+            "Deleted {} agent from project \"{}\" with branch \"{}\"",
+            session.provider.as_str(),
+            project.name,
+            session.branch_name
+        ));
         Ok(())
     }
 
@@ -1157,8 +1179,7 @@ impl App {
             self.session_store.upsert_session(session)?;
         }
         self.set_info(format!(
-            "Default provider for {} is now {}",
-            project.name,
+            "Changed CLI agent to \"{}\"",
             next.as_str()
         ));
         Ok(())
@@ -1199,22 +1220,31 @@ impl App {
         save_config(&self.paths.config_path, &self.config)?;
         self.selected_left = self.selected_left.saturating_sub(1);
         self.reload_changed_files();
-        self.set_info(format!("Deleted project {}", project.name));
+        self.set_info(format!(
+            "Deleted project \"{}\" and all its agents",
+            project.name
+        ));
         Ok(())
     }
 
     fn reconnect_selected_session(&mut self) -> Result<()> {
         let Some(session) = self.selected_session().cloned() else {
-            self.set_error("Select a stopped agent first.");
+            self.set_error("Select a stopped agent first to reconnect.");
             return Ok(());
         };
         logger::info(&format!("reconnecting session {}", session.id));
         if self.providers.contains_key(&session.id) {
-            self.set_info("Session is already connected.");
+            self.set_info(format!(
+                "Agent \"{}\" is already connected.",
+                session.branch_name
+            ));
             return Ok(());
         }
         if !Path::new(&session.worktree_path).exists() {
-            self.set_error("Worktree no longer exists. Delete and re-create the agent.");
+            self.set_error(format!(
+                "Worktree for agent \"{}\" no longer exists. Delete and re-create the agent.",
+                session.branch_name
+            ));
             return Ok(());
         }
         match self.spawn_pty_for_session(&session) {
@@ -1224,10 +1254,19 @@ impl App {
                 self.focus = FocusPane::Center;
                 self.center_mode = CenterMode::Agent;
                 self.input_target = InputTarget::Agent;
-                self.set_info(format!("Relaunched {}", session.branch_name));
+                let proj_name = self.project_name_for_session(&session);
+                self.set_info(format!(
+                    "Relaunched {} agent \"{}\" in project \"{}\"",
+                    session.provider.as_str(),
+                    session.branch_name,
+                    proj_name
+                ));
             }
             Err(err) => {
-                self.set_error(format!("Reconnect failed: {err}"));
+                self.set_error(format!(
+                    "Reconnect failed for agent \"{}\": {err}",
+                    session.branch_name
+                ));
             }
         }
         Ok(())
@@ -1277,7 +1316,13 @@ impl App {
                     self.focus = FocusPane::Center;
                     self.center_mode = CenterMode::Agent;
                     self.input_target = InputTarget::Agent;
-                    self.set_info(format!("Created {}", session.branch_name));
+                    let proj_name = self.project_name_for_session(&session);
+                    self.set_info(format!(
+                        "Created {} agent \"{}\" in project \"{}\"",
+                        session.provider.as_str(),
+                        session.branch_name,
+                        proj_name
+                    ));
                 }
                 WorkerEvent::CreateAgentFailed(message) => {
                     self.create_agent_in_flight = false;
@@ -1308,7 +1353,7 @@ impl App {
                 if exited.contains(&current.id) {
                     self.input_target = InputTarget::None;
                     self.focus = FocusPane::Left;
-                    self.set_info("Agent CLI exited. Press r to relaunch.");
+                    self.set_info("Agent CLI process has exited. Press \"r\" to relaunch.");
                 }
             }
         }
@@ -1406,21 +1451,37 @@ impl App {
         let focused = self.focus == FocusPane::Left;
 
         if self.left_collapsed {
-            let items = self
-                .left_items()
-                .into_iter()
-                .map(|item| match item {
-                    LeftItem::Project(_) => ListItem::new(Line::from(Span::styled(
-                        "▸",
-                        Style::default().fg(self.theme.project_icon),
-                    ))),
-                    LeftItem::Session(index) => {
-                        let session = &self.sessions[index];
-                        let (dot, dot_color) = self.theme.session_dot(&session.status);
+            let collapsed_left_items = self.left_items();
+            let items = collapsed_left_items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| match item {
+                    LeftItem::Project(index) => {
+                        let project = &self.projects[*index];
+                        let icon = if self.collapsed_projects.contains(&project.id) {
+                            "▸"
+                        } else {
+                            "▾"
+                        };
                         ListItem::new(Line::from(Span::styled(
-                            dot.to_string(),
-                            Style::default().fg(dot_color),
+                            icon,
+                            Style::default().fg(self.theme.project_icon),
                         )))
+                    }
+                    LeftItem::Session(index) => {
+                        let session = &self.sessions[*index];
+                        let (dot, dot_color) = self.theme.session_dot(&session.status);
+                        let is_last = !collapsed_left_items
+                            .get(i + 1)
+                            .is_some_and(|next| matches!(next, LeftItem::Session(_)));
+                        let connector = if is_last { "└" } else { "├" };
+                        ListItem::new(Line::from(vec![
+                            Span::styled(
+                                connector,
+                                Style::default().fg(self.theme.project_icon),
+                            ),
+                            Span::styled(dot.to_string(), Style::default().fg(dot_color)),
+                        ]))
                     }
                 })
                 .collect::<Vec<_>>();
@@ -1443,15 +1504,21 @@ impl App {
             }
             counts
         };
-        let items = self
-            .left_items()
-            .into_iter()
-            .map(|item| match item {
+        let left_items = self.left_items();
+        let items = left_items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| match item {
                 LeftItem::Project(index) => {
-                    let project = &self.projects[index];
+                    let project = &self.projects[*index];
                     let count = session_counts.get(&project.id).copied().unwrap_or(0);
+                    let icon = if self.collapsed_projects.contains(&project.id) {
+                        "▸ "
+                    } else {
+                        "▾ "
+                    };
                     let mut spans = vec![
-                        Span::styled("▸ ", Style::default().fg(self.theme.project_icon)),
+                        Span::styled(icon, Style::default().fg(self.theme.project_icon)),
                         Span::raw(project.name.clone()),
                     ];
                     if count > 0 {
@@ -1463,14 +1530,21 @@ impl App {
                     ListItem::new(Line::from(spans))
                 }
                 LeftItem::Session(index) => {
-                    let session = &self.sessions[index];
+                    let session = &self.sessions[*index];
+                    let is_last = !left_items
+                        .get(i + 1)
+                        .is_some_and(|next| matches!(next, LeftItem::Session(_)));
+                    let connector = if is_last { "└ " } else { "├ " };
                     let label = session
                         .title
                         .clone()
                         .unwrap_or_else(|| session.branch_name.clone());
                     let (dot, dot_color) = self.theme.session_dot(&session.status);
                     ListItem::new(Line::from(vec![
-                        Span::raw("  "),
+                        Span::styled(
+                            connector,
+                            Style::default().fg(self.theme.project_icon),
+                        ),
                         Span::styled(format!("{dot} "), Style::default().fg(dot_color)),
                         Span::styled(label, Style::default().fg(dot_color)),
                         Span::styled(
@@ -1789,6 +1863,7 @@ impl App {
         );
         let left_project_hints: &[(&str, &str)] = &[
             ("j/k", "Move"),
+            ("Space", "Toggle"),
             ("n", "New agent"),
             ("a", "Add project"),
             ("y", "Copy path"),
@@ -1796,7 +1871,6 @@ impl App {
             ("u", "Pull"),
             ("^P", "Palette"),
             ("?", "Help"),
-            ("q", "Quit"),
         ];
         let left_session_hints: &[(&str, &str)] = &[
             ("j/k", "Move"),
@@ -1804,10 +1878,9 @@ impl App {
             ("a", "Add project"),
             ("y", "Copy path"),
             ("r", "Reconnect"),
-            ("x", "Delete"),
+            ("^D", "Delete"),
             ("^P", "Palette"),
             ("?", "Help"),
-            ("q", "Quit"),
         ];
         let hints: &[(&str, &str)] = match self.focus {
             FocusPane::Left => {
@@ -1823,7 +1896,6 @@ impl App {
                 ("Tab", "Next"),
                 ("^P", "Palette"),
                 ("?", "Help"),
-                ("q", "Quit"),
             ],
             FocusPane::Files => &[
                 ("j/k", "Move"),
@@ -1831,7 +1903,6 @@ impl App {
                 ("Tab", "Next"),
                 ("^P", "Palette"),
                 ("?", "Help"),
-                ("q", "Quit"),
             ],
         };
         let [hints_area, status_area] = Layout::default()
@@ -1931,13 +2002,14 @@ impl App {
                 "Projects pane",
                 &[
                     ("j/k", "Move through projects and sessions"),
+                    ("space", "Collapse/expand project"),
                     ("a", "Open project browser"),
                     ("A", "Manual path entry"),
                     ("n", "New agent session (creates worktree)"),
                     ("d", "Cycle default provider"),
                     ("u", "Refresh checkout (git pull --ff-only)"),
                     ("r", "Restart agent CLI"),
-                    ("x", "Delete selected session/worktree"),
+                    ("ctrl+d", "Delete selected session/worktree"),
                 ],
             ),
             (
@@ -1980,6 +2052,30 @@ impl App {
                 ));
                 lines.push(Line::from(spans));
             }
+        }
+        // Session state legend
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Session states",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )));
+        let session_states: &[(&str, Color, &str)] = &[
+            ("●", self.theme.session_active, "Active — agent is running"),
+            ("◐", self.theme.session_detached, "Detached — agent process disconnected"),
+            ("○", self.theme.session_exited, "Exited — agent has finished"),
+        ];
+        for (dot, color, desc) in session_states {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(*dot, Style::default().fg(*color)),
+                Span::raw("  "),
+                Span::styled(
+                    desc.to_string(),
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ),
+            ]));
         }
         Paragraph::new(lines)
             .block(self.themed_overlay_block("Help"))
@@ -2598,6 +2694,10 @@ impl App {
                 Ok(())
             }
             "copy-path" => self.copy_selected_path(),
+            "toggle-project" => {
+                self.toggle_collapse_selected_project();
+                Ok(())
+            }
             "toggle-sidebar" => {
                 self.left_collapsed = !self.left_collapsed;
                 Ok(())
@@ -2608,7 +2708,7 @@ impl App {
             }
             "" => Ok(()),
             other => {
-                self.set_error(format!("Unknown command: {other}"));
+                self.set_error(format!("Unknown command: \"{other}\""));
                 Ok(())
             }
         }
@@ -2618,6 +2718,9 @@ impl App {
         let mut items = Vec::new();
         for (project_index, project) in self.projects.iter().enumerate() {
             items.push(LeftItem::Project(project_index));
+            if self.collapsed_projects.contains(&project.id) {
+                continue;
+            }
             for (session_index, session) in self.sessions.iter().enumerate() {
                 if session.project_id == project.id {
                     items.push(LeftItem::Session(session_index));
@@ -2625,6 +2728,17 @@ impl App {
             }
         }
         items
+    }
+
+    fn toggle_collapse_selected_project(&mut self) {
+        if let Some(project) = self.selected_project() {
+            let id = project.id;
+            if self.collapsed_projects.contains(&id) {
+                self.collapsed_projects.remove(&id);
+            } else {
+                self.collapsed_projects.insert(id);
+            }
+        }
     }
 
     fn selected_project(&self) -> Option<&Project> {
@@ -2646,6 +2760,14 @@ impl App {
         }
     }
 
+    fn project_name_for_session(&self, session: &AgentSession) -> String {
+        self.projects
+            .iter()
+            .find(|p| p.id == session.project_id)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
     fn copy_selected_path(&mut self) -> Result<()> {
         let path = match self.left_items().get(self.selected_left) {
             Some(LeftItem::Session(index)) => {
@@ -2661,11 +2783,11 @@ impl App {
                 clipboard
                     .set_text(&p)
                     .map_err(|e| anyhow::anyhow!("Failed to copy to clipboard: {e}"))?;
-                self.set_info(format!("Copied: {p}"));
+                self.set_info(format!("Copied path to clipboard: \"{p}\""));
                 Ok(())
             }
             None => {
-                self.set_error("No project or agent selected.");
+                self.set_error("No project or agent selected. Select one from the sidebar first.");
                 Ok(())
             }
         }
@@ -2757,7 +2879,7 @@ fn run_create_agent_job(
     term_size: (u16, u16),
 ) {
     let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
-        "Creating worktree for {}...",
+        "Creating worktree for project \"{}\"...",
         project.name
     )));
     let repo_path = PathBuf::from(&project.path);
