@@ -158,7 +158,7 @@ const COMMANDS: &[CommandDef] = &[
     CommandDef {
         name: "new-agent",
         description: "Create a new agent for the selected project",
-        shortcut: Some("a"),
+        shortcut: Some("n"),
     },
     CommandDef {
         name: "provider",
@@ -188,7 +188,7 @@ const COMMANDS: &[CommandDef] = &[
     CommandDef {
         name: "add-project",
         description: "Open the project browser",
-        shortcut: Some("p"),
+        shortcut: Some("a"),
     },
     CommandDef {
         name: "add-project-manual",
@@ -409,17 +409,17 @@ impl App {
                 self.focus = FocusPane::Center;
                 self.reload_changed_files();
             }
-            KeyCode::Char('p') => {
+            KeyCode::Char('a') => {
                 self.open_project_browser()?;
             }
-            KeyCode::Char('P') => {
+            KeyCode::Char('A') => {
                 self.prompt = PromptState::AddProject {
                     path: String::new(),
                     name: String::new(),
                     field: PromptField::Path,
                 };
             }
-            KeyCode::Char('a') => self.create_agent_for_selected_project()?,
+            KeyCode::Char('n') => self.create_agent_for_selected_project()?,
             KeyCode::Char('u') => self.refresh_selected_project()?,
             KeyCode::Char('x') => self.delete_selected_session()?,
             KeyCode::Char('d') => self.cycle_selected_project_provider()?,
@@ -1443,33 +1443,50 @@ impl App {
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
+        let is_on_project = matches!(
+            self.left_items().get(self.selected_left),
+            Some(LeftItem::Project(_))
+        );
+        let left_project_hints: &[(&str, &str)] = &[
+            ("j/k", "Move"),
+            ("n", "New agent"),
+            ("a", "Add project"),
+            ("d", "Provider"),
+            ("u", "Pull"),
+            ("^P", "Palette"),
+            ("?", "Help"),
+            ("q", "Quit"),
+        ];
+        let left_session_hints: &[(&str, &str)] = &[
+            ("j/k", "Move"),
+            ("Enter", "Focus"),
+            ("r", "Reconnect"),
+            ("x", "Delete"),
+            ("^P", "Palette"),
+            ("?", "Help"),
+            ("q", "Quit"),
+        ];
         let hints: &[(&str, &str)] = match self.focus {
-            FocusPane::Left => &[
-                ("j/k", "Move"),
-                ("a", "Agent"),
-                ("p", "Add"),
-                ("^P", "Palette"),
-                ("d", "Provider"),
-                ("u", "Pull"),
-                ("[", "Sidebar"),
-                ("?", "Help"),
-                ("q", "Quit"),
-            ],
+            FocusPane::Left => {
+                if is_on_project {
+                    left_project_hints
+                } else {
+                    left_session_hints
+                }
+            }
             FocusPane::Center => &[
                 ("i", "Prompt"),
-                ("^P", "Palette"),
                 ("Esc", "Close diff"),
                 ("Tab", "Next"),
-                ("[", "Sidebar"),
+                ("^P", "Palette"),
                 ("?", "Help"),
                 ("q", "Quit"),
             ],
             FocusPane::Files => &[
                 ("j/k", "Move"),
                 ("Enter", "Diff"),
-                ("^P", "Palette"),
                 ("Tab", "Next"),
-                ("[", "Sidebar"),
+                ("^P", "Palette"),
                 ("?", "Help"),
                 ("q", "Quit"),
             ],
@@ -1533,27 +1550,28 @@ impl App {
                 "Global",
                 &[
                     ("Tab", "Focus next pane"),
-                    ("Ctrl-p", "Open command palette"),
-                    ("Ctrl-w", "Resize mode (h/l side, j/k split)"),
+                    ("^P", "Open command palette"),
+                    ("^W", "Resize mode (h/l side, j/k split)"),
+                    ("[", "Toggle sidebar"),
                     ("?", "Toggle help"),
                     ("q", "Quit"),
                 ],
             ),
             (
-                "Left pane",
+                "Projects pane",
                 &[
                     ("j/k", "Move through projects and sessions"),
-                    ("p", "Open project browser"),
-                    ("P", "Open manual path entry"),
-                    ("a", "Create worktree-backed agent session"),
+                    ("a", "Open project browser"),
+                    ("A", "Manual path entry"),
+                    ("n", "New agent session (creates worktree)"),
                     ("d", "Cycle default provider"),
                     ("u", "Refresh checkout (git pull --ff-only)"),
-                    ("r", "Reconnect detached ACP session"),
+                    ("r", "Reconnect detached session"),
                     ("x", "Delete selected session/worktree"),
                 ],
             ),
             (
-                "Center pane",
+                "Agent pane",
                 &[
                     ("i", "Start a prompt turn for the agent"),
                     ("Esc", "Close diff view"),
@@ -1562,6 +1580,12 @@ impl App {
             (
                 "Files pane",
                 &[("Enter", "Open selected file diff")],
+            ),
+            (
+                "Key notation",
+                &[
+                    ("^X", "Hold Ctrl and press X (e.g. ^P = Ctrl+P)"),
+                ],
             ),
         ];
         let mut lines: Vec<Line> = Vec::new();
