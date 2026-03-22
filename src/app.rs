@@ -121,6 +121,10 @@ enum PromptState {
         branch_name: String,
         confirm_selected: bool, // false = Cancel (default), true = Delete
     },
+    ConfirmQuit {
+        active_count: usize,
+        confirm_selected: bool, // false = Cancel (default), true = Quit
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -309,10 +313,17 @@ impl App {
         if !matches!(self.prompt, PromptState::None) {
             return self.handle_prompt_key(key);
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            return Ok(true);
-        }
-        if key.code == KeyCode::Char('q') {
+        if (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c'))
+            || key.code == KeyCode::Char('q')
+        {
+            let active_count = self.providers.len();
+            if active_count > 0 {
+                self.prompt = PromptState::ConfirmQuit {
+                    active_count,
+                    confirm_selected: false,
+                };
+                return Ok(false);
+            }
             return Ok(true);
         }
         if key.code == KeyCode::Char('?') && self.input_target != InputTarget::Agent {
@@ -753,6 +764,26 @@ impl App {
                         let id = session_id.clone();
                         self.prompt = PromptState::None;
                         self.do_delete_session(&id)?;
+                    } else {
+                        self.prompt = PromptState::None;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let PromptState::ConfirmQuit {
+            confirm_selected, ..
+        } = &mut self.prompt
+        {
+            match key.code {
+                KeyCode::Esc => self.prompt = PromptState::None,
+                KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::Char('h') | KeyCode::Char('l') => {
+                    *confirm_selected = !*confirm_selected;
+                }
+                KeyCode::Enter => {
+                    if *confirm_selected {
+                        return Ok(true);
                     } else {
                         self.prompt = PromptState::None;
                     }
@@ -2195,6 +2226,103 @@ impl App {
                         .border_style(Style::default().fg(delete_border)),
                 )
                 .render(delete_area, frame.buffer_mut());
+            }
+            PromptState::ConfirmQuit {
+                active_count,
+                confirm_selected,
+            } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(56, 30, frame.area());
+                Clear.render(area, frame.buffer_mut());
+                let outer = self.themed_overlay_block("Quit dux");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                let agent_word = if *active_count == 1 { "agent" } else { "agents" };
+                let lines = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw(format!(" {active_count} running {agent_word} will be ")),
+                        Span::styled("killed", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                        Span::raw(" if you quit."),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " Any in-progress work by those agents will be lost.",
+                        Style::default().fg(Color::Yellow),
+                    )),
+                    Line::from(Span::styled(
+                        " File changes in worktrees are preserved.",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )),
+                ];
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let btn_width = 16u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let quit_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                let (cancel_border, cancel_fg) = if !confirm_selected {
+                    (Color::Cyan, Color::White)
+                } else {
+                    (self.theme.border_normal, self.theme.hint_desc_fg)
+                };
+                let (quit_border, quit_fg) = if *confirm_selected {
+                    (Color::Red, Color::White)
+                } else {
+                    (self.theme.border_normal, self.theme.hint_desc_fg)
+                };
+
+                Paragraph::new(Line::from(Span::styled(
+                    "Cancel",
+                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED)
+                        .border_style(Style::default().fg(cancel_border)),
+                )
+                .render(cancel_area, frame.buffer_mut());
+
+                Paragraph::new(Line::from(Span::styled(
+                    "Quit",
+                    Style::default().fg(quit_fg).add_modifier(Modifier::BOLD),
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED)
+                        .border_style(Style::default().fg(quit_border)),
+                )
+                .render(quit_area, frame.buffer_mut());
             }
             PromptState::None => {}
         }
