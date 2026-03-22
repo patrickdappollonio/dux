@@ -104,7 +104,8 @@ pub fn create_worktree(
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    Ok((branch_name, worktree_path))
+    let canonical = worktree_path.canonicalize().unwrap_or(worktree_path);
+    Ok((branch_name, canonical))
 }
 
 pub fn remove_worktree(repo_path: &Path, worktree_path: &Path, branch_name: &str) -> Result<()> {
@@ -188,6 +189,13 @@ pub fn diff_for_file(worktree_path: &Path, path: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+pub fn is_under(base: &Path, candidate: &Path) -> bool {
+    match (base.canonicalize(), candidate.canonicalize()) {
+        (Ok(b), Ok(c)) => c.starts_with(b),
+        _ => false,
+    }
+}
+
 pub fn ellipsize_middle(input: &str, max_width: usize) -> String {
     if input.chars().count() <= max_width {
         return input.to_string();
@@ -227,6 +235,21 @@ mod tests {
             ellipsize_middle("src/components/app.rs", 12),
             "src/...pp.rs"
         );
+    }
+
+    #[test]
+    fn is_under_checks_real_paths() {
+        let tmp = std::env::temp_dir();
+        let child = tmp.join("is_under_test_child");
+        std::fs::create_dir_all(&child).unwrap();
+        assert!(is_under(&tmp, &child));
+        std::fs::remove_dir(&child).unwrap();
+    }
+
+    #[test]
+    fn is_under_rejects_nonexistent_candidate() {
+        let tmp = std::env::temp_dir();
+        assert!(!is_under(&tmp, Path::new("/nonexistent/path/xyz")));
     }
 
     #[test]

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::model::ProviderKind;
 
@@ -48,9 +49,15 @@ pub struct ProviderCommandConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectConfig {
+    #[serde(default = "new_project_id")]
+    pub id: String,
     pub path: String,
     pub name: Option<String>,
     pub default_provider: Option<String>,
+}
+
+fn new_project_id() -> String {
+    Uuid::new_v4().to_string()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -80,8 +87,7 @@ impl Default for Config {
 
 impl Default for Defaults {
     fn default() -> Self {
-        let start_directory = home::home_dir()
-            .map(|p| p.to_string_lossy().to_string());
+        let start_directory = home::home_dir().map(|p| p.to_string_lossy().to_string());
         Self {
             provider: "codex".to_string(),
             start_directory,
@@ -229,20 +235,25 @@ right_width_pct = {right_width}
 # default_provider can override the global default for one project.
 projects = []
 "#,
-        provider = default.defaults.provider,
-        start_directory = default.defaults.start_directory.as_deref().unwrap_or(""),
-        claude_command = default
-            .providers
-            .get("claude")
-            .map(|config| config.command.as_str())
-            .unwrap_or("claude"),
-        codex_command = default
-            .providers
-            .get("codex")
-            .map(|config| config.command.as_str())
-            .unwrap_or("codex"),
-        log_level = default.logging.level,
-        log_path = default.logging.path,
+        provider = escape_toml_string(&default.defaults.provider),
+        start_directory =
+            escape_toml_string(default.defaults.start_directory.as_deref().unwrap_or("")),
+        claude_command = escape_toml_string(
+            default
+                .providers
+                .get("claude")
+                .map(|config| config.command.as_str())
+                .unwrap_or("claude")
+        ),
+        codex_command = escape_toml_string(
+            default
+                .providers
+                .get("codex")
+                .map(|config| config.command.as_str())
+                .unwrap_or("codex")
+        ),
+        log_level = escape_toml_string(&default.logging.level),
+        log_path = escape_toml_string(&default.logging.path),
         left_width = default.ui.left_width_pct,
         right_width = default.ui.right_width_pct,
     )
@@ -261,19 +272,31 @@ fn render_config(config: &Config) -> String {
     out.push_str("# Every value is materialized here so the file doubles as documentation.\n\n");
     out.push_str("[defaults]\n");
     out.push_str("# Which provider new sessions use unless a project overrides it.\n");
-    out.push_str(&format!("provider = \"{}\"\n", config.defaults.provider));
+    out.push_str(&format!(
+        "provider = \"{}\"\n",
+        escape_toml_string(&config.defaults.provider)
+    ));
     out.push_str("# Starting directory for the project browser.\n");
     if let Some(dir) = &config.defaults.start_directory {
-        out.push_str(&format!("start_directory = \"{}\"\n\n", dir));
+        out.push_str(&format!(
+            "start_directory = \"{}\"\n\n",
+            escape_toml_string(dir)
+        ));
     } else {
         out.push_str("start_directory = \"\"\n\n");
     }
     render_provider_configs(&mut out, &config.providers);
     out.push_str("[logging]\n");
     out.push_str("# Log level can be error, info, or debug.\n");
-    out.push_str(&format!("level = \"{}\"\n", config.logging.level));
+    out.push_str(&format!(
+        "level = \"{}\"\n",
+        escape_toml_string(&config.logging.level)
+    ));
     out.push_str("# Relative paths are resolved from the dux config directory.\n");
-    out.push_str(&format!("path = \"{}\"\n\n", config.logging.path));
+    out.push_str(&format!(
+        "path = \"{}\"\n\n",
+        escape_toml_string(&config.logging.path)
+    ));
     out.push_str("[ui]\n");
     out.push_str("# Initial pane sizing percentages. They can still be resized at runtime.\n");
     out.push_str(&format!("left_width_pct = {}\n", config.ui.left_width_pct));
@@ -287,12 +310,19 @@ fn render_config(config: &Config) -> String {
     out.push_str("# default_provider can override the global default for one project.\n");
     for project in &config.projects {
         out.push_str("[[projects]]\n");
-        out.push_str(&format!("path = \"{}\"\n", project.path));
+        out.push_str(&format!("id = \"{}\"\n", escape_toml_string(&project.id)));
+        out.push_str(&format!(
+            "path = \"{}\"\n",
+            escape_toml_string(&project.path)
+        ));
         if let Some(name) = &project.name {
-            out.push_str(&format!("name = \"{}\"\n", name));
+            out.push_str(&format!("name = \"{}\"\n", escape_toml_string(name)));
         }
         if let Some(provider) = &project.default_provider {
-            out.push_str(&format!("default_provider = \"{}\"\n", provider));
+            out.push_str(&format!(
+                "default_provider = \"{}\"\n",
+                escape_toml_string(provider)
+            ));
         }
         out.push('\n');
     }
@@ -302,10 +332,28 @@ fn render_config(config: &Config) -> String {
     out
 }
 
+fn escape_toml_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                out.push_str(&format!("\\u{:04X}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn render_string_list(values: &[String]) -> String {
     let rendered = values
         .iter()
-        .map(|value| format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")))
+        .map(|value| format!("\"{}\"", escape_toml_string(value)))
         .collect::<Vec<_>>()
         .join(", ");
     format!("[{rendered}]")
@@ -352,7 +400,10 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
     } else if name == "codex" {
         out.push_str("# Example: command = \"codex\"\n");
     }
-    out.push_str(&format!("command = \"{}\"\n", config.command));
+    out.push_str(&format!(
+        "command = \"{}\"\n",
+        escape_toml_string(&config.command)
+    ));
     out.push_str(&format!("args = {}\n\n", render_string_list(&config.args)));
 }
 
@@ -412,6 +463,36 @@ mod tests {
         assert!(rendered.contains("[providers.claude]"));
         assert!(rendered.contains("[providers.codex]"));
         assert!(rendered.contains("[ui]"));
+    }
+
+    #[test]
+    fn render_config_escapes_special_chars() {
+        let mut config = Config::default();
+        config.projects.push(ProjectConfig {
+            id: new_project_id(),
+            path: r#"/home/user/"test"\project"#.to_string(),
+            name: Some(r#"te"st"#.to_string()),
+            default_provider: None,
+        });
+        let rendered = render_config(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("should parse back");
+        assert_eq!(parsed.projects[0].path, config.projects[0].path);
+        assert_eq!(parsed.projects[0].name, config.projects[0].name);
+    }
+
+    #[test]
+    fn render_config_escapes_newlines_and_control_chars() {
+        let mut config = Config::default();
+        config.projects.push(ProjectConfig {
+            id: new_project_id(),
+            path: "/home/user/path\nwith\nnewlines".to_string(),
+            name: Some("name\twith\ttabs".to_string()),
+            default_provider: None,
+        });
+        let rendered = render_config(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("should parse back");
+        assert_eq!(parsed.projects[0].path, config.projects[0].path);
+        assert_eq!(parsed.projects[0].name, config.projects[0].name);
     }
 
     #[cfg(target_os = "macos")]
