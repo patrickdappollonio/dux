@@ -22,6 +22,7 @@ pub struct Config {
 #[serde(default)]
 pub struct Defaults {
     pub provider: String,
+    pub start_directory: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -63,9 +64,7 @@ pub struct UiConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            defaults: Defaults {
-                provider: "codex".to_string(),
-            },
+            defaults: Defaults::default(),
             providers: ProvidersConfig::default(),
             logging: LoggingConfig {
                 level: "info".to_string(),
@@ -83,8 +82,11 @@ impl Default for Config {
 
 impl Default for Defaults {
     fn default() -> Self {
+        let start_directory = home::home_dir()
+            .map(|p| p.to_string_lossy().to_string());
         Self {
             provider: "codex".to_string(),
+            start_directory,
         }
     }
 }
@@ -200,6 +202,8 @@ pub fn render_default_config() -> String {
 [defaults]
 # Which provider new sessions use unless a project overrides it.
 provider = "{provider}"
+# Starting directory for the project browser.
+start_directory = "{start_directory}"
 
 [providers.claude]
 # Command used to launch an ACP-compatible Claude adapter.
@@ -230,6 +234,7 @@ right_top_height_pct = {right_top_height}
 projects = []
 "#,
         provider = default.defaults.provider,
+        start_directory = default.defaults.start_directory.as_deref().unwrap_or(""),
         claude_command = default
             .providers
             .get("claude")
@@ -261,7 +266,13 @@ fn render_config(config: &Config) -> String {
     out.push_str("# Every value is materialized here so the file doubles as documentation.\n\n");
     out.push_str("[defaults]\n");
     out.push_str("# Which provider new sessions use unless a project overrides it.\n");
-    out.push_str(&format!("provider = \"{}\"\n\n", config.defaults.provider));
+    out.push_str(&format!("provider = \"{}\"\n", config.defaults.provider));
+    out.push_str("# Starting directory for the project browser.\n");
+    if let Some(dir) = &config.defaults.start_directory {
+        out.push_str(&format!("start_directory = \"{}\"\n\n", dir));
+    } else {
+        out.push_str("start_directory = \"\"\n\n");
+    }
     render_provider_configs(&mut out, &config.providers);
     out.push_str("[logging]\n");
     out.push_str("# Log level can be error, info, or debug.\n");
