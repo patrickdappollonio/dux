@@ -6,7 +6,7 @@
 
 - Left pane for projects and worktree sessions
 - Center pane for live ACP agent output or file diffs
-- Right pane split into changed files and a manual shell
+- Right pane for changed files and diffs
 - Resizable panes with keyboard shortcuts
 - Config written to `~/.dux/config.toml` on macOS
 - Config written to `$XDG_CONFIG_HOME/dux/config.toml` or `~/.config/dux/config.toml` on Linux
@@ -16,58 +16,9 @@
 
 ## Install
 
-If `~/.cargo/bin` is on your `PATH`, install the binary and run it directly:
-
-```bash
-cargo install --path .
-dux
-```
-
-There is also a helper script:
-
-```bash
-./scripts/install.sh
-```
+Download the latest binary for your platform from the [GitHub Releases](https://github.com/patrickdappollonio/dux/releases) page. Extract the archive and place the `dux` binary somewhere on your `PATH` (e.g. `/usr/local/bin`).
 
 On first launch, `dux` creates the config file in the platform-specific dux config directory with the full default configuration and comments.
-
-## Controls
-
-- `Tab`: move focus between panes
-- `Shift-Tab`: move focus backward
-- `Ctrl-p`: open the command palette
-- `:`: open direct command mode
-- `Ctrl-w`: toggle resize mode
-- In resize mode:
-  - `h` / `l`: resize left and right side panes
-  - `j` / `k`: resize the right split
-- `?`: toggle help
-- `q`: quit
-
-### Left pane
-
-- `j` / `k`: move through projects and sessions
-- `p`: open the built-in repo browser
-- `P`: open manual path entry
-- `a`: create a worktree-backed agent session from the selected project
-- `d`: cycle the selected project's default provider
-- `r`: reconnect a detached ACP session
-- `u`: refresh the selected project with `git pull --ff-only`
-- `x`: delete the selected worktree session
-
-### Center pane
-
-- `i`: start an ACP prompt turn for the running agent
-- `Esc`: leave input mode or close diff view
-
-### Files pane
-
-- `j` / `k`: move through changed files
-- `Enter`: open the selected diff in the center pane
-
-### Shell pane
-
-- `i`: send input to the shell process
 
 ## Provider setup
 

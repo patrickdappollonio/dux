@@ -8,17 +8,17 @@ The current app provides:
 
 - A left pane for projects and agent sessions
 - A center pane for live agent output or diff viewing
-- A right pane for changed files and a manual shell
-- Commented user config in `~/.config/dux/config.toml`
-- Session persistence in `~/.config/dux/sessions.sqlite3`
-- Logging in `~/.config/dux/dux.log`
+- A right pane for changed files and diffs
+- Commented user config in the platform-specific dux config directory (`~/.dux/` on macOS, `~/.config/dux/` on Linux)
+- Session persistence in `sessions.sqlite3` alongside the config
+- Logging in `dux.log` alongside the config
 - ACP-oriented agent startup with timeout handling
 
 ## Important Constraints
 
 - The app assumes providers are ACP-compatible adapters, not raw `codex` or `claude` CLIs.
 - Long-running actions should not block the UI thread.
-- User state lives under `~/.config/dux/`.
+- User state lives under `~/.dux/` on macOS and `$XDG_CONFIG_HOME/dux/` (or `~/.config/dux/`) on Linux.
 - Worktrees are user data and should not be removed or mutated casually.
 - Git operations should be explicit and conservative, especially around the source checkout.
 
@@ -43,9 +43,15 @@ The current app provides:
 - If ACP support grows, separate provider capability discovery from session creation.
 - If session restore becomes richer, persist more structured runtime metadata instead of inferring from worktree presence alone.
 
+## Keeping Documentation In Sync
+
+- When adding, removing, or changing keybindings, update `README.md` if it documents controls or shortcuts.
+- When changing features, pane layouts, config paths, or provider behavior, verify that `README.md` still accurately describes the application.
+- The README intentionally omits a full keybinding reference to avoid staleness. Do not add a Controls or Keybindings section back to it. The in-app `?` help overlay is the authoritative reference for key combinations.
+
 ## Recommendations For Debugging
 
-- First check `~/.config/dux/dux.log`.
+- First check the `dux.log` file in the dux config directory (`~/.dux/` on macOS, `~/.config/dux/` on Linux).
 - Confirm whether the provider command in `config.toml` is a real ACP adapter.
 - If agent creation fails, determine whether it stopped in:
   - worktree creation
@@ -71,11 +77,4 @@ Use:
 cargo fmt
 cargo test
 cargo run --bin dux
-```
-
-For installed binary verification:
-
-```bash
-cargo install --path .
-dux
 ```
