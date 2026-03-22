@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::model::ProviderKind;
 
@@ -49,9 +50,15 @@ pub struct ProviderCommandConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectConfig {
+    #[serde(default = "new_project_id")]
+    pub id: String,
     pub path: String,
     pub name: Option<String>,
     pub default_provider: Option<String>,
+}
+
+fn new_project_id() -> String {
+    Uuid::new_v4().to_string()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -81,8 +88,7 @@ impl Default for Config {
 
 impl Default for Defaults {
     fn default() -> Self {
-        let start_directory = home::home_dir()
-            .map(|p| p.to_string_lossy().to_string());
+        let start_directory = home::home_dir().map(|p| p.to_string_lossy().to_string());
         Self {
             provider: "codex".to_string(),
             start_directory,
@@ -227,7 +233,9 @@ enum ConfigEntry {
 fn config_schema() -> Vec<ConfigEntry> {
     vec![
         ConfigEntry::Comment("# dux configuration"),
-        ConfigEntry::Comment("# Every value is materialized here so the file doubles as documentation."),
+        ConfigEntry::Comment(
+            "# Every value is materialized here so the file doubles as documentation.",
+        ),
         ConfigEntry::Blank,
         ConfigEntry::Section("defaults"),
         ConfigEntry::Field {
@@ -257,7 +265,9 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Section("ui"),
         ConfigEntry::Field {
             key: "left_width_pct",
-            comment: Some("# Initial pane sizing percentages. They can still be resized at runtime."),
+            comment: Some(
+                "# Initial pane sizing percentages. They can still be resized at runtime.",
+            ),
             value_fn: |c| FieldValue::U16(c.ui.left_width_pct),
         },
         ConfigEntry::Field {
@@ -293,10 +303,10 @@ fn render_config(config: &Config) -> String {
                 }
                 match value_fn(config) {
                     FieldValue::Str(s) => {
-                        let _ = writeln!(out, "{key} = \"{s}\"");
+                        let _ = writeln!(out, "{key} = \"{}\"", escape_toml_string(&s));
                     }
                     FieldValue::OptStr(Some(s)) => {
-                        let _ = writeln!(out, "{key} = \"{s}\"");
+                        let _ = writeln!(out, "{key} = \"{}\"", escape_toml_string(&s));
                     }
                     FieldValue::OptStr(None) => {
                         let _ = writeln!(out, "{key} = \"\"");
@@ -334,22 +344,45 @@ fn render_projects(out: &mut String, projects: &[ProjectConfig]) {
     } else {
         for project in projects {
             out.push_str("[[projects]]\n");
-            let _ = writeln!(out, "path = \"{}\"", project.path);
+            let _ = writeln!(out, "id = \"{}\"", escape_toml_string(&project.id));
+            let _ = writeln!(out, "path = \"{}\"", escape_toml_string(&project.path));
             if let Some(name) = &project.name {
-                let _ = writeln!(out, "name = \"{name}\"");
+                let _ = writeln!(out, "name = \"{}\"", escape_toml_string(name));
             }
             if let Some(provider) = &project.default_provider {
-                let _ = writeln!(out, "default_provider = \"{provider}\"");
+                let _ = writeln!(
+                    out,
+                    "default_provider = \"{}\"",
+                    escape_toml_string(provider)
+                );
             }
             out.push('\n');
         }
     }
 }
 
+fn escape_toml_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                out.push_str(&format!("\\u{:04X}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn render_string_list(values: &[String]) -> String {
     let rendered = values
         .iter()
-        .map(|value| format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")))
+        .map(|value| format!("\"{}\"", escape_toml_string(value)))
         .collect::<Vec<_>>()
         .join(", ");
     format!("[{rendered}]")
@@ -396,7 +429,10 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
     } else if name == "codex" {
         out.push_str("# Example: command = \"codex\"\n");
     }
-    out.push_str(&format!("command = \"{}\"\n", config.command));
+    out.push_str(&format!(
+        "command = \"{}\"\n",
+        escape_toml_string(&config.command)
+    ));
     out.push_str(&format!("args = {}\n\n", render_string_list(&config.args)));
 }
 
@@ -459,11 +495,44 @@ mod tests {
     }
 
     #[test]
+    fn render_config_escapes_special_chars() {
+        let mut config = Config::default();
+        config.projects.push(ProjectConfig {
+            id: new_project_id(),
+            path: r#"/home/user/"test"\project"#.to_string(),
+            name: Some(r#"te"st"#.to_string()),
+            default_provider: None,
+        });
+        let rendered = render_config(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("should parse back");
+        assert_eq!(parsed.projects[0].path, config.projects[0].path);
+        assert_eq!(parsed.projects[0].name, config.projects[0].name);
+    }
+
+    #[test]
+    fn render_config_escapes_newlines_and_control_chars() {
+        let mut config = Config::default();
+        config.projects.push(ProjectConfig {
+            id: new_project_id(),
+            path: "/home/user/path\nwith\nnewlines".to_string(),
+            name: Some("name\twith\ttabs".to_string()),
+            default_provider: None,
+        });
+        let rendered = render_config(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("should parse back");
+        assert_eq!(parsed.projects[0].path, config.projects[0].path);
+        assert_eq!(parsed.projects[0].name, config.projects[0].name);
+    }
+
+    #[test]
     fn default_config_round_trips_through_toml() {
         let rendered = render_default_config();
         let parsed: Config = toml::from_str(&rendered).expect("default config should parse");
         let re_rendered = render_config(&parsed);
-        assert_eq!(rendered, re_rendered, "render → parse → render should be stable");
+        assert_eq!(
+            rendered, re_rendered,
+            "render → parse → render should be stable"
+        );
     }
 
     #[cfg(target_os = "macos")]

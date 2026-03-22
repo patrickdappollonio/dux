@@ -6,9 +6,7 @@ use ratatui::prelude::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use similar::{ChangeTag, TextDiff};
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{
-    Color as SynColor, FontStyle, Style as SynStyle, ThemeSet,
-};
+use syntect::highlighting::{Color as SynColor, FontStyle, Style as SynStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
 use crate::theme::Theme as AppTheme;
@@ -22,13 +20,8 @@ pub struct DiffOutput {
 ///
 /// `worktree_path` is the root of the git worktree and `rel_path` is the
 /// file path relative to it (as reported by `git status --porcelain`).
-pub fn diff_file(
-    worktree_path: &Path,
-    rel_path: &str,
-    theme: &AppTheme,
-) -> Result<DiffOutput> {
-    let old_text = crate::git::file_at_head(worktree_path, rel_path)?
-        .unwrap_or_default();
+pub fn diff_file(worktree_path: &Path, rel_path: &str, theme: &AppTheme) -> Result<DiffOutput> {
+    let old_text = crate::git::file_at_head(worktree_path, rel_path)?.unwrap_or_default();
     let abs_path = worktree_path.join(rel_path);
     let new_text = fs::read_to_string(&abs_path).unwrap_or_default();
 
@@ -87,8 +80,18 @@ pub fn diff_file(
             let text = change.value();
 
             let (prefix, base_fg, bg, highlighter) = match tag {
-                ChangeTag::Delete => ("-", theme.diff_remove, Some(Color::Rgb(60, 20, 20)), &mut hl_old),
-                ChangeTag::Insert => ("+", theme.diff_add, Some(Color::Rgb(20, 50, 20)), &mut hl_new),
+                ChangeTag::Delete => (
+                    "-",
+                    theme.diff_remove,
+                    Some(Color::Rgb(60, 20, 20)),
+                    &mut hl_old,
+                ),
+                ChangeTag::Insert => (
+                    "+",
+                    theme.diff_add,
+                    Some(Color::Rgb(20, 50, 20)),
+                    &mut hl_new,
+                ),
                 ChangeTag::Equal => (" ", Color::Reset, None, &mut hl_new),
             };
 
@@ -101,9 +104,11 @@ pub fn diff_file(
                         prefix.to_string(),
                         Style::default().fg(base_fg),
                     )];
-                    out.extend(ranges.into_iter().map(|(s, t)| {
-                        Span::styled(t.to_string(), syntect_to_ratatui(s))
-                    }));
+                    out.extend(
+                        ranges
+                            .into_iter()
+                            .map(|(s, t)| Span::styled(t.to_string(), syntect_to_ratatui(s))),
+                    );
                     out
                 }
                 Ok(ranges) => {

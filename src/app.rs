@@ -58,7 +58,8 @@ pub struct App {
     theme: Theme,
     tick_count: u64,
     watched_worktree: Arc<Mutex<Option<PathBuf>>>,
-    collapsed_projects: HashSet<i64>,
+    collapsed_projects: HashSet<String>,
+    left_items_cache: Vec<LeftItem>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,7 +145,7 @@ enum InputTarget {
     Agent,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 enum LeftItem {
     Project(usize),
     Session(usize),
@@ -270,8 +271,10 @@ impl App {
             tick_count: 0,
             watched_worktree: Arc::clone(&watched_worktree),
             collapsed_projects: HashSet::new(),
+            left_items_cache: Vec::new(),
         };
         app.restore_sessions();
+        app.rebuild_left_items();
         app.reload_changed_files();
         Ok(app)
     }
@@ -443,7 +446,9 @@ impl App {
                     self.input_target = InputTarget::Agent;
                     self.set_info("Interactive mode. Keys forwarded to agent. ctrl+g exits.");
                 } else {
-                    self.set_error("No active agent. Press \"r\" to restart or \"n\" to create a new one.");
+                    self.set_error(
+                        "No active agent. Press \"r\" to restart or \"n\" to create a new one.",
+                    );
                 }
             }
             _ => {}
@@ -463,7 +468,9 @@ impl App {
                     self.input_target = InputTarget::Agent;
                     self.set_info("Interactive mode. Keys forwarded to agent. ctrl+g exits.");
                 } else {
-                    self.set_error("No active agent. Press \"r\" to restart or \"n\" to create a new one.");
+                    self.set_error(
+                        "No active agent. Press \"r\" to restart or \"n\" to create a new one.",
+                    );
                 }
             }
             KeyCode::Char('r') => {
@@ -683,8 +690,7 @@ impl App {
                             *selected = 0;
                             filter.clear();
                         } else {
-                            error_msg =
-                                Some(format!("{} is not a directory.", path_input.trim()));
+                            error_msg = Some(format!("{} is not a directory.", path_input.trim()));
                         }
                         *editing_path = false;
                         path_input.clear();
@@ -843,7 +849,11 @@ impl App {
         {
             match key.code {
                 KeyCode::Esc => self.prompt = PromptState::None,
-                KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::Char('h') | KeyCode::Char('l') => {
+                KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Tab
+                | KeyCode::Char('h')
+                | KeyCode::Char('l') => {
                     *confirm_selected = !*confirm_selected;
                 }
                 KeyCode::Enter => {
@@ -865,7 +875,11 @@ impl App {
         {
             match key.code {
                 KeyCode::Esc => self.prompt = PromptState::None,
-                KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::Char('h') | KeyCode::Char('l') => {
+                KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Tab
+                | KeyCode::Char('h')
+                | KeyCode::Char('l') => {
                     *confirm_selected = !*confirm_selected;
                 }
                 KeyCode::Enter => {
@@ -971,7 +985,9 @@ impl App {
     }
 
     fn add_project(&mut self, raw_path: String, name: String) -> Result<()> {
-        let path = PathBuf::from(raw_path.trim());
+        let path = PathBuf::from(raw_path.trim())
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(raw_path.trim()));
         logger::info(&format!("attempting to add project {}", path.display()));
         if !path.exists() || !git::is_git_repo(&path) {
             logger::error(&format!("add project rejected for {}", path.display()));
@@ -983,7 +999,10 @@ impl App {
             .iter()
             .any(|project| Path::new(&project.path) == path.as_path())
         {
-            self.set_error(format!("\"{}\" is already registered as a project.", path.display()));
+            self.set_error(format!(
+                "\"{}\" is already registered as a project.",
+                path.display()
+            ));
             return Ok(());
         }
         let branch = git::current_branch(&path)?;
@@ -995,25 +1014,22 @@ impl App {
         } else {
             name.trim().to_string()
         };
+        let project_id = Uuid::new_v4().to_string();
         self.config.projects.push(ProjectConfig {
+            id: project_id.clone(),
             path: path.to_string_lossy().to_string(),
             name: Some(display_name.clone()),
             default_provider: None,
         });
         save_config(&self.paths.config_path, &self.config)?;
         self.projects.push(Project {
-            id: self
-                .projects
-                .iter()
-                .map(|project| project.id)
-                .max()
-                .unwrap_or_default()
-                + 1,
+            id: project_id,
             name: display_name.clone(),
             path: path.to_string_lossy().to_string(),
             default_provider: self.config.default_provider(),
             current_branch: branch,
         });
+        self.rebuild_left_items();
         logger::info(&format!("registered project {}", path.display()));
         self.set_info(format!("Added project \"{}\" to workspace", display_name));
         Ok(())
@@ -1106,12 +1122,7 @@ impl App {
     }
 
     fn do_delete_session(&mut self, session_id: &str) -> Result<()> {
-        let Some(session) = self
-            .sessions
-            .iter()
-            .find(|s| s.id == session_id)
-            .cloned()
-        else {
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
             return Ok(());
         };
         logger::info(&format!(
@@ -1134,6 +1145,7 @@ impl App {
         self.providers.remove(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
         self.session_store.delete_session(&session.id)?;
+        self.rebuild_left_items();
         self.selected_left = self.selected_left.saturating_sub(1);
         self.reload_changed_files();
         self.set_info(format!(
@@ -1178,10 +1190,7 @@ impl App {
             session.provider = next.clone();
             self.session_store.upsert_session(session)?;
         }
-        self.set_info(format!(
-            "Changed CLI agent to \"{}\"",
-            next.as_str()
-        ));
+        self.set_info(format!("Changed CLI agent to \"{}\"", next.as_str()));
         Ok(())
     }
 
@@ -1218,6 +1227,7 @@ impl App {
             .projects
             .retain(|candidate| Path::new(&candidate.path) != Path::new(&project.path));
         save_config(&self.paths.config_path, &self.config)?;
+        self.rebuild_left_items();
         self.selected_left = self.selected_left.saturating_sub(1);
         self.reload_changed_files();
         self.set_info(format!(
@@ -1280,11 +1290,8 @@ impl App {
         let Some(file) = self.changed_files.get(self.selected_file) else {
             return Ok(());
         };
-        let output = crate::diff::diff_file(
-            Path::new(&session.worktree_path),
-            &file.path,
-            &self.theme,
-        )?;
+        let output =
+            crate::diff::diff_file(Path::new(&session.worktree_path), &file.path, &self.theme)?;
         self.center_mode = CenterMode::Diff(output.lines);
         self.focus = FocusPane::Center;
         Ok(())
@@ -1294,7 +1301,11 @@ impl App {
         while let Ok(event) = self.worker_rx.try_recv() {
             match event {
                 WorkerEvent::CreateAgentProgress(message) => self.set_busy(message),
-                WorkerEvent::CreateAgentReady { session, client, pty_size } => {
+                WorkerEvent::CreateAgentReady {
+                    session,
+                    client,
+                    pty_size,
+                } => {
                     self.create_agent_in_flight = false;
                     self.last_pty_size = pty_size;
                     if let Err(err) = self.session_store.upsert_session(&session) {
@@ -1307,6 +1318,7 @@ impl App {
                     }
                     self.providers.insert(session.id.clone(), client);
                     self.sessions.insert(0, session.clone());
+                    self.rebuild_left_items();
                     self.selected_left = self
                         .left_items()
                         .iter()
@@ -1362,7 +1374,11 @@ impl App {
     fn render(&mut self, frame: &mut Frame) {
         let term_w = frame.area().width as usize;
         let status_text_len = self.status.text().len() + 3; // " ● " prefix
-        let status_lines: u16 = if term_w > 0 && status_text_len > term_w { 2 } else { 1 };
+        let status_lines: u16 = if term_w > 0 && status_text_len > term_w {
+            2
+        } else {
+            1
+        };
         let footer_h = 1 + status_lines; // 1 for hints + status lines
         let [header, body, footer] = Layout::default()
             .direction(Direction::Vertical)
@@ -1476,10 +1492,7 @@ impl App {
                             .is_some_and(|next| matches!(next, LeftItem::Session(_)));
                         let connector = if is_last { "└" } else { "├" };
                         ListItem::new(Line::from(vec![
-                            Span::styled(
-                                connector,
-                                Style::default().fg(self.theme.project_icon),
-                            ),
+                            Span::styled(connector, Style::default().fg(self.theme.project_icon)),
                             Span::styled(dot.to_string(), Style::default().fg(dot_color)),
                         ]))
                     }
@@ -1497,10 +1510,10 @@ impl App {
             return;
         }
 
-        let session_counts: HashMap<i64, usize> = {
+        let session_counts: HashMap<String, usize> = {
             let mut counts = HashMap::new();
             for session in &self.sessions {
-                *counts.entry(session.project_id).or_insert(0) += 1;
+                *counts.entry(session.project_id.clone()).or_insert(0) += 1;
             }
             counts
         };
@@ -1541,10 +1554,7 @@ impl App {
                         .unwrap_or_else(|| session.branch_name.clone());
                     let (dot, dot_color) = self.theme.session_dot(&session.status);
                     ListItem::new(Line::from(vec![
-                        Span::styled(
-                            connector,
-                            Style::default().fg(self.theme.project_icon),
-                        ),
+                        Span::styled(connector, Style::default().fg(self.theme.project_icon)),
                         Span::styled(format!("{dot} "), Style::default().fg(dot_color)),
                         Span::styled(label, Style::default().fg(dot_color)),
                         Span::styled(
@@ -1640,10 +1650,7 @@ impl App {
                                     name.to_owned(),
                                     Style::default().fg(self.theme.branch_fg),
                                 ),
-                                Span::styled(
-                                    "...",
-                                    Style::default().fg(self.theme.hint_desc_fg),
-                                ),
+                                Span::styled("...", Style::default().fg(self.theme.hint_desc_fg)),
                             ];
                             (spans, text_len)
                         }
@@ -1725,8 +1732,7 @@ impl App {
                                 if cell.inverse() {
                                     modifier |= Modifier::REVERSED;
                                 }
-                                let style =
-                                    Style::default().fg(fg).bg(bg).add_modifier(modifier);
+                                let style = Style::default().fg(fg).bg(bg).add_modifier(modifier);
                                 let contents = cell.contents();
                                 let ratatui_cell = &mut buf[(x, y)];
                                 if contents.is_empty() {
@@ -1744,8 +1750,7 @@ impl App {
                         let (cursor_row, cursor_col) = screen.cursor_position();
                         let cx = term_area.x + cursor_col;
                         let cy = term_area.y + cursor_row;
-                        if cx < term_area.x + term_area.width
-                            && cy < term_area.y + term_area.height
+                        if cx < term_area.x + term_area.width && cy < term_area.y + term_area.height
                         {
                             let cursor_cell = &mut buf[(cx, cy)];
                             cursor_cell.set_style(
@@ -1764,9 +1769,7 @@ impl App {
             let hint_line = if is_input {
                 let desc_style = Style::default().fg(self.theme.hint_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
-                let cli_name = session_provider_name
-                    .as_deref()
-                    .unwrap_or("the agent");
+                let cli_name = session_provider_name.as_deref().unwrap_or("the agent");
                 spans.push(Span::styled("Press ", desc_style));
                 spans.extend(self.theme.key_badge("ctrl+g", Color::Reset));
                 spans.push(Span::styled(
@@ -1967,14 +1970,8 @@ impl App {
             status_text
         };
         let status_line = Line::from(vec![
-            Span::styled(
-                prefix,
-                Style::default().fg(dot_color).bg(status_bg),
-            ),
-            Span::styled(
-                truncated,
-                Style::default().fg(msg_color).bg(status_bg),
-            ),
+            Span::styled(prefix, Style::default().fg(dot_color).bg(status_bg)),
+            Span::styled(truncated, Style::default().fg(msg_color).bg(status_bg)),
         ]);
         Paragraph::new(status_line)
             .style(Style::default().bg(status_bg))
@@ -2019,15 +2016,10 @@ impl App {
                     ("Esc", "Close diff view"),
                 ],
             ),
-            (
-                "Files pane",
-                &[("Enter", "Open selected file diff")],
-            ),
+            ("Files pane", &[("Enter", "Open selected file diff")]),
             (
                 "Key notation",
-                &[
-                    ("^X", "Hold Ctrl and press X (e.g. ^P = Ctrl+P)"),
-                ],
+                &[("^X", "Hold Ctrl and press X (e.g. ^P = Ctrl+P)")],
             ),
         ];
         let mut lines: Vec<Line> = Vec::new();
@@ -2063,8 +2055,16 @@ impl App {
         )));
         let session_states: &[(&str, Color, &str)] = &[
             ("●", self.theme.session_active, "Active — agent is running"),
-            ("◐", self.theme.session_detached, "Detached — agent process disconnected"),
-            ("○", self.theme.session_exited, "Exited — agent has finished"),
+            (
+                "◐",
+                self.theme.session_detached,
+                "Detached — agent process disconnected",
+            ),
+            (
+                "○",
+                self.theme.session_exited,
+                "Exited — agent has finished",
+            ),
         ];
         for (dot, color, desc) in session_states {
             lines.push(Line::from(vec![
@@ -2266,9 +2266,15 @@ impl App {
                     let mut bottom_spans = vec![Span::raw(" ")];
                     if *editing_path {
                         bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
-                        bottom_spans.push(Span::styled(" go  ", Style::default().fg(self.theme.hint_desc_fg)));
+                        bottom_spans.push(Span::styled(
+                            " go  ",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ));
                         bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
-                        bottom_spans.push(Span::styled(" cancel", Style::default().fg(self.theme.hint_desc_fg)));
+                        bottom_spans.push(Span::styled(
+                            " cancel",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ));
                     } else if *searching {
                         bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
                         bottom_spans.push(Span::styled(
@@ -2483,10 +2489,7 @@ impl App {
                 let btn_width = 16u16;
                 let gap = 2u16;
                 let total = btn_width * 2 + gap;
-                let left_offset = buttons_area
-                    .width
-                    .saturating_sub(total)
-                    / 2;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
 
                 let cancel_area = Rect {
                     x: buttons_area.x + left_offset,
@@ -2558,12 +2561,19 @@ impl App {
                     ])
                     .areas(inner);
 
-                let agent_word = if *active_count == 1 { "agent" } else { "agents" };
+                let agent_word = if *active_count == 1 {
+                    "agent"
+                } else {
+                    "agents"
+                };
                 let lines = vec![
                     Line::from(""),
                     Line::from(vec![
                         Span::raw(format!(" {active_count} running {agent_word} will be ")),
-                        Span::styled("killed", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            "killed",
+                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        ),
                         Span::raw(" if you quit."),
                     ]),
                     Line::from(""),
@@ -2714,7 +2724,11 @@ impl App {
         }
     }
 
-    fn left_items(&self) -> Vec<LeftItem> {
+    fn left_items(&self) -> &[LeftItem] {
+        &self.left_items_cache
+    }
+
+    fn rebuild_left_items(&mut self) {
         let mut items = Vec::new();
         for (project_index, project) in self.projects.iter().enumerate() {
             items.push(LeftItem::Project(project_index));
@@ -2727,17 +2741,18 @@ impl App {
                 }
             }
         }
-        items
+        self.left_items_cache = items;
     }
 
     fn toggle_collapse_selected_project(&mut self) {
         if let Some(project) = self.selected_project() {
-            let id = project.id;
+            let id = project.id.clone();
             if self.collapsed_projects.contains(&id) {
                 self.collapsed_projects.remove(&id);
             } else {
                 self.collapsed_projects.insert(id);
             }
+            self.rebuild_left_items();
         }
     }
 
@@ -2812,13 +2827,15 @@ impl App {
     fn spawn_changed_files_poller(&self) {
         let tx = self.worker_tx.clone();
         let watched = Arc::clone(&self.watched_worktree);
-        thread::spawn(move || loop {
-            thread::sleep(Duration::from_secs(2));
-            let path = watched.lock().ok().and_then(|guard| guard.clone());
-            if let Some(worktree_path) = path {
-                if let Ok(files) = git::changed_files(&worktree_path) {
-                    if tx.send(WorkerEvent::ChangedFilesReady(files)).is_err() {
-                        break; // receiver dropped, app is shutting down
+        thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_secs(2));
+                let path = watched.lock().ok().and_then(|guard| guard.clone());
+                if let Some(worktree_path) = path {
+                    if let Ok(files) = git::changed_files(&worktree_path) {
+                        if tx.send(WorkerEvent::ChangedFilesReady(files)).is_err() {
+                            break; // receiver dropped, app is shutting down
+                        }
                     }
                 }
             }
@@ -2839,7 +2856,10 @@ impl App {
 
     fn themed_block<'a>(&self, title: &'a str, focused: bool) -> Block<'a> {
         Block::default()
-            .title(Line::from(Span::styled(title, self.theme.title_style(focused))))
+            .title(Line::from(Span::styled(
+                title,
+                self.theme.title_style(focused),
+            )))
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
             .border_style(self.theme.border_style(focused))
@@ -2904,7 +2924,8 @@ fn run_create_agent_job(
     ));
     let session = AgentSession {
         id: Uuid::new_v4().to_string(),
-        project_id: project.id,
+        project_id: project.id.clone(),
+        project_path: Some(project.path.clone()),
         provider: project.default_provider.clone(),
         source_branch: project.current_branch.clone(),
         branch_name,
@@ -2954,7 +2975,11 @@ fn run_create_agent_job(
         }
     };
     logger::info(&format!("PTY session started for {}", session.id));
-    let _ = worker_tx.send(WorkerEvent::CreateAgentReady { session, client, pty_size: (rows, cols) });
+    let _ = worker_tx.send(WorkerEvent::CreateAgentReady {
+        session,
+        client,
+        pty_size: (rows, cols),
+    });
 }
 
 /// Format additions/deletions as right-aligned colored spans.
@@ -2984,7 +3009,7 @@ fn format_line_stats(additions: usize, deletions: usize) -> Vec<Span<'static>> {
 
 fn load_projects(config: &Config) -> Vec<Project> {
     let mut projects = Vec::new();
-    for (index, project) in config.projects.iter().enumerate() {
+    for project in config.projects.iter() {
         let path = PathBuf::from(&project.path);
         if !path.exists() || !git::is_git_repo(&path) {
             continue;
@@ -2995,7 +3020,7 @@ fn load_projects(config: &Config) -> Vec<Project> {
             .map(ProviderKind::from_str)
             .unwrap_or_else(|| config.default_provider());
         projects.push(Project {
-            id: index as i64 + 1,
+            id: project.id.clone(),
             name: project.name.clone().unwrap_or_else(|| {
                 path.file_name()
                     .and_then(|name| name.to_str())
