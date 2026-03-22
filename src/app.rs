@@ -96,12 +96,6 @@ enum CenterMode {
 }
 
 #[derive(Clone, Debug)]
-enum PromptField {
-    Path,
-    Name,
-}
-
-#[derive(Clone, Debug)]
 enum PromptState {
     None,
     Command {
@@ -118,11 +112,8 @@ enum PromptState {
         searching: bool,
         editing_path: bool,
         path_input: String,
-    },
-    AddProject {
-        path: String,
-        name: String,
-        field: PromptField,
+        tab_completions: Vec<String>,
+        tab_index: usize,
     },
     ConfirmDeleteAgent {
         session_id: String,
@@ -211,11 +202,6 @@ const COMMANDS: &[CommandDef] = &[
         name: "add-project",
         description: "Open the project browser",
         shortcut: Some("a"),
-    },
-    CommandDef {
-        name: "add-project-manual",
-        description: "Open manual project entry",
-        shortcut: None,
     },
     CommandDef {
         name: "toggle-sidebar",
@@ -425,13 +411,6 @@ impl App {
             }
             KeyCode::Char('a') => {
                 self.open_project_browser()?;
-            }
-            KeyCode::Char('A') => {
-                self.prompt = PromptState::AddProject {
-                    path: String::new(),
-                    name: String::new(),
-                    field: PromptField::Path,
-                };
             }
             KeyCode::Char('n') => self.create_agent_for_selected_project()?,
             KeyCode::Char('u') => self.refresh_selected_project()?,
@@ -680,6 +659,8 @@ impl App {
             searching,
             editing_path,
             path_input,
+            tab_completions,
+            tab_index,
         } = &mut self.prompt
         {
             let mut browse_to: Option<PathBuf> = None;
@@ -690,9 +671,71 @@ impl App {
                     KeyCode::Esc => {
                         *editing_path = false;
                         path_input.clear();
+                        tab_completions.clear();
+                        *tab_index = 0;
                     }
                     KeyCode::Backspace => {
                         path_input.pop();
+                        tab_completions.clear();
+                        *tab_index = 0;
+                    }
+                    KeyCode::Tab | KeyCode::BackTab => {
+                        if tab_completions.is_empty() {
+                            // Build completions from current input
+                            let input_path = PathBuf::from(path_input.as_str());
+                            let (search_dir, prefix) = if input_path.is_dir()
+                                && path_input.ends_with('/')
+                            {
+                                (input_path.clone(), String::new())
+                            } else {
+                                let parent = input_path
+                                    .parent()
+                                    .unwrap_or_else(|| std::path::Path::new("/"));
+                                let file_name = input_path
+                                    .file_name()
+                                    .map(|f| f.to_string_lossy().to_string())
+                                    .unwrap_or_default();
+                                (parent.to_path_buf(), file_name)
+                            };
+                            if let Ok(read) = std::fs::read_dir(&search_dir) {
+                                let prefix_lower = prefix.to_lowercase();
+                                let mut candidates: Vec<String> = read
+                                    .filter_map(|e| e.ok())
+                                    .filter(|e| {
+                                        e.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+                                    })
+                                    .filter(|e| {
+                                        let name =
+                                            e.file_name().to_string_lossy().to_lowercase();
+                                        !name.starts_with('.')
+                                            && name.starts_with(&prefix_lower)
+                                    })
+                                    .map(|e| {
+                                        let mut full =
+                                            search_dir.join(e.file_name()).to_string_lossy().to_string();
+                                        full.push('/');
+                                        full
+                                    })
+                                    .collect();
+                                candidates.sort();
+                                *tab_completions = candidates;
+                                *tab_index = 0;
+                            }
+                        } else {
+                            // Cycle through existing completions
+                            if key.code == KeyCode::BackTab {
+                                if *tab_index == 0 {
+                                    *tab_index = tab_completions.len().saturating_sub(1);
+                                } else {
+                                    *tab_index -= 1;
+                                }
+                            } else {
+                                *tab_index = (*tab_index + 1) % tab_completions.len();
+                            }
+                        }
+                        if let Some(completion) = tab_completions.get(*tab_index) {
+                            *path_input = completion.clone();
+                        }
                     }
                     KeyCode::Enter => {
                         let new_dir = PathBuf::from(path_input.trim());
@@ -708,10 +751,14 @@ impl App {
                         }
                         *editing_path = false;
                         path_input.clear();
+                        tab_completions.clear();
+                        *tab_index = 0;
                     }
                     KeyCode::Char(c) => {
                         if !key.modifiers.contains(KeyModifiers::CONTROL) {
                             path_input.push(c);
+                            tab_completions.clear();
+                            *tab_index = 0;
                         }
                     }
                     _ => {}
@@ -772,16 +819,13 @@ impl App {
                     filter.pop();
                     *selected = 0;
                 }
-                KeyCode::Char('m') if !*searching => {
-                    self.prompt = PromptState::AddProject {
-                        path: current_dir.to_string_lossy().to_string(),
-                        name: String::new(),
-                        field: PromptField::Path,
-                    };
-                }
                 KeyCode::Char('g') if !*searching => {
                     *editing_path = true;
-                    *path_input = current_dir.to_string_lossy().to_string();
+                    let mut p = current_dir.to_string_lossy().to_string();
+                    if !p.ends_with('/') {
+                        p.push('/');
+                    }
+                    *path_input = p;
                 }
                 KeyCode::Enter if *searching => {
                     *searching = false;
@@ -824,43 +868,6 @@ impl App {
                 self.spawn_browser_entries(&dir);
             }
             return Ok(false);
-        }
-
-        let mut submit = None;
-        if let PromptState::AddProject { path, name, field } = &mut self.prompt {
-            match key.code {
-                KeyCode::Esc => self.prompt = PromptState::None,
-                KeyCode::Tab => {
-                    *field = match field {
-                        PromptField::Path => PromptField::Name,
-                        PromptField::Name => PromptField::Path,
-                    };
-                }
-                KeyCode::Backspace => match field {
-                    PromptField::Path => {
-                        path.pop();
-                    }
-                    PromptField::Name => {
-                        name.pop();
-                    }
-                },
-                KeyCode::Enter => {
-                    submit = Some((path.clone(), name.clone()));
-                }
-                KeyCode::Char(c) => {
-                    if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                        match field {
-                            PromptField::Path => path.push(c),
-                            PromptField::Name => name.push(c),
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        if let Some((path, name)) = submit {
-            self.add_project(path, name)?;
-            self.prompt = PromptState::None;
         }
 
         if let PromptState::ConfirmDeleteAgent {
@@ -994,10 +1001,12 @@ impl App {
             searching: false,
             editing_path: false,
             path_input: String::new(),
+            tab_completions: Vec::new(),
+            tab_index: 0,
         };
         self.spawn_browser_entries(&start_dir);
         self.set_info(
-            "Project browser: Enter opens or adds a repo, / to search, m switches to manual entry.",
+            "Project browser: Enter opens or adds a repo, / to search, g to go to a path.",
         );
         Ok(())
     }
@@ -2253,6 +2262,7 @@ impl App {
                 searching,
                 editing_path,
                 path_input,
+                ..
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(72, 70, frame.area());
@@ -2334,6 +2344,8 @@ impl App {
                         .render(filter_area, frame.buffer_mut());
                     let mut bottom_spans = vec![Span::raw(" ")];
                     if *editing_path {
+                        bottom_spans.extend(self.theme.key_badge("Tab", Color::Reset));
+                        bottom_spans.push(Span::styled(" complete  ", Style::default().fg(self.theme.hint_desc_fg)));
                         bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
                         bottom_spans.push(Span::styled(
                             " go  ",
@@ -2369,11 +2381,6 @@ impl App {
                         bottom_spans.extend(self.theme.key_badge("g", Color::Reset));
                         bottom_spans.push(Span::styled(
                             " go to  ",
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        ));
-                        bottom_spans.extend(self.theme.key_badge("m", Color::Reset));
-                        bottom_spans.push(Span::styled(
-                            " manual  ",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
                         bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
@@ -2412,11 +2419,6 @@ impl App {
                         " go to  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
-                    bottom_spans.extend(self.theme.key_badge("m", Color::Reset));
-                    bottom_spans.push(Span::styled(
-                        " manual  ",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
                     bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
                     bottom_spans.push(Span::styled(
                         " cancel",
@@ -2437,75 +2439,6 @@ impl App {
                         &mut state,
                     );
                 }
-            }
-            PromptState::AddProject { path, name, field } => {
-                self.render_dim_overlay(frame);
-                let area = centered_rect(72, 70, frame.area());
-                Clear.render(area, frame.buffer_mut());
-                let cursor = "█";
-                let path_cursor = if matches!(field, PromptField::Path) {
-                    cursor
-                } else {
-                    ""
-                };
-                let name_cursor = if matches!(field, PromptField::Name) {
-                    cursor
-                } else {
-                    ""
-                };
-                let lines = vec![
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::styled(
-                            "  Path: ",
-                            Style::default()
-                                .fg(if matches!(field, PromptField::Path) {
-                                    Color::Cyan
-                                } else {
-                                    self.theme.hint_desc_fg
-                                })
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(format!("{path}{path_cursor}")),
-                    ]),
-                    Line::from(vec![
-                        Span::styled(
-                            "  Name: ",
-                            Style::default()
-                                .fg(if matches!(field, PromptField::Name) {
-                                    Color::Cyan
-                                } else {
-                                    self.theme.hint_desc_fg
-                                })
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(format!("{name}{name_cursor}")),
-                    ]),
-                    Line::from(""),
-                    Line::from({
-                        let mut s: Vec<Span> = vec![Span::raw("  ")];
-                        s.extend(self.theme.key_badge("Tab", Color::Reset));
-                        s.push(Span::styled(
-                            " switch fields  ",
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        ));
-                        s.extend(self.theme.key_badge("Enter", Color::Reset));
-                        s.push(Span::styled(
-                            " save  ",
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        ));
-                        s.extend(self.theme.key_badge("Esc", Color::Reset));
-                        s.push(Span::styled(
-                            " cancel",
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        ));
-                        s
-                    }),
-                ];
-                Paragraph::new(lines)
-                    .block(self.themed_overlay_block("Manual Project Entry"))
-                    .wrap(Wrap { trim: false })
-                    .render(area, frame.buffer_mut());
             }
             PromptState::ConfirmDeleteAgent {
                 branch_name,
@@ -2764,14 +2697,6 @@ impl App {
             "delete-agent" => self.confirm_delete_selected_session(),
             "reconnect-agent" => self.reconnect_selected_session(),
             "add-project" => self.open_project_browser(),
-            "add-project-manual" => {
-                self.prompt = PromptState::AddProject {
-                    path: String::new(),
-                    name: String::new(),
-                    field: PromptField::Path,
-                };
-                Ok(())
-            }
             "copy-path" => self.copy_selected_path(),
             "toggle-project" => {
                 self.toggle_collapse_selected_project();
