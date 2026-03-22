@@ -1050,6 +1050,11 @@ impl App {
                         " open  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
+                    bottom_spans.extend(self.theme.key_badge("o", Color::Reset));
+                    bottom_spans.push(Span::styled(
+                        " add current  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
                     bottom_spans.extend(self.theme.key_badge("g", Color::Reset));
                     bottom_spans.push(Span::styled(
                         " go to  ",
