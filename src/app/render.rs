@@ -1535,7 +1535,7 @@ impl App {
                     Line::from(""),
                     Line::from(Span::styled(
                         " This action cannot be undone.",
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(self.theme.warning_fg),
                     )),
                 ];
                 Paragraph::new(lines)
@@ -1561,12 +1561,12 @@ impl App {
                 };
 
                 let (cancel_border, cancel_fg) = if !confirm_selected {
-                    (Color::Cyan, Color::White)
+                    (self.theme.button_confirm_border, self.theme.button_active_fg)
                 } else {
                     (self.theme.border_normal, self.theme.hint_desc_fg)
                 };
                 let (discard_border, discard_fg) = if *confirm_selected {
-                    (Color::Red, Color::White)
+                    (self.theme.button_danger_border, self.theme.button_active_fg)
                 } else {
                     (self.theme.border_normal, self.theme.hint_desc_fg)
                 };

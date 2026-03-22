@@ -65,6 +65,21 @@ impl App {
                          You can write one manually or retry with ^G.",
                     ));
                 }
+                WorkerEvent::PushCompleted(result) => match result {
+                    Ok(()) => self.set_info(
+                        "Pushed to remote successfully. Your changes are now available to collaborators.",
+                    ),
+                    Err(e) => self.set_error(format!("Push to remote failed: {e}")),
+                },
+                WorkerEvent::PullCompleted(result) => match result {
+                    Ok(()) => {
+                        self.set_info(
+                            "Pulled latest changes from remote successfully. Local branch is up to date.",
+                        );
+                        self.reload_changed_files();
+                    }
+                    Err(e) => self.set_error(format!("Pull from remote failed: {e}")),
+                },
                 WorkerEvent::BrowserEntriesReady { dir, entries } => {
                     if let PromptState::BrowseProjects {
                         current_dir,

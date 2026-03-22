@@ -21,18 +21,18 @@ pub trait Provider: Send {
     fn run_oneshot(&self, prompt: &str, cwd: &Path) -> Result<String> {
         let (mut cmd, tmpfile) = self.build_oneshot_command(prompt, cwd);
         let output = cmd.output()?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "{} failed: {}",
+                self.command(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         if let Some(path) = tmpfile {
             let text = std::fs::read_to_string(&path)?;
             let _ = std::fs::remove_file(&path);
             Ok(text.trim().to_string())
         } else {
-            if !output.status.success() {
-                anyhow::bail!(
-                    "{} failed: {}",
-                    self.command(),
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
         }
     }

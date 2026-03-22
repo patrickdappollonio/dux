@@ -437,7 +437,11 @@ impl App {
         let worktree = PathBuf::from(&session.worktree_path);
         let diff = git::staged_diff(&worktree)?;
         let diff = if diff.len() > 50_000 {
-            diff[..50_000].to_string()
+            let mut end = 50_000;
+            while !diff.is_char_boundary(end) {
+                end -= 1;
+            }
+            diff[..end].to_string()
         } else {
             diff
         };
@@ -486,7 +490,7 @@ impl App {
                 self.commit_input.clear();
                 self.commit_input_cursor = 0;
                 self.commit_scroll = 0;
-                self.set_info("Changes committed successfully. Press u to push to remote.");
+                self.set_info("Changes committed successfully. Press u to push to remote, or ^G to generate an AI message.");
                 self.reload_changed_files();
             }
             Err(e) => self.set_error(format!("Commit failed: {e}")),
@@ -500,11 +504,12 @@ impl App {
             return Ok(());
         };
         let worktree = PathBuf::from(&session.worktree_path);
+        let tx = self.worker_tx.clone();
         self.set_busy("Pushing to remote…");
-        match git::push(&worktree) {
-            Ok(_) => self.set_info("Pushed to remote successfully."),
-            Err(e) => self.set_error(format!("Push to remote failed: {e}")),
-        }
+        thread::spawn(move || {
+            let result = git::push(&worktree).map(|_| ()).map_err(|e| e.to_string());
+            let _ = tx.send(WorkerEvent::PushCompleted(result));
+        });
         Ok(())
     }
 
@@ -514,14 +519,12 @@ impl App {
             return Ok(());
         };
         let worktree = PathBuf::from(&session.worktree_path);
+        let tx = self.worker_tx.clone();
         self.set_busy("Pulling latest changes from remote…");
-        match git::pull_current_branch(&worktree) {
-            Ok(_) => {
-                self.set_info("Pulled latest changes from remote successfully.");
-                self.reload_changed_files();
-            }
-            Err(e) => self.set_error(format!("Pull from remote failed: {e}")),
-        }
+        thread::spawn(move || {
+            let result = git::pull_current_branch(&worktree).map(|_| ()).map_err(|e| e.to_string());
+            let _ = tx.send(WorkerEvent::PullCompleted(result));
+        });
         Ok(())
     }
 

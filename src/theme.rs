@@ -44,6 +44,10 @@ pub struct Theme {
     pub provider_label_fg: Color,
     pub branch_fg: Color,
     pub terminal_hint_fg: Color,
+    pub warning_fg: Color,
+    pub button_active_fg: Color,
+    pub button_confirm_border: Color,
+    pub button_danger_border: Color,
 }
 
 impl Theme {
@@ -89,6 +93,10 @@ impl Theme {
             provider_label_fg: Color::Rgb(100, 100, 100),
             branch_fg: Color::Cyan,
             terminal_hint_fg: Color::Rgb(80, 80, 80),
+            warning_fg: Color::Yellow,
+            button_active_fg: Color::White,
+            button_confirm_border: Color::Cyan,
+            button_danger_border: Color::Red,
         }
     }
 

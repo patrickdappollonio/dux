@@ -221,6 +221,8 @@ pub(crate) enum WorkerEvent {
     },
     CommitMessageGenerated(String),
     CommitMessageFailed(String),
+    PushCompleted(Result<(), String>),
+    PullCompleted(Result<(), String>),
     BrowserEntriesReady {
         dir: PathBuf,
         entries: Vec<BrowserEntry>,
