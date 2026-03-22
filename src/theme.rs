@@ -33,6 +33,9 @@ pub struct Theme {
     pub hint_bracket_fg: Color,
     pub hint_key_bg: Color,
     pub hint_desc_fg: Color,
+    pub hint_dim_key_fg: Color,
+    pub hint_dim_bracket_fg: Color,
+    pub hint_dim_desc_fg: Color,
     pub hint_bar_bg: Color,
     pub overlay_border: Color,
     pub overlay_bg: Color,
@@ -75,6 +78,9 @@ impl Theme {
             hint_bracket_fg: Color::DarkGray,
             hint_key_bg: Color::Rgb(35, 35, 35),
             hint_desc_fg: Color::Rgb(160, 160, 160),
+            hint_dim_key_fg: Color::Rgb(80, 140, 160),
+            hint_dim_bracket_fg: Color::Rgb(60, 60, 60),
+            hint_dim_desc_fg: Color::Rgb(100, 100, 100),
             hint_bar_bg: Color::Rgb(25, 25, 25),
             overlay_border: Color::Cyan,
             overlay_bg: Color::Rgb(20, 20, 20),
@@ -147,6 +153,20 @@ impl Theme {
 
     /// Render a key badge as `<key>` with the angle brackets in an accent color
     /// and the key name in bold. Returns 3 spans.
+    pub fn dim_key_badge<'a>(&self, key: &'a str, bg: Color) -> Vec<Span<'a>> {
+        vec![
+            Span::styled("<", Style::default().fg(self.hint_dim_bracket_fg).bg(bg)),
+            Span::styled(
+                key,
+                Style::default()
+                    .fg(self.hint_dim_key_fg)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(">", Style::default().fg(self.hint_dim_bracket_fg).bg(bg)),
+        ]
+    }
+
     pub fn key_badge<'a>(&self, key: &'a str, bg: Color) -> Vec<Span<'a>> {
         vec![
             Span::styled("<", Style::default().fg(self.hint_bracket_fg).bg(bg)),

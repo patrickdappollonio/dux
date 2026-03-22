@@ -500,13 +500,16 @@ impl App {
                     );
                 }
             }
-            KeyCode::Char('r') => {
-                // Allow relaunching an exited agent from the center pane.
+            KeyCode::Char('r') | KeyCode::Enter => {
+                // Allow relaunching an exited agent from the center pane,
+                // or entering interactive mode if the agent is active.
                 let has_provider = self
                     .selected_session()
                     .map(|s| self.providers.contains_key(&s.id))
                     .unwrap_or(false);
-                if !has_provider {
+                if has_provider {
+                    self.input_target = InputTarget::Agent;
+                } else if self.selected_session().is_some() {
                     self.reconnect_selected_session()?;
                 }
             }
@@ -1870,26 +1873,40 @@ impl App {
         // Hint bar with top border.
         if hint_area.height > 0 {
             let hint_line = if is_input {
-                let desc_style = Style::default().fg(self.theme.hint_desc_fg);
+                let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
-                let cli_name = session_provider_name.as_deref().unwrap_or("the agent");
-                spans.push(Span::styled("Press ", desc_style));
-                spans.extend(self.theme.key_badge("ctrl+g", Color::Reset));
+                let cli_name = session_provider_name.as_deref().unwrap_or("agent");
+                let capitalized = {
+                    let mut c = cli_name.chars();
+                    match c.next() {
+                        Some(first) => format!("{}{}", first.to_uppercase(), c.as_str()),
+                        None => String::new(),
+                    }
+                };
                 spans.push(Span::styled(
-                    format!(" to manage dux instead of {cli_name}."),
+                    format!("{capitalized} is holding focus. Press "),
+                    desc_style,
+                ));
+                spans.extend(self.theme.dim_key_badge("ctrl+g", Color::Reset));
+                spans.push(Span::styled(
+                    " to bring the focus back to dux.",
                     desc_style,
                 ));
                 Line::from(spans)
             } else {
-                let desc_style = Style::default().fg(self.theme.hint_desc_fg);
+                let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
                 if session_active {
                     spans.push(Span::styled("Press ", desc_style));
-                    spans.extend(self.theme.key_badge("i", Color::Reset));
+                    spans.extend(self.theme.dim_key_badge("i", Color::Reset));
+                    spans.push(Span::styled(" or ", desc_style));
+                    spans.extend(self.theme.dim_key_badge("enter", Color::Reset));
                     spans.push(Span::styled(" to interact with the agent.", desc_style));
                 } else if session_id.is_some() {
                     spans.push(Span::styled("Agent CLI exited. Press ", desc_style));
-                    spans.extend(self.theme.key_badge("r", Color::Reset));
+                    spans.extend(self.theme.dim_key_badge("r", Color::Reset));
+                    spans.push(Span::styled(" or ", desc_style));
+                    spans.extend(self.theme.dim_key_badge("enter", Color::Reset));
                     spans.push(Span::styled(" to relaunch.", desc_style));
                 } else {
                     spans.push(Span::styled("No agent selected.", desc_style));
