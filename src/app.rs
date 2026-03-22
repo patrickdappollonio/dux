@@ -1269,7 +1269,7 @@ impl App {
             let mut state = ListState::default().with_selected(Some(self.selected_left));
             StatefulWidget::render(
                 List::new(items)
-                    .block(self.themed_block("P", focused))
+                    .block(self.themed_block("", focused))
                     .highlight_style(self.theme.selection_style()),
                 area,
                 frame.buffer_mut(),
@@ -1326,10 +1326,7 @@ impl App {
                 }
             })
             .collect::<Vec<_>>();
-        let title = format!(
-            "Projects ({})",
-            self.projects.len()
-        );
+        let title = format!("Projects ({})", self.projects.len());
         let mut state = ListState::default().with_selected(Some(self.selected_left));
         StatefulWidget::render(
             List::new(items)
