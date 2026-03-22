@@ -343,7 +343,7 @@ impl App {
         };
         let output =
             crate::diff::diff_file(Path::new(&session.worktree_path), &file.path, &self.theme)?;
-        self.center_mode = CenterMode::Diff(output.lines);
+        self.center_mode = CenterMode::Diff { lines: output.lines, scroll: 0 };
         self.focus = FocusPane::Center;
         Ok(())
     }

@@ -208,21 +208,82 @@ impl App {
     }
 
     fn render_center(&mut self, frame: &mut Frame, area: Rect) {
-        let title = match self.center_mode {
-            CenterMode::Agent => "Agent",
-            CenterMode::Diff(_) => "Diff",
-        };
         let focused = self.focus == FocusPane::Center;
         match &self.center_mode {
-            CenterMode::Diff(diff_lines) => {
-                Paragraph::new(diff_lines.clone())
-                    .block(self.themed_block(title, focused))
-                    .wrap(Wrap { trim: false })
-                    .render(area, frame.buffer_mut());
+            CenterMode::Diff { .. } => {
+                self.render_diff(frame, area, focused);
             }
             CenterMode::Agent => {
-                self.render_agent_terminal(frame, area, title, focused);
+                self.render_agent_terminal(frame, area, "Agent", focused);
             }
+        }
+    }
+
+    fn render_diff(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
+        let (lines, scroll) = match &self.center_mode {
+            CenterMode::Diff { lines, scroll } => (lines.clone(), *scroll),
+            _ => return,
+        };
+
+        let outer_block = self.themed_block("Diff", focused);
+        let inner = outer_block.inner(area);
+        outer_block.render(area, frame.buffer_mut());
+
+        if inner.height < 3 || inner.width < 4 {
+            return;
+        }
+
+        let hint_height = 2;
+        let [content_area, hint_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
+            .areas(inner);
+
+        self.last_diff_height = content_area.height;
+
+        Paragraph::new(lines.clone())
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0))
+            .render(content_area, frame.buffer_mut());
+
+        // Hint bar with top border (same style as agent terminal).
+        if hint_area.height > 0 {
+            let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+            let mut spans: Vec<Span> = Vec::new();
+
+            if scroll > 0 {
+                spans.push(Span::styled(
+                    format!("Scrolled back {scroll} lines. "),
+                    Style::default().fg(self.theme.hint_key_fg),
+                ));
+                spans.extend(self.theme.dim_key_badge("ctrl+f", Color::Reset));
+                spans.push(Span::styled("/", desc_style));
+                spans.extend(self.theme.dim_key_badge("PgDn", Color::Reset));
+                spans.push(Span::styled(" down, ", desc_style));
+                spans.extend(self.theme.dim_key_badge("ctrl+b", Color::Reset));
+                spans.push(Span::styled("/", desc_style));
+                spans.extend(self.theme.dim_key_badge("PgUp", Color::Reset));
+                spans.push(Span::styled(" up. ", desc_style));
+            } else {
+                spans.extend(self.theme.dim_key_badge("^B", Color::Reset));
+                spans.push(Span::styled("/", desc_style));
+                spans.extend(self.theme.dim_key_badge("PgUp", Color::Reset));
+                spans.push(Span::styled(" ", desc_style));
+                spans.extend(self.theme.dim_key_badge("^F", Color::Reset));
+                spans.push(Span::styled("/", desc_style));
+                spans.extend(self.theme.dim_key_badge("PgDn", Color::Reset));
+                spans.push(Span::styled(" to scroll. ", desc_style));
+            }
+            spans.extend(self.theme.dim_key_badge("Esc", Color::Reset));
+            spans.push(Span::styled(" close diff.", desc_style));
+
+            Paragraph::new(Line::from(spans))
+                .block(
+                    Block::default()
+                        .borders(Borders::TOP)
+                        .border_style(Style::default().fg(self.theme.border_normal)),
+                )
+                .render(hint_area, frame.buffer_mut());
         }
     }
 

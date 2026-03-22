@@ -57,6 +57,7 @@ pub struct App {
     pub(crate) providers: HashMap<String, PtyClient>,
     pub(crate) create_agent_in_flight: bool,
     pub(crate) last_pty_size: (u16, u16),
+    pub(crate) last_diff_height: u16,
     pub(crate) theme: Theme,
     pub(crate) tick_count: u64,
     pub(crate) watched_worktree: Arc<Mutex<Option<PathBuf>>>,
@@ -93,7 +94,10 @@ impl FocusPane {
 #[derive(Clone, Debug)]
 pub(crate) enum CenterMode {
     Agent,
-    Diff(Vec<Line<'static>>),
+    Diff {
+        lines: Vec<Line<'static>>,
+        scroll: u16,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -207,6 +211,7 @@ impl App {
             providers: HashMap::new(),
             create_agent_in_flight: false,
             last_pty_size: (0, 0),
+            last_diff_height: 0,
             theme: Theme::default_dark(),
             tick_count: 0,
             watched_worktree: Arc::clone(&watched_worktree),
@@ -274,7 +279,7 @@ impl App {
             self.set_info("Closed overlay.");
             return true;
         }
-        if matches!(self.center_mode, CenterMode::Diff(_)) {
+        if matches!(self.center_mode, CenterMode::Diff { .. }) {
             self.center_mode = CenterMode::Agent;
             self.focus = FocusPane::Files;
             self.set_info("Returned to agent view.");
