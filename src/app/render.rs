@@ -785,7 +785,7 @@ impl App {
                 spans.extend(self.theme.dim_key_badge("^G", Color::Reset));
                 spans.push(Span::styled(" AI msg  ", desc_style));
                 spans.extend(self.theme.dim_key_badge("c", Color::Reset));
-                spans.push(Span::styled(" Submit commit", desc_style));
+                spans.push(Span::styled(" Commit", desc_style));
             }
             Paragraph::new(Line::from(spans)).render(hint_area, frame.buffer_mut());
         }

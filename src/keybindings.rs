@@ -507,7 +507,7 @@ pub const BINDINGS: &[Binding] = &[
             label: "c",
             description: "Commit staged changes",
         }),
-        hints: &[(HintContext::Files, "c", "Submit commit")],
+        hints: &[(HintContext::Files, "c", "Commit")],
         palette: None,
         native: true,
     },
