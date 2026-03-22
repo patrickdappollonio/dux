@@ -680,7 +680,9 @@ impl App {
                             input.trim().to_string()
                         };
                         self.prompt = PromptState::None;
-                        self.execute_command(command)?;
+                        if let Err(e) = self.execute_command(command) {
+                            self.set_error(format!("{e:#}"));
+                        }
                     }
                 }
                 KeyCode::Char(c) => {
@@ -887,8 +889,10 @@ impl App {
                     if let Some(entry) = visible.get(*selected).cloned() {
                         if entry.is_git_repo {
                             let path = entry.path.to_string_lossy().to_string();
-                            self.add_project(path, String::new())?;
                             self.prompt = PromptState::None;
+                            if let Err(e) = self.add_project(path, String::new()) {
+                                self.set_error(format!("{e:#}"));
+                            }
                         } else {
                             let new_dir = entry.path.clone();
                             *current_dir = new_dir.clone();
@@ -933,7 +937,9 @@ impl App {
                     if *confirm_selected {
                         let id = session_id.clone();
                         self.prompt = PromptState::None;
-                        self.do_delete_session(&id)?;
+                        if let Err(e) = self.do_delete_session(&id) {
+                            self.set_error(format!("{e:#}"));
+                        }
                     } else {
                         self.prompt = PromptState::None;
                     }
@@ -2968,10 +2974,19 @@ impl App {
     }
 
     fn render_dim_overlay(&self, frame: &mut Frame) {
-        let area = frame.area();
+        let full = frame.area();
+        // Keep the statusline (bottom rows) undimmed so errors stay visible.
+        let status_text_len = self.status.text().len() + 3;
+        let status_lines: u16 = if full.width > 0 && status_text_len > full.width as usize {
+            2
+        } else {
+            1
+        };
+        let footer_h = 1 + status_lines; // hints bar + status line(s)
+        let dim_h = full.height.saturating_sub(footer_h);
         let buf = frame.buffer_mut();
-        for y in area.y..area.y + area.height {
-            for x in area.x..area.x + area.width {
+        for y in full.y..full.y + dim_h {
+            for x in full.x..full.x + full.width {
                 let cell = &mut buf[(x, y)];
                 cell.set_fg(Color::DarkGray);
                 cell.set_bg(Color::Rgb(10, 10, 10));
