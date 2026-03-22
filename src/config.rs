@@ -8,6 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::keybindings;
 use crate::model::ProviderKind;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -18,6 +19,15 @@ pub struct Config {
     pub logging: LoggingConfig,
     pub projects: Vec<ProjectConfig>,
     pub ui: UiConfig,
+    pub keys: KeysConfig,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KeysConfig {
+    pub show_terminal_keys: bool,
+    #[serde(flatten)]
+    pub bindings: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -82,6 +92,28 @@ impl Default for Config {
                 left_width_pct: 20,
                 right_width_pct: 23,
             },
+            keys: KeysConfig::default(),
+        }
+    }
+}
+
+impl Default for KeysConfig {
+    fn default() -> Self {
+        let mut bindings = BTreeMap::new();
+        for def in keybindings::BINDING_DEFS {
+            if def.default_keys.is_empty() {
+                continue;
+            }
+            let keys: Vec<String> = def
+                .default_keys
+                .iter()
+                .map(|k| keybindings::format_key_for_config(*k))
+                .collect();
+            bindings.insert(def.action.config_name().to_string(), keys);
+        }
+        Self {
+            show_terminal_keys: true,
+            bindings,
         }
     }
 }
@@ -228,6 +260,8 @@ enum ConfigEntry {
     Providers,
     /// Renders the `[[projects]]` array.
     Projects,
+    /// Renders the `[keys]` section with all keybindings.
+    Keys,
 }
 
 fn config_schema() -> Vec<ConfigEntry> {
@@ -276,6 +310,8 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::U16(c.ui.right_width_pct),
         },
         ConfigEntry::Blank,
+        ConfigEntry::Keys,
+        ConfigEntry::Blank,
         ConfigEntry::Projects,
     ]
 }
@@ -318,6 +354,7 @@ fn render_config(config: &Config) -> String {
             }
             ConfigEntry::Providers => render_provider_configs(&mut out, &config.providers),
             ConfigEntry::Projects => render_projects(&mut out, &config.projects),
+            ConfigEntry::Keys => render_keys_config(&mut out, &config.keys),
         }
     }
     out
@@ -332,6 +369,57 @@ pub fn save_config(config_path: &Path, config: &Config) -> Result<()> {
     fs::write(config_path, body)
         .with_context(|| format!("failed to write {}", config_path.display()))?;
     Ok(())
+}
+
+fn render_keys_config(out: &mut String, keys: &KeysConfig) {
+    out.push_str("[keys]\n");
+    out.push_str("# Keybindings configuration. Each action maps to one or more key combos.\n");
+    out.push_str("# Key format: single chars (\"j\"), special names (\"up\", \"enter\", \"space\",\n");
+    out.push_str("# \"tab\", \"shift-tab\", \"pageup\", \"esc\"), or modifier combos (\"ctrl-d\").\n");
+    out.push_str("#\n");
+    out.push_str("# Some keys shown in hints are terminal conventions (e.g. ctrl-j for newline)\n");
+    out.push_str("# that dux documents but does not control. Set this to false to hide them.\n");
+    let _ = writeln!(
+        out,
+        "show_terminal_keys = {}",
+        keys.show_terminal_keys
+    );
+    out.push('\n');
+
+    let mut last_section: Option<&str> = None;
+    for def in keybindings::BINDING_DEFS {
+        if def.default_keys.is_empty() {
+            continue;
+        }
+        let config_name = def.action.config_name();
+
+        // Section header based on help section.
+        let section = def.action.help_section().unwrap_or("Other");
+        if last_section != Some(section) {
+            if last_section.is_some() {
+                out.push('\n');
+            }
+            let _ = writeln!(out, "# -- {section} --");
+            last_section = Some(section);
+        }
+
+        // Description comment.
+        let _ = writeln!(out, "# {}", def.action.config_description());
+
+        // Value from config (or defaults if missing).
+        let key_strs = keys
+            .bindings
+            .get(config_name)
+            .cloned()
+            .unwrap_or_else(|| {
+                def.default_keys
+                    .iter()
+                    .map(|k| keybindings::format_key_for_config(*k))
+                    .collect()
+            });
+        let _ = writeln!(out, "{config_name} = {}", render_string_list(&key_strs));
+    }
+    out.push('\n');
 }
 
 fn render_projects(out: &mut String, projects: &[ProjectConfig]) {
@@ -436,6 +524,24 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
     out.push_str(&format!("args = {}\n\n", render_string_list(&config.args)));
 }
 
+/// Validate all key bindings in the config. Returns a descriptive error on failure.
+pub fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
+    for (name, key_strs) in &keys.bindings {
+        let valid = keybindings::BINDING_DEFS
+            .iter()
+            .any(|d| d.action.config_name() == name);
+        if !valid {
+            return Err(format!("[keys] unknown action: \"{name}\""));
+        }
+        for s in key_strs {
+            crokey::parse(s).map_err(|_| {
+                format!("[keys] invalid key \"{s}\" for action \"{name}\"")
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// Check whether a provider command is available on PATH.
 /// Returns `Ok(())` if found, or `Err(message)` with a user-friendly install hint.
 pub fn check_provider_available(
@@ -492,6 +598,38 @@ mod tests {
         assert!(rendered.contains("[providers.claude]"));
         assert!(rendered.contains("[providers.codex]"));
         assert!(rendered.contains("[ui]"));
+        assert!(rendered.contains("[keys]"));
+        assert!(rendered.contains("show_terminal_keys = true"));
+        assert!(rendered.contains("move_down = "));
+        assert!(rendered.contains("quit = "));
+    }
+
+    #[test]
+    fn validate_keys_accepts_valid_config() {
+        let keys = KeysConfig::default();
+        assert!(validate_keys(&keys).is_ok());
+    }
+
+    #[test]
+    fn validate_keys_rejects_bad_key() {
+        let mut keys = KeysConfig::default();
+        keys.bindings.insert(
+            "quit".to_string(),
+            vec!["badkey!!!".to_string()],
+        );
+        let result = validate_keys(&keys);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("badkey!!!"));
+    }
+
+    #[test]
+    fn validate_keys_rejects_unknown_action() {
+        let mut keys = KeysConfig::default();
+        keys.bindings
+            .insert("nonexistent_action".to_string(), vec!["q".to_string()]);
+        let result = validate_keys(&keys);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("nonexistent_action"));
     }
 
     #[test]
