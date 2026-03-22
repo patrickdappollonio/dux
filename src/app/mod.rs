@@ -561,6 +561,6 @@ pub(crate) fn provider_config(config: &Config, provider: &ProviderKind) -> Provi
         .cloned()
         .unwrap_or_else(|| ProviderCommandConfig {
             command: provider.as_str().to_string(),
-            args: Vec::new(),
+            ..Default::default()
         })
 }

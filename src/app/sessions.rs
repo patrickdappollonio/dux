@@ -220,10 +220,18 @@ impl App {
             self.set_error("Select a project first.");
             return Ok(());
         };
-        let next = match project.default_provider {
-            ProviderKind::Claude => ProviderKind::Codex,
-            ProviderKind::Codex => ProviderKind::Claude,
-        };
+        let provider_names: Vec<&String> = self.config.providers.commands.keys().collect();
+        if provider_names.is_empty() {
+            self.set_error("No providers configured.");
+            return Ok(());
+        }
+        let current = project.default_provider.as_str();
+        let current_idx = provider_names
+            .iter()
+            .position(|n| n.as_str() == current)
+            .unwrap_or(0);
+        let next_idx = (current_idx + 1) % provider_names.len();
+        let next = ProviderKind::new(provider_names[next_idx].clone());
         if let Some(existing) = self
             .projects
             .iter_mut()

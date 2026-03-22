@@ -364,6 +364,7 @@ dependencies = [
  "crokey",
  "crossterm 0.29.0",
  "home",
+ "indexmap",
  "petname",
  "portable-pty",
  "ratatui",
