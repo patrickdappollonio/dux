@@ -110,6 +110,7 @@ enum PromptState {
     BrowseProjects {
         current_dir: PathBuf,
         entries: Vec<BrowserEntry>,
+        loading: bool,
         selected: usize,
         filter: String,
         searching: bool,
@@ -160,6 +161,10 @@ enum WorkerEvent {
     },
     CreateAgentFailed(String),
     ChangedFilesReady(Vec<ChangedFile>),
+    BrowserEntriesReady {
+        dir: PathBuf,
+        entries: Vec<BrowserEntry>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -665,6 +670,7 @@ impl App {
         if let PromptState::BrowseProjects {
             current_dir,
             entries,
+            loading,
             selected,
             filter,
             searching,
@@ -672,6 +678,8 @@ impl App {
             path_input,
         } = &mut self.prompt
         {
+            let mut browse_to: Option<PathBuf> = None;
+
             if *editing_path {
                 let mut error_msg = None;
                 match key.code {
@@ -685,10 +693,12 @@ impl App {
                     KeyCode::Enter => {
                         let new_dir = PathBuf::from(path_input.trim());
                         if new_dir.is_dir() {
-                            *current_dir = new_dir;
-                            *entries = browser_entries(current_dir);
+                            *current_dir = new_dir.clone();
+                            entries.clear();
+                            *loading = true;
                             *selected = 0;
                             filter.clear();
+                            browse_to = Some(new_dir);
                         } else {
                             error_msg = Some(format!("{} is not a directory.", path_input.trim()));
                         }
@@ -704,6 +714,9 @@ impl App {
                 }
                 if let Some(msg) = error_msg {
                     self.set_error(msg);
+                }
+                if let Some(dir) = browse_to {
+                    self.spawn_browser_entries(&dir);
                 }
                 return Ok(false);
             }
@@ -786,10 +799,12 @@ impl App {
                             self.prompt = PromptState::None;
                         } else {
                             let new_dir = entry.path.clone();
-                            *current_dir = new_dir;
-                            *entries = browser_entries(current_dir);
+                            *current_dir = new_dir.clone();
+                            entries.clear();
+                            *loading = true;
                             *selected = 0;
                             filter.clear();
+                            browse_to = Some(new_dir);
                         }
                     }
                 }
@@ -800,6 +815,9 @@ impl App {
                     }
                 }
                 _ => {}
+            }
+            if let Some(dir) = browse_to {
+                self.spawn_browser_entries(&dir);
             }
             return Ok(false);
         }
@@ -963,25 +981,38 @@ impl App {
                         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                     })
             });
-        let entries = browser_entries(&start_dir);
-        logger::debug(&format!(
-            "opened project browser at {} with {} entries",
-            start_dir.display(),
-            entries.len()
-        ));
         self.prompt = PromptState::BrowseProjects {
-            current_dir: start_dir,
-            entries,
+            current_dir: start_dir.clone(),
+            entries: Vec::new(),
+            loading: true,
             selected: 0,
             filter: String::new(),
             searching: false,
             editing_path: false,
             path_input: String::new(),
         };
+        self.spawn_browser_entries(&start_dir);
         self.set_info(
             "Project browser: Enter opens or adds a repo, / to search, m switches to manual entry.",
         );
         Ok(())
+    }
+
+    fn spawn_browser_entries(&self, dir: &Path) {
+        let tx = self.worker_tx.clone();
+        let dir = dir.to_path_buf();
+        thread::spawn(move || {
+            let entries = browser_entries(&dir);
+            logger::debug(&format!(
+                "browser loaded {} with {} entries",
+                dir.display(),
+                entries.len()
+            ));
+            let _ = tx.send(WorkerEvent::BrowserEntriesReady {
+                dir: dir.clone(),
+                entries,
+            });
+        });
     }
 
     fn add_project(&mut self, raw_path: String, name: String) -> Result<()> {
@@ -1344,6 +1375,22 @@ impl App {
                     self.changed_files = files;
                     if self.selected_file >= self.changed_files.len() {
                         self.selected_file = self.changed_files.len().saturating_sub(1);
+                    }
+                }
+                WorkerEvent::BrowserEntriesReady { dir, entries } => {
+                    if let PromptState::BrowseProjects {
+                        current_dir,
+                        entries: current_entries,
+                        loading,
+                        selected,
+                        ..
+                    } = &mut self.prompt
+                    {
+                        if *current_dir == dir {
+                            *current_entries = entries;
+                            *loading = false;
+                            *selected = 0;
+                        }
                     }
                 }
             }
@@ -2193,6 +2240,7 @@ impl App {
             PromptState::BrowseProjects {
                 current_dir,
                 entries,
+                loading,
                 selected,
                 filter,
                 searching,
@@ -2211,7 +2259,21 @@ impl App {
                         .filter(|e| e.label.to_lowercase().contains(&needle))
                         .collect()
                 };
-                let items = if visible.is_empty() {
+                let items = if *loading {
+                    let spinner = match (self.tick_count / 2) % 4 {
+                        0 => "⠋",
+                        1 => "⠙",
+                        2 => "⠹",
+                        _ => "⠸",
+                    };
+                    vec![ListItem::new(Line::from(vec![
+                        Span::styled(
+                            format!("{spinner} "),
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ),
+                        Span::raw("Loading…"),
+                    ]))]
+                } else if visible.is_empty() {
                     vec![ListItem::new(if filter.is_empty() {
                         "No child directories here."
                     } else {
@@ -3087,7 +3149,7 @@ fn browser_entries(dir: &Path) -> Vec<BrowserEntry> {
             if name.starts_with('.') {
                 return None;
             }
-            let is_git_repo = git::is_git_repo(&path);
+            let is_git_repo = path.join(".git").exists();
             let label = if is_git_repo {
                 name
             } else {
