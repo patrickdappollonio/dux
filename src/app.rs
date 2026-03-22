@@ -2090,12 +2090,8 @@ impl App {
     }
 
     fn themed_block<'a>(&self, title: &'a str, focused: bool) -> Block<'a> {
-        let focus_indicator = if focused { " █" } else { "" };
         Block::default()
-            .title(Line::from(vec![
-                Span::styled(title, self.theme.title_style(focused)),
-                Span::styled(focus_indicator, Style::default().fg(self.theme.border_focused)),
-            ]))
+            .title(Line::from(Span::styled(title, self.theme.title_style(focused))))
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
             .border_style(self.theme.border_style(focused))
