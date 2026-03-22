@@ -534,15 +534,79 @@ impl App {
         }
     }
 
-    fn render_files(&self, frame: &mut Frame, area: Rect) {
+    fn render_files(&mut self, frame: &mut Frame, area: Rect) {
+        let has_staged = !self.staged_files.is_empty();
+        let focused = self.focus == FocusPane::Files;
+
+        if has_staged {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(3), // Changes (unstaged) — always on top
+                    Constraint::Min(3), // Staged Changes (with commit input)
+                ])
+                .split(area);
+            self.render_file_list(
+                frame,
+                chunks[0],
+                "Changes",
+                &self.unstaged_files,
+                RightSection::Unstaged,
+                focused,
+            );
+            self.render_staged_with_commit(frame, chunks[1], focused);
+        } else {
+            self.render_file_list(
+                frame,
+                area,
+                "Changes",
+                &self.unstaged_files,
+                RightSection::Unstaged,
+                focused,
+            );
+        }
+    }
+
+    /// Render the "Staged Changes" file list and the commit input as two
+    /// separate bordered blocks (bubbles).
+    fn render_staged_with_commit(&mut self, frame: &mut Frame, area: Rect, pane_focused: bool) {
+        let commit_height = 10u16;
+        let [files_area, commit_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(commit_height)])
+            .areas(area);
+
+        // Staged files — normal titled block.
+        self.render_file_list(
+            frame,
+            files_area,
+            "Staged Changes",
+            &self.staged_files,
+            RightSection::Staged,
+            pane_focused,
+        );
+
+        // Commit input — untitled block.
+        self.render_commit_input_inner(frame, commit_area);
+    }
+
+    fn render_file_list(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        title_prefix: &str,
+        files: &[ChangedFile],
+        section: RightSection,
+        pane_focused: bool,
+    ) {
         let inner_width = area.width.saturating_sub(2) as usize; // minus borders
+        let is_active_section = pane_focused && self.right_section == section;
         let sel_style = self.theme.selection_style();
-        let items = self
-            .changed_files
+        let items = files
             .iter()
             .enumerate()
             .map(|(index, file)| {
-                let is_selected = index == self.selected_file;
+                let is_selected = is_active_section && index == self.files_index;
 
                 // Build the right-aligned stats string, e.g. "+12 -3".
                 let stats = format_line_stats(file.additions, file.deletions);
@@ -597,15 +661,133 @@ impl App {
                 ListItem::new(Line::from(spans))
             })
             .collect::<Vec<_>>();
-        let focused = self.focus == FocusPane::Files;
-        let title = format!("Changed Files ({})", self.changed_files.len());
-        let mut state = ListState::default().with_selected(Some(self.selected_file));
+        let title = format!("{title_prefix} ({})", files.len());
+        let selected = if is_active_section {
+            Some(self.files_index)
+        } else {
+            None
+        };
+        let mut state = ListState::default().with_selected(selected);
         StatefulWidget::render(
-            List::new(items).block(self.themed_block(&title, focused)),
+            List::new(items).block(self.themed_block(&title, is_active_section)),
             area,
             frame.buffer_mut(),
             &mut state,
         );
+    }
+
+    /// Render the commit input as its own bordered block (no title).
+    fn render_commit_input_inner(&mut self, frame: &mut Frame, area: Rect) {
+        let focused = self.input_target == InputTarget::CommitMessage;
+
+        let block = self.themed_block("", focused);
+        let inner = block.inner(area);
+        block.render(area, frame.buffer_mut());
+
+        // Reserve 1 line at the bottom for the hint bar.
+        let [text_area, hint_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .areas(inner);
+
+        if self.commit_generating {
+            let dots = ".".repeat((self.tick_count as usize / 5) % 4);
+            let text = format!("Generating commit message{dots}");
+            Paragraph::new(text)
+                .style(Style::default().fg(self.theme.hint_desc_fg))
+                .render(text_area, frame.buffer_mut());
+        } else if self.commit_input.is_empty() && !focused {
+            // Placeholder text when not engaged.
+        } else {
+            let display_text = if self.commit_input.is_empty() {
+                "Type your commit message…"
+            } else {
+                &self.commit_input
+            };
+            let style = if self.commit_input.is_empty() {
+                Style::default().fg(self.theme.hint_desc_fg)
+            } else {
+                Style::default()
+            };
+
+            let visible_h = text_area.height;
+            let text_w = text_area.width as usize;
+            if text_w > 0 && !self.commit_input.is_empty() {
+                let mut row: u16 = 0;
+                let mut col: usize = 0;
+                for (i, ch) in self.commit_input.char_indices() {
+                    if i == self.commit_input_cursor {
+                        break;
+                    }
+                    if ch == '\n' {
+                        row += 1;
+                        col = 0;
+                    } else {
+                        col += 1;
+                        if col >= text_w {
+                            row += 1;
+                            col = 0;
+                        }
+                    }
+                }
+                if row < self.commit_scroll {
+                    self.commit_scroll = row;
+                } else if row >= self.commit_scroll + visible_h {
+                    self.commit_scroll = row - visible_h + 1;
+                }
+            } else {
+                self.commit_scroll = 0;
+            }
+
+            Paragraph::new(display_text)
+                .style(style)
+                .wrap(Wrap { trim: false })
+                .scroll((self.commit_scroll, 0))
+                .render(text_area, frame.buffer_mut());
+
+            if focused {
+                let (mut cursor_row, mut cursor_col) = (0u16, 0usize);
+                for (i, ch) in self.commit_input.char_indices() {
+                    if i == self.commit_input_cursor {
+                        break;
+                    }
+                    if ch == '\n' {
+                        cursor_row += 1;
+                        cursor_col = 0;
+                    } else {
+                        cursor_col += 1;
+                        if text_w > 0 && cursor_col >= text_w {
+                            cursor_row += 1;
+                            cursor_col = 0;
+                        }
+                    }
+                }
+                let screen_row = cursor_row.saturating_sub(self.commit_scroll);
+                let cx = text_area.x + cursor_col as u16;
+                let cy = text_area.y + screen_row;
+                if cx < text_area.x + text_area.width && cy < text_area.y + text_area.height {
+                    frame.set_cursor_position((cx, cy));
+                }
+            }
+        }
+
+        // Hint bar.
+        if hint_area.height > 0 {
+            let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+            let mut spans: Vec<Span> = Vec::new();
+            if focused {
+                spans.extend(self.theme.dim_key_badge("Esc", Color::Reset));
+                spans.push(Span::styled(" Exit", desc_style));
+            } else {
+                spans.extend(self.theme.dim_key_badge("i", Color::Reset));
+                spans.push(Span::styled(" Commit msg  ", desc_style));
+                spans.extend(self.theme.dim_key_badge("^G", Color::Reset));
+                spans.push(Span::styled(" AI msg  ", desc_style));
+                spans.extend(self.theme.dim_key_badge("c", Color::Reset));
+                spans.push(Span::styled(" Commit", desc_style));
+            }
+            Paragraph::new(Line::from(spans)).render(hint_area, frame.buffer_mut());
+        }
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
@@ -1318,6 +1500,102 @@ impl App {
                         .border_style(Style::default().fg(quit_border)),
                 )
                 .render(quit_area, frame.buffer_mut());
+            }
+            PromptState::ConfirmDiscardFile {
+                file_path,
+                confirm_selected,
+                ..
+            } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(56, 30, frame.area());
+                Clear.render(area, frame.buffer_mut());
+                let outer = self.themed_overlay_block("Discard Changes");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                let lines = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw(" Discard all changes to \""),
+                        Span::styled(
+                            file_path.as_str(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("\"?"),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " This action cannot be undone.",
+                        Style::default().fg(Color::Yellow),
+                    )),
+                ];
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let btn_width = 16u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let discard_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                let (cancel_border, cancel_fg) = if !confirm_selected {
+                    (Color::Cyan, Color::White)
+                } else {
+                    (self.theme.border_normal, self.theme.hint_desc_fg)
+                };
+                let (discard_border, discard_fg) = if *confirm_selected {
+                    (Color::Red, Color::White)
+                } else {
+                    (self.theme.border_normal, self.theme.hint_desc_fg)
+                };
+
+                Paragraph::new(Line::from(Span::styled(
+                    "Cancel",
+                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED)
+                        .border_style(Style::default().fg(cancel_border)),
+                )
+                .render(cancel_area, frame.buffer_mut());
+
+                Paragraph::new(Line::from(Span::styled(
+                    "Discard",
+                    Style::default().fg(discard_fg).add_modifier(Modifier::BOLD),
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED)
+                        .border_style(Style::default().fg(discard_border)),
+                )
+                .render(discard_area, frame.buffer_mut());
             }
             PromptState::None => {}
         }

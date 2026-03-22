@@ -14,6 +14,13 @@ impl App {
         if self.input_target == InputTarget::Agent {
             return self.handle_agent_input(key);
         }
+        // When typing a commit message, route all keys to the commit input
+        // handler so that q, ?, [ etc. are typed instead of triggering
+        // global shortcuts.
+        if self.input_target == InputTarget::CommitMessage {
+            self.handle_commit_input_key(key)?;
+            return Ok(false);
+        }
         if let Some(action) = keybindings::lookup(&key, BindingScope::Global) {
             match action {
                 Action::Quit => {
@@ -39,10 +46,46 @@ impl App {
                     self.set_info("Command palette opened.");
                 }
                 Action::FocusNext => {
-                    self.focus = self.focus.next();
+                    let has_staged = !self.staged_files.is_empty();
+                    if self.focus == FocusPane::Files {
+                        match self.right_section.next(has_staged) {
+                            Some(next) => {
+                                self.right_section = next;
+                                self.clamp_files_cursor();
+                            }
+                            None => {
+                                self.focus = self.focus.next();
+                            }
+                        }
+                    } else {
+                        self.focus = self.focus.next();
+                        if self.focus == FocusPane::Files {
+                            self.right_section = RightSection::first();
+                            self.clamp_files_cursor();
+                        }
+                    }
+                    self.input_target = InputTarget::None;
                 }
                 Action::FocusPrev => {
-                    self.focus = self.focus.previous();
+                    let has_staged = !self.staged_files.is_empty();
+                    if self.focus == FocusPane::Files {
+                        match self.right_section.previous() {
+                            Some(prev) => {
+                                self.right_section = prev;
+                                self.clamp_files_cursor();
+                            }
+                            None => {
+                                self.focus = self.focus.previous();
+                            }
+                        }
+                    } else {
+                        self.focus = self.focus.previous();
+                        if self.focus == FocusPane::Files {
+                            self.right_section = RightSection::last(has_staged);
+                            self.clamp_files_cursor();
+                        }
+                    }
+                    self.input_target = InputTarget::None;
                 }
                 Action::ToggleSidebar => {
                     self.left_collapsed = !self.left_collapsed;
@@ -249,21 +292,234 @@ impl App {
     }
 
     fn handle_files_key(&mut self, key: KeyEvent) -> Result<()> {
-        if let Some(action) = keybindings::lookup(&key, BindingScope::Files) {
-            match action {
-                Action::MoveDown => {
-                    if self.selected_file + 1 < self.changed_files.len() {
-                        self.selected_file += 1;
-                    }
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                let len = self.current_files_len();
+                if self.files_index + 1 < len {
+                    self.files_index += 1;
                 }
-                Action::MoveUp => {
-                    if self.selected_file > 0 {
-                        self.selected_file -= 1;
-                    }
-                }
-                Action::OpenDiff => self.open_diff_for_selected_file()?,
-                _ => {}
             }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.files_index > 0 {
+                    self.files_index -= 1;
+                }
+            }
+            KeyCode::Char(' ') => {
+                self.toggle_stage_selected_file()?;
+            }
+            KeyCode::Char('c') if !self.staged_files.is_empty() => {
+                self.execute_commit()?;
+            }
+            KeyCode::Enter => self.open_diff_for_selected_file()?,
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.confirm_discard_selected_file()?;
+            }
+            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.trigger_ai_commit_message()?;
+            }
+            KeyCode::Char('i') if !self.staged_files.is_empty() => {
+                self.input_target = InputTarget::CommitMessage;
+            }
+            KeyCode::Char('u') => {
+                self.push_to_remote()?;
+            }
+            KeyCode::Char('p') => {
+                self.pull_from_remote()?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_commit_input_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.input_target = InputTarget::None;
+            }
+            KeyCode::Esc => {
+                self.input_target = InputTarget::None;
+            }
+            KeyCode::Enter => {
+                self.commit_input.insert(self.commit_input_cursor, '\n');
+                self.commit_input_cursor += 1;
+            }
+            KeyCode::Char(ch) => {
+                self.commit_input.insert(self.commit_input_cursor, ch);
+                self.commit_input_cursor += ch.len_utf8();
+            }
+            KeyCode::Backspace => {
+                if self.commit_input_cursor > 0 {
+                    let prev = self.commit_input[..self.commit_input_cursor]
+                        .char_indices()
+                        .next_back()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    self.commit_input.remove(prev);
+                    self.commit_input_cursor = prev;
+                }
+            }
+            KeyCode::Left => {
+                if self.commit_input_cursor > 0 {
+                    self.commit_input_cursor = self.commit_input[..self.commit_input_cursor]
+                        .char_indices()
+                        .next_back()
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                }
+            }
+            KeyCode::Right => {
+                if self.commit_input_cursor < self.commit_input.len() {
+                    self.commit_input_cursor = self.commit_input[self.commit_input_cursor..]
+                        .char_indices()
+                        .nth(1)
+                        .map(|(i, _)| self.commit_input_cursor + i)
+                        .unwrap_or(self.commit_input.len());
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn toggle_stage_selected_file(&mut self) -> Result<()> {
+        let Some(session) = self.selected_session() else {
+            self.set_error("Select a session first.");
+            return Ok(());
+        };
+        let worktree = PathBuf::from(&session.worktree_path);
+        let file = match self.right_section {
+            RightSection::Staged => self.staged_files.get(self.files_index),
+            RightSection::Unstaged => self.unstaged_files.get(self.files_index),
+        };
+        let Some(file) = file else { return Ok(()) };
+        let path = file.path.clone();
+        match self.right_section {
+            RightSection::Unstaged => {
+                git::stage_file(&worktree, &path)?;
+            }
+            RightSection::Staged => {
+                git::unstage_file(&worktree, &path)?;
+            }
+        }
+        self.reload_changed_files();
+        Ok(())
+    }
+
+    fn confirm_discard_selected_file(&mut self) -> Result<()> {
+        let file = match self.right_section {
+            RightSection::Unstaged => self.unstaged_files.get(self.files_index),
+            RightSection::Staged => {
+                self.set_error("Unstage the file first to discard changes.");
+                return Ok(());
+            }
+        };
+        let Some(file) = file else { return Ok(()) };
+        self.prompt = PromptState::ConfirmDiscardFile {
+            file_path: file.path.clone(),
+            is_untracked: file.status == "?",
+            confirm_selected: false,
+        };
+        Ok(())
+    }
+
+    fn trigger_ai_commit_message(&mut self) -> Result<()> {
+        if self.staged_files.is_empty() {
+            self.set_error("Stage files first.");
+            return Ok(());
+        }
+        if self.commit_generating {
+            return Ok(());
+        }
+        let Some(session) = self.selected_session() else {
+            self.set_error("Select a session first.");
+            return Ok(());
+        };
+        let worktree = PathBuf::from(&session.worktree_path);
+        let diff = git::staged_diff(&worktree)?;
+        let diff = if diff.len() > 50_000 {
+            diff[..50_000].to_string()
+        } else {
+            diff
+        };
+        let cfg = provider_config(&self.config, &session.provider);
+        let prov = provider::create_provider(&session.provider, cfg);
+        let tx = self.worker_tx.clone();
+        self.commit_generating = true;
+        self.set_busy("Generating AI commit message from staged diff…");
+        thread::spawn(move || {
+            let prompt = format!(
+                "Write a git commit message for the following diff.\n\n\
+                 Rules:\n\
+                 - Subject line: imperative mood, max 72 chars, no period. Summarize WHAT changed and WHY.\n\
+                 - If the change is simple, output ONLY the subject line with no body.\n\
+                 - If the change touches multiple concerns, add a blank line then a body with short bullet points \
+                 (one per logical change, each under 80 chars).\n\
+                 - No preamble, no quotes, no markdown fences. Output ONLY the raw commit message text.\n\
+                 - Do not repeat filenames unless essential for clarity.\n\
+                 - Focus on intent and impact, not mechanical description of lines added/removed.\n\n\
+                 Diff:\n{diff}"
+            );
+            match prov.run_oneshot(&prompt, &worktree) {
+                Ok(msg) => { let _ = tx.send(WorkerEvent::CommitMessageGenerated(msg)); }
+                Err(e) => { let _ = tx.send(WorkerEvent::CommitMessageFailed(e.to_string())); }
+            }
+        });
+        Ok(())
+    }
+
+    fn execute_commit(&mut self) -> Result<()> {
+        if self.staged_files.is_empty() {
+            self.set_error("No staged changes to commit.");
+            return Ok(());
+        }
+        if self.commit_input.trim().is_empty() {
+            self.set_error("Enter a commit message first.");
+            return Ok(());
+        }
+        let Some(session) = self.selected_session() else {
+            self.set_error("Select a session first.");
+            return Ok(());
+        };
+        let worktree = PathBuf::from(&session.worktree_path);
+        match git::commit(&worktree, &self.commit_input) {
+            Ok(_) => {
+                self.commit_input.clear();
+                self.commit_input_cursor = 0;
+                self.set_info("Changes committed successfully. Press u to push to remote.");
+                self.reload_changed_files();
+            }
+            Err(e) => self.set_error(format!("Commit failed: {e}")),
+        }
+        Ok(())
+    }
+
+    fn push_to_remote(&mut self) -> Result<()> {
+        let Some(session) = self.selected_session() else {
+            self.set_error("Select a session first.");
+            return Ok(());
+        };
+        let worktree = PathBuf::from(&session.worktree_path);
+        self.set_busy("Pushing to remote…");
+        match git::push(&worktree) {
+            Ok(_) => self.set_info("Pushed to remote successfully."),
+            Err(e) => self.set_error(format!("Push to remote failed: {e}")),
+        }
+        Ok(())
+    }
+
+    fn pull_from_remote(&mut self) -> Result<()> {
+        let Some(session) = self.selected_session() else {
+            self.set_error("Select a session first.");
+            return Ok(());
+        };
+        let worktree = PathBuf::from(&session.worktree_path);
+        self.set_busy("Pulling latest changes from remote…");
+        match git::pull_current_branch(&worktree) {
+            Ok(_) => {
+                self.set_info("Pulled latest changes from remote successfully.");
+                self.reload_changed_files();
+            }
+            Err(e) => self.set_error(format!("Pull from remote failed: {e}")),
         }
         Ok(())
     }
@@ -701,6 +957,41 @@ impl App {
             }
         }
 
+        if let PromptState::ConfirmDiscardFile {
+            file_path,
+            is_untracked,
+            confirm_selected,
+        } = &mut self.prompt
+        {
+            match key.code {
+                KeyCode::Esc => self.prompt = PromptState::None,
+                KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::Char('h') | KeyCode::Char('l') => {
+                    *confirm_selected = !*confirm_selected;
+                }
+                KeyCode::Enter => {
+                    if *confirm_selected {
+                        let fp = file_path.clone();
+                        let ut = *is_untracked;
+                        self.prompt = PromptState::None;
+                        if let Some(session) = self.selected_session() {
+                            let worktree = PathBuf::from(&session.worktree_path);
+                            match git::discard_file(&worktree, &fp, ut) {
+                                Ok(()) => {
+                                    self.set_info(format!("Discarded changes to \"{fp}\". File restored to last committed state."));
+                                    self.reload_changed_files();
+                                }
+                                Err(e) => self.set_error(format!("Discard failed: {e}")),
+                            }
+                        }
+                    } else {
+                        self.prompt = PromptState::None;
+                    }
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+
         Ok(false)
     }
 
@@ -752,8 +1043,8 @@ impl App {
                     }
                 }
                 FocusPane::Files => {
-                    if self.selected_file + 1 < self.changed_files.len() {
-                        self.selected_file += 1;
+                    if self.files_index + 1 < self.current_files_len() {
+                        self.files_index += 1;
                     }
                 }
             },
@@ -770,8 +1061,8 @@ impl App {
                     }
                 }
                 FocusPane::Files => {
-                    if self.selected_file > 0 {
-                        self.selected_file -= 1;
+                    if self.files_index > 0 {
+                        self.files_index -= 1;
                     }
                 }
             },
