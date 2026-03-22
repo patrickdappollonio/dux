@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -58,6 +59,7 @@ pub struct App {
     theme: Theme,
     tick_count: u64,
     watched_worktree: Arc<Mutex<Option<PathBuf>>>,
+    has_active_agent: Arc<AtomicBool>,
     collapsed_projects: HashSet<i64>,
 }
 
@@ -269,6 +271,7 @@ impl App {
             theme: Theme::default_dark(),
             tick_count: 0,
             watched_worktree: Arc::clone(&watched_worktree),
+            has_active_agent: Arc::new(AtomicBool::new(false)),
             collapsed_projects: HashSet::new(),
         };
         app.restore_sessions();
@@ -1357,6 +1360,9 @@ impl App {
                 }
             }
         }
+        // Keep the poller's interval flag in sync with whether any agent is running.
+        self.has_active_agent
+            .store(!self.providers.is_empty(), Ordering::Relaxed);
     }
 
     fn render(&mut self, frame: &mut Frame) {
@@ -2812,8 +2818,14 @@ impl App {
     fn spawn_changed_files_poller(&self) {
         let tx = self.worker_tx.clone();
         let watched = Arc::clone(&self.watched_worktree);
+        let has_agent = Arc::clone(&self.has_active_agent);
         thread::spawn(move || loop {
-            thread::sleep(Duration::from_secs(2));
+            let interval = if has_agent.load(Ordering::Relaxed) {
+                Duration::from_secs(2)
+            } else {
+                Duration::from_secs(10)
+            };
+            thread::sleep(interval);
             let path = watched.lock().ok().and_then(|guard| guard.clone());
             if let Some(worktree_path) = path {
                 if let Ok(files) = git::changed_files(&worktree_path) {
