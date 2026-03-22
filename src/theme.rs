@@ -38,7 +38,6 @@ pub struct Theme {
     pub overlay_bg: Color,
     pub overlay_dim_bg: Color,
     pub prompt_cursor: Color,
-    pub branding_fg: Color,
     pub provider_label_fg: Color,
     pub branch_fg: Color,
 }
@@ -80,7 +79,6 @@ impl Theme {
             overlay_bg: Color::Rgb(20, 20, 20),
             overlay_dim_bg: Color::Rgb(15, 15, 15),
             prompt_cursor: Color::Cyan,
-            branding_fg: Color::Rgb(80, 80, 80),
             provider_label_fg: Color::Rgb(100, 100, 100),
             branch_fg: Color::Rgb(120, 120, 120),
         }

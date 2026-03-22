@@ -1479,7 +1479,6 @@ impl App {
             StatusTone::Busy => self.theme.status_busy_bg,
             StatusTone::Error => self.theme.status_error_bg,
         };
-        let branding = format!("dux v{}", env!("CARGO_PKG_VERSION"));
         let status_line = Line::from(vec![
             Span::styled(
                 format!(" {dot} "),
@@ -1490,28 +1489,10 @@ impl App {
                 Style::default().fg(msg_color).bg(status_bg),
             ),
         ]);
-        let branding_line = Line::from(vec![Span::styled(
-            format!("{branding} "),
-            Style::default()
-                .fg(self.theme.branding_fg)
-                .bg(status_bg),
-        )]);
-        // Render status on first row, branding right-aligned on same row
         Paragraph::new(status_line)
             .style(Style::default().bg(status_bg))
             .wrap(Wrap { trim: false })
             .render(status_area, frame.buffer_mut());
-        // Overlay branding in top-right of status area
-        let branding_width = branding.len() as u16 + 1;
-        if status_area.width > branding_width {
-            let branding_area = Rect {
-                x: status_area.x + status_area.width - branding_width,
-                y: status_area.y,
-                width: branding_width,
-                height: 1,
-            };
-            Paragraph::new(branding_line).render(branding_area, frame.buffer_mut());
-        }
     }
 
     fn render_help(&self, frame: &mut Frame) {
