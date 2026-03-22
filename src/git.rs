@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -143,13 +144,11 @@ pub fn remove_worktree(repo_path: &Path, worktree_path: &Path, branch_name: &str
 }
 
 pub fn changed_files(worktree_path: &Path) -> Result<Vec<ChangedFile>> {
+    let wt = worktree_path.to_string_lossy();
+
+    // 1. Get file statuses via porcelain (config-immune).
     let output = Command::new("git")
-        .args([
-            "-C",
-            worktree_path.to_string_lossy().as_ref(),
-            "status",
-            "--short",
-        ])
+        .args(["-C", wt.as_ref(), "status", "--porcelain"])
         .output()?;
     if !output.status.success() {
         return Err(anyhow!(
@@ -164,28 +163,61 @@ pub fn changed_files(worktree_path: &Path) -> Result<Vec<ChangedFile>> {
         }
         let status = line[..2].trim().to_string();
         let path = line[3..].to_string();
-        files.push(ChangedFile { status, path });
+        files.push(ChangedFile {
+            status,
+            path,
+            additions: 0,
+            deletions: 0,
+        });
     }
+
+    // 2. Get line-level stats via diff --numstat (plumbing-style output).
+    if let Ok(ns) = Command::new("git")
+        .args(["-C", wt.as_ref(), "diff", "--numstat"])
+        .output()
+    {
+        if ns.status.success() {
+            let text = String::from_utf8_lossy(&ns.stdout);
+            let stats: HashMap<String, (usize, usize)> = text
+                .lines()
+                .filter_map(|line| {
+                    let mut parts = line.split('\t');
+                    let add = parts.next()?.parse::<usize>().ok()?;
+                    let del = parts.next()?.parse::<usize>().ok()?;
+                    let path = parts.next()?.to_string();
+                    Some((path, (add, del)))
+                })
+                .collect();
+            for file in &mut files {
+                if let Some(&(a, d)) = stats.get(&file.path) {
+                    file.additions = a;
+                    file.deletions = d;
+                }
+            }
+        }
+    }
+
     Ok(files)
 }
 
-pub fn diff_for_file(worktree_path: &Path, path: &str) -> Result<String> {
+/// Return the contents of a file as it exists at HEAD, or `None` for new
+/// (untracked) files. Uses the plumbing command `cat-file` which is immune
+/// to user configuration.
+pub fn file_at_head(worktree_path: &Path, path: &str) -> Result<Option<String>> {
     let output = Command::new("git")
         .args([
             "-C",
             worktree_path.to_string_lossy().as_ref(),
-            "diff",
-            "--",
-            path,
+            "cat-file",
+            "-p",
+            &format!("HEAD:{path}"),
         ])
         .output()?;
     if !output.status.success() {
-        return Err(anyhow!(
-            "git diff failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        // File doesn't exist at HEAD (new/untracked file).
+        return Ok(None);
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(Some(String::from_utf8_lossy(&output.stdout).to_string()))
 }
 
 pub fn ellipsize_middle(input: &str, max_width: usize) -> String {

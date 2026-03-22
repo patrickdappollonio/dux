@@ -74,4 +74,6 @@ pub struct AgentSession {
 pub struct ChangedFile {
     pub status: String,
     pub path: String,
+    pub additions: usize,
+    pub deletions: usize,
 }
