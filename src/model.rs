@@ -24,7 +24,7 @@ impl ProviderKind {
 
 #[derive(Clone, Debug)]
 pub struct Project {
-    pub id: i64,
+    pub id: String,
     pub name: String,
     pub path: String,
     pub default_provider: ProviderKind,
@@ -59,7 +59,8 @@ impl SessionStatus {
 #[derive(Clone, Debug)]
 pub struct AgentSession {
     pub id: String,
-    pub project_id: i64,
+    pub project_id: String,
+    pub project_path: Option<String>,
     pub provider: ProviderKind,
     pub source_branch: String,
     pub branch_name: String,

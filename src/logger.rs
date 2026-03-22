@@ -1,6 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use chrono::Utc;
@@ -85,7 +85,7 @@ fn log(level: LogLevel, message: &str) {
     }
 }
 
-fn resolve_log_path(config: &LoggingConfig, paths: &DuxPaths) -> PathBuf {
+pub fn resolve_log_path(config: &LoggingConfig, paths: &DuxPaths) -> PathBuf {
     let configured = PathBuf::from(&config.path);
     if configured.as_os_str().is_empty() {
         return paths.root.join("dux.log");
@@ -95,9 +95,4 @@ fn resolve_log_path(config: &LoggingConfig, paths: &DuxPaths) -> PathBuf {
     } else {
         paths.root.join(configured)
     }
-}
-
-#[allow(dead_code)]
-fn _is_under(base: &Path, candidate: &Path) -> bool {
-    candidate.starts_with(base)
 }
