@@ -43,6 +43,7 @@ pub struct App {
     right_top_height_pct: u16,
     focus: FocusPane,
     center_mode: CenterMode,
+    left_collapsed: bool,
     resize_mode: bool,
     help_overlay: bool,
     status: StatusLine,
@@ -196,6 +197,11 @@ const COMMANDS: &[CommandDef] = &[
         shortcut: None,
     },
     CommandDef {
+        name: "toggle-sidebar",
+        description: "Collapse or expand the projects sidebar",
+        shortcut: Some("["),
+    },
+    CommandDef {
         name: "help",
         description: "Open the help overlay",
         shortcut: Some("?"),
@@ -225,6 +231,7 @@ impl App {
             changed_files: Vec::new(),
             selected_left: 0,
             selected_file: 0,
+            left_collapsed: false,
             focus: FocusPane::Left,
             center_mode: CenterMode::Agent,
             resize_mode: false,
@@ -356,6 +363,10 @@ impl App {
             self.focus = self.focus.previous();
             self.input_target = InputTarget::None;
             self.input_buffer.clear();
+            return Ok(false);
+        }
+        if key.code == KeyCode::Char('[') {
+            self.left_collapsed = !self.left_collapsed;
             return Ok(false);
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('w') {
@@ -1155,17 +1166,28 @@ impl App {
             ])
             .areas(frame.area());
         self.render_header(frame, header);
-        let center_pct = 100u16
-            .saturating_sub(self.left_width_pct + self.right_width_pct)
-            .max(20);
-        let [left, center, right] = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(self.left_width_pct),
-                Constraint::Percentage(center_pct),
-                Constraint::Percentage(self.right_width_pct),
-            ])
-            .areas(body);
+        let [left, center, right] = if self.left_collapsed {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Length(4),
+                    Constraint::Min(20),
+                    Constraint::Percentage(self.right_width_pct),
+                ])
+                .areas(body)
+        } else {
+            let center_pct = 100u16
+                .saturating_sub(self.left_width_pct + self.right_width_pct)
+                .max(20);
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(self.left_width_pct),
+                    Constraint::Percentage(center_pct),
+                    Constraint::Percentage(self.right_width_pct),
+                ])
+                .areas(body)
+        };
         let [files, shell] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -1234,6 +1256,41 @@ impl App {
     }
 
     fn render_left(&self, frame: &mut Frame, area: Rect) {
+        let focused = self.focus == FocusPane::Left;
+
+        if self.left_collapsed {
+            let items = self
+                .left_items()
+                .into_iter()
+                .map(|item| match item {
+                    LeftItem::Project(_) => {
+                        ListItem::new(Line::from(Span::styled(
+                            "▸",
+                            Style::default().fg(self.theme.project_icon),
+                        )))
+                    }
+                    LeftItem::Session(index) => {
+                        let session = &self.sessions[index];
+                        let (dot, dot_color) = self.theme.session_dot(&session.status);
+                        ListItem::new(Line::from(Span::styled(
+                            dot.to_string(),
+                            Style::default().fg(dot_color),
+                        )))
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut state = ListState::default().with_selected(Some(self.selected_left));
+            StatefulWidget::render(
+                List::new(items)
+                    .block(self.themed_block("P", focused))
+                    .highlight_style(self.theme.selection_style()),
+                area,
+                frame.buffer_mut(),
+                &mut state,
+            );
+            return;
+        }
+
         let session_counts: HashMap<i64, usize> = {
             let mut counts = HashMap::new();
             for session in &self.sessions {
@@ -1282,7 +1339,6 @@ impl App {
                 }
             })
             .collect::<Vec<_>>();
-        let focused = self.focus == FocusPane::Left;
         let title = format!(
             "Projects ({})",
             self.projects.len()
@@ -1406,6 +1462,7 @@ impl App {
                 (":", "Cmd"),
                 ("d", "Provider"),
                 ("u", "Pull"),
+                ("[", "Sidebar"),
                 ("?", "Help"),
                 ("q", "Quit"),
             ],
@@ -1415,6 +1472,7 @@ impl App {
                 (":", "Cmd"),
                 ("Esc", "Close diff"),
                 ("Tab", "Next"),
+                ("[", "Sidebar"),
                 ("?", "Help"),
                 ("q", "Quit"),
             ],
@@ -1424,6 +1482,7 @@ impl App {
                 ("^P", "Palette"),
                 (":", "Cmd"),
                 ("Tab", "Next"),
+                ("[", "Sidebar"),
                 ("?", "Help"),
                 ("q", "Quit"),
             ],
@@ -1877,6 +1936,10 @@ impl App {
                     name: String::new(),
                     field: PromptField::Path,
                 };
+                Ok(())
+            }
+            "toggle-sidebar" => {
+                self.left_collapsed = !self.left_collapsed;
                 Ok(())
             }
             "help" => {
