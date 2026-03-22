@@ -1,0 +1,34 @@
+mod acp;
+mod app;
+mod config;
+mod git;
+mod logger;
+mod model;
+mod statusline;
+mod storage;
+mod terminal;
+
+use anyhow::Result;
+
+fn main() -> Result<()> {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        print_help();
+        return Ok(());
+    }
+    let mut app = app::App::bootstrap()?;
+    app.run()
+}
+
+fn print_help() {
+    println!(
+        "dux\n\n\
+         Terminal UI for ACP-backed AI worktree sessions.\n\n\
+         Usage:\n\
+           dux\n\n\
+         First run writes a full default config to:\n\
+           ~/.config/dux/config.toml\n\
+         Session state is stored in:\n\
+           ~/.config/dux/sessions.sqlite3"
+    );
+}
