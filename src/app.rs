@@ -405,9 +405,49 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                self.center_mode = CenterMode::Agent;
-                self.focus = FocusPane::Center;
-                self.reload_changed_files();
+                match self.left_items().get(self.selected_left) {
+                    Some(LeftItem::Project(project_index)) => {
+                        let project_id = self.projects[*project_index].id.clone();
+                        let has_sessions = self.sessions.iter().any(|s| s.project_id == project_id);
+                        if has_sessions {
+                            // Expand the project if collapsed so the session items are visible
+                            if self.collapsed_projects.contains(&project_id) {
+                                self.collapsed_projects.remove(&project_id);
+                                self.rebuild_left_items();
+                            }
+                            // Find the first session belonging to this project
+                            if let Some(pos) = self.left_items().iter().position(|item| {
+                                matches!(item, LeftItem::Session(si) if self.sessions[*si].project_id == project_id)
+                            }) {
+                                self.selected_left = pos;
+                                self.center_mode = CenterMode::Agent;
+                                self.focus = FocusPane::Center;
+                                self.reload_changed_files();
+                                if self.selected_session()
+                                    .map(|s| self.providers.contains_key(&s.id))
+                                    .unwrap_or(false)
+                                {
+                                    self.input_target = InputTarget::Agent;
+                                }
+                            }
+                        } else {
+                            // Project has no agents: create one
+                            self.create_agent_for_selected_project()?;
+                        }
+                    }
+                    Some(LeftItem::Session(_)) => {
+                        self.center_mode = CenterMode::Agent;
+                        self.focus = FocusPane::Center;
+                        self.reload_changed_files();
+                        if self.selected_session()
+                            .map(|s| self.providers.contains_key(&s.id))
+                            .unwrap_or(false)
+                        {
+                            self.input_target = InputTarget::Agent;
+                        }
+                    }
+                    None => {}
+                }
             }
             KeyCode::Char('a') => {
                 self.open_project_browser()?;
