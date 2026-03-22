@@ -201,6 +201,11 @@ const COMMANDS: &[CommandDef] = &[
         shortcut: Some("["),
     },
     CommandDef {
+        name: "copy-path",
+        description: "Copy the selected agent's worktree path",
+        shortcut: Some("y"),
+    },
+    CommandDef {
         name: "help",
         description: "Open the help overlay",
         shortcut: Some("?"),
@@ -419,6 +424,7 @@ impl App {
             KeyCode::Char('x') => self.delete_selected_session()?,
             KeyCode::Char('d') => self.cycle_selected_project_provider()?,
             KeyCode::Char('r') => self.reconnect_selected_session()?,
+            KeyCode::Char('y') => self.copy_selected_path()?,
             _ => {}
         }
         Ok(())
@@ -1918,6 +1924,7 @@ impl App {
                 };
                 Ok(())
             }
+            "copy-path" => self.copy_selected_path(),
             "toggle-sidebar" => {
                 self.left_collapsed = !self.left_collapsed;
                 Ok(())
@@ -1963,6 +1970,33 @@ impl App {
         match self.left_items().get(self.selected_left) {
             Some(LeftItem::Session(index)) => self.sessions.get(*index),
             _ => None,
+        }
+    }
+
+    fn copy_selected_path(&mut self) -> Result<()> {
+        let path = match self.left_items().get(self.selected_left) {
+            Some(LeftItem::Session(index)) => {
+                self.sessions.get(*index).map(|s| s.worktree_path.clone())
+            }
+            Some(LeftItem::Project(index)) => {
+                self.projects.get(*index).map(|p| p.path.clone())
+            }
+            None => None,
+        };
+        match path {
+            Some(p) => {
+                let mut clipboard = arboard::Clipboard::new()
+                    .map_err(|e| anyhow::anyhow!("Failed to access clipboard: {e}"))?;
+                clipboard
+                    .set_text(&p)
+                    .map_err(|e| anyhow::anyhow!("Failed to copy to clipboard: {e}"))?;
+                self.set_info(format!("Copied: {p}"));
+                Ok(())
+            }
+            None => {
+                self.set_error("No project or agent selected.");
+                Ok(())
+            }
         }
     }
 
