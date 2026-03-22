@@ -2961,10 +2961,19 @@ impl App {
     }
 
     fn render_dim_overlay(&self, frame: &mut Frame) {
-        let area = frame.area();
+        let full = frame.area();
+        // Keep the statusline (bottom rows) undimmed so errors stay visible.
+        let status_text_len = self.status.text().len() + 3;
+        let status_lines: u16 = if full.width > 0 && status_text_len > full.width as usize {
+            2
+        } else {
+            1
+        };
+        let footer_h = 1 + status_lines; // hints bar + status line(s)
+        let dim_h = full.height.saturating_sub(footer_h);
         let buf = frame.buffer_mut();
-        for y in area.y..area.y + area.height {
-            for x in area.x..area.x + area.width {
+        for y in full.y..full.y + dim_h {
+            for x in full.x..full.x + full.width {
                 let cell = &mut buf[(x, y)];
                 cell.set_fg(Color::DarkGray);
                 cell.set_bg(Color::Rgb(10, 10, 10));
