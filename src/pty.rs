@@ -18,6 +18,7 @@ pub struct PtyClient {
     parser: Arc<Mutex<vt100::Parser>>,
     child: Box<dyn Child + Send + Sync>,
     exited: Arc<AtomicBool>,
+    has_output: Arc<AtomicBool>,
 }
 
 impl PtyClient {
@@ -59,12 +60,14 @@ impl PtyClient {
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 200)));
         let exited = Arc::new(AtomicBool::new(false));
+        let has_output = Arc::new(AtomicBool::new(false));
 
         // Background reader thread.
         let parser_ref = Arc::clone(&parser);
         let exited_ref = Arc::clone(&exited);
+        let has_output_ref = Arc::clone(&has_output);
         thread::spawn(move || {
-            Self::reader_loop(reader, parser_ref, exited_ref);
+            Self::reader_loop(reader, parser_ref, exited_ref, has_output_ref);
         });
 
         Ok(Self {
@@ -73,6 +76,7 @@ impl PtyClient {
             parser,
             child,
             exited,
+            has_output,
         })
     }
 
@@ -80,6 +84,7 @@ impl PtyClient {
         mut reader: Box<dyn std::io::Read + Send>,
         parser: Arc<Mutex<vt100::Parser>>,
         exited: Arc<AtomicBool>,
+        has_output: Arc<AtomicBool>,
     ) {
         let mut buf = [0u8; 4096];
         loop {
@@ -91,6 +96,15 @@ impl PtyClient {
                 Ok(n) => {
                     if let Ok(mut p) = parser.lock() {
                         p.process(&buf[..n]);
+                        // Only mark output once the screen contains visible
+                        // (non-whitespace) characters, so ANSI setup sequences
+                        // don't prematurely hide the loading indicator.
+                        if !has_output.load(Ordering::Acquire) {
+                            let contents = p.screen().contents();
+                            if contents.bytes().any(|b| !b.is_ascii_whitespace()) {
+                                has_output.store(true, Ordering::Release);
+                            }
+                        }
                     }
                 }
                 Err(err) => {
@@ -145,6 +159,11 @@ impl PtyClient {
     /// Check whether the child process has exited (reader thread detected EOF).
     pub fn is_exited(&self) -> bool {
         self.exited.load(Ordering::Acquire)
+    }
+
+    /// Check whether the PTY has received any output from the child process.
+    pub fn has_output(&self) -> bool {
+        self.has_output.load(Ordering::Acquire)
     }
 
     /// Non-blocking check of the child's exit status.

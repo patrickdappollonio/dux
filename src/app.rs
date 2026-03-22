@@ -191,7 +191,7 @@ const COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "reconnect-agent",
-        description: "Reconnect the selected detached agent session",
+        description: "Restart the CLI for the selected agent",
         shortcut: None,
     },
     CommandDef {
@@ -313,6 +313,12 @@ impl App {
         if !matches!(self.prompt, PromptState::None) {
             return self.handle_prompt_key(key);
         }
+        // In interactive mode, ALL keys go to the PTY except ctrl+g (handled
+        // inside handle_agent_input). This must be checked before quit / help /
+        // palette so that typing 'q', ctrl+c, '?', ctrl+p etc. reaches the CLI.
+        if self.input_target == InputTarget::Agent {
+            return self.handle_agent_input(key);
+        }
         if (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c'))
             || key.code == KeyCode::Char('q')
         {
@@ -326,7 +332,7 @@ impl App {
             }
             return Ok(true);
         }
-        if key.code == KeyCode::Char('?') && self.input_target != InputTarget::Agent {
+        if key.code == KeyCode::Char('?') {
             self.help_overlay = !self.help_overlay;
             return Ok(false);
         }
@@ -338,9 +344,6 @@ impl App {
             };
             self.set_info("Command palette opened.");
             return Ok(false);
-        }
-        if self.input_target == InputTarget::Agent {
-            return self.handle_agent_input(key);
         }
         if key.code == KeyCode::Tab {
             self.focus = self.focus.next();
@@ -412,6 +415,21 @@ impl App {
             KeyCode::Char('d') => self.cycle_selected_project_provider()?,
             KeyCode::Char('r') => self.reconnect_selected_session()?,
             KeyCode::Char('y') => self.copy_selected_path()?,
+            KeyCode::Char('i') => {
+                if self.selected_session().is_some()
+                    && self
+                        .selected_session()
+                        .map(|s| self.providers.contains_key(&s.id))
+                        .unwrap_or(false)
+                {
+                    self.focus = FocusPane::Center;
+                    self.center_mode = CenterMode::Agent;
+                    self.input_target = InputTarget::Agent;
+                    self.set_info("Interactive mode. Keys forwarded to agent. ctrl+g exits.");
+                } else {
+                    self.set_error("No active agent. Press r to restart or n to create.");
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -429,7 +447,17 @@ impl App {
                     self.input_target = InputTarget::Agent;
                     self.set_info("Interactive mode. Keys forwarded to agent. ctrl+g exits.");
                 } else {
-                    self.set_error("No active agent. Press r to reconnect or a to create.");
+                    self.set_error("No active agent. Press r to restart or n to create.");
+                }
+            }
+            KeyCode::Char('r') => {
+                // Allow relaunching an exited agent from the center pane.
+                let has_provider = self
+                    .selected_session()
+                    .map(|s| self.providers.contains_key(&s.id))
+                    .unwrap_or(false);
+                if !has_provider {
+                    self.reconnect_selected_session()?;
                 }
             }
             KeyCode::Esc => {
@@ -1113,7 +1141,7 @@ impl App {
 
     fn reconnect_selected_session(&mut self) -> Result<()> {
         let Some(session) = self.selected_session().cloned() else {
-            self.set_error("Select a detached session first.");
+            self.set_error("Select a stopped agent first.");
             return Ok(());
         };
         logger::info(&format!("reconnecting session {}", session.id));
@@ -1129,7 +1157,10 @@ impl App {
             Ok(client) => {
                 self.providers.insert(session.id.clone(), client);
                 self.mark_session_status(&session.id, SessionStatus::Active);
-                self.set_info(format!("Reconnected {}", session.branch_name));
+                self.focus = FocusPane::Center;
+                self.center_mode = CenterMode::Agent;
+                self.input_target = InputTarget::Agent;
+                self.set_info(format!("Relaunched {}", session.branch_name));
             }
             Err(err) => {
                 self.set_error(format!("Reconnect failed: {err}"));
@@ -1193,9 +1224,19 @@ impl App {
                 exited.push(session_id.clone());
             }
         }
-        for session_id in exited {
-            self.providers.remove(&session_id);
-            self.mark_session_status(&session_id, SessionStatus::Detached);
+        for session_id in &exited {
+            self.providers.remove(session_id);
+            self.mark_session_status(session_id, SessionStatus::Detached);
+        }
+        if !exited.is_empty() {
+            // If the currently-viewed session just exited, leave interactive mode.
+            if let Some(current) = self.selected_session() {
+                if exited.contains(&current.id) {
+                    self.input_target = InputTarget::None;
+                    self.focus = FocusPane::Left;
+                    self.set_info("Agent CLI exited. Press r to relaunch.");
+                }
+            }
         }
     }
 
@@ -1462,6 +1503,9 @@ impl App {
 
         // Get the selected session's PTY screen.
         let session_id = self.selected_session().map(|s| s.id.clone());
+        let session_provider_name = self
+            .selected_session()
+            .map(|s| s.provider.as_str().to_owned());
         let session_active = session_id
             .as_ref()
             .map(|id| self.providers.contains_key(id))
@@ -1476,59 +1520,137 @@ impl App {
                     self.last_pty_size = new_size;
                 }
 
-                // Render vt100 screen into ratatui buffer.
-                let screen = provider.screen();
-                let buf = frame.buffer_mut();
-                let (screen_rows, screen_cols) = screen.size();
-                for row in 0..screen_rows.min(term_area.height) {
-                    for col in 0..screen_cols.min(term_area.width) {
-                        let cell = screen.cell(row, col);
-                        if let Some(cell) = cell {
-                            if cell.is_wide_continuation() {
-                                continue;
+                if !provider.has_output() {
+                    // Show a centered loading card until the PTY produces output.
+                    let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+                    let idx = (self.tick_count as usize) % spinner_chars.len();
+                    let spinner = spinner_chars[idx];
+                    let (label_spans, label_len) = match session_provider_name.as_deref() {
+                        Some(name) => {
+                            let text_len = "Starting ".len() + name.len() + "...".len();
+                            let spans = vec![
+                                Span::styled(
+                                    "Starting ",
+                                    Style::default().fg(self.theme.hint_desc_fg),
+                                ),
+                                Span::styled(
+                                    name.to_owned(),
+                                    Style::default().fg(self.theme.branch_fg),
+                                ),
+                                Span::styled(
+                                    "...",
+                                    Style::default().fg(self.theme.hint_desc_fg),
+                                ),
+                            ];
+                            (spans, text_len)
+                        }
+                        None => {
+                            let text = "Starting agent...";
+                            let spans = vec![Span::styled(
+                                text,
+                                Style::default().fg(self.theme.hint_desc_fg),
+                            )];
+                            (spans, text.len())
+                        }
+                    };
+
+                    // Card dimensions: border + padding + content + padding + border.
+                    // +2 for spinner + space prefix.
+                    let content_w = label_len as u16 + 2;
+                    let card_w = (content_w + 2 + 6).min(term_area.width); // 2 borders + 6 padding
+                    let card_h: u16 = 5; // top border, blank, spinner, blank, bottom border
+
+                    if term_area.width >= card_w && term_area.height >= card_h {
+                        let cx = term_area.x + (term_area.width - card_w) / 2;
+                        let cy = term_area.y + (term_area.height - card_h) / 2;
+                        let card_area = Rect::new(cx, cy, card_w, card_h);
+
+                        let card_block = Block::default()
+                            .borders(Borders::ALL)
+                            .border_type(ratatui::widgets::BorderType::Rounded)
+                            .border_style(Style::default().fg(self.theme.border_normal));
+                        let card_inner = card_block.inner(card_area);
+                        card_block.render(card_area, frame.buffer_mut());
+
+                        // Render spinner + label centered inside the card.
+                        let mut spans = vec![Span::styled(
+                            format!("{spinner} "),
+                            Style::default()
+                                .fg(self.theme.hint_key_fg)
+                                .add_modifier(Modifier::BOLD),
+                        )];
+                        spans.extend(label_spans);
+                        let line = Line::from(spans);
+                        Paragraph::new(line)
+                            .alignment(ratatui::layout::Alignment::Center)
+                            .render(
+                                Rect::new(
+                                    card_inner.x,
+                                    card_inner.y + card_inner.height / 2,
+                                    card_inner.width,
+                                    1,
+                                ),
+                                frame.buffer_mut(),
+                            );
+                    }
+                } else {
+                    // Render vt100 screen into ratatui buffer.
+                    let screen = provider.screen();
+                    let buf = frame.buffer_mut();
+                    let (screen_rows, screen_cols) = screen.size();
+                    for row in 0..screen_rows.min(term_area.height) {
+                        for col in 0..screen_cols.min(term_area.width) {
+                            let cell = screen.cell(row, col);
+                            if let Some(cell) = cell {
+                                if cell.is_wide_continuation() {
+                                    continue;
+                                }
+                                let x = term_area.x + col;
+                                let y = term_area.y + row;
+                                let fg = convert_vt100_color(cell.fgcolor());
+                                let bg = convert_vt100_color(cell.bgcolor());
+                                let mut modifier = Modifier::empty();
+                                if cell.bold() {
+                                    modifier |= Modifier::BOLD;
+                                }
+                                if cell.italic() {
+                                    modifier |= Modifier::ITALIC;
+                                }
+                                if cell.underline() {
+                                    modifier |= Modifier::UNDERLINED;
+                                }
+                                if cell.inverse() {
+                                    modifier |= Modifier::REVERSED;
+                                }
+                                let style =
+                                    Style::default().fg(fg).bg(bg).add_modifier(modifier);
+                                let contents = cell.contents();
+                                let ratatui_cell = &mut buf[(x, y)];
+                                if contents.is_empty() {
+                                    ratatui_cell.set_symbol(" ");
+                                } else {
+                                    ratatui_cell.set_symbol(&contents);
+                                }
+                                ratatui_cell.set_style(style);
                             }
-                            let x = term_area.x + col;
-                            let y = term_area.y + row;
-                            let fg = convert_vt100_color(cell.fgcolor());
-                            let bg = convert_vt100_color(cell.bgcolor());
-                            let mut modifier = Modifier::empty();
-                            if cell.bold() {
-                                modifier |= Modifier::BOLD;
-                            }
-                            if cell.italic() {
-                                modifier |= Modifier::ITALIC;
-                            }
-                            if cell.underline() {
-                                modifier |= Modifier::UNDERLINED;
-                            }
-                            if cell.inverse() {
-                                modifier |= Modifier::REVERSED;
-                            }
-                            let style = Style::default().fg(fg).bg(bg).add_modifier(modifier);
-                            let contents = cell.contents();
-                            let ratatui_cell = &mut buf[(x, y)];
-                            if contents.is_empty() {
-                                ratatui_cell.set_symbol(" ");
-                            } else {
-                                ratatui_cell.set_symbol(&contents);
-                            }
-                            ratatui_cell.set_style(style);
                         }
                     }
-                }
 
-                // Render cursor if in input mode.
-                if is_input && !screen.hide_cursor() {
-                    let (cursor_row, cursor_col) = screen.cursor_position();
-                    let cx = term_area.x + cursor_col;
-                    let cy = term_area.y + cursor_row;
-                    if cx < term_area.x + term_area.width && cy < term_area.y + term_area.height {
-                        let cursor_cell = &mut buf[(cx, cy)];
-                        cursor_cell.set_style(
-                            Style::default()
-                                .fg(Color::Black)
-                                .bg(self.theme.prompt_cursor),
-                        );
+                    // Render cursor if in input mode.
+                    if is_input && !screen.hide_cursor() {
+                        let (cursor_row, cursor_col) = screen.cursor_position();
+                        let cx = term_area.x + cursor_col;
+                        let cy = term_area.y + cursor_row;
+                        if cx < term_area.x + term_area.width
+                            && cy < term_area.y + term_area.height
+                        {
+                            let cursor_cell = &mut buf[(cx, cy)];
+                            cursor_cell.set_style(
+                                Style::default()
+                                    .fg(Color::Black)
+                                    .bg(self.theme.prompt_cursor),
+                            );
+                        }
                     }
                 }
             }
@@ -1536,25 +1658,42 @@ impl App {
 
         // Hint bar with top border.
         if hint_area.height > 0 {
-            let hint_text = if is_input {
-                "ctrl+g to exit interactive mode"
-            } else if session_active {
-                "Press i to interact with the agent"
-            } else if session_id.is_some() {
-                "Session detached. Press r to reconnect."
+            let hint_line = if is_input {
+                let desc_style = Style::default().fg(self.theme.hint_desc_fg);
+                let mut spans: Vec<Span> = Vec::new();
+                let cli_name = session_provider_name
+                    .as_deref()
+                    .unwrap_or("the agent");
+                spans.push(Span::styled("Press ", desc_style));
+                spans.extend(self.theme.key_badge("ctrl+g", Color::Reset));
+                spans.push(Span::styled(
+                    format!(" to manage dux instead of {cli_name}."),
+                    desc_style,
+                ));
+                Line::from(spans)
             } else {
-                "No agent session selected."
+                let desc_style = Style::default().fg(self.theme.hint_desc_fg);
+                let mut spans: Vec<Span> = Vec::new();
+                if session_active {
+                    spans.push(Span::styled("Press ", desc_style));
+                    spans.extend(self.theme.key_badge("i", Color::Reset));
+                    spans.push(Span::styled(" to interact with the agent.", desc_style));
+                } else if session_id.is_some() {
+                    spans.push(Span::styled("Agent CLI exited. Press ", desc_style));
+                    spans.extend(self.theme.key_badge("r", Color::Reset));
+                    spans.push(Span::styled(" to relaunch.", desc_style));
+                } else {
+                    spans.push(Span::styled("No agent selected.", desc_style));
+                }
+                Line::from(spans)
             };
-            Paragraph::new(Span::styled(
-                hint_text,
-                Style::default().fg(self.theme.terminal_hint_fg),
-            ))
-            .block(
-                Block::default()
-                    .borders(Borders::TOP)
-                    .border_style(Style::default().fg(self.theme.border_normal)),
-            )
-            .render(hint_area, frame.buffer_mut());
+            Paragraph::new(hint_line)
+                .block(
+                    Block::default()
+                        .borders(Borders::TOP)
+                        .border_style(Style::default().fg(self.theme.border_normal)),
+                )
+                .render(hint_area, frame.buffer_mut());
         }
     }
 
@@ -1744,7 +1883,7 @@ impl App {
                     ("n", "New agent session (creates worktree)"),
                     ("d", "Cycle default provider"),
                     ("u", "Refresh checkout (git pull --ff-only)"),
-                    ("r", "Reconnect detached session"),
+                    ("r", "Restart agent CLI"),
                     ("x", "Delete selected session/worktree"),
                 ],
             ),
