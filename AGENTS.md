@@ -59,6 +59,17 @@ The current app provides:
   - PTY process early exit
 - If the UI appears frozen, verify the operation is on a worker path rather than the main event loop.
 
+## Git Command Safety
+
+When shelling out to git, **always ensure the command output is immune to user-specific git configuration**. User settings like `color.diff`, `diff.noprefix`, `status.branch`, `status.renames`, `core.quotePath`, and others can alter output in ways that break parsing.
+
+- **Prefer plumbing commands** (`cat-file`, `rev-parse`, `for-each-ref`) over porcelain when you need machine-readable output. Plumbing commands are guaranteed stable.
+- **Use `--porcelain`** for `git status`. Never use `--short` — it is affected by user config (`status.branch`, `status.relativePaths`, etc.).
+- **Use `--numstat`** for line-level diff statistics. It outputs tab-separated values unaffected by config.
+- **Override config with `-c`** when a porcelain/plumbing alternative doesn't exist (e.g., `git -c color.diff=false diff`).
+- **Imperative commands** that aren't parsed (`worktree add`, `branch -D`, `pull`) are fine as-is.
+- **Avoid shelling out to `git diff` for display** — the project computes diffs in-process using the `similar` crate and applies syntax highlighting with `syntect`. Use `git::file_at_head()` to get the base version and read the working copy from disk.
+
 ## Recommendations For Editing
 
 - Keep changes small and composable in `src/app.rs`; it is large enough that unrelated edits can conflict.
