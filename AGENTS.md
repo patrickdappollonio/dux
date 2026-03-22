@@ -22,16 +22,17 @@ The current app provides:
 - Worktrees are user data and should not be removed or mutated casually.
 - Git operations should be explicit and conservative, especially around the source checkout.
 
-## Key Files
+## App Module Structure
 
-- [src/app.rs](src/app.rs): main TUI, event loop, commands, overlays, terminal rendering
-- [src/pty.rs](src/pty.rs): PTY client — spawns CLI tools, reads output via vt100 parser, writes keystrokes
-- [src/git.rs](src/git.rs): git/worktree helpers
-- [src/config.rs](src/config.rs): config schema, defaults, rendering
-- [src/storage.rs](src/storage.rs): SQLite session persistence
-- [src/statusline.rs](src/statusline.rs): status line model and spinner behavior
-- [src/theme.rs](src/theme.rs): centralized color palette and semantic styling constants
-- [src/logger.rs](src/logger.rs): runtime logging
+The `src/app/` directory splits the TUI into focused submodules. Each file contains an `impl App` block for a specific concern:
+
+- **`mod.rs`** — `App` struct, types, enums, bootstrap, run loop, and state helpers. Read this first to understand the data model.
+- **`input.rs`** — All keyboard/mouse event handling (`handle_key`, `handle_left_key`, etc.).
+- **`render.rs`** — All rendering methods (`render`, `render_header`, `render_left`, etc.) and UI helper functions.
+- **`sessions.rs`** — Project and session CRUD (create agent, delete, reconnect, refresh, project browser).
+- **`workers.rs`** — Background thread management (`drain_events`, `spawn_*`, `run_create_agent_job`).
+
+When making changes, edit only the relevant submodule. If you need to add a new method to `App`, place it in the submodule that matches its concern. If adding a new type or enum, add it to `mod.rs`.
 
 ## Recommendations For Future Changes
 
@@ -72,8 +73,8 @@ When shelling out to git, **always ensure the command output is immune to user-s
 
 ## Recommendations For Editing
 
-- Keep changes small and composable in `src/app.rs`; it is large enough that unrelated edits can conflict.
-- Prefer extracting helper types/modules when adding new UI modes or async workflows.
+- Follow the existing `src/app/` submodule pattern when adding new concerns. If a new feature area grows beyond ~200 lines, extract it into its own submodule with `use super::*;` and an `impl App` block.
+- Keep changes scoped to one submodule at a time; avoid cross-cutting edits across multiple app submodules in the same PR when possible.
 - Use `theme.rs` constants for all colors and styles — never use raw `Color::*` values in rendering code.
 - When adding new UI elements, define semantic color names in `Theme` rather than picking ad-hoc colors. `theme.rs` is the single source of truth for visual styling.
 - Preserve the fully materialized commented config behavior.
