@@ -1150,6 +1150,14 @@ impl App {
             project_config.default_provider = Some(next.as_str().to_string());
         }
         save_config(&self.paths.config_path, &self.config)?;
+        for session in self
+            .sessions
+            .iter_mut()
+            .filter(|s| s.project_id == project.id)
+        {
+            session.provider = next.clone();
+            self.session_store.upsert_session(session)?;
+        }
         self.set_info(format!(
             "Default provider for {} is now {}",
             project.name,
