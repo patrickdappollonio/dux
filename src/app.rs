@@ -110,11 +110,14 @@ enum PromptState {
         input: String,
         selected: usize,
         direct: bool,
+        searching: bool,
     },
     BrowseProjects {
         current_dir: PathBuf,
         entries: Vec<BrowserEntry>,
         selected: usize,
+        filter: String,
+        searching: bool,
     },
     AddProject {
         path: String,
@@ -333,6 +336,7 @@ impl App {
                 input: String::new(),
                 selected: 0,
                 direct: false,
+                searching: false,
             };
             self.set_info("Command palette opened.");
             return Ok(false);
@@ -342,6 +346,7 @@ impl App {
                 input: String::new(),
                 selected: 0,
                 direct: true,
+                searching: false,
             };
             self.set_info("Command mode opened.");
             return Ok(false);
@@ -532,17 +537,38 @@ impl App {
             input,
             selected,
             direct: _,
+            searching,
         } = &mut self.prompt
         {
             match key.code {
-                KeyCode::Esc => self.prompt = PromptState::None,
-                KeyCode::Char('j') | KeyCode::Down => {
+                KeyCode::Esc => {
+                    if *searching {
+                        *searching = false;
+                    } else {
+                        self.prompt = PromptState::None;
+                    }
+                }
+                KeyCode::Char('/') if !*searching => {
+                    *searching = true;
+                }
+                KeyCode::Char('j') | KeyCode::Down if !*searching => {
                     let count = filtered_commands(input).len();
                     if *selected + 1 < count {
                         *selected += 1;
                     }
                 }
-                KeyCode::Char('k') | KeyCode::Up => {
+                KeyCode::Char('k') | KeyCode::Up if !*searching => {
+                    if *selected > 0 {
+                        *selected -= 1;
+                    }
+                }
+                KeyCode::Down if *searching => {
+                    let count = filtered_commands(input).len();
+                    if *selected + 1 < count {
+                        *selected += 1;
+                    }
+                }
+                KeyCode::Up if *searching => {
                     if *selected > 0 {
                         *selected -= 1;
                     }
@@ -558,13 +584,18 @@ impl App {
                     }
                 }
                 KeyCode::Enter => {
-                    let command = if let Some(command) = filtered_commands(input).get(*selected) {
-                        command.name.to_string()
+                    if *searching {
+                        *searching = false;
                     } else {
-                        input.trim().to_string()
-                    };
-                    self.prompt = PromptState::None;
-                    self.execute_command(command)?;
+                        let command =
+                            if let Some(command) = filtered_commands(input).get(*selected) {
+                                command.name.to_string()
+                            } else {
+                                input.trim().to_string()
+                            };
+                        self.prompt = PromptState::None;
+                        self.execute_command(command)?;
+                    }
                 }
                 KeyCode::Char(c) => {
                     if !key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -581,48 +612,95 @@ impl App {
             current_dir,
             entries,
             selected,
+            filter,
+            searching,
         } = &mut self.prompt
         {
+            let filtered_len = if filter.is_empty() {
+                entries.len()
+            } else {
+                let needle = filter.to_lowercase();
+                entries
+                    .iter()
+                    .filter(|e| e.label.to_lowercase().contains(&needle))
+                    .count()
+            };
             match key.code {
-                KeyCode::Esc => self.prompt = PromptState::None,
-                KeyCode::Char('j') | KeyCode::Down => {
-                    if *selected + 1 < entries.len() {
+                KeyCode::Esc => {
+                    if *searching {
+                        *searching = false;
+                    } else if !filter.is_empty() {
+                        filter.clear();
+                        *selected = 0;
+                    } else {
+                        self.prompt = PromptState::None;
+                    }
+                }
+                KeyCode::Char('/') if !*searching => {
+                    *searching = true;
+                }
+                KeyCode::Char('j') | KeyCode::Down if !*searching => {
+                    if *selected + 1 < filtered_len {
                         *selected += 1;
                     }
                 }
-                KeyCode::Char('k') | KeyCode::Up => {
+                KeyCode::Char('k') | KeyCode::Up if !*searching => {
                     if *selected > 0 {
                         *selected -= 1;
                     }
                 }
-                KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
-                    if let Some(parent) = current_dir.parent() {
-                        *current_dir = parent.to_path_buf();
-                        let new_entries = browser_entries(current_dir);
-                        *entries = new_entries;
-                        *selected = 0;
+                KeyCode::Down if *searching => {
+                    if *selected + 1 < filtered_len {
+                        *selected += 1;
                     }
                 }
-                KeyCode::Char('m') => {
+                KeyCode::Up if *searching => {
+                    if *selected > 0 {
+                        *selected -= 1;
+                    }
+                }
+                KeyCode::Backspace if *searching => {
+                    filter.pop();
+                    *selected = 0;
+                }
+                KeyCode::Char('m') if !*searching => {
                     self.prompt = PromptState::AddProject {
                         path: current_dir.to_string_lossy().to_string(),
                         name: String::new(),
                         field: PromptField::Path,
                     };
                 }
-                KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
-                    if let Some(entry) = entries.get(*selected).cloned() {
+                KeyCode::Enter if *searching => {
+                    *searching = false;
+                }
+                KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') if !*searching => {
+                    let visible: Vec<_> = if filter.is_empty() {
+                        entries.iter().collect()
+                    } else {
+                        let needle = filter.to_lowercase();
+                        entries
+                            .iter()
+                            .filter(|e| e.label.to_lowercase().contains(&needle))
+                            .collect()
+                    };
+                    if let Some(entry) = visible.get(*selected).cloned() {
                         if entry.is_git_repo {
-                            self.add_project(
-                                entry.path.to_string_lossy().to_string(),
-                                String::new(),
-                            )?;
+                            let path = entry.path.to_string_lossy().to_string();
+                            self.add_project(path, String::new())?;
                             self.prompt = PromptState::None;
                         } else {
-                            *current_dir = entry.path;
+                            let new_dir = entry.path.clone();
+                            *current_dir = new_dir;
                             *entries = browser_entries(current_dir);
                             *selected = 0;
+                            filter.clear();
                         }
+                    }
+                }
+                KeyCode::Char(c) if *searching => {
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                        filter.push(c);
+                        *selected = 0;
                     }
                 }
                 _ => {}
@@ -741,9 +819,11 @@ impl App {
             current_dir: start_dir,
             entries,
             selected: 0,
+            filter: String::new(),
+            searching: false,
         };
         self.set_info(
-            "Project browser: Enter opens or adds a repo, h goes up, m switches to manual entry.",
+            "Project browser: Enter opens or adds a repo, / to search, m switches to manual entry.",
         );
         Ok(())
     }
@@ -1569,6 +1649,7 @@ impl App {
                 input,
                 selected,
                 direct,
+                searching,
             } => {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(72, 40, frame.area());
@@ -1601,19 +1682,37 @@ impl App {
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Length(3), Constraint::Min(3)])
                     .areas(popup);
-                let title = if *direct {
+                let title = if *searching {
+                    "Command Palette (searching)"
+                } else if *direct {
                     "Command"
                 } else {
                     "Command Palette"
                 };
                 let mut bottom_spans = vec![Span::raw(" ")];
-                bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
-                bottom_spans.push(Span::styled(" run  ", Style::default().fg(self.theme.hint_desc_fg)));
-                bottom_spans.extend(self.theme.key_badge("Tab", Color::Reset));
-                bottom_spans.push(Span::styled(" complete  ", Style::default().fg(self.theme.hint_desc_fg)));
-                bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
-                bottom_spans.push(Span::styled(" cancel", Style::default().fg(self.theme.hint_desc_fg)));
-                Paragraph::new(format!("{}{}", if *direct { ":" } else { "> " }, input))
+                if *searching {
+                    bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
+                    bottom_spans.push(Span::styled(" done  ", Style::default().fg(self.theme.hint_desc_fg)));
+                    bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
+                    bottom_spans.push(Span::styled(" clear", Style::default().fg(self.theme.hint_desc_fg)));
+                } else {
+                    bottom_spans.extend(self.theme.key_badge("/", Color::Reset));
+                    bottom_spans.push(Span::styled(" search  ", Style::default().fg(self.theme.hint_desc_fg)));
+                    bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
+                    bottom_spans.push(Span::styled(" run  ", Style::default().fg(self.theme.hint_desc_fg)));
+                    bottom_spans.extend(self.theme.key_badge("Tab", Color::Reset));
+                    bottom_spans.push(Span::styled(" complete  ", Style::default().fg(self.theme.hint_desc_fg)));
+                    bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
+                    bottom_spans.push(Span::styled(" cancel", Style::default().fg(self.theme.hint_desc_fg)));
+                }
+                let prompt_prefix = if *searching {
+                    "/ "
+                } else if *direct {
+                    ":"
+                } else {
+                    "> "
+                };
+                Paragraph::new(format!("{}{}", prompt_prefix, input))
                     .block(
                         self.themed_overlay_block(title)
                             .title_bottom(Line::from(bottom_spans)),
@@ -1636,25 +1735,44 @@ impl App {
                 current_dir,
                 entries,
                 selected,
+                filter,
+                searching,
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(72, 70, frame.area());
                 Clear.render(area, frame.buffer_mut());
-                let items = if entries.is_empty() {
-                    vec![ListItem::new("No child directories here.")]
+                let visible: Vec<_> = if filter.is_empty() {
+                    entries.iter().collect()
                 } else {
+                    let needle = filter.to_lowercase();
                     entries
                         .iter()
-                        .map(|entry| {
-                            let (prefix, prefix_color) = if entry.is_git_repo {
-                                ("●", Color::Green)
+                        .filter(|e| e.label.to_lowercase().contains(&needle))
+                        .collect()
+                };
+                let items = if visible.is_empty() {
+                    vec![ListItem::new(if filter.is_empty() {
+                        "No child directories here."
+                    } else {
+                        "No matching entries."
+                    })]
+                } else {
+                    let last = visible.len() - 1;
+                    visible
+                        .iter()
+                        .enumerate()
+                        .map(|(i, entry)| {
+                            let prefix = if entry.label == "../" {
+                                ""
+                            } else if i == last {
+                                "└── "
                             } else {
-                                ("○", self.theme.provider_label_fg)
+                                "├── "
                             };
                             ListItem::new(Line::from(vec![
                                 Span::styled(
-                                    format!("{prefix} "),
-                                    Style::default().fg(prefix_color),
+                                    prefix.to_string(),
+                                    Style::default().fg(self.theme.hint_desc_fg),
                                 ),
                                 Span::raw(entry.label.clone()),
                             ]))
@@ -1662,32 +1780,76 @@ impl App {
                         .collect::<Vec<_>>()
                 };
                 let mut state = ListState::default()
-                    .with_selected(Some((*selected).min(entries.len().saturating_sub(1))));
-                StatefulWidget::render(
-                    List::new(items)
-                        .block(
-                            self.themed_overlay_block(&format!(
-                                "Add Project: {}",
-                                current_dir.display()
-                            ))
-                            .title_bottom({
-                                let mut s = vec![Span::raw(" ")];
-                                s.extend(self.theme.key_badge("Enter", Color::Reset));
-                                s.push(Span::styled(" open  ", Style::default().fg(self.theme.hint_desc_fg)));
-                                s.extend(self.theme.key_badge("h", Color::Reset));
-                                s.push(Span::styled(" up  ", Style::default().fg(self.theme.hint_desc_fg)));
-                                s.extend(self.theme.key_badge("m", Color::Reset));
-                                s.push(Span::styled(" manual  ", Style::default().fg(self.theme.hint_desc_fg)));
-                                s.extend(self.theme.key_badge("Esc", Color::Reset));
-                                s.push(Span::styled(" cancel", Style::default().fg(self.theme.hint_desc_fg)));
-                                Line::from(s)
-                            }),
-                        )
-                        .highlight_style(self.theme.selection_style()),
-                    area,
-                    frame.buffer_mut(),
-                    &mut state,
-                );
+                    .with_selected(Some((*selected).min(visible.len().saturating_sub(1))));
+                let has_filter = !filter.is_empty();
+                let (top_areas, list_render_area) = if *searching || has_filter {
+                    let [filter_area, list_area] = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([Constraint::Length(3), Constraint::Min(3)])
+                        .areas(area);
+                    (Some(filter_area), list_area)
+                } else {
+                    (None, area)
+                };
+                if let Some(filter_area) = top_areas {
+                    let title = format!("Add Project: {}", current_dir.display());
+                    Paragraph::new(format!("/ {}", filter))
+                        .block(self.themed_overlay_block(&title))
+                        .render(filter_area, frame.buffer_mut());
+                    let mut bottom_spans = vec![Span::raw(" ")];
+                    if *searching {
+                        bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
+                        bottom_spans.push(Span::styled(" done  ", Style::default().fg(self.theme.hint_desc_fg)));
+                        bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
+                        bottom_spans.push(Span::styled(" clear", Style::default().fg(self.theme.hint_desc_fg)));
+                    } else {
+                        bottom_spans.extend(self.theme.key_badge("/", Color::Reset));
+                        bottom_spans.push(Span::styled(" search  ", Style::default().fg(self.theme.hint_desc_fg)));
+                        bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
+                        bottom_spans.push(Span::styled(" open  ", Style::default().fg(self.theme.hint_desc_fg)));
+                        bottom_spans.extend(self.theme.key_badge("m", Color::Reset));
+                        bottom_spans.push(Span::styled(" manual  ", Style::default().fg(self.theme.hint_desc_fg)));
+                        bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
+                        bottom_spans.push(Span::styled(" cancel", Style::default().fg(self.theme.hint_desc_fg)));
+                    }
+                    StatefulWidget::render(
+                        List::new(items)
+                            .block(
+                                Block::default()
+                                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                                    .border_style(Style::default().fg(self.theme.overlay_border))
+                                    .title_bottom(Line::from(bottom_spans)),
+                            )
+                            .highlight_style(self.theme.selection_style()),
+                        list_render_area,
+                        frame.buffer_mut(),
+                        &mut state,
+                    );
+                } else {
+                    let mut bottom_spans = vec![Span::raw(" ")];
+                    bottom_spans.extend(self.theme.key_badge("/", Color::Reset));
+                    bottom_spans.push(Span::styled(" search  ", Style::default().fg(self.theme.hint_desc_fg)));
+                    bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
+                    bottom_spans.push(Span::styled(" open  ", Style::default().fg(self.theme.hint_desc_fg)));
+                    bottom_spans.extend(self.theme.key_badge("m", Color::Reset));
+                    bottom_spans.push(Span::styled(" manual  ", Style::default().fg(self.theme.hint_desc_fg)));
+                    bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
+                    bottom_spans.push(Span::styled(" cancel", Style::default().fg(self.theme.hint_desc_fg)));
+                    StatefulWidget::render(
+                        List::new(items)
+                            .block(
+                                self.themed_overlay_block(&format!(
+                                    "Add Project: {}",
+                                    current_dir.display()
+                                ))
+                                .title_bottom(Line::from(bottom_spans)),
+                            )
+                            .highlight_style(self.theme.selection_style()),
+                        list_render_area,
+                        frame.buffer_mut(),
+                        &mut state,
+                    );
+                }
             }
             PromptState::AddProject { path, name, field } => {
                 self.render_dim_overlay(frame);
@@ -2133,12 +2295,18 @@ fn browser_entries(dir: &Path) -> Vec<BrowserEntry> {
             if !path.is_dir() {
                 return None;
             }
-            let label = entry.file_name().to_string_lossy().to_string();
-            if label.starts_with('.') {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
                 return None;
             }
+            let is_git_repo = git::is_git_repo(&path);
+            let label = if is_git_repo {
+                name
+            } else {
+                format!("{name}/")
+            };
             Some(BrowserEntry {
-                is_git_repo: git::is_git_repo(&path),
+                is_git_repo,
                 path,
                 label,
             })
@@ -2149,6 +2317,16 @@ fn browser_entries(dir: &Path) -> Vec<BrowserEntry> {
             .cmp(&a.is_git_repo)
             .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
     });
+    if let Some(parent) = dir.parent() {
+        entries.insert(
+            0,
+            BrowserEntry {
+                path: parent.to_path_buf(),
+                label: "../".to_string(),
+                is_git_repo: false,
+            },
+        );
+    }
     entries
 }
 
