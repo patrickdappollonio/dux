@@ -792,32 +792,68 @@ impl App {
                 let items = if commands.is_empty() {
                     vec![ListItem::new("No matching commands.")]
                 } else {
+                    // Compute column widths for aligned layout
+                    let name_col = commands
+                        .iter()
+                        .map(|b| b.palette.as_ref().unwrap().name.len())
+                        .max()
+                        .unwrap_or(0);
+                    let badge_col = commands
+                        .iter()
+                        .filter_map(|b| {
+                            b.palette
+                                .as_ref()
+                                .unwrap()
+                                .shortcut
+                                .map(|s| s.len() + 3) // <key>
+                        })
+                        .max()
+                        .unwrap_or(0);
+                    // Available width inside borders: popup.width - 2 (borders) - 1 (left pad)
+                    let inner_w = popup.width as usize - 3;
+                    // Gap between columns
+                    let gap = 2usize;
                     commands
                         .iter()
                         .map(|binding| {
                             let p = binding.palette.as_ref().unwrap();
-                            let mut left_spans = vec![
-                                Span::styled(
-                                    p.name.to_string(),
-                                    Style::default()
-                                        .fg(Color::Cyan)
-                                        .add_modifier(Modifier::BOLD),
-                                ),
-                                Span::styled(
-                                    format!("  {}", p.description),
-                                    Style::default().fg(self.theme.hint_desc_fg),
-                                ),
-                            ];
-                            if let Some(shortcut) = p.shortcut {
-                                let left_len: usize = left_spans.iter().map(|s| s.width()).sum();
-                                // +3 for badge brackets <k>, +2 for borders, +1 for right padding
-                                let badge_len = shortcut.len() + 3;
-                                let avail = popup.width as usize;
-                                let pad = avail.saturating_sub(left_len + badge_len + 3);
-                                left_spans.push(Span::raw(" ".repeat(pad.max(2))));
-                                left_spans.extend(self.theme.key_badge(shortcut, Color::Reset));
+                            // Pad name to fixed column width
+                            let name_padded = format!("{:width$}", p.name, width = name_col);
+                            let mut spans = vec![Span::styled(
+                                name_padded,
+                                Style::default()
+                                    .fg(Color::Cyan)
+                                    .add_modifier(Modifier::BOLD),
+                            )];
+                            // Description column: fill the space between name and badge
+                            let desc_avail = inner_w
+                                .saturating_sub(name_col + gap)
+                                .saturating_sub(if badge_col > 0 { badge_col + gap } else { 0 });
+                            let desc = p.description;
+                            let desc_display = if desc.len() > desc_avail && desc_avail > 1 {
+                                format!("  {}\u{2026}", &desc[..desc_avail - 1])
+                            } else {
+                                format!("  {:width$}", desc, width = desc_avail)
+                            };
+                            spans.push(Span::styled(
+                                desc_display,
+                                Style::default().fg(self.theme.hint_desc_fg),
+                            ));
+                            // Right-aligned key badge
+                            if badge_col > 0 {
+                                if let Some(shortcut) = p.shortcut {
+                                    // Right-pad the gap, then the badge
+                                    let badge_len = shortcut.len() + 3;
+                                    let pre_pad = gap + badge_col - badge_len;
+                                    spans.push(Span::raw(" ".repeat(pre_pad)));
+                                    spans.extend(
+                                        self.theme.key_badge(shortcut, Color::Reset),
+                                    );
+                                } else {
+                                    spans.push(Span::raw(" ".repeat(gap + badge_col)));
+                                }
                             }
-                            ListItem::new(Line::from(left_spans))
+                            ListItem::new(Line::from(spans))
                         })
                         .collect::<Vec<_>>()
                 };
@@ -878,6 +914,7 @@ impl App {
                         .block(
                             Block::default()
                                 .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                                .border_type(ratatui::widgets::BorderType::Rounded)
                                 .border_style(Style::default().fg(self.theme.overlay_border)),
                         )
                         .highlight_style(self.theme.selection_style()),
