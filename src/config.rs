@@ -29,7 +29,7 @@ pub struct Defaults {
 #[serde(default)]
 pub struct ProvidersConfig {
     #[serde(flatten)]
-    pub adapters: BTreeMap<String, ProviderCommandConfig>,
+    pub commands: BTreeMap<String, ProviderCommandConfig>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -93,11 +93,11 @@ impl Default for Defaults {
 
 impl Default for ProvidersConfig {
     fn default() -> Self {
-        let adapters = default_provider_adapters()
+        let commands = default_provider_commands()
             .into_iter()
             .map(|(name, config)| (name.to_string(), config))
             .collect();
-        Self { adapters }
+        Self { commands }
     }
 }
 
@@ -137,12 +137,12 @@ impl Config {
 
 impl ProvidersConfig {
     pub fn get(&self, name: &str) -> Option<&ProviderCommandConfig> {
-        self.adapters.get(name)
+        self.commands.get(name)
     }
 
     pub fn ensure_defaults(&mut self) {
-        for (name, config) in default_provider_adapters() {
-            self.adapters.entry(name.to_string()).or_insert(config);
+        for (name, config) in default_provider_commands() {
+            self.commands.entry(name.to_string()).or_insert(config);
         }
     }
 }
@@ -206,14 +206,14 @@ provider = "{provider}"
 start_directory = "{start_directory}"
 
 [providers.claude]
-# Command used to launch an ACP-compatible Claude adapter.
-# Example: command = "claude-agent-acp"
+# CLI command for Claude sessions.
+# Example: command = "claude"
 command = "{claude_command}"
 args = []
 
 [providers.codex]
-# Command used to launch an ACP-compatible Codex adapter.
-# Example: command = "codex-acp"
+# CLI command for Codex sessions.
+# Example: command = "codex"
 command = "{codex_command}"
 args = []
 
@@ -239,12 +239,12 @@ projects = []
             .providers
             .get("claude")
             .map(|config| config.command.as_str())
-            .unwrap_or("claude-agent-acp"),
+            .unwrap_or("claude"),
         codex_command = default
             .providers
             .get("codex")
             .map(|config| config.command.as_str())
-            .unwrap_or("codex-acp"),
+            .unwrap_or("codex"),
         log_level = default.logging.level,
         log_path = default.logging.path,
         left_width = default.ui.left_width_pct,
@@ -320,19 +320,19 @@ fn render_string_list(values: &[String]) -> String {
     format!("[{rendered}]")
 }
 
-fn default_provider_adapters() -> [(&'static str, ProviderCommandConfig); 2] {
+fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 2] {
     [
         (
             "claude",
             ProviderCommandConfig {
-                command: "claude-agent-acp".to_string(),
+                command: "claude".to_string(),
                 args: Vec::new(),
             },
         ),
         (
             "codex",
             ProviderCommandConfig {
-                command: "codex-acp".to_string(),
+                command: "codex".to_string(),
                 args: Vec::new(),
             },
         ),
@@ -345,7 +345,7 @@ fn render_provider_configs(out: &mut String, providers: &ProvidersConfig) {
             render_provider_config(out, name, config);
         }
     }
-    for (name, config) in &providers.adapters {
+    for (name, config) in &providers.commands {
         if matches!(name.as_str(), "claude" | "codex") {
             continue;
         }
@@ -355,16 +355,40 @@ fn render_provider_configs(out: &mut String, providers: &ProvidersConfig) {
 
 fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommandConfig) {
     out.push_str(&format!("[providers.{name}]\n"));
-    out.push_str(&format!(
-        "# Command used to launch the ACP-compatible {name} adapter.\n"
-    ));
+    out.push_str(&format!("# CLI command for {name} sessions.\n"));
     if name == "claude" {
-        out.push_str("# Example: command = \"claude-agent-acp\"\n");
+        out.push_str("# Example: command = \"claude\"\n");
     } else if name == "codex" {
-        out.push_str("# Example: command = \"codex-acp\"\n");
+        out.push_str("# Example: command = \"codex\"\n");
     }
     out.push_str(&format!("command = \"{}\"\n", config.command));
     out.push_str(&format!("args = {}\n\n", render_string_list(&config.args)));
+}
+
+/// Check whether a provider command is available on PATH.
+/// Returns `Ok(())` if found, or `Err(message)` with a user-friendly install hint.
+pub fn check_provider_available(
+    provider_name: &str,
+    command: &str,
+) -> std::result::Result<(), String> {
+    use std::process::Command as StdCommand;
+    match StdCommand::new("which").arg(command).output() {
+        Ok(output) if output.status.success() => Ok(()),
+        _ => {
+            let hint = install_hint(provider_name, command);
+            Err(format!("CLI tool '{command}' not found on PATH. {hint}"))
+        }
+    }
+}
+
+fn install_hint(provider_name: &str, command: &str) -> String {
+    match provider_name {
+        "claude" if command == "claude" => {
+            "Install with: npm install -g @anthropic-ai/claude-code".to_string()
+        }
+        "codex" if command == "codex" => "Install with: npm install -g @openai/codex".to_string(),
+        _ => format!("Make sure '{command}' is installed and on your PATH."),
+    }
 }
 
 fn discover_root(home: &Path, xdg_config_home: Option<std::ffi::OsString>) -> PathBuf {

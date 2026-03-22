@@ -64,7 +64,6 @@ pub struct AgentSession {
     pub source_branch: String,
     pub branch_name: String,
     pub worktree_path: String,
-    pub acp_session_id: Option<String>,
     pub title: Option<String>,
     pub status: SessionStatus,
     pub created_at: DateTime<Utc>,

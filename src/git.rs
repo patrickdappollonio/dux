@@ -211,6 +211,9 @@ pub fn ellipsize_middle(input: &str, max_width: usize) -> String {
 }
 
 pub fn docker_style_name() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+
     const ADJECTIVES: &[&str] = &[
         "brisk", "calm", "eager", "fierce", "lively", "mellow", "nimble", "quiet", "rapid",
         "steady", "tidy", "vivid",
@@ -219,15 +222,10 @@ pub fn docker_style_name() -> String {
         "badger", "beaver", "falcon", "heron", "lynx", "otter", "panther", "raven", "seal",
         "tiger", "walrus", "wolf",
     ];
-    let now = chrono::Utc::now()
-        .timestamp_nanos_opt()
-        .unwrap_or_default()
-        .unsigned_abs() as usize;
-    format!(
-        "{}-{}",
-        ADJECTIVES[now % ADJECTIVES.len()],
-        ANIMALS[(now / ADJECTIVES.len()) % ANIMALS.len()]
-    )
+    let random = RandomState::new().build_hasher().finish() as usize;
+    let adj = ADJECTIVES[random % ADJECTIVES.len()];
+    let animal = ANIMALS[(random / ADJECTIVES.len()) % ANIMALS.len()];
+    format!("{adj}-{animal}")
 }
 
 #[cfg(test)]
