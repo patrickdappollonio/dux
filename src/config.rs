@@ -72,7 +72,7 @@ impl Default for Config {
             },
             projects: Vec::new(),
             ui: UiConfig {
-                left_width_pct: 24,
+                left_width_pct: 20,
                 right_width_pct: 28,
                 right_top_height_pct: 45,
             },
@@ -122,7 +122,7 @@ impl Default for LoggingConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            left_width_pct: 24,
+            left_width_pct: 20,
             right_width_pct: 28,
             right_top_height_pct: 45,
         }

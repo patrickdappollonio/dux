@@ -871,7 +871,7 @@ impl App {
     fn handle_resize_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('h') => {
-                self.left_width_pct = self.left_width_pct.saturating_sub(2).max(18)
+                self.left_width_pct = self.left_width_pct.saturating_sub(2).max(14)
             }
             KeyCode::Char('l') => {
                 self.left_width_pct = self.left_width_pct.saturating_add(2).min(38)
