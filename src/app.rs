@@ -41,7 +41,6 @@ pub struct App {
     selected_file: usize,
     left_width_pct: u16,
     right_width_pct: u16,
-    right_top_height_pct: u16,
     focus: FocusPane,
     center_mode: CenterMode,
     left_collapsed: bool,
@@ -236,7 +235,6 @@ impl App {
         let mut app = Self {
             left_width_pct: config.ui.left_width_pct,
             right_width_pct: config.ui.right_width_pct,
-            right_top_height_pct: config.ui.right_top_height_pct,
             config,
             paths,
             session_store,
@@ -362,7 +360,7 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('w') {
             self.resize_mode = !self.resize_mode;
             if self.resize_mode {
-                self.set_info("Resize mode on: h/l resize side panes, j/k resize right split.");
+                self.set_info("Resize mode on: h/l resize side panes.");
             } else {
                 self.set_info("Resize mode off.");
             }
@@ -876,12 +874,6 @@ impl App {
             KeyCode::Char('l') => {
                 self.left_width_pct = self.left_width_pct.saturating_add(2).min(38)
             }
-            KeyCode::Char('j') => {
-                self.right_top_height_pct = self.right_top_height_pct.saturating_add(3).min(75)
-            }
-            KeyCode::Char('k') => {
-                self.right_top_height_pct = self.right_top_height_pct.saturating_sub(3).max(20)
-            }
             _ => {}
         }
     }
@@ -1334,21 +1326,9 @@ impl App {
                 ])
                 .areas(body)
         };
-        let [files, shell] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(self.right_top_height_pct),
-                Constraint::Percentage(100 - self.right_top_height_pct),
-            ])
-            .areas(right);
-
         self.render_left(frame, left);
         self.render_center(frame, center);
-        self.render_files(frame, files);
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.border_normal))
-            .render(shell, frame.buffer_mut());
+        self.render_files(frame, right);
         self.render_footer(frame, footer);
         self.render_overlay(frame);
     }
@@ -1926,7 +1906,7 @@ impl App {
                 &[
                     ("Tab", "Focus next pane"),
                     ("^P", "Open command palette"),
-                    ("^W", "Resize mode (h/l side, j/k split)"),
+                    ("^W", "Resize mode (h/l side panes)"),
                     ("[", "Toggle sidebar"),
                     ("?", "Toggle help"),
                     ("q", "Quit"),

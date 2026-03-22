@@ -58,7 +58,6 @@ pub struct ProjectConfig {
 pub struct UiConfig {
     pub left_width_pct: u16,
     pub right_width_pct: u16,
-    pub right_top_height_pct: u16,
 }
 
 impl Default for Config {
@@ -73,8 +72,7 @@ impl Default for Config {
             projects: Vec::new(),
             ui: UiConfig {
                 left_width_pct: 20,
-                right_width_pct: 28,
-                right_top_height_pct: 45,
+                right_width_pct: 23,
             },
         }
     }
@@ -123,8 +121,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             left_width_pct: 20,
-            right_width_pct: 28,
-            right_top_height_pct: 45,
+            right_width_pct: 23,
         }
     }
 }
@@ -227,7 +224,6 @@ path = "{log_path}"
 # Initial pane sizing percentages. They can still be resized at runtime.
 left_width_pct = {left_width}
 right_width_pct = {right_width}
-right_top_height_pct = {right_top_height}
 
 # Projects are registered here by the UI. The folder name is used when name is omitted.
 # default_provider can override the global default for one project.
@@ -249,7 +245,6 @@ projects = []
         log_path = default.logging.path,
         left_width = default.ui.left_width_pct,
         right_width = default.ui.right_width_pct,
-        right_top_height = default.ui.right_top_height_pct,
     )
 }
 
@@ -283,12 +278,8 @@ fn render_config(config: &Config) -> String {
     out.push_str("# Initial pane sizing percentages. They can still be resized at runtime.\n");
     out.push_str(&format!("left_width_pct = {}\n", config.ui.left_width_pct));
     out.push_str(&format!(
-        "right_width_pct = {}\n",
+        "right_width_pct = {}\n\n",
         config.ui.right_width_pct
-    ));
-    out.push_str(&format!(
-        "right_top_height_pct = {}\n\n",
-        config.ui.right_top_height_pct
     ));
     out.push_str(
         "# Projects are registered here by the UI. The folder name is used when name is omitted.\n",
