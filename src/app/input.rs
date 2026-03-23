@@ -7,6 +7,30 @@ impl App {
         {
             return Ok(false);
         }
+        if let Some(ref mut scroll) = self.help_scroll {
+            // Help overlay is open — consume all keys, only scroll keys do anything.
+            if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
+                match action {
+                    Action::MoveDown => *scroll = scroll.saturating_add(1),
+                    Action::MoveUp => *scroll = scroll.saturating_sub(1),
+                    _ => {}
+                }
+            }
+            if let Some(action) = self.bindings.lookup(&key, BindingScope::Global) {
+                match action {
+                    Action::ScrollPageDown => {
+                        let page = self.last_help_height.max(1);
+                        *scroll = (*scroll + page).min(self.last_help_lines.saturating_sub(1));
+                    }
+                    Action::ScrollPageUp => {
+                        let page = self.last_help_height.max(1);
+                        *scroll = scroll.saturating_sub(page);
+                    }
+                    _ => {}
+                }
+            }
+            return Ok(false);
+        }
         if !matches!(self.prompt, PromptState::None) {
             return self.handle_prompt_key(key);
         }
@@ -37,7 +61,11 @@ impl App {
                     return Ok(true);
                 }
                 Action::ToggleHelp => {
-                    self.help_overlay = !self.help_overlay;
+                    self.help_scroll = if self.help_scroll.is_some() {
+                        None
+                    } else {
+                        Some(0)
+                    };
                 }
                 Action::OpenPalette => {
                     self.prompt = PromptState::Command {
