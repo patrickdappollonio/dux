@@ -729,9 +729,9 @@ impl App {
                 self.commit_scroll = 0;
             }
 
-            Paragraph::new(display_text)
+            let wrapped_text = wrap_text_at_width(display_text, text_w);
+            Paragraph::new(wrapped_text)
                 .style(style)
-                .wrap(Wrap { trim: false })
                 .scroll((self.commit_scroll, 0))
                 .render(text_area, frame.buffer_mut());
 
@@ -1753,4 +1753,28 @@ pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect 
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(vertical)[1]
+}
+
+/// Pre-wrap text at exact character boundaries to match the manual cursor
+/// position calculation used in the commit input box.
+fn wrap_text_at_width(text: &str, width: usize) -> String {
+    if width == 0 {
+        return text.to_string();
+    }
+    let mut result = String::with_capacity(text.len() + text.len() / width);
+    let mut col: usize = 0;
+    for ch in text.chars() {
+        if ch == '\n' {
+            result.push('\n');
+            col = 0;
+        } else {
+            col += 1;
+            result.push(ch);
+            if col >= width {
+                result.push('\n');
+                col = 0;
+            }
+        }
+    }
+    result
 }
