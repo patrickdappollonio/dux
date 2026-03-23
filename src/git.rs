@@ -449,4 +449,126 @@ mod tests {
     fn docker_name_uses_dash() {
         assert!(docker_style_name().contains('-'));
     }
+
+    // ── Helpers for git-backed tests ─────────────────────────────
+
+    /// Create a temporary bare-ish git repo with an initial commit so
+    /// worktrees and branches can be created from it.
+    fn init_test_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(p)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-b", "main"]);
+        run(&["-c", "user.name=test", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "init"]);
+        dir
+    }
+
+    /// Create a worktree + branch from the test repo. Returns the worktree path.
+    fn add_worktree(repo: &Path, branch: &str) -> PathBuf {
+        let wt = repo.join(format!("wt-{branch}"));
+        let out = Command::new("git")
+            .args([
+                "-C",
+                repo.to_string_lossy().as_ref(),
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                wt.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "worktree add failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        wt
+    }
+
+    // ── rename_branch tests ──────────────────────────────────────
+
+    #[test]
+    fn rename_branch_succeeds() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "old-name");
+
+        rename_branch(&wt, "old-name", "new-name").unwrap();
+
+        let branch = current_branch(&wt).unwrap();
+        assert_eq!(branch, "new-name");
+    }
+
+    #[test]
+    fn rename_branch_fails_on_conflict() {
+        let repo = init_test_repo();
+        // Create two worktrees with different branches.
+        let wt1 = add_worktree(repo.path(), "branch-a");
+        let _wt2 = add_worktree(repo.path(), "branch-b");
+
+        // Trying to rename branch-a to branch-b should fail because
+        // branch-b already exists.
+        let result = rename_branch(&wt1, "branch-a", "branch-b");
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("rename failed"),
+            "error should mention rename failure"
+        );
+
+        // The original branch should be unchanged.
+        let branch = current_branch(&wt1).unwrap();
+        assert_eq!(branch, "branch-a");
+    }
+
+    #[test]
+    fn rename_branch_fails_on_invalid_name() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "valid-name");
+
+        // Git rejects branch names with spaces and other invalid characters.
+        let result = rename_branch(&wt, "valid-name", "has spaces");
+        assert!(result.is_err());
+
+        // Original branch should still be intact.
+        let branch = current_branch(&wt).unwrap();
+        assert_eq!(branch, "valid-name");
+    }
+
+    #[test]
+    fn rename_branch_fails_when_old_name_wrong() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "real-branch");
+
+        // Renaming a nonexistent branch should fail.
+        let result = rename_branch(&wt, "nonexistent", "new-name");
+        assert!(result.is_err());
+
+        // The real branch should be unaffected.
+        let branch = current_branch(&wt).unwrap();
+        assert_eq!(branch, "real-branch");
+    }
+
+    #[test]
+    fn rename_branch_noop_same_name() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "same-name");
+
+        // Renaming to the same name should succeed (git allows this).
+        rename_branch(&wt, "same-name", "same-name").unwrap();
+
+        let branch = current_branch(&wt).unwrap();
+        assert_eq!(branch, "same-name");
+    }
 }
