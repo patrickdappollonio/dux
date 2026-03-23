@@ -12,6 +12,18 @@ use uuid::Uuid;
 use crate::keybindings;
 use crate::model::ProviderKind;
 
+pub const DEFAULT_COMMIT_PROMPT: &str = "\
+You are a commit message generator. Look at the staged changes (git diff --cached) and write a commit message.
+
+Rules:
+- Subject line: use Conventional Commits (feat:, fix:, refactor:, docs:, test:, chore:, style:, perf:, ci:, build:). Imperative mood, max 72 chars, no period at the end.
+- Trivial changes (typo, rename, one-liner): ONLY the subject line, nothing else.
+- Small changes (2-3 files, single logical concern): subject line, blank line, then a short paragraph (2-3 sentences max) explaining the motivation and impact. Do NOT use bullet points for this case.
+- Larger changes (4+ files or multiple distinct logical concerns): subject line, blank line, then concise bullet points (one per logical change, each under 80 chars). Use \"- \" for bullets.
+- This is a plain text commit message, not markdown. NEVER use backticks, asterisks, code fences, or any markdown syntax. Refer to functions and files by name without formatting.
+- Focus on intent and impact, not mechanical description of lines added/removed.
+- Output ONLY the raw commit message text.";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -36,6 +48,7 @@ pub struct KeysConfig {
 pub struct Defaults {
     pub provider: String,
     pub start_directory: Option<String>,
+    pub commit_prompt: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -76,6 +89,7 @@ pub struct ProjectConfig {
     pub path: String,
     pub name: Option<String>,
     pub default_provider: Option<String>,
+    pub commit_prompt: Option<String>,
 }
 
 fn new_project_id() -> String {
@@ -135,6 +149,7 @@ impl Default for Defaults {
         Self {
             provider: "codex".to_string(),
             start_directory,
+            commit_prompt: Some(DEFAULT_COMMIT_PROMPT.to_string()),
         }
     }
 }
@@ -182,6 +197,24 @@ impl Default for UiConfig {
 impl Config {
     pub fn default_provider(&self) -> ProviderKind {
         ProviderKind::from_str(&self.defaults.provider)
+    }
+
+    /// Returns the effective commit prompt for a project, checking project-level
+    /// override first, then system default, then the hardcoded fallback.
+    pub fn commit_prompt_for_project(&self, project_path: &str) -> String {
+        if let Some(project) = self.projects.iter().find(|p| p.path == project_path) {
+            if let Some(ref prompt) = project.commit_prompt {
+                if !prompt.is_empty() {
+                    return prompt.clone();
+                }
+            }
+        }
+        self.defaults
+            .commit_prompt
+            .as_ref()
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_COMMIT_PROMPT.to_string())
     }
 }
 
@@ -254,6 +287,7 @@ enum FieldValue {
     Str(String),
     OptStr(Option<String>),
     U16(u16),
+    MultilineStr(Option<String>),
 }
 
 /// One entry in the config file layout.
@@ -295,6 +329,16 @@ fn config_schema() -> Vec<ConfigEntry> {
             key: "start_directory",
             comment: Some("# Starting directory for the project browser."),
             value_fn: |c| FieldValue::OptStr(c.defaults.start_directory.clone()),
+        },
+        ConfigEntry::Blank,
+        ConfigEntry::Field {
+            key: "commit_prompt",
+            comment: Some(
+                "# Prompt sent to the AI provider when generating commit messages (Ctrl+G).\n\
+                 # The provider will inspect the staged diff on its own.\n\
+                 # Override per-project by adding commit_prompt in a [[projects]] entry.",
+            ),
+            value_fn: |c| FieldValue::MultilineStr(c.defaults.commit_prompt.clone()),
         },
         ConfigEntry::Blank,
         ConfigEntry::Providers,
@@ -363,6 +407,12 @@ fn render_config(config: &Config) -> String {
                     }
                     FieldValue::U16(n) => {
                         let _ = writeln!(out, "{key} = {n}");
+                    }
+                    FieldValue::MultilineStr(Some(s)) => {
+                        let _ = writeln!(out, "{key} = \"\"\"\n{s}\"\"\"");
+                    }
+                    FieldValue::MultilineStr(None) => {
+                        let _ = writeln!(out, "{key} = \"\"");
                     }
                 }
             }
@@ -453,6 +503,9 @@ fn render_projects(out: &mut String, projects: &[ProjectConfig]) {
                     "default_provider = \"{}\"",
                     escape_toml_string(provider)
                 );
+            }
+            if let Some(prompt) = &project.commit_prompt {
+                let _ = writeln!(out, "commit_prompt = \"\"\"\n{prompt}\"\"\"");
             }
             out.push('\n');
         }
@@ -628,6 +681,8 @@ mod tests {
         assert!(rendered.contains("show_terminal_keys = true"));
         assert!(rendered.contains("move_down = "));
         assert!(rendered.contains("quit = "));
+        assert!(rendered.contains("commit_prompt = \"\"\""));
+        assert!(rendered.contains("Conventional Commits"));
     }
 
     #[test]
@@ -664,6 +719,7 @@ mod tests {
             path: r#"/home/user/"test"\project"#.to_string(),
             name: Some(r#"te"st"#.to_string()),
             default_provider: None,
+            commit_prompt: None,
         });
         let rendered = render_config(&config);
         let parsed: Config = toml::from_str(&rendered).expect("should parse back");
@@ -679,6 +735,7 @@ mod tests {
             path: "/home/user/path\nwith\nnewlines".to_string(),
             name: Some("name\twith\ttabs".to_string()),
             default_provider: None,
+            commit_prompt: None,
         });
         let rendered = render_config(&config);
         let parsed: Config = toml::from_str(&rendered).expect("should parse back");
@@ -723,5 +780,60 @@ mod tests {
     fn config_root_ignores_relative_xdg_config_home() {
         let root = discover_root(Path::new("/example/home"), Some("relative/path".into()));
         assert_eq!(root, PathBuf::from("/example/home/.config/dux"));
+    }
+
+    #[test]
+    fn commit_prompt_resolution_uses_project_override() {
+        let mut config = Config::default();
+        config.projects.push(ProjectConfig {
+            id: new_project_id(),
+            path: "/my/project".to_string(),
+            name: Some("test".to_string()),
+            default_provider: None,
+            commit_prompt: Some("custom project prompt".to_string()),
+        });
+
+        // Project override takes precedence.
+        assert_eq!(
+            config.commit_prompt_for_project("/my/project"),
+            "custom project prompt"
+        );
+
+        // Unknown project falls back to system default.
+        assert_eq!(
+            config.commit_prompt_for_project("/other/project"),
+            DEFAULT_COMMIT_PROMPT
+        );
+
+        // Empty project prompt falls back to system default.
+        config.projects[0].commit_prompt = Some(String::new());
+        assert_eq!(
+            config.commit_prompt_for_project("/my/project"),
+            DEFAULT_COMMIT_PROMPT
+        );
+    }
+
+    #[test]
+    fn commit_prompt_resolution_uses_system_default() {
+        let mut config = Config::default();
+        config.defaults.commit_prompt = Some("custom system prompt".to_string());
+        assert_eq!(
+            config.commit_prompt_for_project("/any/project"),
+            "custom system prompt"
+        );
+
+        // Empty system prompt falls back to hardcoded constant.
+        config.defaults.commit_prompt = Some(String::new());
+        assert_eq!(
+            config.commit_prompt_for_project("/any/project"),
+            DEFAULT_COMMIT_PROMPT
+        );
+
+        // None falls back to hardcoded constant.
+        config.defaults.commit_prompt = None;
+        assert_eq!(
+            config.commit_prompt_for_project("/any/project"),
+            DEFAULT_COMMIT_PROMPT
+        );
     }
 }

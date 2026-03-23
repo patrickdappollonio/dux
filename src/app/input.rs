@@ -478,34 +478,14 @@ impl App {
             return Ok(());
         };
         let worktree = PathBuf::from(&session.worktree_path);
-        let diff = git::staged_diff(&worktree)?;
-        let diff = if diff.len() > 50_000 {
-            let mut end = 50_000;
-            while !diff.is_char_boundary(end) {
-                end -= 1;
-            }
-            diff[..end].to_string()
-        } else {
-            diff
-        };
+        let project_path = session.project_path.as_deref().unwrap_or("");
+        let prompt = self.config.commit_prompt_for_project(project_path);
         let cfg = provider_config(&self.config, &session.provider);
         let prov = provider::create_provider(session.provider.as_str(), cfg);
         let tx = self.worker_tx.clone();
         self.commit_generating = true;
         self.set_busy("Generating AI commit message from staged diff…");
         thread::spawn(move || {
-            let prompt = format!(
-                "Write a git commit message for the following diff.\n\n\
-                 Rules:\n\
-                 - Subject line: imperative mood, max 72 chars, no period. Summarize WHAT changed and WHY.\n\
-                 - If the change is simple, output ONLY the subject line with no body.\n\
-                 - If the change touches multiple concerns, add a blank line then a body with short bullet points \
-                 (one per logical change, each under 80 chars).\n\
-                 - No preamble, no quotes, no markdown fences. Output ONLY the raw commit message text.\n\
-                 - Do not repeat filenames unless essential for clarity.\n\
-                 - Focus on intent and impact, not mechanical description of lines added/removed.\n\n\
-                 Diff:\n{diff}"
-            );
             match prov.run_oneshot(&prompt, &worktree) {
                 Ok(msg) => {
                     let _ = tx.send(WorkerEvent::CommitMessageGenerated(msg));
