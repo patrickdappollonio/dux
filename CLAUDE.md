@@ -1,4 +1,37 @@
-# AGENTS.md
+# CLAUDE.md
+
+## Design Tenets
+
+Principles that guide every decision in dux. If a change conflicts with a tenet, the tenet wins.
+
+### Configuration
+
+- **All settings are configurable.** Every single one. If a user can't change it, it shouldn't be hardcoded.
+- **The config file is the documentation.** It must clearly explain what each setting does through inline comments. A user should never need to leave the config file to understand an option.
+
+### UI and Navigation
+
+- **Tab and Shift-Tab navigate between panes.** This is the primary spatial navigation model.
+- **Panes have local key combinations.** A key combo bound in one pane does not necessarily work in another.
+- **Panes have interactive and non-interactive modes.** In interactive mode, all key combos (including global ones) are suppressed and input is forwarded to the PTY. In non-interactive mode, both local and global key combos are active.
+- **Key combinations are documented in the help page.** The in-app `?` overlay is the authoritative reference. External docs describe how to configure bindings, not enumerate them.
+
+### Agents and Providers
+
+- **A provider is supported if and only if it supports PTY and oneshot mode.** PTY for interactive sessions; oneshot (headless: send a prompt, get one response) for automated tasks like commit message generation.
+- **Any CLI tool can be a provider.** Configure `command` in `config.toml` and dux spawns it. No adapters, no protocol layer. Adding a new provider is a config-only change, not a code change.
+- **Claude and Codex are the defaults.**
+- **No protocol layer.** No JSON-RPC, no custom message format, no adapter binaries. The CLI runs exactly as it would in a normal terminal.
+
+### Git and Data Safety
+
+- **Worktrees are user data.** Never removed or mutated casually. Deletion requires explicit user confirmation.
+- **Git operations are conservative.** Source checkout refresh uses `--ff-only`. Destructive operations require confirmation.
+- **Prefer explicit failure over silent waiting.** If something fails, say so immediately with context.
+
+### Quality
+
+- **Prove your work with tests.** Every change should include unit tests. When feasible and low-lift, add integration tests as well.
 
 ## Project Summary
 
