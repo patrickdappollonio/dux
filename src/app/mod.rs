@@ -56,7 +56,9 @@ pub struct App {
     pub(crate) center_mode: CenterMode,
     pub(crate) left_collapsed: bool,
     pub(crate) resize_mode: bool,
-    pub(crate) help_overlay: bool,
+    pub(crate) help_scroll: Option<u16>,
+    pub(crate) last_help_height: u16,
+    pub(crate) last_help_lines: u16,
     pub(crate) status: StatusLine,
     pub(crate) prompt: PromptState,
     pub(crate) input_target: InputTarget,
@@ -285,7 +287,9 @@ impl App {
             focus: FocusPane::Left,
             center_mode: CenterMode::Agent,
             resize_mode: false,
-            help_overlay: false,
+            help_scroll: None,
+            last_help_height: 0,
+            last_help_lines: 0,
             status: StatusLine::new("Press p to add a project, a to create an agent, ? for help."),
             prompt: PromptState::None,
             input_target: InputTarget::None,
@@ -357,8 +361,8 @@ impl App {
             self.set_info("Closed overlay.");
             return true;
         }
-        if self.help_overlay {
-            self.help_overlay = false;
+        if self.help_scroll.is_some() {
+            self.help_scroll = None;
             self.set_info("Closed overlay.");
             return true;
         }
@@ -404,7 +408,7 @@ impl App {
                 Ok(())
             }
             "help" => {
-                self.help_overlay = true;
+                self.help_scroll = Some(0);
                 Ok(())
             }
             "" => Ok(()),

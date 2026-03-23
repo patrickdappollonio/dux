@@ -867,16 +867,45 @@ impl App {
             .render(status_area, frame.buffer_mut());
     }
 
-    fn render_help(&self, frame: &mut Frame) {
+    fn render_help(&mut self, frame: &mut Frame) {
         self.render_dim_overlay(frame);
         let area = centered_rect(72, 70, frame.area());
         Clear.render(area, frame.buffer_mut());
-        let help_bindings = self.bindings.help_sections();
+
+        let outer_block = self.themed_overlay_block("Help");
+        let inner = outer_block.inner(area);
+        outer_block.render(area, frame.buffer_mut());
+
+        if inner.height < 3 || inner.width < 4 {
+            return;
+        }
+
+        let hint_height = 2;
+        let [content_area, hint_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
+            .areas(inner);
+
+        // Build help content lines.
         let mut lines: Vec<Line> = Vec::new();
-        for (section_idx, (section, bindings)) in help_bindings.iter().enumerate() {
-            if section_idx > 0 {
-                lines.push(Line::from(""));
-            }
+
+        // Config banner
+        lines.push(Line::from(vec![
+            Span::styled(
+                "All keybindings are configurable. See ",
+                Style::default().fg(self.theme.hint_desc_fg),
+            ),
+            Span::styled(
+                self.paths.config_path.display().to_string(),
+                Style::default()
+                    .fg(self.theme.hint_key_fg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+
+        let help_bindings = self.bindings.help_sections();
+        for (section, bindings) in &help_bindings {
+            lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 section.to_string(),
                 Style::default()
@@ -948,10 +977,56 @@ impl App {
                 ),
             ]));
         }
+
+        // Track content size for scroll clamping in input handler.
+        let total_lines = lines.len() as u16;
+        self.last_help_lines = total_lines;
+        self.last_help_height = content_area.height;
+
+        // Clamp scroll offset.
+        let max_scroll = total_lines.saturating_sub(content_area.height);
+        let scroll = self.help_scroll.unwrap_or(0).min(max_scroll);
+
         Paragraph::new(lines)
-            .block(self.themed_overlay_block("Help"))
             .wrap(Wrap { trim: false })
-            .render(area, frame.buffer_mut());
+            .scroll((scroll, 0))
+            .render(content_area, frame.buffer_mut());
+
+        // Hint bar with top border (same pattern as diff view).
+        if hint_area.height > 0 {
+            let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+            let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
+            let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
+            let move_down = self.bindings.label_for(Action::MoveDown);
+            let move_up = self.bindings.label_for(Action::MoveUp);
+            let close = self.bindings.label_for(Action::CloseOverlay);
+            let mut spans: Vec<Span> = Vec::new();
+
+            if scroll > 0 {
+                spans.push(Span::styled(
+                    format!("Scrolled back {scroll} lines. "),
+                    Style::default().fg(self.theme.hint_key_fg),
+                ));
+            }
+            spans.extend(self.theme.dim_key_badge(&move_down, Color::Reset));
+            spans.push(Span::styled(" ", desc_style));
+            spans.extend(self.theme.dim_key_badge(&move_up, Color::Reset));
+            spans.push(Span::styled(" scroll, ", desc_style));
+            spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
+            spans.push(Span::styled(" ", desc_style));
+            spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
+            spans.push(Span::styled(" page. ", desc_style));
+            spans.extend(self.theme.dim_key_badge(&close, Color::Reset));
+            spans.push(Span::styled(" close.", desc_style));
+
+            Paragraph::new(Line::from(spans))
+                .block(
+                    Block::default()
+                        .borders(Borders::TOP)
+                        .border_style(Style::default().fg(self.theme.border_normal)),
+                )
+                .render(hint_area, frame.buffer_mut());
+        }
     }
 
     fn render_prompt(&self, frame: &mut Frame) {
@@ -1572,12 +1647,12 @@ impl App {
         }
     }
 
-    fn render_overlay(&self, frame: &mut Frame) {
+    fn render_overlay(&mut self, frame: &mut Frame) {
         if !matches!(self.prompt, PromptState::None) {
             self.render_prompt(frame);
             return;
         }
-        if self.help_overlay {
+        if self.help_scroll.is_some() {
             self.render_help(frame);
         }
     }

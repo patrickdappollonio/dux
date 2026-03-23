@@ -323,7 +323,10 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         action: Action::FocusAgent,
         default_keys: &[key!(enter)],
         scopes: &[BindingScope::Left],
-        help: None,
+        help: Some(HelpEntry {
+            section: "Projects pane",
+            description: "Focus the selected agent",
+        }),
         hint_contexts: &[(HintContext::LeftSession, "Focus")],
         palette: None,
     },
@@ -348,7 +351,10 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         action: Action::CopyPath,
         default_keys: &[key!(y)],
         scopes: &[BindingScope::Left],
-        help: None,
+        help: Some(HelpEntry {
+            section: "Projects pane",
+            description: "Copy agent worktree path",
+        }),
         hint_contexts: &[
             (HintContext::LeftProject, "Copy path"),
             (HintContext::LeftSession, "Copy path"),
@@ -577,7 +583,10 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         action: Action::FocusPrev,
         default_keys: &[key!(shift - tab)],
         scopes: &[BindingScope::Global],
-        help: None,
+        help: Some(HelpEntry {
+            section: "Global",
+            description: "Focus previous pane",
+        }),
         hint_contexts: &[],
         palette: None,
     },
