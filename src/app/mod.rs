@@ -184,6 +184,11 @@ pub(crate) enum PromptState {
         is_untracked: bool,
         confirm_selected: bool, // false = Cancel (default), true = Discard
     },
+    RenameSession {
+        session_id: String,
+        input: String,
+        cursor: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -392,6 +397,7 @@ impl App {
             "delete-project" => self.delete_selected_project(),
             "remove-project" => self.remove_selected_project(),
             "delete-agent" => self.confirm_delete_selected_session(),
+            "rename-agent" => self.open_rename_session(),
             "reconnect-agent" => self.reconnect_selected_session(),
             "add-project" => self.open_project_browser(),
             "copy-path" => self.copy_selected_path(),
@@ -516,6 +522,59 @@ impl App {
         } else if self.files_index >= len {
             self.files_index = len.saturating_sub(1);
         }
+    }
+
+    pub(crate) fn open_rename_session(&mut self) -> Result<()> {
+        if let Some(session) = self.selected_session() {
+            let current_name = session
+                .title
+                .clone()
+                .unwrap_or_else(|| session.branch_name.clone());
+            let cursor = current_name.len();
+            self.prompt = PromptState::RenameSession {
+                session_id: session.id.clone(),
+                input: current_name,
+                cursor,
+            };
+        } else {
+            self.set_error("No agent session selected.");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn apply_rename_session(&mut self, session_id: &str, new_name: String) {
+        let name = new_name.trim().to_string();
+        if name.is_empty() {
+            self.set_error("Name cannot be empty.");
+            return;
+        }
+
+        // Gather session info we need before mutating.
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
+            return;
+        };
+        let old_branch = session.branch_name.clone();
+        let worktree = session.worktree_path.clone();
+
+        // Skip the git rename if the branch name is unchanged.
+        if name != old_branch {
+            if let Err(e) = git::rename_branch(Path::new(&worktree), &old_branch, &name) {
+                self.set_error(format!("Rename failed: {e}"));
+                return;
+            }
+        }
+
+        // Git rename succeeded — update the session.
+        if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+            session.branch_name = name.clone();
+            session.title = Some(name.clone());
+            session.updated_at = Utc::now();
+        }
+        if let Some(session) = self.sessions.iter().find(|s| s.id == session_id) {
+            let _ = self.session_store.upsert_session(session);
+        }
+        self.set_info(format!("Renamed agent to \"{name}\" (branch updated)."));
+        self.rebuild_left_items();
     }
 
     pub(crate) fn mark_session_status(&mut self, session_id: &str, status: SessionStatus) {

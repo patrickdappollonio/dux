@@ -1568,6 +1568,81 @@ impl App {
                 )
                 .render(discard_area, frame.buffer_mut());
             }
+            PromptState::RenameSession {
+                input, cursor, ..
+            } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(56, 14, frame.area());
+                Clear.render(area, frame.buffer_mut());
+
+                let outer = self.themed_overlay_block("Rename Agent");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [label_area, _, input_area, _, hint_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                        Constraint::Length(1),
+                        Constraint::Min(1),
+                    ])
+                    .areas(inner);
+
+                Paragraph::new(Line::from(Span::styled(
+                    " Enter a new name (empty to reset):",
+                    Style::default().fg(Color::White),
+                )))
+                .render(label_area, frame.buffer_mut());
+
+                // Show the input with a cursor indicator.
+                let display = if *cursor < input.len() {
+                    let (before, after) = input.split_at(*cursor);
+                    let (cursor_char, rest) = after.split_at(1);
+                    Line::from(vec![
+                        Span::raw(format!(" {before}")),
+                        Span::styled(
+                            cursor_char.to_string(),
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(Color::White),
+                        ),
+                        Span::raw(rest.to_string()),
+                    ])
+                } else {
+                    Line::from(vec![
+                        Span::raw(format!(" {input}")),
+                        Span::styled(
+                            " ",
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(Color::White),
+                        ),
+                    ])
+                };
+                Paragraph::new(display)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_set(border::ROUNDED)
+                            .border_style(Style::default().fg(Color::Cyan)),
+                    )
+                    .render(input_area, frame.buffer_mut());
+
+                let mut hints = vec![Span::raw(" ")];
+                hints.extend(self.theme.key_badge("Enter", Color::Reset));
+                hints.push(Span::styled(
+                    " confirm  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                hints.extend(self.theme.key_badge("Esc", Color::Reset));
+                hints.push(Span::styled(
+                    " cancel",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
+            }
             PromptState::None => {}
         }
     }

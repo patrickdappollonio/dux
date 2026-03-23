@@ -188,6 +188,7 @@ impl App {
                 Action::NewAgent => self.create_agent_for_selected_project()?,
                 Action::RefreshProject => self.refresh_selected_project()?,
                 Action::DeleteSession => self.confirm_delete_selected_session()?,
+                Action::RenameSession => self.open_rename_session()?,
                 Action::CycleProvider => self.cycle_selected_project_provider()?,
                 Action::ReconnectAgent => self.reconnect_selected_session()?,
                 Action::CopyPath => self.copy_selected_path()?,
@@ -1026,6 +1027,58 @@ impl App {
                     } else {
                         self.prompt = PromptState::None;
                     }
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+
+        if let PromptState::RenameSession {
+            session_id,
+            input,
+            cursor,
+        } = &mut self.prompt
+        {
+            match key.code {
+                KeyCode::Esc => {
+                    self.prompt = PromptState::None;
+                }
+                KeyCode::Enter => {
+                    let id = session_id.clone();
+                    let new_name = input.clone();
+                    self.prompt = PromptState::None;
+                    self.apply_rename_session(&id, new_name);
+                }
+                KeyCode::Backspace => {
+                    if *cursor > 0 {
+                        input.remove(*cursor - 1);
+                        *cursor -= 1;
+                    }
+                }
+                KeyCode::Delete => {
+                    if *cursor < input.len() {
+                        input.remove(*cursor);
+                    }
+                }
+                KeyCode::Left => {
+                    if *cursor > 0 {
+                        *cursor -= 1;
+                    }
+                }
+                KeyCode::Right => {
+                    if *cursor < input.len() {
+                        *cursor += 1;
+                    }
+                }
+                KeyCode::Home => {
+                    *cursor = 0;
+                }
+                KeyCode::End => {
+                    *cursor = input.len();
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    input.insert(*cursor, c);
+                    *cursor += 1;
                 }
                 _ => {}
             }

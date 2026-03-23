@@ -388,6 +388,28 @@ pub fn ellipsize_middle(input: &str, max_width: usize) -> String {
     format!("{start}...{end}")
 }
 
+/// Rename a git branch inside a worktree. Runs `git branch -m <old> <new>`
+/// from within the worktree directory.
+pub fn rename_branch(worktree_path: &Path, old_name: &str, new_name: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            worktree_path.to_string_lossy().as_ref(),
+            "branch",
+            "-m",
+            old_name,
+            new_name,
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git branch rename failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 pub fn docker_style_name() -> String {
     use petname::{Generator, Petnames};
 

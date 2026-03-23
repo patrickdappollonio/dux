@@ -53,6 +53,7 @@ pub enum Action {
     Confirm,
     ToggleSelection,
     // Palette-only (no direct keybinding)
+    RenameSession,
     DeleteProject,
     RemoveProject,
 }
@@ -149,6 +150,7 @@ impl Action {
             Action::AddCurrentDir => "add_current_dir",
             Action::Confirm => "confirm",
             Action::ToggleSelection => "toggle_selection",
+            Action::RenameSession => "rename_session",
             Action::DeleteProject => "delete_project",
             Action::RemoveProject => "remove_project",
         }
@@ -197,6 +199,7 @@ impl Action {
             Action::AddCurrentDir => "Add the current directory as a project.",
             Action::Confirm => "Confirm the selected action in a dialog.",
             Action::ToggleSelection => "Toggle between options in a confirmation dialog.",
+            Action::RenameSession => "Rename the selected agent session.",
             Action::DeleteProject => "Remove the selected project and its sessions.",
             Action::RemoveProject => "Remove project from app (keeps files on disk).",
         }
@@ -244,7 +247,7 @@ impl Action {
             | Action::AddCurrentDir
             | Action::Confirm
             | Action::ToggleSelection => Some("Overlays"),
-            Action::DeleteProject | Action::RemoveProject => None,
+            Action::RenameSession | Action::DeleteProject | Action::RemoveProject => None,
         }
     }
 }
@@ -768,6 +771,20 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: None,
     },
     // ── Palette-only (no direct keybinding) ────────────────────────
+    BindingDef {
+        action: Action::RenameSession,
+        default_keys: &[key!(e)],
+        scopes: &[BindingScope::Left],
+        help: Some(HelpEntry {
+            section: "Projects pane",
+            description: "Rename the selected agent session",
+        }),
+        hint_contexts: &[(HintContext::LeftSession, "Rename")],
+        palette: Some(PaletteEntry {
+            name: "rename-agent",
+            description: "Rename the selected agent session",
+        }),
+    },
     BindingDef {
         action: Action::DeleteProject,
         default_keys: &[],
