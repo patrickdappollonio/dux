@@ -1,4 +1,4 @@
-use crokey::{key, KeyCombination, KeyCombinationFormat};
+use crokey::{KeyCombination, KeyCombinationFormat, key};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Unique identifier for every bindable action.
@@ -205,24 +205,45 @@ impl Action {
     /// Help section name for the help overlay.
     pub fn help_section(self) -> Option<&'static str> {
         match self {
-            Action::MoveDown | Action::MoveUp | Action::ToggleProject | Action::NewAgent
-            | Action::FocusAgent | Action::OpenProjectBrowser | Action::CopyPath
-            | Action::CycleProvider | Action::RefreshProject | Action::ReconnectAgent
+            Action::MoveDown
+            | Action::MoveUp
+            | Action::ToggleProject
+            | Action::NewAgent
+            | Action::FocusAgent
+            | Action::OpenProjectBrowser
+            | Action::CopyPath
+            | Action::CycleProvider
+            | Action::RefreshProject
+            | Action::ReconnectAgent
             | Action::DeleteSession => Some("Projects pane"),
-            Action::InteractAgent | Action::ExitInteractive | Action::ScrollPageUp
+            Action::InteractAgent
+            | Action::ExitInteractive
+            | Action::ScrollPageUp
             | Action::ScrollPageDown => Some("Agent pane"),
-            Action::OpenDiff | Action::StageUnstage | Action::CommitChanges
-            | Action::GenerateCommitMessage | Action::DiscardChanges | Action::EngageCommitInput
-            | Action::PushToRemote | Action::PullFromRemote => Some("Files pane"),
+            Action::OpenDiff
+            | Action::StageUnstage
+            | Action::CommitChanges
+            | Action::GenerateCommitMessage
+            | Action::DiscardChanges
+            | Action::EngageCommitInput
+            | Action::PushToRemote
+            | Action::PullFromRemote => Some("Files pane"),
             Action::ExitCommitInput => Some("Commit input"),
-            Action::FocusNext | Action::FocusPrev | Action::OpenPalette
-            | Action::ToggleResizeMode | Action::ToggleSidebar | Action::ToggleHelp
-            | Action::Quit | Action::CloseOverlay => Some("Global"),
+            Action::FocusNext
+            | Action::FocusPrev
+            | Action::OpenPalette
+            | Action::ToggleResizeMode
+            | Action::ToggleSidebar
+            | Action::ToggleHelp
+            | Action::Quit
+            | Action::CloseOverlay => Some("Global"),
             Action::ResizeGrow | Action::ResizeShrink => Some("Resize mode"),
-            Action::SearchToggle | Action::GoToPath | Action::OpenEntry
-            | Action::AddCurrentDir | Action::Confirm | Action::ToggleSelection => {
-                Some("Overlays")
-            }
+            Action::SearchToggle
+            | Action::GoToPath
+            | Action::OpenEntry
+            | Action::AddCurrentDir
+            | Action::Confirm
+            | Action::ToggleSelection => Some("Overlays"),
             Action::DeleteProject | Action::RemoveProject => None,
         }
     }
@@ -549,10 +570,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             section: "Global",
             description: "Focus next pane",
         }),
-        hint_contexts: &[
-            (HintContext::Center, "Next"),
-            (HintContext::Files, "Next"),
-        ],
+        hint_contexts: &[(HintContext::Center, "Next"), (HintContext::Files, "Next")],
         palette: None,
     },
     BindingDef {
@@ -592,7 +610,10 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     },
     BindingDef {
         action: Action::ToggleSidebar,
-        default_keys: &[KeyCombination::one_key(KeyCode::Char('['), KeyModifiers::NONE)],
+        default_keys: &[KeyCombination::one_key(
+            KeyCode::Char('['),
+            KeyModifiers::NONE,
+        )],
         scopes: &[BindingScope::Global],
         help: Some(HelpEntry {
             section: "Global",
@@ -606,7 +627,10 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     },
     BindingDef {
         action: Action::ToggleHelp,
-        default_keys: &[KeyCombination::one_key(KeyCode::Char('?'), KeyModifiers::NONE)],
+        default_keys: &[KeyCombination::one_key(
+            KeyCode::Char('?'),
+            KeyModifiers::NONE,
+        )],
         scopes: &[BindingScope::Global],
         help: Some(HelpEntry {
             section: "Global",
@@ -637,7 +661,12 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     BindingDef {
         action: Action::CloseOverlay,
         default_keys: &[key!(esc)],
-        scopes: &[BindingScope::Global, BindingScope::Palette, BindingScope::Browser, BindingScope::Dialog],
+        scopes: &[
+            BindingScope::Global,
+            BindingScope::Palette,
+            BindingScope::Browser,
+            BindingScope::Dialog,
+        ],
         help: Some(HelpEntry {
             section: "Global",
             description: "Close the current overlay or dialog",
@@ -671,7 +700,10 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     // ── Overlays and dialogs ──────────────────────────────────────
     BindingDef {
         action: Action::SearchToggle,
-        default_keys: &[KeyCombination::one_key(KeyCode::Char('/'), KeyModifiers::NONE)],
+        default_keys: &[KeyCombination::one_key(
+            KeyCode::Char('/'),
+            KeyModifiers::NONE,
+        )],
         scopes: &[BindingScope::Palette, BindingScope::Browser],
         help: Some(HelpEntry {
             section: "Overlays",
@@ -854,10 +886,7 @@ impl RuntimeBindings {
 
     /// Build runtime bindings from parsed config keys.
     /// `keys_for` returns the parsed `KeyCombination`s for a given action.
-    pub fn new(
-        keys_for: impl Fn(Action) -> Vec<KeyCombination>,
-        show_terminal_keys: bool,
-    ) -> Self {
+    pub fn new(keys_for: impl Fn(Action) -> Vec<KeyCombination>, show_terminal_keys: bool) -> Self {
         let format = display_format();
         let bindings = BINDING_DEFS
             .iter()
@@ -1047,7 +1076,10 @@ mod tests {
     fn lookup_finds_action_in_correct_scope() {
         let bindings = default_bindings();
         let key = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
-        assert_eq!(bindings.lookup(&key, BindingScope::Left), Some(Action::MoveDown));
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Left),
+            Some(Action::MoveDown)
+        );
         assert_eq!(bindings.lookup(&key, BindingScope::Center), None);
     }
 
@@ -1121,13 +1153,13 @@ mod tests {
     fn filtered_palette_filters_by_name() {
         let bindings = default_bindings();
         let results = bindings.filtered_palette("toggle");
-        assert!(results
-            .iter()
-            .all(|b| b.palette_name.unwrap().contains("toggle")
+        assert!(results.iter().all(|b| {
+            b.palette_name.unwrap().contains("toggle")
                 || b.palette_description
                     .unwrap()
                     .to_lowercase()
-                    .contains("toggle")));
+                    .contains("toggle")
+        }));
     }
 
     #[test]

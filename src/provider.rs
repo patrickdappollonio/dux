@@ -92,10 +92,7 @@ mod tests {
         ProviderCommandConfig {
             command: "bash".to_string(),
             args: Vec::new(),
-            oneshot_args: vec![
-                "-c".to_string(),
-                "echo {prompt} > {tempfile}".to_string(),
-            ],
+            oneshot_args: vec!["-c".to_string(), "echo {prompt} > {tempfile}".to_string()],
             oneshot_output: OneshotOutput::Tempfile,
             install_hint: None,
         }
@@ -106,9 +103,15 @@ mod tests {
         let prov = create_provider("claude", claude_like_config());
         let cwd = std::env::temp_dir();
         let (cmd, tmpfile) = prov.build_oneshot_command("hello world", &cwd);
-        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
         assert_eq!(args, vec!["-p", "hello world"]);
-        assert!(tmpfile.is_none(), "stdout mode should not produce a tempfile");
+        assert!(
+            tmpfile.is_none(),
+            "stdout mode should not produce a tempfile"
+        );
     }
 
     #[test]
@@ -116,11 +119,20 @@ mod tests {
         let prov = create_provider("codex", codex_like_config());
         let cwd = std::env::temp_dir();
         let (cmd, tmpfile) = prov.build_oneshot_command("hello world", &cwd);
-        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
-        assert!(tmpfile.is_some(), "tempfile mode should produce a tempfile path");
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            tmpfile.is_some(),
+            "tempfile mode should produce a tempfile path"
+        );
         let tf = tmpfile.unwrap();
         assert_eq!(args[0], "-c");
-        assert!(args[1].contains("hello world"), "prompt should be substituted");
+        assert!(
+            args[1].contains("hello world"),
+            "prompt should be substituted"
+        );
         assert!(
             args[1].contains(&tf.to_string_lossy().to_string()),
             "tempfile path should be substituted"
@@ -197,8 +209,7 @@ mod tests {
             .collect();
         assert!(
             leftover.is_empty(),
-            "tempfile should be cleaned up after run_oneshot, found: {:?}",
-            leftover
+            "tempfile should be cleaned up after run_oneshot, found: {leftover:?}",
         );
     }
 }

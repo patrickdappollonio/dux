@@ -979,7 +979,7 @@ impl App {
                         .iter()
                         .map(|binding| {
                             let name = binding.palette_name.unwrap();
-                            let name_padded = format!("{:width$}", name, width = name_col);
+                            let name_padded = format!("{name:name_col$}");
                             let mut spans = vec![Span::styled(
                                 name_padded,
                                 Style::default()
@@ -991,7 +991,7 @@ impl App {
                             let desc_display = if desc.len() > desc_avail && desc_avail > 1 {
                                 format!("  {}\u{2026}", &desc[..desc_avail - 1])
                             } else {
-                                format!("  {:width$}", desc, width = desc_avail)
+                                format!("  {desc:desc_avail$}")
                             };
                             spans.push(Span::styled(
                                 desc_display,
@@ -1047,7 +1047,7 @@ impl App {
                     ));
                 }
                 let prompt_prefix = if *searching { "/ " } else { "> " };
-                Paragraph::new(format!("{}{}", prompt_prefix, input))
+                Paragraph::new(format!("{prompt_prefix}{input}"))
                     .block(
                         self.themed_overlay_block(title)
                             .title_bottom(Line::from(bottom_spans)),
@@ -1149,9 +1149,9 @@ impl App {
                 if let Some(filter_area) = top_areas {
                     let title = format!("Add Project: {}", current_dir.display());
                     let input_text = if *editing_path {
-                        format!("go: {}█", path_input)
+                        format!("go: {path_input}█")
                     } else {
-                        format!("/ {}", filter)
+                        format!("/ {filter}")
                     };
                     Paragraph::new(input_text)
                         .block(self.themed_overlay_block(&title))
@@ -1529,7 +1529,10 @@ impl App {
                 };
 
                 let (cancel_border, cancel_fg) = if !confirm_selected {
-                    (self.theme.button_confirm_border, self.theme.button_active_fg)
+                    (
+                        self.theme.button_confirm_border,
+                        self.theme.button_active_fg,
+                    )
                 } else {
                     (self.theme.border_normal, self.theme.hint_desc_fg)
                 };

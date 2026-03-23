@@ -82,7 +82,7 @@ impl App {
         });
         self.rebuild_left_items();
         logger::info(&format!("registered project {}", path.display()));
-        self.set_info(format!("Added project \"{}\" to workspace", display_name));
+        self.set_info(format!("Added project \"{display_name}\" to workspace"));
         Ok(())
     }
 

@@ -388,16 +388,16 @@ pub fn save_config(config_path: &Path, config: &Config) -> Result<()> {
 fn render_keys_config(out: &mut String, keys: &KeysConfig) {
     out.push_str("[keys]\n");
     out.push_str("# Keybindings configuration. Each action maps to one or more key combos.\n");
-    out.push_str("# Key format: single chars (\"j\"), special names (\"up\", \"enter\", \"space\",\n");
-    out.push_str("# \"tab\", \"shift-tab\", \"pageup\", \"esc\"), or modifier combos (\"ctrl-d\").\n");
+    out.push_str(
+        "# Key format: single chars (\"j\"), special names (\"up\", \"enter\", \"space\",\n",
+    );
+    out.push_str(
+        "# \"tab\", \"shift-tab\", \"pageup\", \"esc\"), or modifier combos (\"ctrl-d\").\n",
+    );
     out.push_str("#\n");
     out.push_str("# Some keys shown in hints are terminal conventions (e.g. ctrl-j for newline)\n");
     out.push_str("# that dux documents but does not control. Set this to false to hide them.\n");
-    let _ = writeln!(
-        out,
-        "show_terminal_keys = {}",
-        keys.show_terminal_keys
-    );
+    let _ = writeln!(out, "show_terminal_keys = {}", keys.show_terminal_keys);
     out.push('\n');
 
     let mut last_section: Option<&str> = None;
@@ -421,16 +421,12 @@ fn render_keys_config(out: &mut String, keys: &KeysConfig) {
         let _ = writeln!(out, "# {}", def.action.config_description());
 
         // Value from config (or defaults if missing).
-        let key_strs = keys
-            .bindings
-            .get(config_name)
-            .cloned()
-            .unwrap_or_else(|| {
-                def.default_keys
-                    .iter()
-                    .map(|k| keybindings::format_key_for_config(*k))
-                    .collect()
-            });
+        let key_strs = keys.bindings.get(config_name).cloned().unwrap_or_else(|| {
+            def.default_keys
+                .iter()
+                .map(|k| keybindings::format_key_for_config(*k))
+                .collect()
+        });
         let _ = writeln!(out, "{config_name} = {}", render_string_list(&key_strs));
     }
     out.push('\n');
@@ -499,9 +495,7 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 2] {
                 args: Vec::new(),
                 oneshot_args: vec!["-p".to_string(), "{prompt}".to_string()],
                 oneshot_output: OneshotOutput::Stdout,
-                install_hint: Some(
-                    "npm install -g @anthropic-ai/claude-code".to_string(),
-                ),
+                install_hint: Some("npm install -g @anthropic-ai/claude-code".to_string()),
             },
         ),
         (
@@ -566,9 +560,8 @@ pub fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
             return Err(format!("[keys] unknown action: \"{name}\""));
         }
         for s in key_strs {
-            crokey::parse(s).map_err(|_| {
-                format!("[keys] invalid key \"{s}\" for action \"{name}\"")
-            })?;
+            crokey::parse(s)
+                .map_err(|_| format!("[keys] invalid key \"{s}\" for action \"{name}\""))?;
         }
     }
     Ok(())
@@ -576,9 +569,7 @@ pub fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
 
 /// Check whether a provider command is available on PATH.
 /// Returns `Ok(())` if found, or `Err(message)` with a user-friendly install hint.
-pub fn check_provider_available(
-    config: &ProviderCommandConfig,
-) -> std::result::Result<(), String> {
+pub fn check_provider_available(config: &ProviderCommandConfig) -> std::result::Result<(), String> {
     use std::process::Command as StdCommand;
     match StdCommand::new("which").arg(&config.command).output() {
         Ok(output) if output.status.success() => Ok(()),
@@ -588,7 +579,10 @@ pub fn check_provider_available(
                 .as_ref()
                 .map(|h| format!("Install with: {h}"))
                 .unwrap_or_else(|| {
-                    format!("Make sure '{}' is installed and on your PATH.", config.command)
+                    format!(
+                        "Make sure '{}' is installed and on your PATH.",
+                        config.command
+                    )
                 });
             Err(format!(
                 "CLI tool '{}' not found on PATH. {hint}",
@@ -602,7 +596,7 @@ fn discover_root(home: &Path, xdg_config_home: Option<std::ffi::OsString>) -> Pa
     #[cfg(target_os = "macos")]
     {
         let _ = xdg_config_home;
-        return home.join(".dux");
+        home.join(".dux")
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -645,10 +639,8 @@ mod tests {
     #[test]
     fn validate_keys_rejects_bad_key() {
         let mut keys = KeysConfig::default();
-        keys.bindings.insert(
-            "quit".to_string(),
-            vec!["badkey!!!".to_string()],
-        );
+        keys.bindings
+            .insert("quit".to_string(), vec!["badkey!!!".to_string()]);
         let result = validate_keys(&keys);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("badkey!!!"));

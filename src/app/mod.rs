@@ -27,8 +27,8 @@ use crate::config::{
 use crate::git;
 use crate::keybindings::{Action, BindingScope, HintContext, RuntimeBindings};
 use crate::logger;
-use crate::provider;
 use crate::model::{AgentSession, ChangedFile, Project, ProviderKind, SessionStatus};
+use crate::provider;
 use crate::pty::PtyClient;
 use crate::statusline::{StatusLine, StatusTone};
 use crate::storage::SessionStore;
@@ -212,13 +212,15 @@ pub(crate) enum LeftItem {
     Session(usize),
 }
 
+pub(crate) struct AgentReadyData {
+    pub session: AgentSession,
+    pub client: PtyClient,
+    pub pty_size: (u16, u16), // (rows, cols) the PTY was spawned with
+}
+
 pub(crate) enum WorkerEvent {
     CreateAgentProgress(String),
-    CreateAgentReady {
-        session: AgentSession,
-        client: PtyClient,
-        pty_size: (u16, u16), // (rows, cols) the PTY was spawned with
-    },
+    CreateAgentReady(Box<AgentReadyData>),
     CreateAgentFailed(String),
     ChangedFilesReady {
         staged: Vec<ChangedFile>,
@@ -248,7 +250,10 @@ impl App {
 
         // Validate and build runtime keybindings from config.
         if let Err(msg) = validate_keys(&config.keys) {
-            eprintln!("Configuration error in {}: {msg}", paths.config_path.display());
+            eprintln!(
+                "Configuration error in {}: {msg}",
+                paths.config_path.display()
+            );
             std::process::exit(1);
         }
         let bindings = RuntimeBindings::from_keys_config(&config.keys);

@@ -5,11 +5,8 @@ impl App {
         while let Ok(event) = self.worker_rx.try_recv() {
             match event {
                 WorkerEvent::CreateAgentProgress(message) => self.set_busy(message),
-                WorkerEvent::CreateAgentReady {
-                    session,
-                    client,
-                    pty_size,
-                } => {
+                WorkerEvent::CreateAgentReady(boxed) => {
+                    let AgentReadyData { session, client, pty_size } = *boxed;
                     self.create_agent_in_flight = false;
                     self.last_pty_size = pty_size;
                     if let Err(err) = self.session_store.upsert_session(&session) {
@@ -156,7 +153,10 @@ impl App {
                 let path = watched.lock().ok().and_then(|guard| guard.clone());
                 if let Some(worktree_path) = path {
                     if let Ok((staged, unstaged)) = git::changed_files(&worktree_path) {
-                        if tx.send(WorkerEvent::ChangedFilesReady { staged, unstaged }).is_err() {
+                        if tx
+                            .send(WorkerEvent::ChangedFilesReady { staged, unstaged })
+                            .is_err()
+                        {
                             break; // receiver dropped, app is shutting down
                         }
                     }
@@ -250,11 +250,11 @@ pub(crate) fn run_create_agent_job(
         }
     };
     logger::info(&format!("PTY session started for {}", session.id));
-    let _ = worker_tx.send(WorkerEvent::CreateAgentReady {
+    let _ = worker_tx.send(WorkerEvent::CreateAgentReady(Box::new(AgentReadyData {
         session,
         client,
         pty_size: (rows, cols),
-    });
+    })));
 }
 
 pub(crate) fn browser_entries(dir: &Path) -> Vec<BrowserEntry> {

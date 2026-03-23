@@ -5,7 +5,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
 
-use crate::model::{ChangedFile, FileStage};
+use crate::model::ChangedFile;
 
 pub fn current_branch(repo_path: &Path) -> Result<String> {
     let output = Command::new("git")
@@ -191,7 +191,6 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
                 path,
                 additions: 0,
                 deletions: 0,
-                stage: FileStage::Unstaged,
             });
             continue;
         }
@@ -202,7 +201,6 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
                 path: path.clone(),
                 additions: 0,
                 deletions: 0,
-                stage: FileStage::Staged,
             });
         }
 
@@ -212,7 +210,6 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
                 path: path.clone(),
                 additions: 0,
                 deletions: 0,
-                stage: FileStage::Unstaged,
             });
         }
     }

@@ -97,7 +97,9 @@ impl App {
                     if self.resize_mode {
                         let grow = self.bindings.labels_for(Action::ResizeGrow);
                         let shrink = self.bindings.labels_for(Action::ResizeShrink);
-                        self.set_info(format!("Resize mode on: {shrink}/{grow} resize side panes."));
+                        self.set_info(format!(
+                            "Resize mode on: {shrink}/{grow} resize side panes."
+                        ));
                     } else {
                         self.persist_pane_widths();
                         self.set_info("Resize mode off.");
@@ -201,7 +203,9 @@ impl App {
                         self.center_mode = CenterMode::Agent;
                         self.input_target = InputTarget::Agent;
                         let exit_key = self.bindings.label_for(Action::ExitInteractive);
-                        self.set_info(format!("Interactive mode. Keys forwarded to agent. {exit_key} exits."));
+                        self.set_info(format!(
+                            "Interactive mode. Keys forwarded to agent. {exit_key} exits."
+                        ));
                     } else {
                         let r = self.bindings.label_for(Action::ReconnectAgent);
                         let n = self.bindings.label_for(Action::NewAgent);
@@ -230,7 +234,9 @@ impl App {
                         self.reset_pty_scrollback();
                         self.input_target = InputTarget::Agent;
                         let exit_key = self.bindings.label_for(Action::ExitInteractive);
-                        self.set_info(format!("Interactive mode. Keys forwarded to agent. {exit_key} exits."));
+                        self.set_info(format!(
+                            "Interactive mode. Keys forwarded to agent. {exit_key} exits."
+                        ));
                     } else {
                         let r = self.bindings.label_for(Action::ReconnectAgent);
                         let n = self.bindings.label_for(Action::NewAgent);
@@ -313,10 +319,8 @@ impl App {
                     }
                 }
                 Action::MoveUp => {
-                    if self.right_section != RightSection::CommitInput {
-                        if self.files_index > 0 {
-                            self.files_index -= 1;
-                        }
+                    if self.right_section != RightSection::CommitInput && self.files_index > 0 {
+                        self.files_index -= 1;
                     }
                 }
                 Action::StageUnstage => {
@@ -361,8 +365,7 @@ impl App {
 
     fn handle_commit_input_key(&mut self, key: KeyEvent) -> Result<()> {
         // Exit actions are dispatched via bindings; text input stays hardcoded.
-        if let Some(Action::ExitCommitInput) =
-            self.bindings.lookup(&key, BindingScope::CommitInput)
+        if let Some(Action::ExitCommitInput) = self.bindings.lookup(&key, BindingScope::CommitInput)
         {
             self.input_target = InputTarget::None;
             return Ok(());
@@ -504,8 +507,12 @@ impl App {
                  Diff:\n{diff}"
             );
             match prov.run_oneshot(&prompt, &worktree) {
-                Ok(msg) => { let _ = tx.send(WorkerEvent::CommitMessageGenerated(msg)); }
-                Err(e) => { let _ = tx.send(WorkerEvent::CommitMessageFailed(e.to_string())); }
+                Ok(msg) => {
+                    let _ = tx.send(WorkerEvent::CommitMessageGenerated(msg));
+                }
+                Err(e) => {
+                    let _ = tx.send(WorkerEvent::CommitMessageFailed(e.to_string()));
+                }
             }
         });
         Ok(())
@@ -564,7 +571,9 @@ impl App {
         let tx = self.worker_tx.clone();
         self.set_busy("Pulling latest changes from remote…");
         thread::spawn(move || {
-            let result = git::pull_current_branch(&worktree).map(|_| ()).map_err(|e| e.to_string());
+            let result = git::pull_current_branch(&worktree)
+                .map(|_| ())
+                .map_err(|e| e.to_string());
             let _ = tx.send(WorkerEvent::PullCompleted(result));
         });
         Ok(())
@@ -588,8 +597,7 @@ impl App {
         };
 
         // Exit interactive mode via configured binding (default: ctrl-g).
-        if let Some(Action::ExitInteractive) =
-            self.bindings.lookup(&key, BindingScope::Interactive)
+        if let Some(Action::ExitInteractive) = self.bindings.lookup(&key, BindingScope::Interactive)
         {
             self.input_target = InputTarget::None;
             self.set_info("Exited interactive mode.");
@@ -1013,7 +1021,11 @@ impl App {
         {
             match key.code {
                 KeyCode::Esc => self.prompt = PromptState::None,
-                KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::Char('h') | KeyCode::Char('l') => {
+                KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Tab
+                | KeyCode::Char('h')
+                | KeyCode::Char('l') => {
                     *confirm_selected = !*confirm_selected;
                 }
                 KeyCode::Enter => {
