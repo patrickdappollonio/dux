@@ -1222,4 +1222,21 @@ mod tests {
         assert!(actions_in_defs.contains(&Action::PushToRemote));
         assert!(actions_in_defs.contains(&Action::AddCurrentDir));
     }
+
+    #[test]
+    fn every_keyed_binding_has_help_entry() {
+        // Every BindingDef that has keys assigned should have a help entry,
+        // so it appears in the help overlay. MoveUp is the sole exception
+        // because it's shown via MoveDown's combined "j/k" label.
+        for def in BINDING_DEFS {
+            if def.default_keys.is_empty() || def.action == Action::MoveUp {
+                continue;
+            }
+            assert!(
+                def.help.is_some(),
+                "Action {:?} has keys but no help entry — add help: Some(HelpEntry {{ ... }})",
+                def.action,
+            );
+        }
+    }
 }
