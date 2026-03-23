@@ -325,20 +325,6 @@ pub fn commit(worktree_path: &Path, message: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-pub fn staged_diff(worktree_path: &Path) -> Result<String> {
-    let wt = worktree_path.to_string_lossy();
-    let output = Command::new("git")
-        .args(["-C", wt.as_ref(), "diff", "--cached"])
-        .output()?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "git diff --cached failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
 pub fn push(worktree_path: &Path) -> Result<String> {
     let wt = worktree_path.to_string_lossy();
     let branch = current_branch(worktree_path)?;

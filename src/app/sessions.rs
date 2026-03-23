@@ -71,6 +71,7 @@ impl App {
             path: path.to_string_lossy().to_string(),
             name: Some(display_name.clone()),
             default_provider: None,
+            commit_prompt: None,
         });
         save_config(&self.paths.config_path, &self.config)?;
         self.projects.push(Project {
