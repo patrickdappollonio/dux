@@ -703,23 +703,8 @@ impl App {
             let visible_h = text_area.height;
             let text_w = text_area.width as usize;
             if text_w > 0 && !self.commit_input.is_empty() {
-                let mut row: u16 = 0;
-                let mut col: usize = 0;
-                for (i, ch) in self.commit_input.char_indices() {
-                    if i == self.commit_input_cursor {
-                        break;
-                    }
-                    if ch == '\n' {
-                        row += 1;
-                        col = 0;
-                    } else {
-                        col += 1;
-                        if col >= text_w {
-                            row += 1;
-                            col = 0;
-                        }
-                    }
-                }
+                let (row, _) =
+                    cursor_pos_in_wrapped(&self.commit_input, self.commit_input_cursor, text_w);
                 if row < self.commit_scroll {
                     self.commit_scroll = row;
                 } else if row >= self.commit_scroll + visible_h {
@@ -736,22 +721,11 @@ impl App {
                 .render(text_area, frame.buffer_mut());
 
             if focused {
-                let (mut cursor_row, mut cursor_col) = (0u16, 0usize);
-                for (i, ch) in self.commit_input.char_indices() {
-                    if i == self.commit_input_cursor {
-                        break;
-                    }
-                    if ch == '\n' {
-                        cursor_row += 1;
-                        cursor_col = 0;
-                    } else {
-                        cursor_col += 1;
-                        if text_w > 0 && cursor_col >= text_w {
-                            cursor_row += 1;
-                            cursor_col = 0;
-                        }
-                    }
-                }
+                let (cursor_row, cursor_col) = cursor_pos_in_wrapped(
+                    &self.commit_input,
+                    self.commit_input_cursor,
+                    text_w,
+                );
                 let screen_row = cursor_row.saturating_sub(self.commit_scroll);
                 let cx = text_area.x + cursor_col as u16;
                 let cy = text_area.y + screen_row;
@@ -1777,4 +1751,284 @@ fn wrap_text_at_width(text: &str, width: usize) -> String {
         }
     }
     result
+}
+
+/// Compute the (row, col) position of a cursor in text that wraps at `width`.
+/// This mirrors the inline cursor calculation used in `render_commit_input_inner`.
+fn cursor_pos_in_wrapped(text: &str, cursor: usize, width: usize) -> (u16, usize) {
+    let mut row: u16 = 0;
+    let mut col: usize = 0;
+    for (i, ch) in text.char_indices() {
+        if i == cursor {
+            break;
+        }
+        if ch == '\n' {
+            row += 1;
+            col = 0;
+        } else {
+            col += 1;
+            if width > 0 && col >= width {
+                row += 1;
+                col = 0;
+            }
+        }
+    }
+    (row, col)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    // ── Unit tests for wrap_text_at_width ──────────────────────────
+
+    #[test]
+    fn wrap_empty_string() {
+        assert_eq!(wrap_text_at_width("", 10), "");
+    }
+
+    #[test]
+    fn wrap_shorter_than_width() {
+        assert_eq!(wrap_text_at_width("hello", 10), "hello");
+    }
+
+    #[test]
+    fn wrap_exact_width() {
+        // Exactly 5 chars at width 5 → wraps after the last char.
+        assert_eq!(wrap_text_at_width("abcde", 5), "abcde\n");
+    }
+
+    #[test]
+    fn wrap_longer_than_width() {
+        assert_eq!(wrap_text_at_width("abcdefgh", 5), "abcde\nfgh");
+    }
+
+    #[test]
+    fn wrap_multiple_lines() {
+        assert_eq!(
+            wrap_text_at_width("abcdefghij", 3),
+            "abc\ndef\nghi\nj"
+        );
+    }
+
+    #[test]
+    fn wrap_preserves_existing_newlines() {
+        assert_eq!(
+            wrap_text_at_width("ab\ncdefgh", 5),
+            "ab\ncdefg\nh"
+        );
+    }
+
+    #[test]
+    fn wrap_newline_resets_column() {
+        // "abcde" fills width 5, then "\n" resets, then "fg" fits.
+        assert_eq!(
+            wrap_text_at_width("abcde\nfg", 5),
+            "abcde\n\nfg"
+        );
+    }
+
+    #[test]
+    fn wrap_width_one() {
+        assert_eq!(wrap_text_at_width("abc", 1), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn wrap_width_zero_returns_unchanged() {
+        assert_eq!(wrap_text_at_width("abc", 0), "abc");
+    }
+
+    // ── Unit tests for cursor_pos_in_wrapped ───────────────────────
+
+    #[test]
+    fn cursor_at_start() {
+        assert_eq!(cursor_pos_in_wrapped("hello", 0, 10), (0, 0));
+    }
+
+    #[test]
+    fn cursor_mid_line() {
+        assert_eq!(cursor_pos_in_wrapped("hello", 3, 10), (0, 3));
+    }
+
+    #[test]
+    fn cursor_at_wrap_boundary() {
+        // "abcde" at width 5: after 'e' col hits 5, wraps → cursor at (1, 0).
+        assert_eq!(cursor_pos_in_wrapped("abcdefgh", 5, 5), (1, 0));
+    }
+
+    #[test]
+    fn cursor_after_wrap() {
+        assert_eq!(cursor_pos_in_wrapped("abcdefgh", 6, 5), (1, 1));
+    }
+
+    #[test]
+    fn cursor_after_newline() {
+        assert_eq!(cursor_pos_in_wrapped("ab\ncd", 3, 10), (1, 0));
+    }
+
+    #[test]
+    fn cursor_at_end() {
+        // Cursor past last char (len = 5), sits at (1, 0) after wrapping.
+        assert_eq!(cursor_pos_in_wrapped("abcde", 5, 5), (1, 0));
+    }
+
+    // ── Consistency: cursor pos matches wrapped text layout ────────
+
+    /// For every possible cursor position in `text`, verify that the (row, col)
+    /// from `cursor_pos_in_wrapped` points to the correct character in the
+    /// output of `wrap_text_at_width`.
+    fn assert_cursor_wrap_consistency(text: &str, width: usize) {
+        let wrapped = wrap_text_at_width(text, width);
+        let wrapped_lines: Vec<&str> = wrapped.split('\n').collect();
+
+        for cursor in 0..=text.len() {
+            // Only test at char boundaries.
+            if !text.is_char_boundary(cursor) {
+                continue;
+            }
+            let (row, col) = cursor_pos_in_wrapped(text, cursor, width);
+            let row = row as usize;
+
+            // The cursor should be within the wrapped output's line count.
+            assert!(
+                row < wrapped_lines.len(),
+                "text={text:?} width={width} cursor={cursor}: row {row} >= line count {}",
+                wrapped_lines.len()
+            );
+
+            let line = wrapped_lines[row];
+
+            let at_char = text[cursor..].chars().next();
+            if at_char == Some('\n') || at_char.is_none() {
+                // Cursor at a newline or end of text: sits at end of current line.
+                assert!(
+                    col <= line.len(),
+                    "text={text:?} width={width} cursor={cursor}: \
+                     col {col} > line len {} at row {row}",
+                    line.len()
+                );
+            } else {
+                // Cursor points at a visible character; it should match.
+                let expected_char = at_char.unwrap();
+                let actual_char = line[col..].chars().next().unwrap_or('\0');
+                assert_eq!(
+                    actual_char, expected_char,
+                    "text={text:?} width={width} cursor={cursor}: \
+                     at ({row},{col}) expected {expected_char:?} got {actual_char:?}\n\
+                     wrapped={wrapped:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn consistency_short_text() {
+        assert_cursor_wrap_consistency("hello", 10);
+    }
+
+    #[test]
+    fn consistency_exact_width() {
+        assert_cursor_wrap_consistency("abcde", 5);
+    }
+
+    #[test]
+    fn consistency_wrapping_text() {
+        assert_cursor_wrap_consistency("abcdefghijklmno", 5);
+    }
+
+    #[test]
+    fn consistency_with_newlines() {
+        assert_cursor_wrap_consistency("abc\ndef\nghi", 5);
+    }
+
+    #[test]
+    fn consistency_mixed_wrap_and_newlines() {
+        assert_cursor_wrap_consistency("abcdefg\nhij", 4);
+    }
+
+    #[test]
+    fn consistency_width_one() {
+        assert_cursor_wrap_consistency("abc", 1);
+    }
+
+    #[test]
+    fn consistency_long_commit_message() {
+        let msg = "fix: align commit input text wrapping with cursor position calculation for correctness";
+        for w in 5..30 {
+            assert_cursor_wrap_consistency(msg, w);
+        }
+    }
+
+    // ── Ratatui TestBackend rendering test ──────────────────────────
+
+    /// Render wrapped text into a Ratatui TestBackend and verify the character
+    /// at the calculated cursor position matches the expected character.
+    #[test]
+    fn rendered_cursor_matches_buffer_content() {
+        let text = "abcdefghijklmno";
+        let width: u16 = 5;
+        let height: u16 = 4;
+
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Test cursor at several positions including wrap boundaries.
+        for cursor in [0usize, 4, 5, 7, 10, 14] {
+            let wrapped = wrap_text_at_width(text, width as usize);
+            let (crow, ccol) = cursor_pos_in_wrapped(text, cursor, width as usize);
+
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    Paragraph::new(wrapped.as_str()).render(area, frame.buffer_mut());
+                })
+                .unwrap();
+
+            let buf = terminal.backend().buffer();
+            let cell = buf.cell((ccol as u16, crow as u16)).unwrap();
+            let expected = &text[cursor..cursor + 1];
+            assert_eq!(
+                cell.symbol(), expected,
+                "cursor={cursor} at ({crow},{ccol}): buffer has {:?}, expected {expected:?}",
+                cell.symbol()
+            );
+        }
+    }
+
+    /// Verify that after deleting a character near a wrap boundary, the cursor
+    /// still points to the correct cell in the rendered buffer.
+    #[test]
+    fn cursor_correct_after_deletion_near_wrap() {
+        let width: u16 = 5;
+        let height: u16 = 4;
+
+        // Simulate: text is "abcdefgh", cursor at 5 ('f'), delete → "abcdegh", cursor at 5 ('g').
+        let original = "abcdefgh";
+        let delete_at = 5; // byte index of 'f'
+        let after_delete = format!("{}{}", &original[..delete_at], &original[delete_at + 1..]);
+        let new_cursor = delete_at; // cursor stays at same byte pos, now pointing at 'g'
+
+        let wrapped = wrap_text_at_width(&after_delete, width as usize);
+        let (crow, ccol) = cursor_pos_in_wrapped(&after_delete, new_cursor, width as usize);
+
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                Paragraph::new(wrapped.as_str()).render(area, frame.buffer_mut());
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let cell = buf.cell((ccol as u16, crow as u16)).unwrap();
+        let expected_char = after_delete[new_cursor..].chars().next().unwrap();
+        assert_eq!(
+            cell.symbol(),
+            expected_char.to_string(),
+            "After deletion: cursor at ({crow},{ccol}) should show {expected_char:?}, got {:?}",
+            cell.symbol()
+        );
+    }
 }
