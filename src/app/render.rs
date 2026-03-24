@@ -459,6 +459,7 @@ impl App {
         if hint_area.height > 0 {
             // Pre-compute all key labels so they outlive the Span borrows.
             let exit_key = self.bindings.label_for(Action::ExitInteractive);
+            let fullscreen_key = self.bindings.label_for(Action::ToggleFullscreen);
             let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
             let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
             let interact = self.bindings.labels_for(Action::InteractAgent);
@@ -480,7 +481,9 @@ impl App {
                     desc_style,
                 ));
                 spans.extend(self.theme.dim_key_badge(&exit_key, Color::Reset));
-                spans.push(Span::styled(" to bring the focus back.", desc_style));
+                spans.push(Span::styled(" to bring the focus back. ", desc_style));
+                spans.extend(self.theme.dim_key_badge(&fullscreen_key, Color::Reset));
+                spans.push(Span::styled(" fullscreen.", desc_style));
                 Line::from(spans)
             } else if scrollback_offset > 0 {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
@@ -500,6 +503,8 @@ impl App {
                 if session_active {
                     spans.extend(self.theme.dim_key_badge(&interact, Color::Reset));
                     spans.push(Span::styled(" to interact. ", desc_style));
+                    spans.extend(self.theme.dim_key_badge(&fullscreen_key, Color::Reset));
+                    spans.push(Span::styled(" fullscreen. ", desc_style));
                     spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
                     spans.push(Span::styled(" ", desc_style));
                     spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
@@ -721,11 +726,8 @@ impl App {
                 .render(text_area, frame.buffer_mut());
 
             if focused {
-                let (cursor_row, cursor_col) = cursor_pos_in_wrapped(
-                    &self.commit_input,
-                    self.commit_input_cursor,
-                    text_w,
-                );
+                let (cursor_row, cursor_col) =
+                    cursor_pos_in_wrapped(&self.commit_input, self.commit_input_cursor, text_w);
                 let screen_row = cursor_row.saturating_sub(self.commit_scroll);
                 let cx = text_area.x + cursor_col as u16;
                 let cy = text_area.y + screen_row;
@@ -1061,35 +1063,39 @@ impl App {
                 } else {
                     "Command Palette"
                 };
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let search_key = self.bindings.label_for(Action::SearchToggle);
                 let mut bottom_spans = vec![Span::raw(" ")];
                 if *searching {
-                    bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge(&confirm_key, Color::Reset));
                     bottom_spans.push(Span::styled(
                         " done  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
-                    bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge(&close_key, Color::Reset));
                     bottom_spans.push(Span::styled(
                         " clear",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
                 } else {
-                    bottom_spans.extend(self.theme.key_badge("/", Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge(&search_key, Color::Reset));
                     bottom_spans.push(Span::styled(
                         " search  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
-                    bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge(&confirm_key, Color::Reset));
                     bottom_spans.push(Span::styled(
                         " run  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
+                    // Tab autocomplete is text-input behavior, not a rebindable action.
                     bottom_spans.extend(self.theme.key_badge("Tab", Color::Reset));
                     bottom_spans.push(Span::styled(
                         " complete  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
-                    bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge(&close_key, Color::Reset));
                     bottom_spans.push(Span::styled(
                         " cancel",
                         Style::default().fg(self.theme.hint_desc_fg),
@@ -1205,8 +1211,14 @@ impl App {
                     Paragraph::new(input_text)
                         .block(self.themed_overlay_block(&title))
                         .render(filter_area, frame.buffer_mut());
+                    let confirm_key = self.bindings.label_for(Action::Confirm);
+                    let close_key = self.bindings.label_for(Action::CloseOverlay);
+                    let search_key = self.bindings.label_for(Action::SearchToggle);
+                    let open_key = self.bindings.label_for(Action::OpenEntry);
+                    let goto_key = self.bindings.label_for(Action::GoToPath);
                     let mut bottom_spans = vec![Span::raw(" ")];
                     if *editing_path {
+                        // Path editor: Tab/Enter/Esc are text-input controls, not rebindable.
                         bottom_spans.extend(self.theme.key_badge("Tab", Color::Reset));
                         bottom_spans.push(Span::styled(
                             " complete  ",
@@ -1223,33 +1235,33 @@ impl App {
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
                     } else if *searching {
-                        bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
+                        bottom_spans.extend(self.theme.key_badge(&confirm_key, Color::Reset));
                         bottom_spans.push(Span::styled(
                             " done  ",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
-                        bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
+                        bottom_spans.extend(self.theme.key_badge(&close_key, Color::Reset));
                         bottom_spans.push(Span::styled(
                             " clear",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
                     } else {
-                        bottom_spans.extend(self.theme.key_badge("/", Color::Reset));
+                        bottom_spans.extend(self.theme.key_badge(&search_key, Color::Reset));
                         bottom_spans.push(Span::styled(
                             " search  ",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
-                        bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
+                        bottom_spans.extend(self.theme.key_badge(&open_key, Color::Reset));
                         bottom_spans.push(Span::styled(
                             " open  ",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
-                        bottom_spans.extend(self.theme.key_badge("g", Color::Reset));
+                        bottom_spans.extend(self.theme.key_badge(&goto_key, Color::Reset));
                         bottom_spans.push(Span::styled(
                             " go to  ",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
-                        bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
+                        bottom_spans.extend(self.theme.key_badge(&close_key, Color::Reset));
                         bottom_spans.push(Span::styled(
                             " cancel",
                             Style::default().fg(self.theme.hint_desc_fg),
@@ -1269,28 +1281,33 @@ impl App {
                         &mut state,
                     );
                 } else {
+                    let search_key = self.bindings.label_for(Action::SearchToggle);
+                    let open_key = self.bindings.label_for(Action::OpenEntry);
+                    let add_key = self.bindings.label_for(Action::AddCurrentDir);
+                    let goto_key = self.bindings.label_for(Action::GoToPath);
+                    let close_key = self.bindings.label_for(Action::CloseOverlay);
                     let mut bottom_spans = vec![Span::raw(" ")];
-                    bottom_spans.extend(self.theme.key_badge("/", Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge(&search_key, Color::Reset));
                     bottom_spans.push(Span::styled(
                         " search  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
-                    bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge(&open_key, Color::Reset));
                     bottom_spans.push(Span::styled(
                         " open  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
-                    bottom_spans.extend(self.theme.key_badge("o", Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge(&add_key, Color::Reset));
                     bottom_spans.push(Span::styled(
                         " add current  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
-                    bottom_spans.extend(self.theme.key_badge("g", Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge(&goto_key, Color::Reset));
                     bottom_spans.push(Span::styled(
                         " go to  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
-                    bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge(&close_key, Color::Reset));
                     bottom_spans.push(Span::styled(
                         " cancel",
                         Style::default().fg(self.theme.hint_desc_fg),
@@ -1617,9 +1634,7 @@ impl App {
                 )
                 .render(discard_area, frame.buffer_mut());
             }
-            PromptState::RenameSession {
-                input, cursor, ..
-            } => {
+            PromptState::RenameSession { input, cursor, .. } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(56, 14, frame.area());
                 Clear.render(area, frame.buffer_mut());
@@ -1653,21 +1668,14 @@ impl App {
                         Span::raw(format!(" {before}")),
                         Span::styled(
                             cursor_char.to_string(),
-                            Style::default()
-                                .fg(Color::Black)
-                                .bg(Color::White),
+                            Style::default().fg(Color::Black).bg(Color::White),
                         ),
                         Span::raw(rest.to_string()),
                     ])
                 } else {
                     Line::from(vec![
                         Span::raw(format!(" {input}")),
-                        Span::styled(
-                            " ",
-                            Style::default()
-                                .fg(Color::Black)
-                                .bg(Color::White),
-                        ),
+                        Span::styled(" ", Style::default().fg(Color::Black).bg(Color::White)),
                     ])
                 };
                 Paragraph::new(display)
@@ -1679,13 +1687,15 @@ impl App {
                     )
                     .render(input_area, frame.buffer_mut());
 
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
                 let mut hints = vec![Span::raw(" ")];
-                hints.extend(self.theme.key_badge("Enter", Color::Reset));
+                hints.extend(self.theme.key_badge(&confirm_key, Color::Reset));
                 hints.push(Span::styled(
                     " confirm  ",
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
-                hints.extend(self.theme.key_badge("Esc", Color::Reset));
+                hints.extend(self.theme.key_badge(&close_key, Color::Reset));
                 hints.push(Span::styled(
                     " cancel",
                     Style::default().fg(self.theme.hint_desc_fg),
@@ -1697,6 +1707,10 @@ impl App {
     }
 
     fn render_overlay(&mut self, frame: &mut Frame) {
+        if self.fullscreen_agent {
+            self.render_fullscreen_agent(frame);
+            return;
+        }
         if !matches!(self.prompt, PromptState::None) {
             self.render_prompt(frame);
             return;
@@ -1704,6 +1718,13 @@ impl App {
         if self.help_scroll.is_some() {
             self.render_help(frame);
         }
+    }
+
+    fn render_fullscreen_agent(&mut self, frame: &mut Frame) {
+        self.render_dim_overlay(frame);
+        let area = centered_rect(96, 94, frame.area());
+        Clear.render(area, frame.buffer_mut());
+        self.render_agent_terminal(frame, area, " Agent (fullscreen) ", true);
     }
 
     fn themed_block<'a>(&self, title: &'a str, focused: bool) -> Block<'a> {
@@ -1854,7 +1875,7 @@ fn cursor_pos_in_wrapped(text: &str, cursor: usize, width: usize) -> (u16, usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
 
     // ── Unit tests for wrap_text_at_width ──────────────────────────
 
@@ -1881,27 +1902,18 @@ mod tests {
 
     #[test]
     fn wrap_multiple_lines() {
-        assert_eq!(
-            wrap_text_at_width("abcdefghij", 3),
-            "abc\ndef\nghi\nj"
-        );
+        assert_eq!(wrap_text_at_width("abcdefghij", 3), "abc\ndef\nghi\nj");
     }
 
     #[test]
     fn wrap_preserves_existing_newlines() {
-        assert_eq!(
-            wrap_text_at_width("ab\ncdefgh", 5),
-            "ab\ncdefg\nh"
-        );
+        assert_eq!(wrap_text_at_width("ab\ncdefgh", 5), "ab\ncdefg\nh");
     }
 
     #[test]
     fn wrap_newline_resets_column() {
         // "abcde" fills width 5, then "\n" resets, then "fg" fits.
-        assert_eq!(
-            wrap_text_at_width("abcde\nfg", 5),
-            "abcde\n\nfg"
-        );
+        assert_eq!(wrap_text_at_width("abcde\nfg", 5), "abcde\n\nfg");
     }
 
     #[test]
@@ -2064,7 +2076,8 @@ mod tests {
             let cell = buf.cell((ccol as u16, crow as u16)).unwrap();
             let expected = &text[cursor..cursor + 1];
             assert_eq!(
-                cell.symbol(), expected,
+                cell.symbol(),
+                expected,
                 "cursor={cursor} at ({crow},{ccol}): buffer has {:?}, expected {expected:?}",
                 cell.symbol()
             );

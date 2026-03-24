@@ -272,7 +272,8 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     let mut config: Config = toml::from_str(&raw)
         .with_context(|| format!("failed to parse {}", paths.config_path.display()))?;
     config.providers.ensure_defaults();
-    let _ = save_config(&paths.config_path, &config);
+    let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
+    let _ = save_config(&paths.config_path, &config, &bindings);
     Ok(config)
 }
 
@@ -290,6 +291,12 @@ enum FieldValue {
     MultilineStr(Option<String>),
 }
 
+/// A comment source: static string or dynamically built.
+enum CommentSource {
+    Static(&'static str),
+    Dynamic(String),
+}
+
 /// One entry in the config file layout.
 enum ConfigEntry {
     /// A comment line (must include the leading `#`).
@@ -301,7 +308,7 @@ enum ConfigEntry {
     /// A key = value line with an optional comment above it.
     Field {
         key: &'static str,
-        comment: Option<&'static str>,
+        comment: Option<CommentSource>,
         value_fn: fn(&Config) -> FieldValue,
     },
     /// Renders all `[providers.*]` sub-tables dynamically.
@@ -312,7 +319,7 @@ enum ConfigEntry {
     Keys,
 }
 
-fn config_schema() -> Vec<ConfigEntry> {
+fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
     vec![
         ConfigEntry::Comment("# dux configuration"),
         ConfigEntry::Comment(
@@ -322,22 +329,26 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Section("defaults"),
         ConfigEntry::Field {
             key: "provider",
-            comment: Some("# Which provider new sessions use unless a project overrides it."),
+            comment: Some(CommentSource::Static(
+                "# Which provider new sessions use unless a project overrides it.",
+            )),
             value_fn: |c| FieldValue::Str(c.defaults.provider.clone()),
         },
         ConfigEntry::Field {
             key: "start_directory",
-            comment: Some("# Starting directory for the project browser."),
+            comment: Some(CommentSource::Static(
+                "# Starting directory for the project browser.",
+            )),
             value_fn: |c| FieldValue::OptStr(c.defaults.start_directory.clone()),
         },
         ConfigEntry::Blank,
         ConfigEntry::Field {
             key: "commit_prompt",
-            comment: Some(
-                "# Prompt sent to the AI provider when generating commit messages (Ctrl+G).\n\
+            comment: Some(CommentSource::Dynamic(format!(
+                "# Prompt sent to the AI provider when generating commit messages ({generate_commit_key}).\n\
                  # The provider will inspect the staged diff on its own.\n\
                  # Override per-project by adding commit_prompt in a [[projects]] entry.",
-            ),
+            ))),
             value_fn: |c| FieldValue::MultilineStr(c.defaults.commit_prompt.clone()),
         },
         ConfigEntry::Blank,
@@ -345,21 +356,25 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Section("logging"),
         ConfigEntry::Field {
             key: "level",
-            comment: Some("# Log level can be error, info, or debug."),
+            comment: Some(CommentSource::Static(
+                "# Log level can be error, info, or debug.",
+            )),
             value_fn: |c| FieldValue::Str(c.logging.level.clone()),
         },
         ConfigEntry::Field {
             key: "path",
-            comment: Some("# Relative paths are resolved from the dux config directory."),
+            comment: Some(CommentSource::Static(
+                "# Relative paths are resolved from the dux config directory.",
+            )),
             value_fn: |c| FieldValue::Str(c.logging.path.clone()),
         },
         ConfigEntry::Blank,
         ConfigEntry::Section("ui"),
         ConfigEntry::Field {
             key: "left_width_pct",
-            comment: Some(
+            comment: Some(CommentSource::Static(
                 "# Initial pane sizing percentages. They can still be resized at runtime.",
-            ),
+            )),
             value_fn: |c| FieldValue::U16(c.ui.left_width_pct),
         },
         ConfigEntry::Field {
@@ -374,9 +389,9 @@ fn config_schema() -> Vec<ConfigEntry> {
     ]
 }
 
-fn render_config(config: &Config) -> String {
+fn render_config(config: &Config, generate_commit_key: &str) -> String {
     let mut out = String::new();
-    for entry in config_schema() {
+    for entry in config_schema(generate_commit_key) {
         match entry {
             ConfigEntry::Comment(text) => {
                 out.push_str(text);
@@ -392,7 +407,10 @@ fn render_config(config: &Config) -> String {
                 value_fn,
             } => {
                 if let Some(c) = comment {
-                    out.push_str(c);
+                    match c {
+                        CommentSource::Static(s) => out.push_str(s),
+                        CommentSource::Dynamic(s) => out.push_str(&s),
+                    }
                     out.push('\n');
                 }
                 match value_fn(config) {
@@ -409,7 +427,8 @@ fn render_config(config: &Config) -> String {
                         let _ = writeln!(out, "{key} = {n}");
                     }
                     FieldValue::MultilineStr(Some(s)) => {
-                        let _ = writeln!(out, "{key} = \"\"\"\n{s}\"\"\"");
+                        let escaped = escape_toml_multiline(&s);
+                        let _ = writeln!(out, "{key} = \"\"\"\n{escaped}\"\"\"");
                     }
                     FieldValue::MultilineStr(None) => {
                         let _ = writeln!(out, "{key} = \"\"");
@@ -425,11 +444,18 @@ fn render_config(config: &Config) -> String {
 }
 
 pub fn render_default_config() -> String {
-    render_config(&Config::default())
+    let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&KeysConfig::default());
+    let key = bindings.label_for(crate::keybindings::Action::GenerateCommitMessage);
+    render_config(&Config::default(), &key)
 }
 
-pub fn save_config(config_path: &Path, config: &Config) -> Result<()> {
-    let body = render_config(config);
+pub fn save_config(
+    config_path: &Path,
+    config: &Config,
+    bindings: &crate::keybindings::RuntimeBindings,
+) -> Result<()> {
+    let key = bindings.label_for(crate::keybindings::Action::GenerateCommitMessage);
+    let body = render_config(config, &key);
     fs::write(config_path, body)
         .with_context(|| format!("failed to write {}", config_path.display()))?;
     Ok(())
@@ -505,11 +531,19 @@ fn render_projects(out: &mut String, projects: &[ProjectConfig]) {
                 );
             }
             if let Some(prompt) = &project.commit_prompt {
-                let _ = writeln!(out, "commit_prompt = \"\"\"\n{prompt}\"\"\"");
+                let escaped = escape_toml_multiline(prompt);
+                let _ = writeln!(out, "commit_prompt = \"\"\"\n{escaped}\"\"\"");
             }
             out.push('\n');
         }
     }
+}
+
+/// Escape triple-quotes in a TOML multiline basic string.
+/// Per the TOML spec, `"""` inside `"""..."""` can be included by escaping
+/// at least one quote: `""\"`.
+fn escape_toml_multiline(value: &str) -> String {
+    value.replace("\"\"\"", "\"\"\\\"")
 }
 
 fn escape_toml_string(value: &str) -> String {
@@ -667,6 +701,14 @@ fn discover_root(home: &Path, xdg_config_home: Option<std::ffi::OsString>) -> Pa
 mod tests {
     use super::*;
 
+    /// Render config using default keybinding labels (for tests that don't need custom bindings).
+    fn render_config_default(config: &Config) -> String {
+        let bindings =
+            crate::keybindings::RuntimeBindings::from_keys_config(&KeysConfig::default());
+        let key = bindings.label_for(crate::keybindings::Action::GenerateCommitMessage);
+        render_config(config, &key)
+    }
+
     #[test]
     fn default_config_is_commented_and_complete() {
         let rendered = render_default_config();
@@ -721,7 +763,7 @@ mod tests {
             default_provider: None,
             commit_prompt: None,
         });
-        let rendered = render_config(&config);
+        let rendered = render_config_default(&config);
         let parsed: Config = toml::from_str(&rendered).expect("should parse back");
         assert_eq!(parsed.projects[0].path, config.projects[0].path);
         assert_eq!(parsed.projects[0].name, config.projects[0].name);
@@ -737,7 +779,7 @@ mod tests {
             default_provider: None,
             commit_prompt: None,
         });
-        let rendered = render_config(&config);
+        let rendered = render_config_default(&config);
         let parsed: Config = toml::from_str(&rendered).expect("should parse back");
         assert_eq!(parsed.projects[0].path, config.projects[0].path);
         assert_eq!(parsed.projects[0].name, config.projects[0].name);
@@ -747,7 +789,7 @@ mod tests {
     fn default_config_round_trips_through_toml() {
         let rendered = render_default_config();
         let parsed: Config = toml::from_str(&rendered).expect("default config should parse");
-        let re_rendered = render_config(&parsed);
+        let re_rendered = render_config_default(&parsed);
         assert_eq!(
             rendered, re_rendered,
             "render → parse → render should be stable"
@@ -834,6 +876,33 @@ mod tests {
         assert_eq!(
             config.commit_prompt_for_project("/any/project"),
             DEFAULT_COMMIT_PROMPT
+        );
+    }
+
+    #[test]
+    fn multiline_string_with_triple_quotes_roundtrips() {
+        let mut config = Config::default();
+        config.defaults.commit_prompt =
+            Some("Use triple \"\"\" quotes in your prompt.".to_string());
+        let rendered = render_config_default(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("should parse back");
+        assert_eq!(
+            parsed.defaults.commit_prompt.as_deref(),
+            Some("Use triple \"\"\" quotes in your prompt."),
+        );
+    }
+
+    #[test]
+    fn config_comment_uses_dynamic_keybinding_label() {
+        let rendered = render_default_config();
+        // The default binding for GenerateCommitMessage is Ctrl-g.
+        assert!(
+            rendered.contains("(Ctrl-g)"),
+            "config comment should include the dynamic keybinding label"
+        );
+        assert!(
+            !rendered.contains("(Ctrl+G)"),
+            "config comment should NOT contain hardcoded Ctrl+G"
         );
     }
 }

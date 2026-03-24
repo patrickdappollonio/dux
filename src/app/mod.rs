@@ -59,6 +59,7 @@ pub struct App {
     pub(crate) help_scroll: Option<u16>,
     pub(crate) last_help_height: u16,
     pub(crate) last_help_lines: u16,
+    pub(crate) fullscreen_agent: bool,
     pub(crate) status: StatusLine,
     pub(crate) prompt: PromptState,
     pub(crate) input_target: InputTarget,
@@ -295,6 +296,7 @@ impl App {
             help_scroll: None,
             last_help_height: 0,
             last_help_lines: 0,
+            fullscreen_agent: false,
             status: StatusLine::new("Press p to add a project, a to create an agent, ? for help."),
             prompt: PromptState::None,
             input_target: InputTarget::None,
@@ -361,6 +363,12 @@ impl App {
     }
 
     pub(crate) fn close_top_overlay(&mut self) -> bool {
+        if self.fullscreen_agent {
+            self.fullscreen_agent = false;
+            let key = self.bindings.label_for(Action::ToggleFullscreen);
+            self.set_info(format!("Exited fullscreen. Press {key} to re-enter."));
+            return true;
+        }
         if !matches!(self.prompt, PromptState::None) {
             self.prompt = PromptState::None;
             self.set_info("Closed overlay.");
