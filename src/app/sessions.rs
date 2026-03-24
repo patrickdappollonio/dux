@@ -29,9 +29,15 @@ impl App {
             tab_index: 0,
         };
         self.spawn_browser_entries(&start_dir);
-        self.set_info(
-            "Project browser: Enter opens folders, o adds current dir, / to search, g to go to a path.",
-        );
+        {
+            let open = self.bindings.label_for(Action::OpenEntry);
+            let add = self.bindings.label_for(Action::AddCurrentDir);
+            let search = self.bindings.label_for(Action::SearchToggle);
+            let goto = self.bindings.label_for(Action::GoToPath);
+            self.set_info(format!(
+                "Project browser: {open} opens folders, {add} adds current dir, {search} to search, {goto} to go to a path.",
+            ));
+        }
         Ok(())
     }
 
@@ -73,7 +79,7 @@ impl App {
             default_provider: None,
             commit_prompt: None,
         });
-        save_config(&self.paths.config_path, &self.config)?;
+        save_config(&self.paths.config_path, &self.config, &self.bindings)?;
         self.projects.push(Project {
             id: project_id,
             name: display_name.clone(),
@@ -248,7 +254,7 @@ impl App {
         {
             project_config.default_provider = Some(next.as_str().to_string());
         }
-        save_config(&self.paths.config_path, &self.config)?;
+        save_config(&self.paths.config_path, &self.config, &self.bindings)?;
         for session in self
             .sessions
             .iter_mut()
@@ -275,7 +281,7 @@ impl App {
         self.config
             .projects
             .retain(|p| Path::new(&p.path) != Path::new(&project.path));
-        save_config(&self.paths.config_path, &self.config)?;
+        save_config(&self.paths.config_path, &self.config, &self.bindings)?;
         self.rebuild_left_items();
         self.selected_left = self.selected_left.saturating_sub(1);
         self.set_info(format!("Removed project \"{}\" from app", project.name));
@@ -314,7 +320,7 @@ impl App {
         self.config
             .projects
             .retain(|candidate| Path::new(&candidate.path) != Path::new(&project.path));
-        save_config(&self.paths.config_path, &self.config)?;
+        save_config(&self.paths.config_path, &self.config, &self.bindings)?;
         self.rebuild_left_items();
         self.selected_left = self.selected_left.saturating_sub(1);
         self.reload_changed_files();

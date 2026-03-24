@@ -75,6 +75,7 @@ When making changes, edit only the relevant submodule. If you need to add a new 
 - Route new modal UI through `PromptState` so `Esc` keeps working uniformly.
 - Prefer command-palette actions over adding many more global hotkeys.
 - Keybinding labels shown to the user must be lowercase (e.g. `ctrl+g`, not `Ctrl+G`) to avoid implying that Shift is required. The `^X` notation (e.g. `^P`) is acceptable in footer hint bars since its meaning is explained in the help overlay.
+- Never hardcode keybinding labels in user-facing strings (config comments, status messages, UI text). All keybindings are user-configurable — always look up the actual binding via `RuntimeBindings::label_for()` so labels stay accurate after rebinding. The only exception is pure text-input contexts (typing characters, backspace, cursor movement in text fields).
 - Keep agent creation and other blocking git/provider work in background workers.
 - The PTY approach is CLI-agnostic: any terminal command can be used as a provider. Keep it generic.
 

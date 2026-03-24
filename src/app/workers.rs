@@ -51,16 +51,23 @@ impl App {
                     self.commit_input_cursor = self.commit_input.len();
                     self.commit_generating = false;
                     self.input_target = InputTarget::CommitMessage;
-                    self.set_info(
-                        "AI commit message generated. Press Esc to exit, then c to commit.",
-                    );
+                    {
+                        let exit_key = self.bindings.label_for(Action::ExitCommitInput);
+                        let commit_key = self.bindings.label_for(Action::CommitChanges);
+                        self.set_info(format!(
+                            "AI commit message generated. Press {exit_key} to exit, then {commit_key} to commit.",
+                        ));
+                    }
                 }
                 WorkerEvent::CommitMessageFailed(err) => {
                     self.commit_generating = false;
-                    self.set_error(format!(
-                        "Failed to generate AI commit message: {err}. \
-                         You can write one manually or retry with ^G.",
-                    ));
+                    {
+                        let gen_key = self.bindings.label_for(Action::GenerateCommitMessage);
+                        self.set_error(format!(
+                            "Failed to generate AI commit message: {err}. \
+                             You can write one manually or retry with {gen_key}.",
+                        ));
+                    }
                 }
                 WorkerEvent::PushCompleted(result) => match result {
                     Ok(()) => self.set_info(

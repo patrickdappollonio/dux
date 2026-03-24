@@ -288,6 +288,9 @@ impl App {
                         self.reconnect_selected_session()?;
                     }
                 }
+                Action::ToggleFullscreen if !in_diff => {
+                    self.fullscreen_agent = !self.fullscreen_agent;
+                }
                 Action::ScrollPageUp => {
                     if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
                         let page = self.last_diff_height.max(1);
@@ -514,14 +517,12 @@ impl App {
         let tx = self.worker_tx.clone();
         self.commit_generating = true;
         self.set_busy("Generating AI commit message from staged diff…");
-        thread::spawn(move || {
-            match prov.run_oneshot(&prompt, &worktree) {
-                Ok(msg) => {
-                    let _ = tx.send(WorkerEvent::CommitMessageGenerated(msg));
-                }
-                Err(e) => {
-                    let _ = tx.send(WorkerEvent::CommitMessageFailed(e.to_string()));
-                }
+        thread::spawn(move || match prov.run_oneshot(&prompt, &worktree) {
+            Ok(msg) => {
+                let _ = tx.send(WorkerEvent::CommitMessageGenerated(msg));
+            }
+            Err(e) => {
+                let _ = tx.send(WorkerEvent::CommitMessageFailed(e.to_string()));
             }
         });
         Ok(())
@@ -613,6 +614,14 @@ impl App {
             return Ok(false);
         }
 
+        // Toggle fullscreen overlay (default: ctrl-e) without leaving interactive mode.
+        if let Some(Action::ToggleFullscreen) =
+            self.bindings.lookup(&key, BindingScope::Interactive)
+        {
+            self.fullscreen_agent = !self.fullscreen_agent;
+            return Ok(false);
+        }
+
         match key.code {
             KeyCode::Esc => {
                 let _ = provider.write_bytes(b"\x1b");
@@ -671,65 +680,75 @@ impl App {
     }
 
     fn handle_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
-        if let PromptState::Command {
-            input,
-            selected,
-            searching,
-        } = &mut self.prompt
-        {
-            match key.code {
-                KeyCode::Esc => {
-                    if *searching {
-                        *searching = false;
+        if matches!(self.prompt, PromptState::Command { .. }) {
+            // Determine search state and do binding lookup before taking a mutable borrow.
+            let is_searching = matches!(
+                self.prompt,
+                PromptState::Command {
+                    searching: true,
+                    ..
+                }
+            );
+            let is_plain_char = matches!(key.code, KeyCode::Char(_))
+                && !key.modifiers.contains(KeyModifiers::CONTROL);
+            let action = if is_searching && is_plain_char {
+                None
+            } else {
+                self.bindings.lookup(&key, BindingScope::Palette)
+            };
+
+            match action {
+                Some(Action::CloseOverlay) => {
+                    if is_searching {
+                        if let PromptState::Command { searching, .. } = &mut self.prompt {
+                            *searching = false;
+                        }
                     } else {
                         self.prompt = PromptState::None;
                     }
                 }
-                KeyCode::Char('/') if !*searching => {
-                    *searching = true;
-                }
-                KeyCode::Char('j') | KeyCode::Down if !*searching => {
-                    let count = self.bindings.filtered_palette(input).len();
-                    if *selected + 1 < count {
-                        *selected += 1;
+                Some(Action::SearchToggle) if !is_searching => {
+                    if let PromptState::Command { searching, .. } = &mut self.prompt {
+                        *searching = true;
                     }
                 }
-                KeyCode::Char('k') | KeyCode::Up if !*searching => {
-                    if *selected > 0 {
-                        *selected -= 1;
+                Some(Action::MoveDown) => {
+                    if let PromptState::Command {
+                        input, selected, ..
+                    } = &mut self.prompt
+                    {
+                        let count = self.bindings.filtered_palette(input).len();
+                        if *selected + 1 < count {
+                            *selected += 1;
+                        }
                     }
                 }
-                KeyCode::Down if *searching => {
-                    let count = self.bindings.filtered_palette(input).len();
-                    if *selected + 1 < count {
-                        *selected += 1;
+                Some(Action::MoveUp) => {
+                    if let PromptState::Command { selected, .. } = &mut self.prompt {
+                        if *selected > 0 {
+                            *selected -= 1;
+                        }
                     }
                 }
-                KeyCode::Up if *searching => {
-                    if *selected > 0 {
-                        *selected -= 1;
-                    }
-                }
-                KeyCode::Backspace => {
-                    input.pop();
-                    *selected = 0;
-                }
-                KeyCode::Tab => {
-                    if let Some(binding) = self.bindings.filtered_palette(input).get(*selected) {
-                        *input = binding.palette_name.unwrap().to_string();
-                        *selected = 0;
-                    }
-                }
-                KeyCode::Enter => {
-                    if *searching {
-                        *searching = false;
+                Some(Action::Confirm) => {
+                    if is_searching {
+                        if let PromptState::Command { searching, .. } = &mut self.prompt {
+                            *searching = false;
+                        }
                     } else {
-                        let command = if let Some(binding) =
-                            self.bindings.filtered_palette(input).get(*selected)
+                        let command = if let PromptState::Command {
+                            input, selected, ..
+                        } = &self.prompt
                         {
-                            binding.palette_name.unwrap().to_string()
+                            if let Some(binding) =
+                                self.bindings.filtered_palette(input).get(*selected)
+                            {
+                                binding.palette_name.unwrap().to_string()
+                            } else {
+                                input.trim().to_string()
+                            }
                         } else {
-                            input.trim().to_string()
+                            String::new()
                         };
                         self.prompt = PromptState::None;
                         if let Err(e) = self.execute_command(command) {
@@ -737,90 +756,128 @@ impl App {
                         }
                     }
                 }
-                KeyCode::Char(c) => {
-                    if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                        input.push(c);
-                        *selected = 0;
+                _ => {
+                    // Text input fallback: Tab (autocomplete), Backspace, Char.
+                    if let PromptState::Command {
+                        input, selected, ..
+                    } = &mut self.prompt
+                    {
+                        match key.code {
+                            KeyCode::Tab => {
+                                if let Some(binding) =
+                                    self.bindings.filtered_palette(input).get(*selected)
+                                {
+                                    *input = binding.palette_name.unwrap().to_string();
+                                    *selected = 0;
+                                }
+                            }
+                            KeyCode::Backspace => {
+                                input.pop();
+                                *selected = 0;
+                            }
+                            KeyCode::Char(c) if is_plain_char => {
+                                input.push(c);
+                                *selected = 0;
+                            }
+                            _ => {}
+                        }
                     }
                 }
-                _ => {}
             }
             return Ok(false);
         }
 
-        if let PromptState::BrowseProjects {
-            current_dir,
-            entries,
-            loading,
-            selected,
-            filter,
-            searching,
-            editing_path,
-            path_input,
-            tab_completions,
-            tab_index,
-        } = &mut self.prompt
-        {
-            let mut browse_to: Option<PathBuf> = None;
+        if matches!(self.prompt, PromptState::BrowseProjects { .. }) {
+            // Check sub-mode states and do binding lookup before mutable borrow.
+            let is_editing_path = matches!(
+                self.prompt,
+                PromptState::BrowseProjects {
+                    editing_path: true,
+                    ..
+                }
+            );
+            let is_searching = matches!(
+                self.prompt,
+                PromptState::BrowseProjects {
+                    searching: true,
+                    ..
+                }
+            );
+            let is_plain_char = matches!(key.code, KeyCode::Char(_))
+                && !key.modifiers.contains(KeyModifiers::CONTROL);
 
-            if *editing_path {
-                let mut error_msg = None;
-                match key.code {
-                    KeyCode::Esc => {
-                        *editing_path = false;
-                        path_input.clear();
-                        tab_completions.clear();
-                        *tab_index = 0;
-                    }
-                    KeyCode::Backspace => {
-                        path_input.pop();
-                        tab_completions.clear();
-                        *tab_index = 0;
-                    }
-                    KeyCode::Tab | KeyCode::BackTab => {
-                        if tab_completions.is_empty() {
-                            // Build completions from current input
-                            let input_path = PathBuf::from(path_input.as_str());
-                            let (search_dir, prefix) =
-                                if input_path.is_dir() && path_input.ends_with('/') {
-                                    (input_path.clone(), String::new())
-                                } else {
-                                    let parent = input_path
-                                        .parent()
-                                        .unwrap_or_else(|| std::path::Path::new("/"));
-                                    let file_name = input_path
-                                        .file_name()
-                                        .map(|f| f.to_string_lossy().to_string())
-                                        .unwrap_or_default();
-                                    (parent.to_path_buf(), file_name)
-                                };
-                            if let Ok(read) = std::fs::read_dir(&search_dir) {
-                                let prefix_lower = prefix.to_lowercase();
-                                let mut candidates: Vec<String> = read
-                                    .filter_map(|e| e.ok())
-                                    .filter(|e| {
-                                        e.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
-                                    })
-                                    .filter(|e| {
-                                        let name = e.file_name().to_string_lossy().to_lowercase();
-                                        !name.starts_with('.') && name.starts_with(&prefix_lower)
-                                    })
-                                    .map(|e| {
-                                        let mut full = search_dir
-                                            .join(e.file_name())
-                                            .to_string_lossy()
-                                            .to_string();
-                                        full.push('/');
-                                        full
-                                    })
-                                    .collect();
-                                candidates.sort();
-                                *tab_completions = candidates;
-                                *tab_index = 0;
-                            }
-                        } else {
-                            // Cycle through existing completions
-                            if key.code == KeyCode::BackTab {
+            // Path editor is pure text input — keep hardcoded KeyCode matches.
+            if is_editing_path {
+                if let PromptState::BrowseProjects {
+                    current_dir,
+                    entries,
+                    loading,
+                    selected,
+                    filter,
+                    editing_path,
+                    path_input,
+                    tab_completions,
+                    tab_index,
+                    ..
+                } = &mut self.prompt
+                {
+                    let mut browse_to: Option<PathBuf> = None;
+                    let mut error_msg = None;
+                    match key.code {
+                        KeyCode::Esc => {
+                            *editing_path = false;
+                            path_input.clear();
+                            tab_completions.clear();
+                            *tab_index = 0;
+                        }
+                        KeyCode::Backspace => {
+                            path_input.pop();
+                            tab_completions.clear();
+                            *tab_index = 0;
+                        }
+                        KeyCode::Tab | KeyCode::BackTab => {
+                            if tab_completions.is_empty() {
+                                let input_path = PathBuf::from(path_input.as_str());
+                                let (search_dir, prefix) =
+                                    if input_path.is_dir() && path_input.ends_with('/') {
+                                        (input_path.clone(), String::new())
+                                    } else {
+                                        let parent = input_path
+                                            .parent()
+                                            .unwrap_or_else(|| std::path::Path::new("/"));
+                                        let file_name = input_path
+                                            .file_name()
+                                            .map(|f| f.to_string_lossy().to_string())
+                                            .unwrap_or_default();
+                                        (parent.to_path_buf(), file_name)
+                                    };
+                                if let Ok(read) = std::fs::read_dir(&search_dir) {
+                                    let prefix_lower = prefix.to_lowercase();
+                                    let mut candidates: Vec<String> = read
+                                        .filter_map(|e| e.ok())
+                                        .filter(|e| {
+                                            e.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+                                        })
+                                        .filter(|e| {
+                                            let name =
+                                                e.file_name().to_string_lossy().to_lowercase();
+                                            !name.starts_with('.')
+                                                && name.starts_with(&prefix_lower)
+                                        })
+                                        .map(|e| {
+                                            let mut full = search_dir
+                                                .join(e.file_name())
+                                                .to_string_lossy()
+                                                .to_string();
+                                            full.push('/');
+                                            full
+                                        })
+                                        .collect();
+                                    candidates.sort();
+                                    *tab_completions = candidates;
+                                    *tab_index = 0;
+                                }
+                            } else if key.code == KeyCode::BackTab {
                                 if *tab_index == 0 {
                                     *tab_index = tab_completions.len().saturating_sub(1);
                                 } else {
@@ -829,138 +886,187 @@ impl App {
                             } else {
                                 *tab_index = (*tab_index + 1) % tab_completions.len();
                             }
+                            if let Some(completion) = tab_completions.get(*tab_index) {
+                                *path_input = completion.clone();
+                            }
                         }
-                        if let Some(completion) = tab_completions.get(*tab_index) {
-                            *path_input = completion.clone();
+                        KeyCode::Enter => {
+                            let new_dir = PathBuf::from(path_input.trim());
+                            if new_dir.is_dir() {
+                                *current_dir = new_dir.clone();
+                                entries.clear();
+                                *loading = true;
+                                *selected = 0;
+                                filter.clear();
+                                browse_to = Some(new_dir);
+                            } else {
+                                error_msg =
+                                    Some(format!("{} is not a directory.", path_input.trim()));
+                            }
+                            *editing_path = false;
+                            path_input.clear();
+                            tab_completions.clear();
+                            *tab_index = 0;
+                        }
+                        KeyCode::Char(c) if is_plain_char => {
+                            path_input.push(c);
+                            tab_completions.clear();
+                            *tab_index = 0;
+                        }
+                        _ => {}
+                    }
+                    if let Some(msg) = error_msg {
+                        self.set_error(msg);
+                    }
+                    if let Some(dir) = browse_to {
+                        self.spawn_browser_entries(&dir);
+                    }
+                }
+                return Ok(false);
+            }
+
+            // Browser normal/search mode — use binding lookup.
+            let action = if is_searching && is_plain_char {
+                None
+            } else {
+                self.bindings.lookup(&key, BindingScope::Browser)
+            };
+
+            let mut browse_to: Option<PathBuf> = None;
+            match action {
+                Some(Action::CloseOverlay) => {
+                    if let PromptState::BrowseProjects {
+                        searching,
+                        filter,
+                        selected,
+                        ..
+                    } = &mut self.prompt
+                    {
+                        if *searching {
+                            *searching = false;
+                        } else if !filter.is_empty() {
+                            filter.clear();
+                            *selected = 0;
+                        } else {
+                            self.prompt = PromptState::None;
                         }
                     }
-                    KeyCode::Enter => {
-                        let new_dir = PathBuf::from(path_input.trim());
-                        if new_dir.is_dir() {
+                }
+                Some(Action::SearchToggle) if !is_searching => {
+                    if let PromptState::BrowseProjects { searching, .. } = &mut self.prompt {
+                        *searching = true;
+                    }
+                }
+                Some(Action::MoveDown) => {
+                    if let PromptState::BrowseProjects {
+                        entries,
+                        selected,
+                        filter,
+                        ..
+                    } = &mut self.prompt
+                    {
+                        let filtered_len = if filter.is_empty() {
+                            entries.len()
+                        } else {
+                            let needle = filter.to_lowercase();
+                            entries
+                                .iter()
+                                .filter(|e| e.label.to_lowercase().contains(&needle))
+                                .count()
+                        };
+                        if *selected + 1 < filtered_len {
+                            *selected += 1;
+                        }
+                    }
+                }
+                Some(Action::MoveUp) => {
+                    if let PromptState::BrowseProjects { selected, .. } = &mut self.prompt {
+                        if *selected > 0 {
+                            *selected -= 1;
+                        }
+                    }
+                }
+                Some(Action::GoToPath) if !is_searching => {
+                    if let PromptState::BrowseProjects {
+                        current_dir,
+                        editing_path,
+                        path_input,
+                        ..
+                    } = &mut self.prompt
+                    {
+                        *editing_path = true;
+                        let mut p = current_dir.to_string_lossy().to_string();
+                        if !p.ends_with('/') {
+                            p.push('/');
+                        }
+                        *path_input = p;
+                    }
+                }
+                Some(Action::Confirm) if is_searching => {
+                    if let PromptState::BrowseProjects { searching, .. } = &mut self.prompt {
+                        *searching = false;
+                    }
+                }
+                Some(Action::OpenEntry) if !is_searching => {
+                    if let PromptState::BrowseProjects {
+                        current_dir,
+                        entries,
+                        loading,
+                        selected,
+                        filter,
+                        ..
+                    } = &mut self.prompt
+                    {
+                        let visible: Vec<_> = if filter.is_empty() {
+                            entries.iter().collect()
+                        } else {
+                            let needle = filter.to_lowercase();
+                            entries
+                                .iter()
+                                .filter(|e| e.label.to_lowercase().contains(&needle))
+                                .collect()
+                        };
+                        if let Some(entry) = visible.get(*selected).cloned() {
+                            let new_dir = entry.path.clone();
                             *current_dir = new_dir.clone();
                             entries.clear();
                             *loading = true;
                             *selected = 0;
                             filter.clear();
                             browse_to = Some(new_dir);
-                        } else {
-                            error_msg = Some(format!("{} is not a directory.", path_input.trim()));
-                        }
-                        *editing_path = false;
-                        path_input.clear();
-                        tab_completions.clear();
-                        *tab_index = 0;
-                    }
-                    KeyCode::Char(c) => {
-                        if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                            path_input.push(c);
-                            tab_completions.clear();
-                            *tab_index = 0;
                         }
                     }
-                    _ => {}
                 }
-                if let Some(msg) = error_msg {
-                    self.set_error(msg);
-                }
-                if let Some(dir) = browse_to {
-                    self.spawn_browser_entries(&dir);
-                }
-                return Ok(false);
-            }
-
-            let filtered_len = if filter.is_empty() {
-                entries.len()
-            } else {
-                let needle = filter.to_lowercase();
-                entries
-                    .iter()
-                    .filter(|e| e.label.to_lowercase().contains(&needle))
-                    .count()
-            };
-            match key.code {
-                KeyCode::Esc => {
-                    if *searching {
-                        *searching = false;
-                    } else if !filter.is_empty() {
-                        filter.clear();
-                        *selected = 0;
-                    } else {
+                Some(Action::AddCurrentDir) if !is_searching => {
+                    if let PromptState::BrowseProjects { current_dir, .. } = &self.prompt {
+                        let path = current_dir.to_string_lossy().to_string();
                         self.prompt = PromptState::None;
+                        if let Err(e) = self.add_project(path, String::new()) {
+                            self.set_error(format!("{e:#}"));
+                        }
                     }
                 }
-                KeyCode::Char('/') if !*searching => {
-                    *searching = true;
-                }
-                KeyCode::Char('j') | KeyCode::Down if !*searching => {
-                    if *selected + 1 < filtered_len {
-                        *selected += 1;
+                _ => {
+                    // Text input fallback for search mode.
+                    if is_searching {
+                        if let PromptState::BrowseProjects {
+                            filter, selected, ..
+                        } = &mut self.prompt
+                        {
+                            match key.code {
+                                KeyCode::Backspace => {
+                                    filter.pop();
+                                    *selected = 0;
+                                }
+                                KeyCode::Char(c) if is_plain_char => {
+                                    filter.push(c);
+                                    *selected = 0;
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
-                KeyCode::Char('k') | KeyCode::Up if !*searching => {
-                    if *selected > 0 {
-                        *selected -= 1;
-                    }
-                }
-                KeyCode::Down if *searching => {
-                    if *selected + 1 < filtered_len {
-                        *selected += 1;
-                    }
-                }
-                KeyCode::Up if *searching => {
-                    if *selected > 0 {
-                        *selected -= 1;
-                    }
-                }
-                KeyCode::Backspace if *searching => {
-                    filter.pop();
-                    *selected = 0;
-                }
-                KeyCode::Char('g') if !*searching => {
-                    *editing_path = true;
-                    let mut p = current_dir.to_string_lossy().to_string();
-                    if !p.ends_with('/') {
-                        p.push('/');
-                    }
-                    *path_input = p;
-                }
-                KeyCode::Enter if *searching => {
-                    *searching = false;
-                }
-                KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') if !*searching => {
-                    let visible: Vec<_> = if filter.is_empty() {
-                        entries.iter().collect()
-                    } else {
-                        let needle = filter.to_lowercase();
-                        entries
-                            .iter()
-                            .filter(|e| e.label.to_lowercase().contains(&needle))
-                            .collect()
-                    };
-                    if let Some(entry) = visible.get(*selected).cloned() {
-                        let new_dir = entry.path.clone();
-                        *current_dir = new_dir.clone();
-                        entries.clear();
-                        *loading = true;
-                        *selected = 0;
-                        filter.clear();
-                        browse_to = Some(new_dir);
-                    }
-                }
-                KeyCode::Char('o') if !*searching => {
-                    let path = current_dir.to_string_lossy().to_string();
-                    self.prompt = PromptState::None;
-                    if let Err(e) = self.add_project(path, String::new()) {
-                        self.set_error(format!("{e:#}"));
-                    }
-                }
-                KeyCode::Char(c) if *searching => {
-                    if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                        filter.push(c);
-                        *selected = 0;
-                    }
-                }
-                _ => {}
             }
             if let Some(dir) = browse_to {
                 self.spawn_browser_entries(&dir);
@@ -974,16 +1080,12 @@ impl App {
             ..
         } = &mut self.prompt
         {
-            match key.code {
-                KeyCode::Esc => self.prompt = PromptState::None,
-                KeyCode::Left
-                | KeyCode::Right
-                | KeyCode::Tab
-                | KeyCode::Char('h')
-                | KeyCode::Char('l') => {
+            match self.bindings.lookup(&key, BindingScope::Dialog) {
+                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+                Some(Action::ToggleSelection) => {
                     *confirm_selected = !*confirm_selected;
                 }
-                KeyCode::Enter => {
+                Some(Action::Confirm) => {
                     if *confirm_selected {
                         let id = session_id.clone();
                         self.prompt = PromptState::None;
@@ -1002,16 +1104,12 @@ impl App {
             confirm_selected, ..
         } = &mut self.prompt
         {
-            match key.code {
-                KeyCode::Esc => self.prompt = PromptState::None,
-                KeyCode::Left
-                | KeyCode::Right
-                | KeyCode::Tab
-                | KeyCode::Char('h')
-                | KeyCode::Char('l') => {
+            match self.bindings.lookup(&key, BindingScope::Dialog) {
+                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+                Some(Action::ToggleSelection) => {
                     *confirm_selected = !*confirm_selected;
                 }
-                KeyCode::Enter => {
+                Some(Action::Confirm) => {
                     if *confirm_selected {
                         return Ok(true);
                     } else {
@@ -1028,16 +1126,12 @@ impl App {
             confirm_selected,
         } = &mut self.prompt
         {
-            match key.code {
-                KeyCode::Esc => self.prompt = PromptState::None,
-                KeyCode::Left
-                | KeyCode::Right
-                | KeyCode::Tab
-                | KeyCode::Char('h')
-                | KeyCode::Char('l') => {
+            match self.bindings.lookup(&key, BindingScope::Dialog) {
+                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+                Some(Action::ToggleSelection) => {
                     *confirm_selected = !*confirm_selected;
                 }
-                KeyCode::Enter => {
+                Some(Action::Confirm) => {
                     if *confirm_selected {
                         let fp = file_path.clone();
                         let ut = *is_untracked;
@@ -1148,7 +1242,7 @@ impl App {
         {
             self.config.ui.left_width_pct = self.left_width_pct;
             self.config.ui.right_width_pct = self.right_width_pct;
-            let _ = save_config(&self.paths.config_path, &self.config);
+            let _ = save_config(&self.paths.config_path, &self.config, &self.bindings);
         }
     }
 
@@ -1156,7 +1250,7 @@ impl App {
         match mouse.kind {
             MouseEventKind::Down(_) => {
                 self.set_info(
-                    "Mouse support is available for wheel navigation; resize has a keyboard fallback via Ctrl-w.",
+                    &format!("Mouse support is available for wheel navigation; resize has a keyboard fallback via {}.", self.bindings.label_for(Action::ToggleResizeMode)),
                 );
             }
             MouseEventKind::ScrollDown => match self.focus {

@@ -471,7 +471,16 @@ mod tests {
             );
         };
         run(&["init", "-b", "main"]);
-        run(&["-c", "user.name=test", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "init"]);
+        run(&[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]);
         dir
     }
 

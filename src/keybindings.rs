@@ -20,6 +20,7 @@ pub enum Action {
     // Agent pane
     InteractAgent,
     ExitInteractive,
+    ToggleFullscreen,
     ScrollPageUp,
     ScrollPageDown,
     // Files pane (git staging)
@@ -123,6 +124,7 @@ impl Action {
             Action::DeleteSession => "delete_session",
             Action::InteractAgent => "interact_agent",
             Action::ExitInteractive => "exit_interactive",
+            Action::ToggleFullscreen => "toggle_fullscreen",
             Action::ScrollPageUp => "scroll_page_up",
             Action::ScrollPageDown => "scroll_page_down",
             Action::OpenDiff => "open_diff",
@@ -172,6 +174,7 @@ impl Action {
             Action::DeleteSession => "Delete the selected session and worktree.",
             Action::InteractAgent => "Start a prompt turn for the agent.",
             Action::ExitInteractive => "Exit interactive mode (stop forwarding keys to agent).",
+            Action::ToggleFullscreen => "Toggle fullscreen overlay for the agent terminal.",
             Action::ScrollPageUp => "Scroll up one page in the agent output.",
             Action::ScrollPageDown => "Scroll down one page in the agent output.",
             Action::OpenDiff => "Open the selected file's diff.",
@@ -221,6 +224,7 @@ impl Action {
             | Action::DeleteSession => Some("Projects pane"),
             Action::InteractAgent
             | Action::ExitInteractive
+            | Action::ToggleFullscreen
             | Action::ScrollPageUp
             | Action::ScrollPageDown => Some("Agent pane"),
             Action::OpenDiff
@@ -444,6 +448,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Exit interactive mode",
         }),
         hint_contexts: &[],
+        palette: None,
+    },
+    BindingDef {
+        action: Action::ToggleFullscreen,
+        default_keys: &[key!(ctrl - e)],
+        scopes: &[BindingScope::Interactive, BindingScope::Center],
+        help: Some(HelpEntry {
+            section: "Agent pane",
+            description: "Toggle fullscreen agent overlay",
+        }),
+        hint_contexts: &[(HintContext::Center, "Fullscreen")],
         palette: None,
     },
     BindingDef {
