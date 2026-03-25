@@ -74,7 +74,8 @@ When making changes, edit only the relevant submodule. If you need to add a new 
 - Code must be production ready and modular to allow future Open Source contributors to integrate new features with ease. Do not take shortcuts.
 - Route new modal UI through `PromptState` so `Esc` keeps working uniformly.
 - Prefer command-palette actions over adding many more global hotkeys.
-- Keybinding labels shown to the user must be lowercase (e.g. `ctrl+g`, not `Ctrl+G`) to avoid implying that Shift is required. The `^X` notation (e.g. `^P`) is acceptable in footer hint bars since its meaning is explained in the help overlay.
+- Keybinding labels shown to the user should use proper casing (e.g. `Ctrl-g`, not `ctrl-g` or `CTRL-G`). Title-case modifiers (`Ctrl`, `Shift`, `Alt`) distinguish them visually from the key itself. The `^X` notation (e.g. `^P`) is acceptable in footer hint bars since its meaning is explained in the help overlay.
+- Keybinding parsing from config is case-insensitive for modifiers and control keys — `CTRL-g`, `Ctrl-g`, and `ctrl-g` all parse identically (crokey lowercases the input). Letter keys are also lowercased during parsing, so `P` and `p` are the same binding; to bind uppercase P the user must write `shift-p`.
 - Never hardcode keybinding labels in user-facing strings (config comments, status messages, UI text). All keybindings are user-configurable — always look up the actual binding via `RuntimeBindings::label_for()` so labels stay accurate after rebinding. The only exception is pure text-input contexts (typing characters, backspace, cursor movement in text fields).
 - Keep agent creation and other blocking git/provider work in background workers.
 - The PTY approach is CLI-agnostic: any terminal command can be used as a provider. Keep it generic.

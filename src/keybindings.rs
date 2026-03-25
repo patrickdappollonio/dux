@@ -189,7 +189,7 @@ impl Action {
             Action::FocusNext => "Focus the next pane.",
             Action::FocusPrev => "Focus the previous pane.",
             Action::OpenPalette => "Open the command palette.",
-            Action::ToggleResizeMode => "Enter resize mode (h/l to resize side panes).",
+            Action::ToggleResizeMode => "Enter resize mode to resize side panes.",
             Action::ToggleSidebar => "Toggle the projects sidebar.",
             Action::ToggleHelp => "Toggle the help overlay.",
             Action::Quit => "Quit the application.",

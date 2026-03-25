@@ -119,7 +119,10 @@ impl App {
                 if exited.contains(&current.id) {
                     self.input_target = InputTarget::None;
                     self.focus = FocusPane::Left;
-                    self.set_info("Agent CLI process has exited. Press \"r\" to relaunch.");
+                    let key = self.bindings.label_for(Action::ReconnectAgent);
+                    self.set_info(format!(
+                        "Agent CLI process has exited. Press \"{key}\" to relaunch."
+                    ));
                 }
             }
         }
