@@ -190,6 +190,8 @@ impl App {
                                         .unwrap_or(false)
                                     {
                                         self.input_target = InputTarget::Agent;
+                                    } else if self.selected_session().is_some() {
+                                        self.reconnect_selected_session()?;
                                     }
                                 }
                         } else {
@@ -206,6 +208,8 @@ impl App {
                             .unwrap_or(false)
                         {
                             self.input_target = InputTarget::Agent;
+                        } else if self.selected_session().is_some() {
+                            self.reconnect_selected_session()?;
                         }
                     }
                     None => {}
@@ -218,7 +222,6 @@ impl App {
                 Action::DeleteSession => self.confirm_delete_selected_session()?,
                 Action::RenameSession => self.open_rename_session()?,
                 Action::CycleProvider => self.cycle_selected_project_provider()?,
-                Action::ReconnectAgent => self.reconnect_selected_session()?,
                 Action::CopyPath => self.copy_selected_path()?,
                 Action::ToggleProject => self.toggle_collapse_selected_project(),
                 Action::InteractAgent => {

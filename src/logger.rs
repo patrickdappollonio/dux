@@ -17,6 +17,7 @@ struct Logger {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum LogLevel {
     Error,
+    Warn,
     Info,
     Debug,
 }
@@ -26,6 +27,7 @@ impl LogLevel {
         match value {
             "debug" => Self::Debug,
             "error" => Self::Error,
+            "warn" => Self::Warn,
             _ => Self::Info,
         }
     }
@@ -33,6 +35,7 @@ impl LogLevel {
     fn as_str(self) -> &'static str {
         match self {
             Self::Error => "ERROR",
+            Self::Warn => "WARN",
             Self::Info => "INFO",
             Self::Debug => "DEBUG",
         }
@@ -52,6 +55,11 @@ pub fn init(config: &LoggingConfig, paths: &DuxPaths) {
         let _ = LOGGER.set(logger);
         info(&format!("logger initialized at {}", path.display()));
     }
+}
+
+#[allow(dead_code)] // Public API for future callers
+pub fn warn(message: &str) {
+    log(LogLevel::Warn, message);
 }
 
 pub fn info(message: &str) {
