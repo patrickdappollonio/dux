@@ -528,7 +528,8 @@ fn render_projects(out: &mut String, projects: &[ProjectConfig]) {
     );
     out.push_str("# default_provider can override the global default for one project.\n");
     if projects.is_empty() {
-        out.push_str("projects = []\n");
+        out.push_str("# [[projects]]\n");
+        out.push_str("# path = \"/path/to/your/repo\"\n");
     } else {
         for project in projects {
             out.push_str("[[projects]]\n");
@@ -821,6 +822,13 @@ mod tests {
     fn config_root_uses_xdg_config_home_when_absolute() {
         let root = discover_root(Path::new("/example/home"), Some("/tmp/xdg".into()));
         assert_eq!(root, PathBuf::from("/tmp/xdg/dux"));
+    }
+
+    #[test]
+    fn default_config_keys_valid_after_round_trip() {
+        let rendered = render_default_config();
+        let parsed: Config = toml::from_str(&rendered).expect("default config should parse");
+        validate_keys(&parsed.keys).expect("round-tripped keys should be valid");
     }
 
     #[cfg(not(target_os = "macos"))]
