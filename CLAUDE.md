@@ -32,6 +32,7 @@ Principles that guide every decision in dux. If a change conflicts with a tenet,
 ### Quality
 
 - **Prove your work with tests.** Every change should include unit tests. When feasible and low-lift, add integration tests as well.
+- When debugging a problem, before fixing it, **aim to prove your findings with a unit test**.
 
 ## Project Summary
 
