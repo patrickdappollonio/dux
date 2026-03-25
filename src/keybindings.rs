@@ -74,6 +74,24 @@ pub enum BindingScope {
     CommitInput,
 }
 
+impl BindingScope {
+    /// Human-readable scope name for error messages and diagnostics.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Global => "Global",
+            Self::Left => "Projects pane",
+            Self::Center => "Agent pane",
+            Self::Files => "Files pane",
+            Self::Interactive => "Interactive mode",
+            Self::Resize => "Resize mode",
+            Self::Palette => "Command palette",
+            Self::Browser => "Project browser",
+            Self::Dialog => "Dialog",
+            Self::CommitInput => "Commit input",
+        }
+    }
+}
+
 /// Where a binding's hint appears in the status bar cheatsheet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum HintContext {
@@ -256,12 +274,36 @@ impl Action {
     }
 }
 
+// ── Keybinding resolution semantics ──────────────────────────────────────
+//
 // Declaration order within each scope determines:
 //   - hint display order in the status bar cheatsheet
 //   - help entry order within each help section
+//   - tiebreaker when the same key is bound to multiple actions in the
+//     same scope (first match wins). This is intentional and by design.
 //
 // Pane bindings come first so their hints appear before global hints
 // which are appended at the end of every context.
+//
+// Key matching rules (see `lookup()`):
+//   - Plain bindings (no modifiers) only match events with no modifiers.
+//     A binding for `d` will not fire on Ctrl+d.
+//   - Modifier bindings require the incoming event to contain at least
+//     those modifiers (subset match).
+//
+// Case handling:
+//   - `crokey::parse()` lowercases its input, so a bare "P" in config
+//     silently becomes lowercase "p". Use `normalize_key_string()` before
+//     parsing to rewrite "P" → "shift-p" (crokey convention).
+//   - `crokey::normalized()` canonicalizes case:
+//       Char('P') + no mods  →  Char('P') + SHIFT
+//       Char('p') + SHIFT    →  Char('P') + SHIFT
+//     Both forms are equivalent after normalization, so `p` and `shift-p`
+//     can coexist as distinct bindings in the same scope.
+//
+// Conflict detection (`detect_conflicts()`) runs at startup and rejects
+// configs where the same normalized key is bound to two actions in
+// overlapping scopes.
 pub const BINDING_DEFS: &[BindingDef] = &[
     // ── Navigation (Left / Files / Palette / Browser) ─────────────
     BindingDef {
@@ -401,13 +443,13 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     },
     BindingDef {
         action: Action::ReconnectAgent,
-        default_keys: &[key!(r), key!(enter)],
-        scopes: &[BindingScope::Left, BindingScope::Center],
+        default_keys: &[key!(r)],
+        scopes: &[BindingScope::Center],
         help: Some(HelpEntry {
-            section: "Projects pane",
+            section: "Agent pane",
             description: "Restart agent CLI",
         }),
-        hint_contexts: &[(HintContext::LeftSession, "Reconnect")],
+        hint_contexts: &[(HintContext::Center, "Reconnect")],
         palette: Some(PaletteEntry {
             name: "reconnect-agent",
             description: "Restart the CLI for the selected agent",
@@ -878,6 +920,21 @@ pub fn format_key_for_config(kc: KeyCombination) -> String {
     config_format().to_string(kc).to_lowercase()
 }
 
+/// Normalize a config key string to crokey convention before parsing.
+///
+/// `crokey::parse()` lowercases its input, so a bare uppercase letter like
+/// `"P"` silently becomes lowercase `"p"`. This helper rewrites bare
+/// uppercase letters to the explicit shift form (`"P"` → `"shift-p"`) so
+/// that `crokey::parse` produces the correct `KeyCombination`.
+pub fn normalize_key_string(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() == 1 && chars[0].is_ascii_uppercase() {
+        format!("shift-{}", chars[0].to_ascii_lowercase())
+    } else {
+        s.to_string()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // RuntimeBindings: the runtime-resolved keybinding table built from config.
 // ---------------------------------------------------------------------------
@@ -912,7 +969,7 @@ impl RuntimeBindings {
                 match keys.bindings.get(config_name) {
                     Some(key_strs) => key_strs
                         .iter()
-                        .filter_map(|s| crokey::parse(s).ok())
+                        .filter_map(|s| crokey::parse(&normalize_key_string(s)).ok())
                         .collect(),
                     None => BINDING_DEFS
                         .iter()
@@ -1096,6 +1153,104 @@ impl RuntimeBindings {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Conflict detection: reject configs with duplicate keys in the same scope.
+// ---------------------------------------------------------------------------
+
+/// A detected conflict: the same key is bound to two actions in a shared scope.
+#[derive(Debug, Clone)]
+pub struct KeyConflict {
+    pub key_label: String,
+    pub scope: BindingScope,
+    pub action_a: &'static str,
+    pub action_b: &'static str,
+}
+
+/// Check whether two `KeyCombination` values would conflict in `lookup()`.
+///
+/// Mirrors the matching semantics of `RuntimeBindings::lookup()`:
+/// - Plain bindings (no modifiers) only conflict with other plain bindings.
+/// - Modifier bindings conflict only when modifiers are identical.
+fn keys_conflict(a: &KeyCombination, b: &KeyCombination) -> bool {
+    let na = normalize_backtab(a.normalized());
+    let nb = normalize_backtab(b.normalized());
+    if na.codes != nb.codes {
+        return false;
+    }
+    match (na.modifiers.is_empty(), nb.modifiers.is_empty()) {
+        (true, true) => true,
+        (true, false) | (false, true) => false,
+        (false, false) => na.modifiers == nb.modifiers,
+    }
+}
+
+/// Build the resolved key list for each action (config overrides, falling
+/// back to defaults), applying `normalize_key_string` to config values.
+fn resolve_keys(
+    keys: &crate::config::KeysConfig,
+) -> Vec<(Action, Vec<KeyCombination>, &'static [BindingScope])> {
+    BINDING_DEFS
+        .iter()
+        .map(|def| {
+            let resolved = match keys.bindings.get(def.action.config_name()) {
+                Some(key_strs) => key_strs
+                    .iter()
+                    .filter_map(|s| crokey::parse(&normalize_key_string(s)).ok())
+                    .collect(),
+                None => def.default_keys.to_vec(),
+            };
+            (def.action, resolved, def.scopes)
+        })
+        .collect()
+}
+
+/// Detect key combination conflicts across bindings that share scopes.
+///
+/// Returns all pairs of actions that bind the same normalized key in at least
+/// one overlapping scope. This is called during config validation to prevent
+/// silent shadowing (where declaration order would pick a winner).
+pub fn detect_conflicts(keys: &crate::config::KeysConfig) -> Vec<KeyConflict> {
+    let resolved = resolve_keys(keys);
+    let format = config_format();
+    let mut conflicts = Vec::new();
+
+    for i in 0..resolved.len() {
+        for j in (i + 1)..resolved.len() {
+            let (action_a, keys_a, scopes_a) = &resolved[i];
+            let (action_b, keys_b, scopes_b) = &resolved[j];
+
+            // Find scopes shared between the two bindings.
+            let shared_scopes: Vec<BindingScope> = scopes_a
+                .iter()
+                .filter(|s| scopes_b.contains(s))
+                .copied()
+                .collect();
+            if shared_scopes.is_empty() {
+                continue;
+            }
+
+            // Check every key pair for conflicts.
+            for ka in keys_a {
+                for kb in keys_b {
+                    if keys_conflict(ka, kb) {
+                        let label = format.to_string(ka.normalized()).to_lowercase();
+                        for &scope in &shared_scopes {
+                            conflicts.push(KeyConflict {
+                                key_label: label.clone(),
+                                scope,
+                                action_a: action_a.config_name(),
+                                action_b: action_b.config_name(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    conflicts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1270,5 +1425,233 @@ mod tests {
                 def.action,
             );
         }
+    }
+
+    // ── normalize_key_string tests ──────────────────────────────────────
+
+    #[test]
+    fn normalize_key_string_bare_uppercase() {
+        assert_eq!(normalize_key_string("P"), "shift-p");
+        assert_eq!(normalize_key_string("G"), "shift-g");
+        assert_eq!(normalize_key_string("A"), "shift-a");
+    }
+
+    #[test]
+    fn normalize_key_string_lowercase_unchanged() {
+        assert_eq!(normalize_key_string("p"), "p");
+        assert_eq!(normalize_key_string("j"), "j");
+    }
+
+    #[test]
+    fn normalize_key_string_modifier_combo_unchanged() {
+        assert_eq!(normalize_key_string("ctrl-p"), "ctrl-p");
+        assert_eq!(normalize_key_string("ctrl-shift-p"), "ctrl-shift-p");
+    }
+
+    #[test]
+    fn normalize_key_string_shift_letter_unchanged() {
+        assert_eq!(normalize_key_string("shift-p"), "shift-p");
+    }
+
+    #[test]
+    fn normalize_key_string_special_keys_unchanged() {
+        assert_eq!(normalize_key_string("enter"), "enter");
+        assert_eq!(normalize_key_string("space"), "space");
+        assert_eq!(normalize_key_string("tab"), "tab");
+    }
+
+    // ── Conflict detection tests ────────────────────────────────────────
+
+    #[test]
+    fn detect_conflicts_same_key_same_scope() {
+        // Bind "x" to both toggle_project and new_agent — both are in Left scope.
+        let mut keys = crate::config::KeysConfig::default();
+        keys.bindings
+            .insert("toggle_project".to_string(), vec!["x".to_string()]);
+        keys.bindings
+            .insert("new_agent".to_string(), vec!["x".to_string()]);
+        let conflicts = detect_conflicts(&keys);
+        assert!(
+            conflicts.iter().any(|c| c.key_label == "x"
+                && ((c.action_a == "toggle_project" && c.action_b == "new_agent")
+                    || (c.action_a == "new_agent" && c.action_b == "toggle_project"))),
+            "expected conflict on 'x' between toggle_project and new_agent, got: {conflicts:?}"
+        );
+    }
+
+    #[test]
+    fn detect_conflicts_different_scopes_no_conflict() {
+        // "enter" in Left-only vs Files-only should not conflict.
+        let mut keys = crate::config::KeysConfig::default();
+        keys.bindings
+            .insert("focus_agent".to_string(), vec!["enter".to_string()]);
+        keys.bindings
+            .insert("open_diff".to_string(), vec!["enter".to_string()]);
+        let conflicts = detect_conflicts(&keys);
+        // focus_agent is Left scope, open_diff is Files scope — no overlap.
+        let bad = conflicts.iter().any(|c| {
+            (c.action_a == "focus_agent" && c.action_b == "open_diff")
+                || (c.action_a == "open_diff" && c.action_b == "focus_agent")
+        });
+        assert!(!bad, "should not conflict across non-overlapping scopes");
+    }
+
+    #[test]
+    fn detect_conflicts_plain_vs_modifier_no_conflict() {
+        // "d" and "ctrl-d" in the same scope should not conflict.
+        let mut keys = crate::config::KeysConfig::default();
+        keys.bindings
+            .insert("quit".to_string(), vec!["d".to_string()]);
+        keys.bindings
+            .insert("toggle_project".to_string(), vec!["ctrl-d".to_string()]);
+        let conflicts = detect_conflicts(&keys);
+        let bad = conflicts.iter().any(|c| {
+            (c.action_a == "quit" && c.action_b == "toggle_project")
+                || (c.action_a == "toggle_project" && c.action_b == "quit")
+        });
+        assert!(
+            !bad,
+            "plain 'd' and 'ctrl-d' should not conflict: {conflicts:?}"
+        );
+    }
+
+    #[test]
+    fn detect_conflicts_default_config_clean() {
+        let keys = crate::config::KeysConfig::default();
+        let conflicts = detect_conflicts(&keys);
+        assert!(
+            conflicts.is_empty(),
+            "default config should have no conflicts, found: {conflicts:?}"
+        );
+    }
+
+    // ── Resolution semantics tests ──────────────────────────────────────
+    // These document intentional behavior for future contributors/agents.
+
+    #[test]
+    fn lookup_declaration_order_wins() {
+        // Build bindings where two actions share the same key in the same scope.
+        // The one declared earlier in BINDING_DEFS should win.
+        let bindings = RuntimeBindings::new(
+            |action| {
+                if action == Action::MoveDown || action == Action::MoveUp {
+                    // Both bound to 'x' in Left scope
+                    vec![crokey::parse("x").unwrap()]
+                } else {
+                    BINDING_DEFS
+                        .iter()
+                        .find(|d| d.action == action)
+                        .map(|d| d.default_keys.to_vec())
+                        .unwrap_or_default()
+                }
+            },
+            true,
+        );
+        let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        // MoveDown is declared before MoveUp in BINDING_DEFS
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Left),
+            Some(Action::MoveDown),
+            "first action in BINDING_DEFS should win when keys overlap"
+        );
+    }
+
+    #[test]
+    fn lookup_plain_key_ignores_shift_variant() {
+        // A plain 'p' binding should NOT match Shift+P.
+        let bindings = RuntimeBindings::new(
+            |action| {
+                if action == Action::Quit {
+                    vec![crokey::parse("p").unwrap()]
+                } else {
+                    BINDING_DEFS
+                        .iter()
+                        .find(|d| d.action == action)
+                        .map(|d| d.default_keys.to_vec())
+                        .unwrap_or_default()
+                }
+            },
+            true,
+        );
+        let shift_p = KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT);
+        assert_ne!(
+            bindings.lookup(&shift_p, BindingScope::Global),
+            Some(Action::Quit),
+            "plain 'p' binding should not match Shift+P"
+        );
+    }
+
+    #[test]
+    fn lookup_shift_key_ignores_plain() {
+        // A 'shift-p' binding should NOT match plain 'p'.
+        let bindings = RuntimeBindings::new(
+            |action| {
+                if action == Action::Quit {
+                    vec![crokey::parse("shift-p").unwrap()]
+                } else {
+                    BINDING_DEFS
+                        .iter()
+                        .find(|d| d.action == action)
+                        .map(|d| d.default_keys.to_vec())
+                        .unwrap_or_default()
+                }
+            },
+            true,
+        );
+        let plain_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        assert_ne!(
+            bindings.lookup(&plain_p, BindingScope::Global),
+            Some(Action::Quit),
+            "shift-p binding should not match plain p"
+        );
+    }
+
+    #[test]
+    fn lookup_shift_p_and_plain_p_coexist() {
+        // 'p' and 'shift-p' bound to different actions should both resolve correctly.
+        let bindings = RuntimeBindings::new(
+            |action| {
+                if action == Action::Quit {
+                    vec![crokey::parse("p").unwrap()]
+                } else if action == Action::ToggleHelp {
+                    vec![crokey::parse("shift-p").unwrap()]
+                } else {
+                    BINDING_DEFS
+                        .iter()
+                        .find(|d| d.action == action)
+                        .map(|d| d.default_keys.to_vec())
+                        .unwrap_or_default()
+                }
+            },
+            true,
+        );
+        let plain_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        let shift_p = KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT);
+        assert_eq!(
+            bindings.lookup(&plain_p, BindingScope::Global),
+            Some(Action::Quit),
+            "plain 'p' should resolve to Quit"
+        );
+        assert_eq!(
+            bindings.lookup(&shift_p, BindingScope::Global),
+            Some(Action::ToggleHelp),
+            "shift-p should resolve to Help"
+        );
+    }
+
+    #[test]
+    fn normalized_uppercase_matches_shift() {
+        // Char('P') with no modifiers should normalize identically to
+        // Char('p') with SHIFT — both represent the same physical keypress.
+        let upper = KeyCombination::new(KeyCode::Char('P'), KeyModifiers::NONE).normalized();
+        let shift = KeyCombination::new(KeyCode::Char('p'), KeyModifiers::SHIFT).normalized();
+        assert_eq!(
+            upper.codes, shift.codes,
+            "key codes should match after normalization"
+        );
+        assert_eq!(
+            upper.modifiers, shift.modifiers,
+            "modifiers should match after normalization"
+        );
     }
 }

@@ -653,6 +653,12 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
 }
 
 /// Validate all key bindings in the config. Returns a descriptive error on failure.
+///
+/// Checks:
+/// 1. Every action name is known (present in `BINDING_DEFS`).
+/// 2. Every key string parses successfully after normalization
+///    (bare uppercase letters like `"P"` are rewritten to `"shift-p"`).
+/// 3. No two actions bind the same normalized key in overlapping scopes.
 pub fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
     for (name, key_strs) in &keys.bindings {
         let valid = keybindings::BINDING_DEFS
@@ -662,10 +668,31 @@ pub fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
             return Err(format!("[keys] unknown action: \"{name}\""));
         }
         for s in key_strs {
-            crokey::parse(s)
+            let normalized = keybindings::normalize_key_string(s);
+            crokey::parse(&normalized)
                 .map_err(|_| format!("[keys] invalid key \"{s}\" for action \"{name}\""))?;
         }
     }
+
+    // Detect conflicting bindings (same key in overlapping scopes).
+    let conflicts = keybindings::detect_conflicts(keys);
+    if !conflicts.is_empty() {
+        let mut msg = String::from("[keys] conflicting keybindings detected:");
+        for c in &conflicts {
+            msg.push_str(&format!(
+                "\n  - \"{}\" is bound to both \"{}\" and \"{}\" in {}",
+                c.key_label,
+                c.action_a,
+                c.action_b,
+                c.scope.display_name(),
+            ));
+        }
+        msg.push_str(
+            "\nCheck your [keys.bindings] configuration and ensure each key is unique within its scope.",
+        );
+        return Err(msg);
+    }
+
     Ok(())
 }
 
@@ -924,6 +951,43 @@ mod tests {
         assert!(
             !rendered.contains("(Ctrl+G)"),
             "config comment should NOT contain hardcoded Ctrl+G"
+        );
+    }
+
+    #[test]
+    fn validate_keys_normalizes_bare_uppercase() {
+        let mut keys = KeysConfig::default();
+        keys.bindings
+            .insert("quit".to_string(), vec!["P".to_string()]);
+        // Should succeed — "P" is normalized to "shift-p" before parsing.
+        assert!(
+            validate_keys(&keys).is_ok(),
+            "bare uppercase 'P' should be normalized to 'shift-p' and accepted"
+        );
+    }
+
+    #[test]
+    fn validate_keys_detects_conflict() {
+        let mut keys = KeysConfig::default();
+        // Bind the same key to two actions that share the Left scope.
+        keys.bindings
+            .insert("toggle_project".to_string(), vec!["x".to_string()]);
+        keys.bindings
+            .insert("new_agent".to_string(), vec!["x".to_string()]);
+        let result = validate_keys(&keys);
+        assert!(result.is_err(), "duplicate key in same scope should error");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("conflicting"),
+            "error should mention conflict: {msg}"
+        );
+        assert!(
+            msg.contains("toggle_project"),
+            "error should name first action: {msg}"
+        );
+        assert!(
+            msg.contains("new_agent"),
+            "error should name second action: {msg}"
         );
     }
 }
