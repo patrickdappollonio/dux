@@ -271,6 +271,12 @@ impl App {
         let sessions = session_store.load_sessions()?;
         let (worker_tx, worker_rx) = mpsc::channel();
         let watched_worktree: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let initial_status = format!(
+            "Press {} to add a project, {} to create an agent, {} for help.",
+            bindings.label_for(Action::OpenProjectBrowser),
+            bindings.label_for(Action::NewAgent),
+            bindings.label_for(Action::ToggleHelp),
+        );
         let mut app = Self {
             left_width_pct: config.ui.left_width_pct,
             right_width_pct: config.ui.right_width_pct,
@@ -297,7 +303,7 @@ impl App {
             last_help_height: 0,
             last_help_lines: 0,
             fullscreen_agent: false,
-            status: StatusLine::new("Press p to add a project, a to create an agent, ? for help."),
+            status: StatusLine::new(initial_status),
             prompt: PromptState::None,
             input_target: InputTarget::None,
             worker_tx,

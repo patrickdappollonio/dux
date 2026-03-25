@@ -389,9 +389,10 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
     ]
 }
 
-fn render_config(config: &Config, generate_commit_key: &str) -> String {
+fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings) -> String {
+    let generate_commit_key = bindings.label_for(crate::keybindings::Action::GenerateCommitMessage);
     let mut out = String::new();
-    for entry in config_schema(generate_commit_key) {
+    for entry in config_schema(&generate_commit_key) {
         match entry {
             ConfigEntry::Comment(text) => {
                 out.push_str(text);
@@ -437,7 +438,7 @@ fn render_config(config: &Config, generate_commit_key: &str) -> String {
             }
             ConfigEntry::Providers => render_provider_configs(&mut out, &config.providers),
             ConfigEntry::Projects => render_projects(&mut out, &config.projects),
-            ConfigEntry::Keys => render_keys_config(&mut out, &config.keys),
+            ConfigEntry::Keys => render_keys_config(&mut out, &config.keys, bindings),
         }
     }
     out
@@ -445,8 +446,7 @@ fn render_config(config: &Config, generate_commit_key: &str) -> String {
 
 pub fn render_default_config() -> String {
     let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&KeysConfig::default());
-    let key = bindings.label_for(crate::keybindings::Action::GenerateCommitMessage);
-    render_config(&Config::default(), &key)
+    render_config(&Config::default(), &bindings)
 }
 
 pub fn save_config(
@@ -454,14 +454,17 @@ pub fn save_config(
     config: &Config,
     bindings: &crate::keybindings::RuntimeBindings,
 ) -> Result<()> {
-    let key = bindings.label_for(crate::keybindings::Action::GenerateCommitMessage);
-    let body = render_config(config, &key);
+    let body = render_config(config, bindings);
     fs::write(config_path, body)
         .with_context(|| format!("failed to write {}", config_path.display()))?;
     Ok(())
 }
 
-fn render_keys_config(out: &mut String, keys: &KeysConfig) {
+fn render_keys_config(
+    out: &mut String,
+    keys: &KeysConfig,
+    bindings: &crate::keybindings::RuntimeBindings,
+) {
     out.push_str("[keys]\n");
     out.push_str("# Keybindings configuration. Each action maps to one or more key combos.\n");
     out.push_str(
@@ -493,8 +496,19 @@ fn render_keys_config(out: &mut String, keys: &KeysConfig) {
             last_section = Some(section);
         }
 
-        // Description comment.
-        let _ = writeln!(out, "# {}", def.action.config_description());
+        // Description comment — dynamic override for actions that reference other keys.
+        let desc = if def.action == keybindings::Action::ToggleResizeMode {
+            format!(
+                "Enter resize mode ({} to resize side panes).",
+                bindings.combined_label(
+                    keybindings::Action::ResizeGrow,
+                    keybindings::Action::ResizeShrink,
+                ),
+            )
+        } else {
+            def.action.config_description().to_string()
+        };
+        let _ = writeln!(out, "# {desc}");
 
         // Value from config (or defaults if missing).
         let key_strs = keys.bindings.get(config_name).cloned().unwrap_or_else(|| {
@@ -705,8 +719,7 @@ mod tests {
     fn render_config_default(config: &Config) -> String {
         let bindings =
             crate::keybindings::RuntimeBindings::from_keys_config(&KeysConfig::default());
-        let key = bindings.label_for(crate::keybindings::Action::GenerateCommitMessage);
-        render_config(config, &key)
+        render_config(config, &bindings)
     }
 
     #[test]
