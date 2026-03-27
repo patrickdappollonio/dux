@@ -1438,6 +1438,105 @@ impl App {
                     );
                 }
             }
+            PromptState::PickEditor {
+                session_label,
+                worktree_path,
+                editors,
+                selected,
+            } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(64, 34, frame.area());
+                Clear.render(area, frame.buffer_mut());
+
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let move_down = self.bindings.label_for(Action::MoveDown);
+                let move_up = self.bindings.label_for(Action::MoveUp);
+                let mut bottom_spans = vec![Span::raw(" ")];
+                bottom_spans.extend(self.theme.key_badge(&move_down, Color::Reset));
+                bottom_spans.push(Span::styled(
+                    " down  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge(&move_up, Color::Reset));
+                bottom_spans.push(Span::styled(
+                    " up  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge(&confirm_key, Color::Reset));
+                bottom_spans.push(Span::styled(
+                    " open  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge(&close_key, Color::Reset));
+                bottom_spans.push(Span::styled(
+                    " cancel",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+
+                let [details_area, list_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(4), Constraint::Min(4)])
+                    .areas(area);
+
+                let detail_lines = vec![
+                    Line::from(vec![
+                        Span::styled(" Agent: ", Style::default().fg(self.theme.hint_desc_fg)),
+                        Span::styled(
+                            session_label.as_str(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(" Path: ", Style::default().fg(self.theme.hint_desc_fg)),
+                        Span::raw(worktree_path.as_str()),
+                    ]),
+                ];
+                Paragraph::new(detail_lines)
+                    .block(
+                        self.themed_overlay_block("Open Worktree In")
+                            .title_bottom(Line::from(bottom_spans)),
+                    )
+                    .render(details_area, frame.buffer_mut());
+
+                let configured_default = self.config.editor.default.trim();
+                let items = editors
+                    .iter()
+                    .map(|editor| {
+                        let mut spans = vec![Span::styled(
+                            format!("{:<14}", editor.label),
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        )];
+                        spans.push(Span::styled(
+                            format!(" {}", editor.command),
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ));
+                        if crate::editor::matches_configured_editor(editor, configured_default) {
+                            spans.push(Span::styled(
+                                "  default",
+                                Style::default().fg(self.theme.branch_fg),
+                            ));
+                        }
+                        ListItem::new(Line::from(spans))
+                    })
+                    .collect::<Vec<_>>();
+                let mut state = ListState::default()
+                    .with_selected(Some((*selected).min(editors.len().saturating_sub(1))));
+                StatefulWidget::render(
+                    List::new(items)
+                        .block(
+                            Block::default()
+                                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                                .border_style(Style::default().fg(self.theme.overlay_border)),
+                        )
+                        .highlight_style(self.theme.selection_style()),
+                    list_area,
+                    frame.buffer_mut(),
+                    &mut state,
+                );
+            }
             PromptState::ConfirmDeleteAgent {
                 branch_name,
                 confirm_selected,

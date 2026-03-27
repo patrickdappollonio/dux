@@ -1,4 +1,5 @@
 use super::*;
+use crate::editor;
 
 impl App {
     pub(crate) fn open_project_browser(&mut self) -> Result<()> {
@@ -419,5 +420,87 @@ impl App {
                 Ok(())
             }
         }
+    }
+
+    pub(crate) fn open_selected_worktree_in_default_editor(&mut self) -> Result<()> {
+        let Some(session) = self.selected_session().cloned() else {
+            self.set_error("Select an agent session first.");
+            return Ok(());
+        };
+        let editors = editor::detect_installed_editors();
+        let Some(selected_editor) = editor::preferred_editor(&editors, &self.config.editor.default)
+        else {
+            self.set_error(
+                "No supported editor CLI found on PATH. Install cursor, code, zed, or antigravity.",
+            );
+            return Ok(());
+        };
+
+        let session_label = self.session_label(&session);
+        let configured_default = self.config.editor.default.trim().to_string();
+        self.open_worktree_in_editor(&session.worktree_path, &session_label, &selected_editor)?;
+
+        if !configured_default.is_empty()
+            && !editor::matches_configured_editor(&selected_editor, &configured_default)
+        {
+            self.set_info(format!(
+                "Opened agent \"{session_label}\" in {} via {} (configured default \"{}\" was not found on PATH).",
+                selected_editor.label, selected_editor.command, configured_default
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn open_worktree_editor_picker(&mut self) -> Result<()> {
+        let Some(session) = self.selected_session().cloned() else {
+            self.set_error("Select an agent session first.");
+            return Ok(());
+        };
+        let editors = editor::detect_installed_editors();
+        if editors.is_empty() {
+            self.set_error(
+                "No supported editor CLI found on PATH. Install cursor, code, zed, or antigravity.",
+            );
+            return Ok(());
+        }
+
+        let selected = editor::preferred_editor(&editors, &self.config.editor.default)
+            .and_then(|preferred| {
+                editors
+                    .iter()
+                    .position(|editor| editor.command == preferred.command)
+            })
+            .unwrap_or(0);
+        let session_label = self.session_label(&session);
+        self.prompt = PromptState::PickEditor {
+            session_label,
+            worktree_path: session.worktree_path.clone(),
+            editors,
+            selected,
+        };
+        self.set_info("Choose an editor and press Enter to open the selected worktree.");
+        Ok(())
+    }
+
+    pub(crate) fn open_worktree_in_editor(
+        &mut self,
+        worktree_path: &str,
+        session_label: &str,
+        editor_choice: &editor::DetectedEditor,
+    ) -> Result<()> {
+        editor::launch_editor(editor_choice, Path::new(worktree_path))?;
+        self.set_info(format!(
+            "Opened agent \"{session_label}\" in {} via {}.",
+            editor_choice.label, editor_choice.command
+        ));
+        Ok(())
+    }
+
+    fn session_label(&self, session: &AgentSession) -> String {
+        session
+            .title
+            .clone()
+            .unwrap_or_else(|| session.branch_name.clone())
     }
 }

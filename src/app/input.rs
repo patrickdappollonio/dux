@@ -239,6 +239,8 @@ impl App {
                 Action::RenameSession => self.open_rename_session()?,
                 Action::CycleProvider => self.cycle_selected_project_provider()?,
                 Action::CopyPath => self.copy_selected_path()?,
+                Action::OpenWorktreeInEditor => self.open_selected_worktree_in_default_editor()?,
+                Action::ChooseWorktreeEditor => self.open_worktree_editor_picker()?,
                 Action::ToggleProject => self.toggle_collapse_selected_project(),
                 Action::InteractAgent => {
                     if self.selected_session().is_some()
@@ -1104,6 +1106,41 @@ impl App {
             }
             if let Some(dir) = browse_to {
                 self.spawn_browser_entries(&dir);
+            }
+            return Ok(false);
+        }
+
+        if let PromptState::PickEditor {
+            session_label,
+            worktree_path,
+            editors,
+            selected,
+        } = &mut self.prompt
+        {
+            match self.bindings.lookup(&key, BindingScope::Palette) {
+                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+                Some(Action::MoveDown) => {
+                    if *selected + 1 < editors.len() {
+                        *selected += 1;
+                    }
+                }
+                Some(Action::MoveUp) => {
+                    if *selected > 0 {
+                        *selected -= 1;
+                    }
+                }
+                Some(Action::Confirm) => {
+                    let editor = editors.get(*selected).cloned();
+                    let worktree = worktree_path.clone();
+                    let label = session_label.clone();
+                    self.prompt = PromptState::None;
+                    if let Some(editor) = editor {
+                        if let Err(e) = self.open_worktree_in_editor(&worktree, &label, &editor) {
+                            self.set_error(format!("{e:#}"));
+                        }
+                    }
+                }
+                _ => {}
             }
             return Ok(false);
         }

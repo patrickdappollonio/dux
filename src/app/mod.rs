@@ -24,6 +24,7 @@ use crate::config::{
     Config, DuxPaths, ProjectConfig, ProviderCommandConfig, check_provider_available,
     ensure_config, save_config, validate_keys,
 };
+use crate::editor::DetectedEditor;
 use crate::git;
 use crate::keybindings::{Action, BindingScope, HintContext, RuntimeBindings};
 use crate::logger;
@@ -192,6 +193,12 @@ pub(crate) enum PromptState {
         session_id: String,
         input: String,
         cursor: usize,
+    },
+    PickEditor {
+        session_label: String,
+        worktree_path: String,
+        editors: Vec<DetectedEditor>,
+        selected: usize,
     },
 }
 
@@ -415,6 +422,8 @@ impl App {
             "reconnect-agent" => self.reconnect_selected_session(),
             "add-project" => self.open_project_browser(),
             "copy-path" => self.copy_selected_path(),
+            "open-worktree" => self.open_selected_worktree_in_default_editor(),
+            "open-worktree-with" => self.open_worktree_editor_picker(),
             "toggle-project" => {
                 self.toggle_collapse_selected_project();
                 Ok(())
@@ -467,9 +476,9 @@ impl App {
 
             // Move selection to the toggled project so collapsing from a
             // child session leaves the cursor on the parent header.
-            if let Some(new_index) = self.left_items().iter().position(|item| {
-                matches!(item, LeftItem::Project(pi) if self.projects[*pi].id == id)
-            }) {
+            if let Some(new_index) = self.left_items().iter().position(
+                |item| matches!(item, LeftItem::Project(pi) if self.projects[*pi].id == id),
+            ) {
                 self.selected_left = new_index;
             }
         }

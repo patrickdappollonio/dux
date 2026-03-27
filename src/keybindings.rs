@@ -13,6 +13,8 @@ pub enum Action {
     FocusAgent,
     OpenProjectBrowser,
     CopyPath,
+    OpenWorktreeInEditor,
+    ChooseWorktreeEditor,
     CycleProvider,
     RefreshProject,
     ReconnectAgent,
@@ -136,6 +138,8 @@ impl Action {
             Action::FocusAgent => "focus_agent",
             Action::OpenProjectBrowser => "open_project_browser",
             Action::CopyPath => "copy_path",
+            Action::OpenWorktreeInEditor => "open_worktree_in_editor",
+            Action::ChooseWorktreeEditor => "choose_worktree_editor",
             Action::CycleProvider => "cycle_provider",
             Action::RefreshProject => "refresh_project",
             Action::ReconnectAgent => "reconnect_agent",
@@ -186,6 +190,12 @@ impl Action {
             Action::FocusAgent => "Focus the selected agent's output pane.",
             Action::OpenProjectBrowser => "Open the project browser.",
             Action::CopyPath => "Copy the selected agent's worktree path.",
+            Action::OpenWorktreeInEditor => {
+                "Open the selected agent worktree in the configured editor."
+            }
+            Action::ChooseWorktreeEditor => {
+                "Open a picker and choose which editor should open the selected agent worktree."
+            }
             Action::CycleProvider => "Cycle the default provider for the selected project.",
             Action::RefreshProject => "Git pull the selected project checkout.",
             Action::ReconnectAgent => "Restart the CLI for the selected agent.",
@@ -236,6 +246,8 @@ impl Action {
             | Action::FocusAgent
             | Action::OpenProjectBrowser
             | Action::CopyPath
+            | Action::OpenWorktreeInEditor
+            | Action::ChooseWorktreeEditor
             | Action::CycleProvider
             | Action::RefreshProject
             | Action::InteractAgent
@@ -414,6 +426,34 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "copy-path",
             description: "Copy the selected agent's worktree path",
+        }),
+    },
+    BindingDef {
+        action: Action::OpenWorktreeInEditor,
+        default_keys: &[key!(o)],
+        scopes: &[BindingScope::Left],
+        help: Some(HelpEntry {
+            section: "Projects pane",
+            description: "Open selected agent worktree in the default editor",
+        }),
+        hint_contexts: &[(HintContext::LeftSession, "Open")],
+        palette: Some(PaletteEntry {
+            name: "open-worktree",
+            description: "Open the selected agent worktree in the configured editor",
+        }),
+    },
+    BindingDef {
+        action: Action::ChooseWorktreeEditor,
+        default_keys: &[key!(shift - o)],
+        scopes: &[BindingScope::Left],
+        help: Some(HelpEntry {
+            section: "Projects pane",
+            description: "Choose an editor and open the selected agent worktree",
+        }),
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "open-worktree-with",
+            description: "Choose which editor should open the selected agent worktree",
         }),
     },
     BindingDef {

@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod diff;
+mod editor;
 mod git;
 mod keybindings;
 mod logger;
