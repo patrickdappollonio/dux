@@ -25,6 +25,7 @@ pub enum Action {
     ToggleFullscreen,
     ScrollPageUp,
     ScrollPageDown,
+    ScrollLineDown,
     // Files pane (git staging)
     OpenDiff,
     StageUnstage,
@@ -149,6 +150,7 @@ impl Action {
             Action::ToggleFullscreen => "toggle_fullscreen",
             Action::ScrollPageUp => "scroll_page_up",
             Action::ScrollPageDown => "scroll_page_down",
+            Action::ScrollLineDown => "scroll_line_down",
             Action::OpenDiff => "open_diff",
             Action::StageUnstage => "stage_unstage",
             Action::CommitChanges => "commit_changes",
@@ -205,6 +207,9 @@ impl Action {
             Action::ToggleFullscreen => "Toggle fullscreen overlay for the agent terminal.",
             Action::ScrollPageUp => "Scroll up one page in the agent output.",
             Action::ScrollPageDown => "Scroll down one page in the agent output.",
+            Action::ScrollLineDown => {
+                "Scroll down one line while scrolled back in interactive mode."
+            }
             Action::OpenDiff => "Open the selected file's diff.",
             Action::StageUnstage => "Stage or unstage the selected file.",
             Action::CommitChanges => "Commit staged changes.",
@@ -256,7 +261,8 @@ impl Action {
             Action::ExitInteractive
             | Action::ToggleFullscreen
             | Action::ScrollPageUp
-            | Action::ScrollPageDown => Some("Agent pane"),
+            | Action::ScrollPageDown
+            | Action::ScrollLineDown => Some("Agent pane"),
             Action::OpenDiff
             | Action::StageUnstage
             | Action::CommitChanges
@@ -545,8 +551,8 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     },
     BindingDef {
         action: Action::ScrollPageUp,
-        default_keys: &[key!(ctrl - b), key!(pageup)],
-        scopes: &[BindingScope::Center],
+        default_keys: &[key!(pageup)],
+        scopes: &[BindingScope::Center, BindingScope::Interactive],
         help: Some(HelpEntry {
             section: "Agent pane",
             description: "Scroll up one page",
@@ -556,11 +562,22 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     },
     BindingDef {
         action: Action::ScrollPageDown,
-        default_keys: &[key!(ctrl - f), key!(pagedown)],
-        scopes: &[BindingScope::Center],
+        default_keys: &[key!(pagedown)],
+        scopes: &[BindingScope::Center, BindingScope::Interactive],
         help: Some(HelpEntry {
             section: "Agent pane",
             description: "Scroll down one page",
+        }),
+        hint_contexts: &[],
+        palette: None,
+    },
+    BindingDef {
+        action: Action::ScrollLineDown,
+        default_keys: &[key!(space)],
+        scopes: &[BindingScope::Interactive],
+        help: Some(HelpEntry {
+            section: "Agent pane",
+            description: "Scroll down one line (while scrolled back)",
         }),
         hint_contexts: &[],
         palette: None,
