@@ -48,6 +48,8 @@ pub struct Theme {
     pub button_active_fg: Color,
     pub button_confirm_border: Color,
     pub button_danger_border: Color,
+    pub scroll_indicator_fg: Color,
+    pub scroll_indicator_bg: Color,
 }
 
 impl Theme {
@@ -97,6 +99,8 @@ impl Theme {
             button_active_fg: Color::White,
             button_confirm_border: Color::Cyan,
             button_danger_border: Color::Red,
+            scroll_indicator_fg: Color::White,
+            scroll_indicator_bg: Color::Rgb(60, 60, 60),
         }
     }
 

@@ -463,6 +463,24 @@ impl App {
                         }
                     }
 
+                    // Floating scroll indicator in top-right corner.
+                    if scrollback_offset > 0 {
+                        let label = format!(" ↑ {scrollback_offset} lines ");
+                        let label_len = label.chars().count() as u16;
+                        if label_len < term_area.width {
+                            let x_start = term_area.x + term_area.width - label_len;
+                            let y = term_area.y;
+                            let style = Style::default()
+                                .fg(self.theme.scroll_indicator_fg)
+                                .bg(self.theme.scroll_indicator_bg);
+                            for (i, ch) in label.chars().enumerate() {
+                                let cell = &mut buf[(x_start + i as u16, y)];
+                                cell.set_symbol(&ch.to_string());
+                                cell.set_style(style);
+                            }
+                        }
+                    }
+
                     // Render cursor if in input mode.
                     if is_input && !screen.hide_cursor() {
                         let (cursor_row, cursor_col) = screen.cursor_position();
