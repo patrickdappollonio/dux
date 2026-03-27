@@ -135,6 +135,7 @@ impl App {
             Path::new(&session.worktree_path),
             rows,
             cols,
+            self.config.ui.agent_scrollback_lines,
         )
     }
 

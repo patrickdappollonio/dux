@@ -452,64 +452,72 @@ impl App {
                             );
                     }
                 } else {
-                    // Render vt100 screen into ratatui buffer.
-                    // Use a single lock to get both screen and scrollback
-                    // offset atomically, avoiding race conditions with the
-                    // background reader thread.
-                    let (screen, sb_offset) = provider.screen_and_scrollback();
-                    scrollback_offset = sb_offset;
+                    // Render the current terminal viewport into the ratatui
+                    // buffer from an owned snapshot to avoid holding locks
+                    // during painting.
+                    let snapshot = provider.snapshot();
+                    scrollback_offset = snapshot.scrollback_offset;
                     let buf = frame.buffer_mut();
-                    let (screen_rows, screen_cols) = screen.size();
-                    for row in 0..screen_rows.min(term_area.height) {
-                        for col in 0..screen_cols.min(term_area.width) {
-                            let cell = screen.cell(row, col);
-                            if let Some(cell) = cell {
-                                if cell.is_wide_continuation() {
-                                    continue;
+                    for cell in &snapshot.cells {
+                        if cell.row >= snapshot.rows
+                            || cell.col >= snapshot.cols
+                            || cell.row >= term_area.height
+                            || cell.col >= term_area.width
+                        {
+                            continue;
+                        }
+                        let x = term_area.x + cell.col;
+                        let y = term_area.y + cell.row;
+                        let style = Style::default()
+                            .fg(cell.fg)
+                            .bg(cell.bg)
+                            .add_modifier(cell.modifier);
+                        let ratatui_cell = &mut buf[(x, y)];
+                        ratatui_cell.set_symbol(&cell.symbol);
+                        ratatui_cell.set_style(style);
+                    }
+
+                    // Render cursor if in input mode.
+                    if is_input {
+                        if let Some(cursor) = snapshot.cursor {
+                            if cursor.row < snapshot.rows && cursor.col < snapshot.cols {
+                                let cx = term_area.x + cursor.col;
+                                let cy = term_area.y + cursor.row;
+                                if cx < term_area.x + term_area.width
+                                    && cy < term_area.y + term_area.height
+                                {
+                                    let cursor_cell = &mut buf[(cx, cy)];
+                                    cursor_cell.set_style(
+                                        Style::default()
+                                            .fg(Color::Black)
+                                            .bg(self.theme.prompt_cursor),
+                                    );
                                 }
-                                let x = term_area.x + col;
-                                let y = term_area.y + row;
-                                let fg = convert_vt100_color(cell.fgcolor());
-                                let bg = convert_vt100_color(cell.bgcolor());
-                                let mut modifier = Modifier::empty();
-                                if cell.bold() {
-                                    modifier |= Modifier::BOLD;
-                                }
-                                if cell.italic() {
-                                    modifier |= Modifier::ITALIC;
-                                }
-                                if cell.underline() {
-                                    modifier |= Modifier::UNDERLINED;
-                                }
-                                if cell.inverse() {
-                                    modifier |= Modifier::REVERSED;
-                                }
-                                let style = Style::default().fg(fg).bg(bg).add_modifier(modifier);
-                                let contents = cell.contents();
-                                let ratatui_cell = &mut buf[(x, y)];
-                                if contents.is_empty() {
-                                    ratatui_cell.set_symbol(" ");
-                                } else {
-                                    ratatui_cell.set_symbol(&contents);
-                                }
-                                ratatui_cell.set_style(style);
                             }
                         }
                     }
 
-                    // Render cursor if in input mode.
-                    if is_input && !screen.hide_cursor() {
-                        let (cursor_row, cursor_col) = screen.cursor_position();
-                        let cx = term_area.x + cursor_col;
-                        let cy = term_area.y + cursor_row;
-                        if cx < term_area.x + term_area.width && cy < term_area.y + term_area.height
-                        {
-                            let cursor_cell = &mut buf[(cx, cy)];
-                            cursor_cell.set_style(
-                                Style::default()
-                                    .fg(Color::Black)
-                                    .bg(self.theme.prompt_cursor),
-                            );
+                    if let Some(label) = scrollback_indicator_label(
+                        snapshot.scrollback_offset,
+                        snapshot.scrollback_total,
+                    ) {
+                        let badge_width = label.len() as u16;
+                        if term_area.height > 0 && badge_width <= term_area.width {
+                            Paragraph::new(label)
+                                .style(
+                                    Style::default()
+                                        .fg(self.theme.scroll_indicator_fg)
+                                        .bg(self.theme.scroll_indicator_bg),
+                                )
+                                .render(
+                                    Rect::new(
+                                        term_area.x + term_area.width - badge_width,
+                                        term_area.y,
+                                        badge_width,
+                                        1,
+                                    ),
+                                    frame.buffer_mut(),
+                                );
                         }
                     }
                 }
@@ -546,8 +554,16 @@ impl App {
                 ));
                 spans.extend(self.theme.dim_key_badge(&exit_key, Color::Reset));
                 spans.push(Span::styled(" to return to the app. ", desc_style));
-                spans.extend(self.theme.dim_key_badge("PgUp/PgDn", Color::Reset));
-                spans.push(Span::styled(" to scroll.", desc_style));
+                spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
+                spans.push(Span::styled(" up, ", desc_style));
+                spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
+                if scrollback_offset > 0 {
+                    spans.push(Span::styled(" page down, or ", desc_style));
+                    spans.extend(self.theme.dim_key_badge("Space", Color::Reset));
+                    spans.push(Span::styled(" down one line.", desc_style));
+                } else {
+                    spans.push(Span::styled(" page down.", desc_style));
+                }
                 Line::from(spans)
             } else if scrollback_offset > 0 {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
@@ -1892,14 +1908,6 @@ pub(crate) fn format_line_stats(additions: usize, deletions: usize) -> Vec<Span<
     spans
 }
 
-pub(crate) fn convert_vt100_color(color: vt100::Color) -> Color {
-    match color {
-        vt100::Color::Default => Color::Reset,
-        vt100::Color::Idx(n) => Color::Indexed(n),
-        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
-    }
-}
-
 pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -1917,6 +1925,16 @@ pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect 
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(vertical)[1]
+}
+
+fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {
+    if scrolled == 0 {
+        return None;
+    }
+
+    let total = total.max(scrolled);
+    let noun = if total == 1 { "line" } else { "lines" };
+    Some(format!(" {scrolled}/{total} {noun} "))
 }
 
 /// Pre-wrap text at exact character boundaries to match the manual cursor
@@ -1976,6 +1994,27 @@ mod tests {
     #[test]
     fn wrap_empty_string() {
         assert_eq!(wrap_text_at_width("", 10), "");
+    }
+
+    #[test]
+    fn scrollback_indicator_uses_fractional_label() {
+        assert_eq!(
+            scrollback_indicator_label(41, 800),
+            Some(" 41/800 lines ".to_string())
+        );
+    }
+
+    #[test]
+    fn scrollback_indicator_handles_singular_total() {
+        assert_eq!(
+            scrollback_indicator_label(1, 1),
+            Some(" 1/1 line ".to_string())
+        );
+    }
+
+    #[test]
+    fn scrollback_indicator_hides_at_live_bottom() {
+        assert_eq!(scrollback_indicator_label(0, 800), None);
     }
 
     #[test]

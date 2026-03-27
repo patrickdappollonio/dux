@@ -50,7 +50,7 @@ The current app provides:
 
 ## Important Constraints
 
-- The app spawns CLI tools directly via PTY (portable-pty) and renders their output using vt100 terminal emulation. There is no protocol layer (no ACP, no JSON-RPC).
+- The app spawns CLI tools directly via PTY (portable-pty) and renders their output using an embedded terminal emulator built on alacritty_terminal. There is no protocol layer (no ACP, no JSON-RPC).
 - Long-running actions should not block the UI thread.
 - User state lives under `~/.dux/` on macOS and `$XDG_CONFIG_HOME/dux/` (or `~/.config/dux/`) on Linux.
 - Worktrees are user data and should not be removed or mutated casually.
