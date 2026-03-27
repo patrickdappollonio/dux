@@ -241,6 +241,26 @@ impl App {
 
         self.last_diff_height = content_area.height;
 
+        // Compute visual line count accounting for wrapping.
+        let w = content_area.width.max(1) as usize;
+        self.last_diff_visual_lines = lines
+            .iter()
+            .map(|l| {
+                let lw = l.width();
+                if lw <= w {
+                    1u16
+                } else {
+                    ((lw + w - 1) / w) as u16
+                }
+            })
+            .sum();
+
+        // Clamp scroll so content never overflows past the last visual line.
+        let max_scroll = self
+            .last_diff_visual_lines
+            .saturating_sub(content_area.height);
+        let scroll = scroll.min(max_scroll);
+
         Paragraph::new(lines.clone())
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0))
