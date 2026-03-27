@@ -20,7 +20,10 @@ impl App {
                 match action {
                     Action::ScrollPageDown => {
                         let page = self.last_help_height.max(1);
-                        *scroll = (*scroll + page).min(self.last_help_lines.saturating_sub(1));
+                        *scroll = (*scroll + page).min(
+                            self.last_help_lines
+                                .saturating_sub(self.last_help_height.max(1)),
+                        );
                     }
                     Action::ScrollPageUp => {
                         let page = self.last_help_height.max(1);
@@ -303,13 +306,11 @@ impl App {
                     }
                 }
                 Action::ScrollPageDown => {
-                    if let CenterMode::Diff {
-                        ref lines,
-                        ref mut scroll,
-                    } = self.center_mode
-                    {
+                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
                         let page = self.last_diff_height.max(1);
-                        let max_scroll = (lines.len() as u16).saturating_sub(1);
+                        let max_scroll = self
+                            .last_diff_visual_lines
+                            .saturating_sub(self.last_diff_height.max(1));
                         *scroll = (*scroll + page).min(max_scroll);
                     } else if self.last_pty_size.0 > 0 {
                         self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
@@ -1265,12 +1266,10 @@ impl App {
                     }
                 }
                 FocusPane::Center => {
-                    if let CenterMode::Diff {
-                        ref lines,
-                        ref mut scroll,
-                    } = self.center_mode
-                    {
-                        let max_scroll = (lines.len() as u16).saturating_sub(1);
+                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
+                        let max_scroll = self
+                            .last_diff_visual_lines
+                            .saturating_sub(self.last_diff_height.max(1));
                         *scroll = (*scroll + 3).min(max_scroll);
                     }
                 }
