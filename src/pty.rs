@@ -209,14 +209,19 @@ impl PtyClient {
             } else {
                 current.saturating_sub(amount)
             };
-            p.set_scrollback(new_offset);
+            // vt100's visible_rows() subtracts the scrollback offset from
+            // the row count, so the offset must never exceed the number of
+            // terminal rows to avoid an underflow panic.
+            let max_offset = p.screen().size().0 as usize;
+            p.set_scrollback(new_offset.min(max_offset));
         }
     }
 
     /// Set the scrollback offset (0 = normal view, positive = scrolled back).
     pub fn set_scrollback(&self, rows: usize) {
         if let Ok(mut p) = self.parser.lock() {
-            p.set_scrollback(rows);
+            let max_offset = p.screen().size().0 as usize;
+            p.set_scrollback(rows.min(max_offset));
         }
     }
 
