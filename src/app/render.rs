@@ -1,5 +1,20 @@
 use super::*;
 
+/// ASCII art logo displayed in the agent pane when no content is active.
+const ASCII_LOGO: &[&str] = &[
+    "       ░██                       ",
+    "       ░██                       ",
+    " ░████████ ░██    ░██ ░██    ░██ ",
+    "░██    ░██ ░██    ░██  ░██  ░██  ",
+    "░██    ░██ ░██    ░██   ░█████   ",
+    "░██   ░███ ░██   ░███  ░██  ░██  ",
+    " ░█████░██  ░█████░██ ░██    ░██ ",
+];
+/// Display width of each line in `ASCII_LOGO` (all lines are equal width).
+const ASCII_LOGO_WIDTH: u16 = 33;
+/// Number of lines in `ASCII_LOGO`.
+const ASCII_LOGO_HEIGHT: u16 = 7;
+
 impl App {
     pub(crate) fn render(&mut self, frame: &mut Frame) {
         let term_w = frame.area().width as usize;
@@ -309,6 +324,23 @@ impl App {
         }
     }
 
+    /// Render the ASCII "dux" logo centered in the given area.
+    fn render_ascii_logo(&self, frame: &mut Frame, area: Rect) {
+        if area.width < ASCII_LOGO_WIDTH || area.height < ASCII_LOGO_HEIGHT {
+            return;
+        }
+
+        let x = area.x + (area.width - ASCII_LOGO_WIDTH) / 2;
+        let y = area.y + (area.height - ASCII_LOGO_HEIGHT) / 2;
+        let style = Style::default().fg(self.theme.border_normal);
+
+        let lines: Vec<Line> = ASCII_LOGO.iter().map(|l| Line::styled(*l, style)).collect();
+        Paragraph::new(lines).render(
+            Rect::new(x, y, ASCII_LOGO_WIDTH, ASCII_LOGO_HEIGHT),
+            frame.buffer_mut(),
+        );
+    }
+
     fn render_agent_terminal(&mut self, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
         let outer_block = self.themed_block(title, focused);
         let inner = outer_block.inner(area);
@@ -320,6 +352,7 @@ impl App {
 
         let is_input = self.input_target == InputTarget::Agent;
         let mut scrollback_offset: usize = 0;
+        let mut rendered_content = false;
 
         // Reserve 2 lines at the bottom for the hint bar (top border + text).
         let hint_height = 2;
@@ -340,6 +373,7 @@ impl App {
 
         if let Some(ref sid) = session_id {
             if let Some(provider) = self.providers.get(sid) {
+                rendered_content = true;
                 // Resize PTY if needed.
                 let new_size = (term_area.height, term_area.width);
                 if new_size != self.last_pty_size && new_size.0 > 0 && new_size.1 > 0 {
@@ -480,6 +514,10 @@ impl App {
                     }
                 }
             }
+        }
+
+        if !rendered_content {
+            self.render_ascii_logo(frame, term_area);
         }
 
         // Hint bar with top border.
