@@ -135,6 +135,7 @@ impl App {
             Path::new(&session.worktree_path),
             rows,
             cols,
+            self.config.ui.agent_scrollback_lines,
         )
     }
 
@@ -358,6 +359,7 @@ impl App {
                 self.focus = FocusPane::Center;
                 self.center_mode = CenterMode::Agent;
                 self.input_target = InputTarget::Agent;
+                self.fullscreen_agent = true;
                 let proj_name = self.project_name_for_session(&session);
                 self.set_info(format!(
                     "Relaunched {} agent \"{}\" in project \"{}\"",

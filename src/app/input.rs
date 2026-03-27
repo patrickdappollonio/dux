@@ -1,7 +1,22 @@
 use super::*;
 
+fn should_scroll_down_with_space(
+    modifiers: KeyModifiers,
+    scrollback_offset: usize,
+    page_height: u16,
+) -> bool {
+    modifiers.is_empty() && scrollback_offset > 0 && page_height > 0
+}
+
 impl App {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        // Interactive mode: ALL keys go to the PTY except Ctrl-G
+        // (ExitInteractive, handled inside handle_agent_input). This must be
+        // the very first check so that no global binding — including
+        // CloseOverlay / Escape — intercepts keys during interactive mode.
+        if self.input_target == InputTarget::Agent {
+            return self.handle_agent_input(key);
+        }
         if self.bindings.lookup(&key, BindingScope::Global) == Some(Action::CloseOverlay)
             && self.close_top_overlay()
         {
@@ -20,7 +35,10 @@ impl App {
                 match action {
                     Action::ScrollPageDown => {
                         let page = self.last_help_height.max(1);
-                        *scroll = (*scroll + page).min(self.last_help_lines.saturating_sub(1));
+                        *scroll = (*scroll + page).min(
+                            self.last_help_lines
+                                .saturating_sub(self.last_help_height.max(1)),
+                        );
                     }
                     Action::ScrollPageUp => {
                         let page = self.last_help_height.max(1);
@@ -33,12 +51,6 @@ impl App {
         }
         if !matches!(self.prompt, PromptState::None) {
             return self.handle_prompt_key(key);
-        }
-        // In interactive mode, ALL keys go to the PTY except ctrl+g (handled
-        // inside handle_agent_input). This must be checked before quit / help /
-        // palette so that typing 'q', ctrl+c, '?', ctrl+p etc. reaches the CLI.
-        if self.input_target == InputTarget::Agent {
-            return self.handle_agent_input(key);
         }
         // When typing a commit message, route all keys to the commit input
         // handler so that q, ?, [ etc. are typed instead of triggering
@@ -95,6 +107,7 @@ impl App {
                         }
                     }
                     self.input_target = InputTarget::None;
+                    self.fullscreen_agent = false;
                 }
                 Action::FocusPrev => {
                     let has_staged = !self.staged_files.is_empty();
@@ -116,6 +129,7 @@ impl App {
                         }
                     }
                     self.input_target = InputTarget::None;
+                    self.fullscreen_agent = false;
                 }
                 Action::ToggleSidebar => {
                     self.left_collapsed = !self.left_collapsed;
@@ -190,6 +204,7 @@ impl App {
                                         .unwrap_or(false)
                                     {
                                         self.input_target = InputTarget::Agent;
+                                        self.fullscreen_agent = true;
                                     } else if self.selected_session().is_some() {
                                         self.reconnect_selected_session()?;
                                     }
@@ -208,6 +223,7 @@ impl App {
                             .unwrap_or(false)
                         {
                             self.input_target = InputTarget::Agent;
+                            self.fullscreen_agent = true;
                         } else if self.selected_session().is_some() {
                             self.reconnect_selected_session()?;
                         }
@@ -234,6 +250,7 @@ impl App {
                         self.focus = FocusPane::Center;
                         self.center_mode = CenterMode::Agent;
                         self.input_target = InputTarget::Agent;
+                        self.fullscreen_agent = true;
                         let exit_key = self.bindings.label_for(Action::ExitInteractive);
                         self.set_info(format!(
                             "Interactive mode. Keys forwarded to agent. {exit_key} exits."
@@ -256,7 +273,7 @@ impl App {
         let in_diff = matches!(self.center_mode, CenterMode::Diff { .. });
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Center) {
             match action {
-                Action::InteractAgent if !in_diff => {
+                Action::FocusAgent if !in_diff => {
                     if self.selected_session().is_some()
                         && self
                             .selected_session()
@@ -265,16 +282,18 @@ impl App {
                     {
                         self.reset_pty_scrollback();
                         self.input_target = InputTarget::Agent;
+                        self.fullscreen_agent = true;
                         let exit_key = self.bindings.label_for(Action::ExitInteractive);
                         self.set_info(format!(
                             "Interactive mode. Keys forwarded to agent. {exit_key} exits."
                         ));
+                    } else if self.selected_session().is_some() {
+                        self.reconnect_selected_session()?;
                     } else {
-                        let r = self.bindings.label_for(Action::ReconnectAgent);
                         let n = self.bindings.label_for(Action::NewAgent);
-                        self.set_error(
-                            format!("No active agent. Press \"{r}\" to restart or \"{n}\" to create a new one."),
-                        );
+                        self.set_error(format!(
+                            "No agent selected. Press \"{n}\" to create a new one."
+                        ));
                     }
                 }
                 Action::ReconnectAgent if !in_diff => {
@@ -287,12 +306,10 @@ impl App {
                     if has_provider {
                         self.reset_pty_scrollback();
                         self.input_target = InputTarget::Agent;
+                        self.fullscreen_agent = true;
                     } else if self.selected_session().is_some() {
                         self.reconnect_selected_session()?;
                     }
-                }
-                Action::ToggleFullscreen if !in_diff => {
-                    self.fullscreen_agent = !self.fullscreen_agent;
                 }
                 Action::ScrollPageUp => {
                     if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
@@ -303,13 +320,11 @@ impl App {
                     }
                 }
                 Action::ScrollPageDown => {
-                    if let CenterMode::Diff {
-                        ref lines,
-                        ref mut scroll,
-                    } = self.center_mode
-                    {
+                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
                         let page = self.last_diff_height.max(1);
-                        let max_scroll = (lines.len() as u16).saturating_sub(1);
+                        let max_scroll = self
+                            .last_diff_visual_lines
+                            .saturating_sub(self.last_diff_height.max(1));
                         *scroll = (*scroll + page).min(max_scroll);
                     } else if self.last_pty_size.0 > 0 {
                         self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
@@ -613,16 +628,29 @@ impl App {
         if let Some(Action::ExitInteractive) = self.bindings.lookup(&key, BindingScope::Interactive)
         {
             self.input_target = InputTarget::None;
-            self.set_info("Exited interactive mode.");
+            self.fullscreen_agent = false;
+            let reenter_key = self.bindings.label_for(Action::FocusAgent);
+            self.set_info(format!(
+                "Exited interactive mode. Press {reenter_key} to re-enter."
+            ));
             return Ok(false);
         }
 
-        // Toggle fullscreen overlay (default: ctrl-e) without leaving interactive mode.
-        if let Some(Action::ToggleFullscreen) =
-            self.bindings.lookup(&key, BindingScope::Interactive)
-        {
-            self.fullscreen_agent = !self.fullscreen_agent;
-            return Ok(false);
+        // PgUp/PgDn scroll the scrollback buffer even in interactive mode.
+        match key.code {
+            KeyCode::PageUp => {
+                if self.last_pty_size.0 > 0 {
+                    self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
+                }
+                return Ok(false);
+            }
+            KeyCode::PageDown => {
+                if self.last_pty_size.0 > 0 {
+                    self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
+                }
+                return Ok(false);
+            }
+            _ => {}
         }
 
         match key.code {
@@ -635,6 +663,15 @@ impl App {
                     let ctrl_byte = c as u8 - b'a' + 1;
                     let _ = provider.write_bytes(&[ctrl_byte]);
                 }
+            }
+            KeyCode::Char(' ')
+                if should_scroll_down_with_space(
+                    key.modifiers,
+                    provider.scrollback_offset(),
+                    self.last_pty_size.0,
+                ) =>
+            {
+                self.scroll_pty(ScrollDirection::Down, 1);
             }
             KeyCode::Char(c) => {
                 let mut buf = [0u8; 4];
@@ -670,12 +707,6 @@ impl App {
             }
             KeyCode::Delete => {
                 let _ = provider.write_bytes(b"\x1b[3~");
-            }
-            KeyCode::PageUp => {
-                let _ = provider.write_bytes(b"\x1b[5~");
-            }
-            KeyCode::PageDown => {
-                let _ = provider.write_bytes(b"\x1b[6~");
             }
             _ => {}
         }
@@ -1265,12 +1296,10 @@ impl App {
                     }
                 }
                 FocusPane::Center => {
-                    if let CenterMode::Diff {
-                        ref lines,
-                        ref mut scroll,
-                    } = self.center_mode
-                    {
-                        let max_scroll = (lines.len() as u16).saturating_sub(1);
+                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
+                        let max_scroll = self
+                            .last_diff_visual_lines
+                            .saturating_sub(self.last_diff_height.max(1));
                         *scroll = (*scroll + 3).min(max_scroll);
                     }
                 }
@@ -1300,5 +1329,30 @@ impl App {
             },
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn space_scroll_requires_live_scrollback() {
+        assert!(should_scroll_down_with_space(KeyModifiers::empty(), 3, 20));
+    }
+
+    #[test]
+    fn space_scroll_is_disabled_at_live_bottom() {
+        assert!(!should_scroll_down_with_space(KeyModifiers::empty(), 0, 20));
+    }
+
+    #[test]
+    fn space_scroll_is_disabled_with_modifiers() {
+        assert!(!should_scroll_down_with_space(KeyModifiers::CONTROL, 3, 20,));
+    }
+
+    #[test]
+    fn space_scroll_is_disabled_without_terminal_height() {
+        assert!(!should_scroll_down_with_space(KeyModifiers::empty(), 3, 0));
     }
 }

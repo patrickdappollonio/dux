@@ -238,10 +238,10 @@ impl Action {
             | Action::CopyPath
             | Action::CycleProvider
             | Action::RefreshProject
+            | Action::InteractAgent
             | Action::ReconnectAgent
             | Action::DeleteSession => Some("Projects pane"),
-            Action::InteractAgent
-            | Action::ExitInteractive
+            Action::ExitInteractive
             | Action::ToggleFullscreen
             | Action::ScrollPageUp
             | Action::ScrollPageDown => Some("Agent pane"),
@@ -371,12 +371,15 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     BindingDef {
         action: Action::FocusAgent,
         default_keys: &[key!(enter)],
-        scopes: &[BindingScope::Left],
+        scopes: &[BindingScope::Left, BindingScope::Center],
         help: Some(HelpEntry {
             section: "Projects pane",
             description: "Focus the selected agent",
         }),
-        hint_contexts: &[(HintContext::LeftSession, "Focus")],
+        hint_contexts: &[
+            (HintContext::LeftSession, "Focus"),
+            (HintContext::Center, "Interact"),
+        ],
         palette: None,
     },
     BindingDef {
@@ -473,12 +476,12 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     BindingDef {
         action: Action::InteractAgent,
         default_keys: &[key!(i)],
-        scopes: &[BindingScope::Left, BindingScope::Center],
+        scopes: &[BindingScope::Left],
         help: Some(HelpEntry {
-            section: "Agent pane",
-            description: "Start a prompt turn for the agent",
+            section: "Projects pane",
+            description: "Enter interactive mode for the selected agent",
         }),
-        hint_contexts: &[(HintContext::Center, "Interact")],
+        hint_contexts: &[],
         palette: None,
     },
     BindingDef {
@@ -494,13 +497,10 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     },
     BindingDef {
         action: Action::ToggleFullscreen,
-        default_keys: &[key!(ctrl - e)],
-        scopes: &[BindingScope::Interactive, BindingScope::Center],
-        help: Some(HelpEntry {
-            section: "Agent pane",
-            description: "Toggle fullscreen agent overlay",
-        }),
-        hint_contexts: &[(HintContext::Center, "Fullscreen")],
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
         palette: None,
     },
     BindingDef {

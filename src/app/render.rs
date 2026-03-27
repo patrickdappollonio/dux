@@ -1,5 +1,20 @@
 use super::*;
 
+/// ASCII art logo displayed in the agent pane when no content is active.
+const ASCII_LOGO: &[&str] = &[
+    "       ░██                       ",
+    "       ░██                       ",
+    " ░████████ ░██    ░██ ░██    ░██ ",
+    "░██    ░██ ░██    ░██  ░██  ░██  ",
+    "░██    ░██ ░██    ░██   ░█████   ",
+    "░██   ░███ ░██   ░███  ░██  ░██  ",
+    " ░█████░██  ░█████░██ ░██    ░██ ",
+];
+/// Display width of each line in `ASCII_LOGO` (all lines are equal width).
+const ASCII_LOGO_WIDTH: u16 = 33;
+/// Number of lines in `ASCII_LOGO`.
+const ASCII_LOGO_HEIGHT: u16 = 7;
+
 impl App {
     pub(crate) fn render(&mut self, frame: &mut Frame) {
         let term_w = frame.area().width as usize;
@@ -213,6 +228,13 @@ impl App {
             CenterMode::Diff { .. } => {
                 self.render_diff(frame, area, focused);
             }
+            CenterMode::Agent if self.fullscreen_agent => {
+                // Skip agent rendering here — fullscreen overlay handles it.
+                // Rendering in both places causes the PTY to be resized twice
+                // per frame (once to the small pane, once to the overlay).
+                self.themed_block("Agent", focused)
+                    .render(area, frame.buffer_mut());
+            }
             CenterMode::Agent => {
                 self.render_agent_terminal(frame, area, "Agent", focused);
             }
@@ -240,6 +262,26 @@ impl App {
             .areas(inner);
 
         self.last_diff_height = content_area.height;
+
+        // Compute visual line count accounting for wrapping.
+        let w = content_area.width.max(1) as usize;
+        self.last_diff_visual_lines = lines
+            .iter()
+            .map(|l| {
+                let lw = l.width();
+                if lw <= w {
+                    1u16
+                } else {
+                    ((lw + w - 1) / w) as u16
+                }
+            })
+            .sum();
+
+        // Clamp scroll so content never overflows past the last visual line.
+        let max_scroll = self
+            .last_diff_visual_lines
+            .saturating_sub(content_area.height);
+        let scroll = scroll.min(max_scroll);
 
         Paragraph::new(lines.clone())
             .wrap(Wrap { trim: false })
@@ -282,6 +324,23 @@ impl App {
         }
     }
 
+    /// Render the ASCII "dux" logo centered in the given area.
+    fn render_ascii_logo(&self, frame: &mut Frame, area: Rect) {
+        if area.width < ASCII_LOGO_WIDTH || area.height < ASCII_LOGO_HEIGHT {
+            return;
+        }
+
+        let x = area.x + (area.width - ASCII_LOGO_WIDTH) / 2;
+        let y = area.y + (area.height - ASCII_LOGO_HEIGHT) / 2;
+        let style = Style::default().fg(self.theme.border_normal);
+
+        let lines: Vec<Line> = ASCII_LOGO.iter().map(|l| Line::styled(*l, style)).collect();
+        Paragraph::new(lines).render(
+            Rect::new(x, y, ASCII_LOGO_WIDTH, ASCII_LOGO_HEIGHT),
+            frame.buffer_mut(),
+        );
+    }
+
     fn render_agent_terminal(&mut self, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
         let outer_block = self.themed_block(title, focused);
         let inner = outer_block.inner(area);
@@ -293,6 +352,7 @@ impl App {
 
         let is_input = self.input_target == InputTarget::Agent;
         let mut scrollback_offset: usize = 0;
+        let mut rendered_content = false;
 
         // Reserve 2 lines at the bottom for the hint bar (top border + text).
         let hint_height = 2;
@@ -313,6 +373,7 @@ impl App {
 
         if let Some(ref sid) = session_id {
             if let Some(provider) = self.providers.get(sid) {
+                rendered_content = true;
                 // Resize PTY if needed.
                 let new_size = (term_area.height, term_area.width);
                 if new_size != self.last_pty_size && new_size.0 > 0 && new_size.1 > 0 {
@@ -391,78 +452,89 @@ impl App {
                             );
                     }
                 } else {
-                    // Render vt100 screen into ratatui buffer.
-                    // Use a single lock to get both screen and scrollback
-                    // offset atomically, avoiding race conditions with the
-                    // background reader thread.
-                    let (screen, sb_offset) = provider.screen_and_scrollback();
-                    scrollback_offset = sb_offset;
+                    // Render the current terminal viewport into the ratatui
+                    // buffer from an owned snapshot to avoid holding locks
+                    // during painting.
+                    let snapshot = provider.snapshot();
+                    scrollback_offset = snapshot.scrollback_offset;
                     let buf = frame.buffer_mut();
-                    let (screen_rows, screen_cols) = screen.size();
-                    for row in 0..screen_rows.min(term_area.height) {
-                        for col in 0..screen_cols.min(term_area.width) {
-                            let cell = screen.cell(row, col);
-                            if let Some(cell) = cell {
-                                if cell.is_wide_continuation() {
-                                    continue;
+                    for cell in &snapshot.cells {
+                        if cell.row >= snapshot.rows
+                            || cell.col >= snapshot.cols
+                            || cell.row >= term_area.height
+                            || cell.col >= term_area.width
+                        {
+                            continue;
+                        }
+                        let x = term_area.x + cell.col;
+                        let y = term_area.y + cell.row;
+                        let style = Style::default()
+                            .fg(cell.fg)
+                            .bg(cell.bg)
+                            .add_modifier(cell.modifier);
+                        let ratatui_cell = &mut buf[(x, y)];
+                        ratatui_cell.set_symbol(&cell.symbol);
+                        ratatui_cell.set_style(style);
+                    }
+
+                    // Render cursor if in input mode.
+                    if is_input {
+                        if let Some(cursor) = snapshot.cursor {
+                            if cursor.row < snapshot.rows && cursor.col < snapshot.cols {
+                                let cx = term_area.x + cursor.col;
+                                let cy = term_area.y + cursor.row;
+                                if cx < term_area.x + term_area.width
+                                    && cy < term_area.y + term_area.height
+                                {
+                                    let cursor_cell = &mut buf[(cx, cy)];
+                                    cursor_cell.set_style(
+                                        Style::default()
+                                            .fg(Color::Black)
+                                            .bg(self.theme.prompt_cursor),
+                                    );
                                 }
-                                let x = term_area.x + col;
-                                let y = term_area.y + row;
-                                let fg = convert_vt100_color(cell.fgcolor());
-                                let bg = convert_vt100_color(cell.bgcolor());
-                                let mut modifier = Modifier::empty();
-                                if cell.bold() {
-                                    modifier |= Modifier::BOLD;
-                                }
-                                if cell.italic() {
-                                    modifier |= Modifier::ITALIC;
-                                }
-                                if cell.underline() {
-                                    modifier |= Modifier::UNDERLINED;
-                                }
-                                if cell.inverse() {
-                                    modifier |= Modifier::REVERSED;
-                                }
-                                let style = Style::default().fg(fg).bg(bg).add_modifier(modifier);
-                                let contents = cell.contents();
-                                let ratatui_cell = &mut buf[(x, y)];
-                                if contents.is_empty() {
-                                    ratatui_cell.set_symbol(" ");
-                                } else {
-                                    ratatui_cell.set_symbol(&contents);
-                                }
-                                ratatui_cell.set_style(style);
                             }
                         }
                     }
 
-                    // Render cursor if in input mode.
-                    if is_input && !screen.hide_cursor() {
-                        let (cursor_row, cursor_col) = screen.cursor_position();
-                        let cx = term_area.x + cursor_col;
-                        let cy = term_area.y + cursor_row;
-                        if cx < term_area.x + term_area.width && cy < term_area.y + term_area.height
-                        {
-                            let cursor_cell = &mut buf[(cx, cy)];
-                            cursor_cell.set_style(
-                                Style::default()
-                                    .fg(Color::Black)
-                                    .bg(self.theme.prompt_cursor),
-                            );
+                    if let Some(label) = scrollback_indicator_label(
+                        snapshot.scrollback_offset,
+                        snapshot.scrollback_total,
+                    ) {
+                        let badge_width = label.len() as u16;
+                        if term_area.height > 0 && badge_width <= term_area.width {
+                            Paragraph::new(label)
+                                .style(
+                                    Style::default()
+                                        .fg(self.theme.scroll_indicator_fg)
+                                        .bg(self.theme.scroll_indicator_bg),
+                                )
+                                .render(
+                                    Rect::new(
+                                        term_area.x + term_area.width - badge_width,
+                                        term_area.y,
+                                        badge_width,
+                                        1,
+                                    ),
+                                    frame.buffer_mut(),
+                                );
                         }
                     }
                 }
             }
         }
 
+        if !rendered_content {
+            self.render_ascii_logo(frame, term_area);
+        }
+
         // Hint bar with top border.
         if hint_area.height > 0 {
             // Pre-compute all key labels so they outlive the Span borrows.
             let exit_key = self.bindings.label_for(Action::ExitInteractive);
-            let fullscreen_key = self.bindings.label_for(Action::ToggleFullscreen);
             let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
             let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
-            let interact = self.bindings.labels_for(Action::InteractAgent);
+            let focus_agent = self.bindings.labels_for(Action::FocusAgent);
             let reconnect = self.bindings.labels_for(Action::ReconnectAgent);
 
             let hint_line = if is_input {
@@ -481,9 +553,17 @@ impl App {
                     desc_style,
                 ));
                 spans.extend(self.theme.dim_key_badge(&exit_key, Color::Reset));
-                spans.push(Span::styled(" to bring the focus back. ", desc_style));
-                spans.extend(self.theme.dim_key_badge(&fullscreen_key, Color::Reset));
-                spans.push(Span::styled(" fullscreen.", desc_style));
+                spans.push(Span::styled(" to return to the app. ", desc_style));
+                spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
+                spans.push(Span::styled(" up, ", desc_style));
+                spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
+                if scrollback_offset > 0 {
+                    spans.push(Span::styled(" page down, or ", desc_style));
+                    spans.extend(self.theme.dim_key_badge("Space", Color::Reset));
+                    spans.push(Span::styled(" down one line.", desc_style));
+                } else {
+                    spans.push(Span::styled(" page down.", desc_style));
+                }
                 Line::from(spans)
             } else if scrollback_offset > 0 {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
@@ -501,10 +581,8 @@ impl App {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
                 if session_active {
-                    spans.extend(self.theme.dim_key_badge(&interact, Color::Reset));
+                    spans.extend(self.theme.dim_key_badge(&focus_agent, Color::Reset));
                     spans.push(Span::styled(" to interact. ", desc_style));
-                    spans.extend(self.theme.dim_key_badge(&fullscreen_key, Color::Reset));
-                    spans.push(Span::styled(" fullscreen. ", desc_style));
                     spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
                     spans.push(Span::styled(" ", desc_style));
                     spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
@@ -512,7 +590,9 @@ impl App {
                 } else if session_id.is_some() {
                     spans.push(Span::styled("Agent CLI exited. Press ", desc_style));
                     spans.extend(self.theme.dim_key_badge(&reconnect, Color::Reset));
-                    spans.push(Span::styled(" to relaunch.", desc_style));
+                    spans.push(Span::styled(" to relaunch or ", desc_style));
+                    spans.extend(self.theme.dim_key_badge(&focus_agent, Color::Reset));
+                    spans.push(Span::styled(" to interact.", desc_style));
                 } else {
                     spans.push(Span::styled("No agent selected.", desc_style));
                 }
@@ -547,6 +627,7 @@ impl App {
                 &self.unstaged_files,
                 RightSection::Unstaged,
                 focused,
+                true,
             );
             self.render_staged_with_commit(frame, chunks[1], focused);
         } else {
@@ -557,6 +638,7 @@ impl App {
                 &self.unstaged_files,
                 RightSection::Unstaged,
                 focused,
+                true,
             );
         }
     }
@@ -578,6 +660,7 @@ impl App {
             &self.staged_files,
             RightSection::Staged,
             pane_focused,
+            false,
         );
 
         // Commit input block.
@@ -592,9 +675,26 @@ impl App {
         files: &[ChangedFile],
         section: RightSection,
         pane_focused: bool,
+        show_hint: bool,
     ) {
-        let inner_width = area.width.saturating_sub(2) as usize; // minus borders
         let is_active_section = pane_focused && self.right_section == section;
+        let title = format!("{title_prefix} ({})", files.len());
+        let block = self.themed_block(&title, is_active_section);
+        let inner = block.inner(area);
+        block.render(area, frame.buffer_mut());
+
+        // Optionally reserve 2 lines at the bottom for the hint bar (border + text).
+        let (list_area, hint_area) = if show_hint && pane_focused && inner.height >= 4 {
+            let [la, ha] = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(2)])
+                .areas(inner);
+            (la, Some(ha))
+        } else {
+            (inner, None)
+        };
+
+        let inner_width = list_area.width as usize;
         let sel_style = self.theme.selection_style();
         let items = files
             .iter()
@@ -655,19 +755,29 @@ impl App {
                 ListItem::new(Line::from(spans))
             })
             .collect::<Vec<_>>();
-        let title = format!("{title_prefix} ({})", files.len());
         let selected = if is_active_section {
             Some(self.files_index)
         } else {
             None
         };
         let mut state = ListState::default().with_selected(selected);
-        StatefulWidget::render(
-            List::new(items).block(self.themed_block(&title, is_active_section)),
-            area,
-            frame.buffer_mut(),
-            &mut state,
-        );
+        StatefulWidget::render(List::new(items), list_area, frame.buffer_mut(), &mut state);
+
+        // Hint bar inside the block (same style as agent terminal / diff view).
+        if let Some(ha) = hint_area {
+            let stage_key = self.bindings.label_for(Action::StageUnstage);
+            let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+            let mut spans: Vec<Span> = Vec::new();
+            spans.extend(self.theme.dim_key_badge(&stage_key, Color::Reset));
+            spans.push(Span::styled(" stage/unstage.", desc_style));
+            Paragraph::new(Line::from(spans))
+                .block(
+                    Block::default()
+                        .borders(Borders::TOP)
+                        .border_style(Style::default().fg(self.theme.border_normal)),
+                )
+                .render(ha, frame.buffer_mut());
+        }
     }
 
     /// Render the commit input as its own bordered block.
@@ -1798,14 +1908,6 @@ pub(crate) fn format_line_stats(additions: usize, deletions: usize) -> Vec<Span<
     spans
 }
 
-pub(crate) fn convert_vt100_color(color: vt100::Color) -> Color {
-    match color {
-        vt100::Color::Default => Color::Reset,
-        vt100::Color::Idx(n) => Color::Indexed(n),
-        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
-    }
-}
-
 pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -1823,6 +1925,16 @@ pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect 
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(vertical)[1]
+}
+
+fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {
+    if scrolled == 0 {
+        return None;
+    }
+
+    let total = total.max(scrolled);
+    let noun = if total == 1 { "line" } else { "lines" };
+    Some(format!(" {scrolled}/{total} {noun} "))
 }
 
 /// Pre-wrap text at exact character boundaries to match the manual cursor
@@ -1882,6 +1994,27 @@ mod tests {
     #[test]
     fn wrap_empty_string() {
         assert_eq!(wrap_text_at_width("", 10), "");
+    }
+
+    #[test]
+    fn scrollback_indicator_uses_fractional_label() {
+        assert_eq!(
+            scrollback_indicator_label(41, 800),
+            Some(" 41/800 lines ".to_string())
+        );
+    }
+
+    #[test]
+    fn scrollback_indicator_handles_singular_total() {
+        assert_eq!(
+            scrollback_indicator_label(1, 1),
+            Some(" 1/1 line ".to_string())
+        );
+    }
+
+    #[test]
+    fn scrollback_indicator_hides_at_live_bottom() {
+        assert_eq!(scrollback_indicator_label(0, 800), None);
     }
 
     #[test]

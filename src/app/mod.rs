@@ -69,6 +69,7 @@ pub struct App {
     pub(crate) create_agent_in_flight: bool,
     pub(crate) last_pty_size: (u16, u16),
     pub(crate) last_diff_height: u16,
+    pub(crate) last_diff_visual_lines: u16,
     pub(crate) theme: Theme,
     pub(crate) tick_count: u64,
     pub(crate) watched_worktree: Arc<Mutex<Option<PathBuf>>>,
@@ -312,6 +313,7 @@ impl App {
             create_agent_in_flight: false,
             last_pty_size: (0, 0),
             last_diff_height: 0,
+            last_diff_visual_lines: 0,
             theme: Theme::default_dark(),
             tick_count: 0,
             watched_worktree: Arc::clone(&watched_worktree),
@@ -369,12 +371,6 @@ impl App {
     }
 
     pub(crate) fn close_top_overlay(&mut self) -> bool {
-        if self.fullscreen_agent {
-            self.fullscreen_agent = false;
-            let key = self.bindings.label_for(Action::ToggleFullscreen);
-            self.set_info(format!("Exited fullscreen. Press {key} to re-enter."));
-            return true;
-        }
         if !matches!(self.prompt, PromptState::None) {
             self.prompt = PromptState::None;
             self.set_info("Closed overlay.");
@@ -465,9 +461,17 @@ impl App {
             if self.collapsed_projects.contains(&id) {
                 self.collapsed_projects.remove(&id);
             } else {
-                self.collapsed_projects.insert(id);
+                self.collapsed_projects.insert(id.clone());
             }
             self.rebuild_left_items();
+
+            // Move selection to the toggled project so collapsing from a
+            // child session leaves the cursor on the parent header.
+            if let Some(new_index) = self.left_items().iter().position(|item| {
+                matches!(item, LeftItem::Project(pi) if self.projects[*pi].id == id)
+            }) {
+                self.selected_left = new_index;
+            }
         }
     }
 

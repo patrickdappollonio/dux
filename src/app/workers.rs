@@ -29,6 +29,7 @@ impl App {
                     self.focus = FocusPane::Center;
                     self.center_mode = CenterMode::Agent;
                     self.input_target = InputTarget::Agent;
+                    self.fullscreen_agent = true;
                     let proj_name = self.project_name_for_session(&session);
                     self.set_info(format!(
                         "Created {} agent \"{}\" in project \"{}\"",
@@ -118,6 +119,7 @@ impl App {
             if let Some(current) = self.selected_session() {
                 if exited.contains(&current.id) {
                     self.input_target = InputTarget::None;
+                    self.fullscreen_agent = false;
                     self.focus = FocusPane::Left;
                     let key = self.bindings.label_for(Action::ReconnectAgent);
                     self.set_info(format!(
@@ -243,6 +245,7 @@ pub(crate) fn run_create_agent_job(
         &worktree_path,
         rows,
         cols,
+        config.ui.agent_scrollback_lines,
     ) {
         Ok(client) => client,
         Err(err) => {
