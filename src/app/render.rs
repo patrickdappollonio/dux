@@ -507,7 +507,9 @@ impl App {
                     desc_style,
                 ));
                 spans.extend(self.theme.dim_key_badge(&exit_key, Color::Reset));
-                spans.push(Span::styled(" to return to the app.", desc_style));
+                spans.push(Span::styled(" to return to the app. ", desc_style));
+                spans.extend(self.theme.dim_key_badge("PgUp/PgDn", Color::Reset));
+                spans.push(Span::styled(" to scroll.", desc_style));
                 Line::from(spans)
             } else if scrollback_offset > 0 {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);

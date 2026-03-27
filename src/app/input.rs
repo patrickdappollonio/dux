@@ -628,6 +628,23 @@ impl App {
             return Ok(false);
         }
 
+        // PgUp/PgDn scroll the scrollback buffer even in interactive mode.
+        match key.code {
+            KeyCode::PageUp => {
+                if self.last_pty_size.0 > 0 {
+                    self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
+                }
+                return Ok(false);
+            }
+            KeyCode::PageDown => {
+                if self.last_pty_size.0 > 0 {
+                    self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
+                }
+                return Ok(false);
+            }
+            _ => {}
+        }
+
         match key.code {
             KeyCode::Esc => {
                 let _ = provider.write_bytes(b"\x1b");
@@ -673,12 +690,6 @@ impl App {
             }
             KeyCode::Delete => {
                 let _ = provider.write_bytes(b"\x1b[3~");
-            }
-            KeyCode::PageUp => {
-                let _ = provider.write_bytes(b"\x1b[5~");
-            }
-            KeyCode::PageDown => {
-                let _ = provider.write_bytes(b"\x1b[6~");
             }
             _ => {}
         }
