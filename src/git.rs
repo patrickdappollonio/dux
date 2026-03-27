@@ -164,7 +164,13 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     let wt = worktree_path.to_string_lossy();
 
     let output = Command::new("git")
-        .args(["-C", wt.as_ref(), "status", "--porcelain"])
+        .args([
+            "-C",
+            wt.as_ref(),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ])
         .output()?;
     if !output.status.success() {
         return Err(anyhow!(
@@ -473,6 +479,8 @@ mod tests {
         run(&["init", "-b", "main"]);
         run(&[
             "-c",
+            "commit.gpgsign=false",
+            "-c",
             "user.name=test",
             "-c",
             "user.email=t@t",
@@ -579,5 +587,20 @@ mod tests {
 
         let branch = current_branch(&wt).unwrap();
         assert_eq!(branch, "same-name");
+    }
+
+    #[test]
+    fn changed_files_lists_untracked_files_instead_of_directories() {
+        let repo = init_test_repo();
+        let nested = repo.path().join("docs").join("guide.md");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, "# guide\n").unwrap();
+
+        let (staged, unstaged) = changed_files(repo.path()).unwrap();
+
+        assert!(staged.is_empty(), "new files should not appear as staged");
+        assert_eq!(unstaged.len(), 1);
+        assert_eq!(unstaged[0].status, "?");
+        assert_eq!(unstaged[0].path, "docs/guide.md");
     }
 }

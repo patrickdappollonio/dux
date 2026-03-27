@@ -101,6 +101,7 @@ fn new_project_id() -> String {
 pub struct UiConfig {
     pub left_width_pct: u16,
     pub right_width_pct: u16,
+    pub show_diff_line_numbers: bool,
 }
 
 impl Default for Config {
@@ -116,6 +117,7 @@ impl Default for Config {
             ui: UiConfig {
                 left_width_pct: 20,
                 right_width_pct: 23,
+                show_diff_line_numbers: false,
             },
             keys: KeysConfig::default(),
         }
@@ -190,6 +192,7 @@ impl Default for UiConfig {
         Self {
             left_width_pct: 17,
             right_width_pct: 19,
+            show_diff_line_numbers: false,
         }
     }
 }
@@ -288,6 +291,7 @@ enum FieldValue {
     Str(String),
     OptStr(Option<String>),
     U16(u16),
+    Bool(bool),
     MultilineStr(Option<String>),
 }
 
@@ -382,6 +386,13 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             comment: None,
             value_fn: |c| FieldValue::U16(c.ui.right_width_pct),
         },
+        ConfigEntry::Field {
+            key: "show_diff_line_numbers",
+            comment: Some(CommentSource::Static(
+                "# Show old/new line numbers in the diff view. Useful for review, but costs horizontal space.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.ui.show_diff_line_numbers),
+        },
         ConfigEntry::Blank,
         ConfigEntry::Keys,
         ConfigEntry::Blank,
@@ -426,6 +437,9 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
                     }
                     FieldValue::U16(n) => {
                         let _ = writeln!(out, "{key} = {n}");
+                    }
+                    FieldValue::Bool(value) => {
+                        let _ = writeln!(out, "{key} = {value}");
                     }
                     FieldValue::MultilineStr(Some(s)) => {
                         let escaped = escape_toml_multiline(&s);
@@ -760,6 +774,7 @@ mod tests {
         assert!(rendered.contains("oneshot_args = "));
         assert!(rendered.contains("oneshot_output = "));
         assert!(rendered.contains("[ui]"));
+        assert!(rendered.contains("show_diff_line_numbers = false"));
         assert!(rendered.contains("[keys]"));
         assert!(rendered.contains("show_terminal_keys = true"));
         assert!(rendered.contains("move_down = "));

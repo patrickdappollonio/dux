@@ -384,8 +384,14 @@ impl App {
         let Some(file) = self.selected_changed_file() else {
             return Ok(());
         };
-        let output =
-            crate::diff::diff_file(Path::new(&session.worktree_path), &file.path, &self.theme)?;
+        let output = crate::diff::diff_file(
+            Path::new(&session.worktree_path),
+            &file.path,
+            &self.theme,
+            crate::diff::DiffRenderOptions {
+                show_line_numbers: self.config.ui.show_diff_line_numbers,
+            },
+        )?;
         self.center_mode = CenterMode::Diff {
             lines: output.lines,
             scroll: 0,

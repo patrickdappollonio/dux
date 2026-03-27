@@ -68,3 +68,12 @@ show_terminal_keys = false
 Text input keys (Backspace, typing characters, Enter in the commit editor) and PTY passthrough keys in interactive mode are not rebindable.
 
 Invalid key strings cause the app to refuse to start with a clear error pointing to the broken entry.
+
+## UI
+
+Diff line numbers can be enabled from the `[ui]` section of `config.toml`:
+
+```toml
+[ui]
+show_diff_line_numbers = true
+```
