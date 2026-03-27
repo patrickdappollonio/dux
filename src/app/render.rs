@@ -213,6 +213,13 @@ impl App {
             CenterMode::Diff { .. } => {
                 self.render_diff(frame, area, focused);
             }
+            CenterMode::Agent if self.fullscreen_agent => {
+                // Skip agent rendering here — fullscreen overlay handles it.
+                // Rendering in both places causes the PTY to be resized twice
+                // per frame (once to the small pane, once to the overlay).
+                self.themed_block("Agent", focused)
+                    .render(area, frame.buffer_mut());
+            }
             CenterMode::Agent => {
                 self.render_agent_terminal(frame, area, "Agent", focused);
             }
@@ -479,10 +486,9 @@ impl App {
         if hint_area.height > 0 {
             // Pre-compute all key labels so they outlive the Span borrows.
             let exit_key = self.bindings.label_for(Action::ExitInteractive);
-            let fullscreen_key = self.bindings.label_for(Action::ToggleFullscreen);
             let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
             let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
-            let interact = self.bindings.labels_for(Action::InteractAgent);
+            let focus_agent = self.bindings.labels_for(Action::FocusAgent);
             let reconnect = self.bindings.labels_for(Action::ReconnectAgent);
 
             let hint_line = if is_input {
@@ -501,9 +507,7 @@ impl App {
                     desc_style,
                 ));
                 spans.extend(self.theme.dim_key_badge(&exit_key, Color::Reset));
-                spans.push(Span::styled(" to bring the focus back. ", desc_style));
-                spans.extend(self.theme.dim_key_badge(&fullscreen_key, Color::Reset));
-                spans.push(Span::styled(" fullscreen.", desc_style));
+                spans.push(Span::styled(" to return to the app.", desc_style));
                 Line::from(spans)
             } else if scrollback_offset > 0 {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
@@ -521,10 +525,8 @@ impl App {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
                 if session_active {
-                    spans.extend(self.theme.dim_key_badge(&interact, Color::Reset));
+                    spans.extend(self.theme.dim_key_badge(&focus_agent, Color::Reset));
                     spans.push(Span::styled(" to interact. ", desc_style));
-                    spans.extend(self.theme.dim_key_badge(&fullscreen_key, Color::Reset));
-                    spans.push(Span::styled(" fullscreen. ", desc_style));
                     spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
                     spans.push(Span::styled(" ", desc_style));
                     spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
@@ -532,7 +534,9 @@ impl App {
                 } else if session_id.is_some() {
                     spans.push(Span::styled("Agent CLI exited. Press ", desc_style));
                     spans.extend(self.theme.dim_key_badge(&reconnect, Color::Reset));
-                    spans.push(Span::styled(" to relaunch.", desc_style));
+                    spans.push(Span::styled(" to relaunch or ", desc_style));
+                    spans.extend(self.theme.dim_key_badge(&focus_agent, Color::Reset));
+                    spans.push(Span::styled(" to interact.", desc_style));
                 } else {
                     spans.push(Span::styled("No agent selected.", desc_style));
                 }
