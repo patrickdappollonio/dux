@@ -790,8 +790,6 @@ mod tests {
         assert!(rendered.contains("[ui]"));
         assert!(rendered.contains("show_diff_line_numbers = false"));
         assert!(rendered.contains("agent_scrollback_lines = 10000"));
-        assert!(rendered.contains("show_diff_line_numbers = false"));
-        assert!(rendered.contains("agent_scrollback_lines = 10000"));
         assert!(rendered.contains("[keys]"));
         assert!(rendered.contains("show_terminal_keys = true"));
         assert!(rendered.contains("move_down = "));
