@@ -23,7 +23,7 @@ impl App {
                     _ => {}
                 }
             }
-            if let Some(action) = self.bindings.lookup(&key, BindingScope::Global) {
+            if let Some(action) = self.bindings.lookup(&key, BindingScope::Center) {
                 match action {
                     Action::ScrollPageDown => {
                         let page = self.last_help_height.max(1);
