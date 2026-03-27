@@ -461,9 +461,17 @@ impl App {
             if self.collapsed_projects.contains(&id) {
                 self.collapsed_projects.remove(&id);
             } else {
-                self.collapsed_projects.insert(id);
+                self.collapsed_projects.insert(id.clone());
             }
             self.rebuild_left_items();
+
+            // Move selection to the toggled project so collapsing from a
+            // child session leaves the cursor on the parent header.
+            if let Some(new_index) = self.left_items().iter().position(|item| {
+                matches!(item, LeftItem::Project(pi) if self.projects[*pi].id == id)
+            }) {
+                self.selected_left = new_index;
+            }
         }
     }
 
