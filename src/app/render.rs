@@ -571,6 +571,7 @@ impl App {
                 &self.unstaged_files,
                 RightSection::Unstaged,
                 focused,
+                true,
             );
             self.render_staged_with_commit(frame, chunks[1], focused);
         } else {
@@ -581,6 +582,7 @@ impl App {
                 &self.unstaged_files,
                 RightSection::Unstaged,
                 focused,
+                true,
             );
         }
     }
@@ -602,6 +604,7 @@ impl App {
             &self.staged_files,
             RightSection::Staged,
             pane_focused,
+            false,
         );
 
         // Commit input block.
@@ -616,9 +619,26 @@ impl App {
         files: &[ChangedFile],
         section: RightSection,
         pane_focused: bool,
+        show_hint: bool,
     ) {
-        let inner_width = area.width.saturating_sub(2) as usize; // minus borders
         let is_active_section = pane_focused && self.right_section == section;
+        let title = format!("{title_prefix} ({})", files.len());
+        let block = self.themed_block(&title, is_active_section);
+        let inner = block.inner(area);
+        block.render(area, frame.buffer_mut());
+
+        // Optionally reserve 2 lines at the bottom for the hint bar (border + text).
+        let (list_area, hint_area) = if show_hint && pane_focused && inner.height >= 4 {
+            let [la, ha] = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(2)])
+                .areas(inner);
+            (la, Some(ha))
+        } else {
+            (inner, None)
+        };
+
+        let inner_width = list_area.width as usize;
         let sel_style = self.theme.selection_style();
         let items = files
             .iter()
@@ -679,19 +699,29 @@ impl App {
                 ListItem::new(Line::from(spans))
             })
             .collect::<Vec<_>>();
-        let title = format!("{title_prefix} ({})", files.len());
         let selected = if is_active_section {
             Some(self.files_index)
         } else {
             None
         };
         let mut state = ListState::default().with_selected(selected);
-        StatefulWidget::render(
-            List::new(items).block(self.themed_block(&title, is_active_section)),
-            area,
-            frame.buffer_mut(),
-            &mut state,
-        );
+        StatefulWidget::render(List::new(items), list_area, frame.buffer_mut(), &mut state);
+
+        // Hint bar inside the block (same style as agent terminal / diff view).
+        if let Some(ha) = hint_area {
+            let stage_key = self.bindings.label_for(Action::StageUnstage);
+            let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+            let mut spans: Vec<Span> = Vec::new();
+            spans.extend(self.theme.dim_key_badge(&stage_key, Color::Reset));
+            spans.push(Span::styled(" stage/unstage.", desc_style));
+            Paragraph::new(Line::from(spans))
+                .block(
+                    Block::default()
+                        .borders(Borders::TOP)
+                        .border_style(Style::default().fg(self.theme.border_normal)),
+                )
+                .render(ha, frame.buffer_mut());
+        }
     }
 
     /// Render the commit input as its own bordered block.
