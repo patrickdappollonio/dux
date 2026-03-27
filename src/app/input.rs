@@ -631,9 +631,9 @@ impl App {
         }
 
         // Scroll bindings are checked before forwarding keys to the PTY so
-        // that the configured keys for ScrollPageUp, ScrollPageDown, and
-        // ScrollLineDown work in interactive mode without being eaten by the
-        // child process.
+        // that the configured keys for ScrollPageUp, ScrollPageDown,
+        // ScrollLineUp, and ScrollLineDown work in interactive mode without
+        // being eaten by the child process.
         match self.bindings.lookup(&key, BindingScope::Interactive) {
             Some(Action::ScrollPageUp) => {
                 if self.last_pty_size.0 > 0 {
@@ -645,6 +645,12 @@ impl App {
                 if self.last_pty_size.0 > 0 {
                     self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
                 }
+                return Ok(false);
+            }
+            Some(Action::ScrollLineUp)
+                if provider.scrollback_offset() > 0 && self.last_pty_size.0 > 0 =>
+            {
+                self.scroll_pty(ScrollDirection::Up, 1);
                 return Ok(false);
             }
             Some(Action::ScrollLineDown)
@@ -1426,6 +1432,26 @@ mod tests {
         assert_ne!(
             bindings.lookup(&key, BindingScope::Center),
             Some(Action::ScrollPageDown),
+        );
+    }
+
+    #[test]
+    fn scroll_line_up_resolves_arrow_up_in_interactive_scope() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Interactive),
+            Some(Action::ScrollLineUp),
+        );
+    }
+
+    #[test]
+    fn scroll_line_down_resolves_arrow_down_in_interactive_scope() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Interactive),
+            Some(Action::ScrollLineDown),
         );
     }
 }
