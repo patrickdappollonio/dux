@@ -192,7 +192,15 @@ impl PtyClient {
     /// offset in a single lock acquisition, avoiding race conditions with the
     /// background reader thread.
     pub fn screen_and_scrollback(&self) -> (vt100::Screen, usize) {
-        let p = self.parser.lock().expect("parser mutex poisoned");
+        let mut p = self.parser.lock().expect("parser mutex poisoned");
+        // vt100's scroll_up() can increment scrollback_offset beyond the
+        // terminal row count, which causes visible_rows() to panic with an
+        // underflow. Re-clamp before cloning to ensure the snapshot is safe.
+        let offset = p.screen().scrollback();
+        let max_offset = p.screen().size().0 as usize;
+        if offset > max_offset {
+            p.set_scrollback(max_offset);
+        }
         let screen = p.screen().clone();
         let offset = screen.scrollback();
         (screen, offset)
