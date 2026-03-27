@@ -32,6 +32,7 @@ pub struct Config {
     pub logging: LoggingConfig,
     pub projects: Vec<ProjectConfig>,
     pub ui: UiConfig,
+    pub editor: EditorConfig,
     pub keys: KeysConfig,
 }
 
@@ -63,6 +64,12 @@ pub struct ProvidersConfig {
 pub struct LoggingConfig {
     pub level: String,
     pub path: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EditorConfig {
+    pub default: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -119,6 +126,7 @@ impl Default for Config {
                 right_width_pct: 23,
                 agent_scrollback_lines: 10_000,
             },
+            editor: EditorConfig::default(),
             keys: KeysConfig::default(),
         }
     }
@@ -183,6 +191,14 @@ impl Default for LoggingConfig {
         Self {
             level: "info".to_string(),
             path: "dux.log".to_string(),
+        }
+    }
+}
+
+impl Default for EditorConfig {
+    fn default() -> Self {
+        Self {
+            default: "cursor".to_string(),
         }
     }
 }
@@ -392,6 +408,15 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
                 "# Maximum number of lines retained in the embedded agent terminal scrollback.",
             )),
             value_fn: |c| FieldValue::Usize(c.ui.agent_scrollback_lines),
+        },
+        ConfigEntry::Blank,
+        ConfigEntry::Section("editor"),
+        ConfigEntry::Field {
+            key: "default",
+            comment: Some(CommentSource::Static(
+                "# Preferred editor when opening a selected agent worktree.\n# Supported values are matched against popular editor CLIs on PATH\n# (for example: cursor, vscode/code, zed, antigravity).",
+            )),
+            value_fn: |c| FieldValue::Str(c.editor.default.clone()),
         },
         ConfigEntry::Blank,
         ConfigEntry::Keys,
@@ -775,6 +800,8 @@ mod tests {
         assert!(rendered.contains("oneshot_output = "));
         assert!(rendered.contains("[ui]"));
         assert!(rendered.contains("agent_scrollback_lines = 10000"));
+        assert!(rendered.contains("[editor]"));
+        assert!(rendered.contains("default = \"cursor\""));
         assert!(rendered.contains("[keys]"));
         assert!(rendered.contains("show_terminal_keys = true"));
         assert!(rendered.contains("move_down = "));
@@ -859,6 +886,15 @@ mod tests {
         let rendered = render_config_default(&config);
         let parsed: Config = toml::from_str(&rendered).expect("config should parse");
         assert_eq!(parsed.ui.agent_scrollback_lines, 12_345);
+    }
+
+    #[test]
+    fn default_config_round_trips_default_editor() {
+        let mut config = Config::default();
+        config.editor.default = "zed".to_string();
+        let rendered = render_config_default(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("config should parse");
+        assert_eq!(parsed.editor.default, "zed");
     }
 
     #[cfg(target_os = "macos")]
