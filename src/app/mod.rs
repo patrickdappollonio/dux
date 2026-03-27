@@ -371,12 +371,6 @@ impl App {
     }
 
     pub(crate) fn close_top_overlay(&mut self) -> bool {
-        if self.fullscreen_agent {
-            self.fullscreen_agent = false;
-            let key = self.bindings.label_for(Action::ToggleFullscreen);
-            self.set_info(format!("Exited fullscreen. Press {key} to re-enter."));
-            return true;
-        }
         if !matches!(self.prompt, PromptState::None) {
             self.prompt = PromptState::None;
             self.set_info("Closed overlay.");
