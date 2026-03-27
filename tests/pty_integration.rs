@@ -30,11 +30,34 @@ fn pty_spawn_and_detect_exit() {
     assert!(status.success());
 }
 
-/// Verify that PTY output can be read and parsed by vt100.
+/// Verify that PTY output can be read and parsed by alacritty_terminal.
 #[test]
-fn pty_read_output_into_vt100() {
+fn pty_read_output_into_alacritty_terminal() {
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::grid::Dimensions;
+    use alacritty_terminal::term::{self, Config, Term};
+    use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
     use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
     use std::io::Read;
+
+    struct TerminalDimensions {
+        rows: usize,
+        cols: usize,
+    }
+
+    impl Dimensions for TerminalDimensions {
+        fn total_lines(&self) -> usize {
+            self.rows
+        }
+
+        fn screen_lines(&self) -> usize {
+            self.rows
+        }
+
+        fn columns(&self) -> usize {
+            self.cols
+        }
+    }
 
     let pty_system = NativePtySystem::default();
     let pair = pty_system
@@ -56,47 +79,43 @@ fn pty_read_output_into_vt100() {
         .master
         .try_clone_reader()
         .expect("failed to clone reader");
-    let mut parser = vt100::Parser::new(24, 80, 0);
+    let mut parser: Processor<StdSyncHandler> = Processor::new();
+    let dimensions = TerminalDimensions { rows: 24, cols: 80 };
+    let mut term = Term::new(Config::default(), &dimensions, VoidListener);
 
     // Read output in a loop until EOF.
     let mut buf = [0u8; 4096];
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => parser.process(&buf[..n]),
+            Ok(n) => parser.advance(&mut term, &buf[..n]),
             Err(_) => break,
         }
     }
 
     child.wait().expect("failed to wait");
 
-    // The screen should contain "hello-from-pty".
-    let screen = parser.screen();
-    let mut found = false;
-    for row in 0..24 {
-        for col in 0..80 {
-            if let Some(cell) = screen.cell(row, col) {
-                let contents = cell.contents();
-                if contents == "h" {
-                    // Check if "hello-from-pty" starts here.
-                    let mut text = String::new();
-                    for c in col..80 {
-                        if let Some(cell) = screen.cell(row, c) {
-                            let ch = cell.contents();
-                            if ch.is_empty() || ch == " " {
-                                break;
-                            }
-                            text.push_str(&ch);
-                        }
-                    }
-                    if text == "hello-from-pty" {
-                        found = true;
-                    }
-                }
+    let renderable = term.renderable_content();
+    let mut viewport = vec![String::new(); 24];
+    for indexed in renderable.display_iter {
+        let Some(point) = term::point_to_viewport(renderable.display_offset, indexed.point) else {
+            continue;
+        };
+        let row = &mut viewport[point.line];
+        while row.len() < indexed.point.column.0 {
+            row.push(' ');
+        }
+        row.push(indexed.cell.c);
+        if let Some(zerowidth) = indexed.cell.zerowidth() {
+            for ch in zerowidth {
+                row.push(*ch);
             }
         }
     }
-    assert!(found, "Expected 'hello-from-pty' in vt100 screen output");
+    assert!(
+        viewport.iter().any(|line| line.contains("hello-from-pty")),
+        "Expected 'hello-from-pty' in terminal output"
+    );
 }
 
 /// Verify that writing to the PTY sends input to the child.

@@ -1,5 +1,13 @@
 use super::*;
 
+fn should_scroll_down_with_space(
+    modifiers: KeyModifiers,
+    scrollback_offset: usize,
+    page_height: u16,
+) -> bool {
+    modifiers.is_empty() && scrollback_offset > 0 && page_height > 0
+}
+
 impl App {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
         // Interactive mode: ALL keys go to the PTY except Ctrl-G
@@ -628,6 +636,23 @@ impl App {
             return Ok(false);
         }
 
+        // PgUp/PgDn scroll the scrollback buffer even in interactive mode.
+        match key.code {
+            KeyCode::PageUp => {
+                if self.last_pty_size.0 > 0 {
+                    self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
+                }
+                return Ok(false);
+            }
+            KeyCode::PageDown => {
+                if self.last_pty_size.0 > 0 {
+                    self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
+                }
+                return Ok(false);
+            }
+            _ => {}
+        }
+
         match key.code {
             KeyCode::Esc => {
                 let _ = provider.write_bytes(b"\x1b");
@@ -638,6 +663,15 @@ impl App {
                     let ctrl_byte = c as u8 - b'a' + 1;
                     let _ = provider.write_bytes(&[ctrl_byte]);
                 }
+            }
+            KeyCode::Char(' ')
+                if should_scroll_down_with_space(
+                    key.modifiers,
+                    provider.scrollback_offset(),
+                    self.last_pty_size.0,
+                ) =>
+            {
+                self.scroll_pty(ScrollDirection::Down, 1);
             }
             KeyCode::Char(c) => {
                 let mut buf = [0u8; 4];
@@ -673,12 +707,6 @@ impl App {
             }
             KeyCode::Delete => {
                 let _ = provider.write_bytes(b"\x1b[3~");
-            }
-            KeyCode::PageUp => {
-                let _ = provider.write_bytes(b"\x1b[5~");
-            }
-            KeyCode::PageDown => {
-                let _ = provider.write_bytes(b"\x1b[6~");
             }
             _ => {}
         }
@@ -1301,5 +1329,30 @@ impl App {
             },
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn space_scroll_requires_live_scrollback() {
+        assert!(should_scroll_down_with_space(KeyModifiers::empty(), 3, 20));
+    }
+
+    #[test]
+    fn space_scroll_is_disabled_at_live_bottom() {
+        assert!(!should_scroll_down_with_space(KeyModifiers::empty(), 0, 20));
+    }
+
+    #[test]
+    fn space_scroll_is_disabled_with_modifiers() {
+        assert!(!should_scroll_down_with_space(KeyModifiers::CONTROL, 3, 20,));
+    }
+
+    #[test]
+    fn space_scroll_is_disabled_without_terminal_height() {
+        assert!(!should_scroll_down_with_space(KeyModifiers::empty(), 3, 0));
     }
 }

@@ -101,6 +101,7 @@ fn new_project_id() -> String {
 pub struct UiConfig {
     pub left_width_pct: u16,
     pub right_width_pct: u16,
+    pub agent_scrollback_lines: usize,
 }
 
 impl Default for Config {
@@ -116,6 +117,7 @@ impl Default for Config {
             ui: UiConfig {
                 left_width_pct: 20,
                 right_width_pct: 23,
+                agent_scrollback_lines: 10_000,
             },
             keys: KeysConfig::default(),
         }
@@ -190,6 +192,7 @@ impl Default for UiConfig {
         Self {
             left_width_pct: 17,
             right_width_pct: 19,
+            agent_scrollback_lines: 10_000,
         }
     }
 }
@@ -288,6 +291,7 @@ enum FieldValue {
     Str(String),
     OptStr(Option<String>),
     U16(u16),
+    Usize(usize),
     MultilineStr(Option<String>),
 }
 
@@ -382,6 +386,13 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             comment: None,
             value_fn: |c| FieldValue::U16(c.ui.right_width_pct),
         },
+        ConfigEntry::Field {
+            key: "agent_scrollback_lines",
+            comment: Some(CommentSource::Static(
+                "# Maximum number of lines retained in the embedded agent terminal scrollback.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.ui.agent_scrollback_lines),
+        },
         ConfigEntry::Blank,
         ConfigEntry::Keys,
         ConfigEntry::Blank,
@@ -425,6 +436,9 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
                         let _ = writeln!(out, "{key} = \"\"");
                     }
                     FieldValue::U16(n) => {
+                        let _ = writeln!(out, "{key} = {n}");
+                    }
+                    FieldValue::Usize(n) => {
                         let _ = writeln!(out, "{key} = {n}");
                     }
                     FieldValue::MultilineStr(Some(s)) => {
@@ -760,6 +774,7 @@ mod tests {
         assert!(rendered.contains("oneshot_args = "));
         assert!(rendered.contains("oneshot_output = "));
         assert!(rendered.contains("[ui]"));
+        assert!(rendered.contains("agent_scrollback_lines = 10000"));
         assert!(rendered.contains("[keys]"));
         assert!(rendered.contains("show_terminal_keys = true"));
         assert!(rendered.contains("move_down = "));
@@ -835,6 +850,15 @@ mod tests {
             rendered, re_rendered,
             "render → parse → render should be stable"
         );
+    }
+
+    #[test]
+    fn default_config_round_trips_agent_scrollback_lines() {
+        let mut config = Config::default();
+        config.ui.agent_scrollback_lines = 12_345;
+        let rendered = render_config_default(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("config should parse");
+        assert_eq!(parsed.ui.agent_scrollback_lines, 12_345);
     }
 
     #[cfg(target_os = "macos")]

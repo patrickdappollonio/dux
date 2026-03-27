@@ -245,6 +245,7 @@ pub(crate) fn run_create_agent_job(
         &worktree_path,
         rows,
         cols,
+        config.ui.agent_scrollback_lines,
     ) {
         Ok(client) => client,
         Err(err) => {
