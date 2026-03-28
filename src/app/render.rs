@@ -534,6 +534,7 @@ impl App {
             let exit_key = self.bindings.label_for(Action::ExitInteractive);
             let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
             let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
+            let scroll_line = self.bindings.label_for(Action::ScrollLineDown);
             let focus_agent = self.bindings.labels_for(Action::FocusAgent);
             let reconnect = self.bindings.labels_for(Action::ReconnectAgent);
 
@@ -559,7 +560,7 @@ impl App {
                 spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
                 if scrollback_offset > 0 {
                     spans.push(Span::styled(" page down, or ", desc_style));
-                    spans.extend(self.theme.dim_key_badge("Space", Color::Reset));
+                    spans.extend(self.theme.dim_key_badge(&scroll_line, Color::Reset));
                     spans.push(Span::styled(" down one line.", desc_style));
                 } else {
                     spans.push(Span::styled(" page down.", desc_style));

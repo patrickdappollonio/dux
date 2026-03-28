@@ -1,13 +1,5 @@
 use super::*;
 
-fn should_scroll_down_with_space(
-    modifiers: KeyModifiers,
-    scrollback_offset: usize,
-    page_height: u16,
-) -> bool {
-    modifiers.is_empty() && scrollback_offset > 0 && page_height > 0
-}
-
 impl App {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
         // Interactive mode: ALL keys go to the PTY except Ctrl-G
@@ -24,15 +16,10 @@ impl App {
         }
         if let Some(ref mut scroll) = self.help_scroll {
             // Help overlay is open — consume all keys, only scroll keys do anything.
-            if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
+            if let Some(action) = self.bindings.lookup(&key, BindingScope::Help) {
                 match action {
                     Action::MoveDown => *scroll = scroll.saturating_add(1),
                     Action::MoveUp => *scroll = scroll.saturating_sub(1),
-                    _ => {}
-                }
-            }
-            if let Some(action) = self.bindings.lookup(&key, BindingScope::Global) {
-                match action {
                     Action::ScrollPageDown => {
                         let page = self.last_help_height.max(1);
                         *scroll = (*scroll + page).min(
@@ -638,18 +625,33 @@ impl App {
             return Ok(false);
         }
 
-        // PgUp/PgDn scroll the scrollback buffer even in interactive mode.
-        match key.code {
-            KeyCode::PageUp => {
+        // Scroll bindings are checked before forwarding keys to the PTY so
+        // that the configured keys for ScrollPageUp, ScrollPageDown,
+        // ScrollLineUp, and ScrollLineDown work in interactive mode without
+        // being eaten by the child process.
+        match self.bindings.lookup(&key, BindingScope::Interactive) {
+            Some(Action::ScrollPageUp) => {
                 if self.last_pty_size.0 > 0 {
                     self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
                 }
                 return Ok(false);
             }
-            KeyCode::PageDown => {
+            Some(Action::ScrollPageDown) => {
                 if self.last_pty_size.0 > 0 {
                     self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
                 }
+                return Ok(false);
+            }
+            Some(Action::ScrollLineUp)
+                if provider.scrollback_offset() > 0 && self.last_pty_size.0 > 0 =>
+            {
+                self.scroll_pty(ScrollDirection::Up, 1);
+                return Ok(false);
+            }
+            Some(Action::ScrollLineDown)
+                if provider.scrollback_offset() > 0 && self.last_pty_size.0 > 0 =>
+            {
+                self.scroll_pty(ScrollDirection::Down, 1);
                 return Ok(false);
             }
             _ => {}
@@ -665,15 +667,6 @@ impl App {
                     let ctrl_byte = c as u8 - b'a' + 1;
                     let _ = provider.write_bytes(&[ctrl_byte]);
                 }
-            }
-            KeyCode::Char(' ')
-                if should_scroll_down_with_space(
-                    key.modifiers,
-                    provider.scrollback_offset(),
-                    self.last_pty_size.0,
-                ) =>
-            {
-                self.scroll_pty(ScrollDirection::Down, 1);
             }
             KeyCode::Char(c) => {
                 let mut buf = [0u8; 4];
@@ -1371,25 +1364,89 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::keybindings::{Action, BINDING_DEFS, BindingScope, RuntimeBindings};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    #[test]
-    fn space_scroll_requires_live_scrollback() {
-        assert!(should_scroll_down_with_space(KeyModifiers::empty(), 3, 20));
+    fn default_bindings() -> RuntimeBindings {
+        RuntimeBindings::new(
+            |action| {
+                BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == action)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default()
+            },
+            true,
+        )
     }
 
     #[test]
-    fn space_scroll_is_disabled_at_live_bottom() {
-        assert!(!should_scroll_down_with_space(KeyModifiers::empty(), 0, 20));
+    fn scroll_page_up_resolves_in_interactive_scope() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Interactive),
+            Some(Action::ScrollPageUp),
+        );
     }
 
     #[test]
-    fn space_scroll_is_disabled_with_modifiers() {
-        assert!(!should_scroll_down_with_space(KeyModifiers::CONTROL, 3, 20,));
+    fn scroll_page_down_resolves_in_interactive_scope() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Interactive),
+            Some(Action::ScrollPageDown),
+        );
     }
 
     #[test]
-    fn space_scroll_is_disabled_without_terminal_height() {
-        assert!(!should_scroll_down_with_space(KeyModifiers::empty(), 3, 0));
+    fn scroll_line_down_resolves_space_in_interactive_scope() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Interactive),
+            Some(Action::ScrollLineDown),
+        );
+    }
+
+    #[test]
+    fn ctrl_b_does_not_resolve_scroll_in_center_scope() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        assert_ne!(
+            bindings.lookup(&key, BindingScope::Center),
+            Some(Action::ScrollPageUp),
+        );
+    }
+
+    #[test]
+    fn ctrl_f_does_not_resolve_scroll_in_center_scope() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
+        assert_ne!(
+            bindings.lookup(&key, BindingScope::Center),
+            Some(Action::ScrollPageDown),
+        );
+    }
+
+    #[test]
+    fn scroll_line_up_resolves_arrow_up_in_interactive_scope() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Interactive),
+            Some(Action::ScrollLineUp),
+        );
+    }
+
+    #[test]
+    fn scroll_line_down_resolves_arrow_down_in_interactive_scope() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Interactive),
+            Some(Action::ScrollLineDown),
+        );
     }
 }
