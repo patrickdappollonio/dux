@@ -293,6 +293,7 @@ impl App {
             let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
             let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
             let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
+            let scroll_line = self.bindings.label_for(Action::ScrollLineDown);
             let close = self.bindings.label_for(Action::CloseOverlay);
             let mut spans: Vec<Span> = Vec::new();
 
@@ -304,12 +305,16 @@ impl App {
                 spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
                 spans.push(Span::styled(" down, ", desc_style));
                 spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
-                spans.push(Span::styled(" up. ", desc_style));
+                spans.push(Span::styled(" up, ", desc_style));
+                spans.extend(self.theme.dim_key_badge(&scroll_line, Color::Reset));
+                spans.push(Span::styled(" one line. ", desc_style));
             } else {
                 spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
                 spans.push(Span::styled(" ", desc_style));
                 spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
                 spans.push(Span::styled(" to scroll. ", desc_style));
+                spans.extend(self.theme.dim_key_badge(&scroll_line, Color::Reset));
+                spans.push(Span::styled(" one line. ", desc_style));
             }
             spans.extend(self.theme.dim_key_badge(&close, Color::Reset));
             spans.push(Span::styled(" close diff.", desc_style));
@@ -576,7 +581,9 @@ impl App {
                 spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
                 spans.push(Span::styled(" down, ", desc_style));
                 spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
-                spans.push(Span::styled(" up.", desc_style));
+                spans.push(Span::styled(" up, ", desc_style));
+                spans.extend(self.theme.dim_key_badge(&scroll_line, Color::Reset));
+                spans.push(Span::styled(" one line.", desc_style));
                 Line::from(spans)
             } else {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
@@ -587,7 +594,9 @@ impl App {
                     spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
                     spans.push(Span::styled(" ", desc_style));
                     spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
-                    spans.push(Span::styled(" to scroll.", desc_style));
+                    spans.push(Span::styled(" to scroll. ", desc_style));
+                    spans.extend(self.theme.dim_key_badge(&scroll_line, Color::Reset));
+                    spans.push(Span::styled(" one line.", desc_style));
                 } else if session_id.is_some() {
                     spans.push(Span::styled("Agent CLI exited. Press ", desc_style));
                     spans.extend(self.theme.dim_key_badge(&reconnect, Color::Reset));
@@ -1098,6 +1107,8 @@ impl App {
             spans.extend(self.theme.dim_key_badge(&move_down, Color::Reset));
             spans.push(Span::styled(" ", desc_style));
             spans.extend(self.theme.dim_key_badge(&move_up, Color::Reset));
+            spans.push(Span::styled(" or ", desc_style));
+            spans.extend(self.theme.dim_key_badge("Space", Color::Reset));
             spans.push(Span::styled(" scroll, ", desc_style));
             spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
             spans.push(Span::styled(" ", desc_style));

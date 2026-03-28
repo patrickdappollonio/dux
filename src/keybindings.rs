@@ -153,8 +153,8 @@ impl Action {
             Action::ToggleFullscreen => "toggle_fullscreen",
             Action::ScrollPageUp => "scroll_page_up",
             Action::ScrollPageDown => "scroll_page_down",
-            Action::ScrollLineUp => "agent_scroll_line_up",
-            Action::ScrollLineDown => "agent_scroll_line_down",
+            Action::ScrollLineUp => "scroll_line_up",
+            Action::ScrollLineDown => "scroll_line_down",
             Action::OpenDiff => "open_diff",
             Action::StageUnstage => "stage_unstage",
             Action::CommitChanges => "commit_changes",
@@ -211,10 +211,8 @@ impl Action {
             Action::ToggleFullscreen => "Toggle fullscreen overlay for the agent terminal.",
             Action::ScrollPageUp => "Scroll up one page in the agent output.",
             Action::ScrollPageDown => "Scroll down one page in the agent output.",
-            Action::ScrollLineUp => "Scroll up one line while scrolled back in interactive mode.",
-            Action::ScrollLineDown => {
-                "Scroll down one line while scrolled back in interactive mode."
-            }
+            Action::ScrollLineUp => "Scroll up one line in any scrollable view.",
+            Action::ScrollLineDown => "Scroll down one line in any scrollable view.",
             Action::OpenDiff => "Open the selected file's diff.",
             Action::StageUnstage => "Stage or unstage the selected file.",
             Action::CommitChanges => "Commit staged changes.",
@@ -266,9 +264,8 @@ impl Action {
             Action::ExitInteractive
             | Action::ToggleFullscreen
             | Action::ScrollPageUp
-            | Action::ScrollPageDown
-            | Action::ScrollLineUp
-            | Action::ScrollLineDown => Some("Agent pane"),
+            | Action::ScrollPageDown => Some("Agent pane"),
+            Action::ScrollLineUp | Action::ScrollLineDown => Some("Scrolling"),
             Action::OpenDiff
             | Action::StageUnstage
             | Action::CommitChanges
@@ -590,10 +587,10 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     BindingDef {
         action: Action::ScrollLineUp,
         default_keys: &[key!(Up)],
-        scopes: &[BindingScope::Interactive],
+        scopes: &[BindingScope::Interactive, BindingScope::Center],
         help: Some(HelpEntry {
-            section: "Agent pane",
-            description: "Scroll up one line (while scrolled back)",
+            section: "Scrolling",
+            description: "Scroll up one line",
         }),
         hint_contexts: &[],
         palette: None,
@@ -601,10 +598,10 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     BindingDef {
         action: Action::ScrollLineDown,
         default_keys: &[key!(Down), key!(space)],
-        scopes: &[BindingScope::Interactive],
+        scopes: &[BindingScope::Interactive, BindingScope::Center],
         help: Some(HelpEntry {
-            section: "Agent pane",
-            description: "Scroll down one line (while scrolled back)",
+            section: "Scrolling",
+            description: "Scroll down one line",
         }),
         hint_contexts: &[],
         palette: None,
