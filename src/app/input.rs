@@ -16,15 +16,10 @@ impl App {
         }
         if let Some(ref mut scroll) = self.help_scroll {
             // Help overlay is open — consume all keys, only scroll keys do anything.
-            if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
+            if let Some(action) = self.bindings.lookup(&key, BindingScope::Help) {
                 match action {
                     Action::MoveDown => *scroll = scroll.saturating_add(1),
                     Action::MoveUp => *scroll = scroll.saturating_sub(1),
-                    _ => {}
-                }
-            }
-            if let Some(action) = self.bindings.lookup(&key, BindingScope::Center) {
-                match action {
                     Action::ScrollPageDown => {
                         let page = self.last_help_height.max(1);
                         *scroll = (*scroll + page).min(

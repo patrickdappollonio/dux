@@ -76,6 +76,7 @@ pub enum BindingScope {
     Browser,
     Dialog,
     CommitInput,
+    Help,
 }
 
 impl BindingScope {
@@ -92,6 +93,7 @@ impl BindingScope {
             Self::Browser => "Project browser",
             Self::Dialog => "Dialog",
             Self::CommitInput => "Commit input",
+            Self::Help => "Help overlay",
         }
     }
 }
@@ -336,6 +338,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             BindingScope::Files,
             BindingScope::Palette,
             BindingScope::Browser,
+            BindingScope::Help,
         ],
         help: Some(HelpEntry {
             section: "Projects pane",
@@ -356,6 +359,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             BindingScope::Files,
             BindingScope::Palette,
             BindingScope::Browser,
+            BindingScope::Help,
         ],
         help: None, // covered by MoveDown's combined label
         hint_contexts: &[],
@@ -556,7 +560,11 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     BindingDef {
         action: Action::ScrollPageUp,
         default_keys: &[key!(pageup)],
-        scopes: &[BindingScope::Center, BindingScope::Interactive],
+        scopes: &[
+            BindingScope::Center,
+            BindingScope::Interactive,
+            BindingScope::Help,
+        ],
         help: Some(HelpEntry {
             section: "Agent pane",
             description: "Scroll up one page",
@@ -567,7 +575,11 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     BindingDef {
         action: Action::ScrollPageDown,
         default_keys: &[key!(pagedown)],
-        scopes: &[BindingScope::Center, BindingScope::Interactive],
+        scopes: &[
+            BindingScope::Center,
+            BindingScope::Interactive,
+            BindingScope::Help,
+        ],
         help: Some(HelpEntry {
             section: "Agent pane",
             description: "Scroll down one page",
@@ -1725,5 +1737,51 @@ mod tests {
             upper.modifiers, shift.modifiers,
             "modifiers should match after normalization"
         );
+    }
+
+    #[test]
+    fn help_scope_resolves_scroll_keys() {
+        let bindings = default_bindings();
+        // j/k/Up/Down → MoveDown/MoveUp
+        let j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        let k = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&j, BindingScope::Help),
+            Some(Action::MoveDown)
+        );
+        assert_eq!(
+            bindings.lookup(&k, BindingScope::Help),
+            Some(Action::MoveUp)
+        );
+        assert_eq!(
+            bindings.lookup(&down, BindingScope::Help),
+            Some(Action::MoveDown)
+        );
+        assert_eq!(
+            bindings.lookup(&up, BindingScope::Help),
+            Some(Action::MoveUp)
+        );
+
+        // PgUp/PgDn → ScrollPageUp/ScrollPageDown
+        let pgup = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
+        let pgdn = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&pgup, BindingScope::Help),
+            Some(Action::ScrollPageUp)
+        );
+        assert_eq!(
+            bindings.lookup(&pgdn, BindingScope::Help),
+            Some(Action::ScrollPageDown)
+        );
+    }
+
+    #[test]
+    fn help_scope_rejects_unrelated_actions() {
+        let bindings = default_bindings();
+        // 'n' is NewAgent in Left scope, should not resolve in Help
+        let n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(bindings.lookup(&n, BindingScope::Help), None);
     }
 }
