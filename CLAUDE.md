@@ -15,6 +15,7 @@ Principles that guide every decision in dux. If a change conflicts with a tenet,
 - **Panes have local key combinations.** A key combo bound in one pane does not necessarily work in another.
 - **Panes have interactive and non-interactive modes.** In interactive mode, all key combos (including global ones) are suppressed and input is forwarded to the PTY. In non-interactive mode, both local and global key combos are active.
 - **Key combinations are documented in the help page.** The in-app `?` overlay is the authoritative reference. External docs describe how to configure bindings, not enumerate them.
+- **Line-scroll keys are gated by context.** In interactive (PTY) mode, arrow keys and Space only scroll when already scrolled back (`scrollback_offset > 0`); otherwise they pass through to the child process. In non-interactive views (diff overlay, non-interactive agent pane, help overlay), there is no competing use for these keys, so they scroll unconditionally. Page-scroll keys (`PgUp`/`PgDn`) always initiate scrolling regardless of context.
 
 ### Agents and Providers
 

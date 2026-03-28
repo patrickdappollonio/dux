@@ -16,16 +16,16 @@ impl App {
         }
         if let Some(ref mut scroll) = self.help_scroll {
             // Help overlay is open — consume all keys, only scroll keys do anything.
+            let max_help = self
+                .last_help_lines
+                .saturating_sub(self.last_help_height.max(1));
             if let Some(action) = self.bindings.lookup(&key, BindingScope::Help) {
                 match action {
-                    Action::MoveDown => *scroll = scroll.saturating_add(1),
+                    Action::MoveDown => *scroll = (*scroll + 1).min(max_help),
                     Action::MoveUp => *scroll = scroll.saturating_sub(1),
                     Action::ScrollPageDown => {
                         let page = self.last_help_height.max(1);
-                        *scroll = (*scroll + page).min(
-                            self.last_help_lines
-                                .saturating_sub(self.last_help_height.max(1)),
-                        );
+                        *scroll = (*scroll + page).min(max_help);
                     }
                     Action::ScrollPageUp => {
                         let page = self.last_help_height.max(1);
@@ -33,6 +33,11 @@ impl App {
                     }
                     _ => {}
                 }
+            } else if key.code == KeyCode::Char(' ') {
+                // Space scrolls down one line in the help overlay (not bound
+                // via MoveDown to avoid conflicting with ToggleProject/StageUnstage
+                // in other scopes).
+                *scroll = (*scroll + 1).min(max_help);
             }
             return Ok(false);
         }
@@ -317,6 +322,23 @@ impl App {
                         *scroll = (*scroll + page).min(max_scroll);
                     } else if self.last_pty_size.0 > 0 {
                         self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
+                    }
+                }
+                Action::ScrollLineUp => {
+                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
+                        *scroll = scroll.saturating_sub(1);
+                    } else if self.last_pty_size.0 > 0 {
+                        self.scroll_pty(ScrollDirection::Up, 1);
+                    }
+                }
+                Action::ScrollLineDown => {
+                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
+                        let max_scroll = self
+                            .last_diff_visual_lines
+                            .saturating_sub(self.last_diff_height.max(1));
+                        *scroll = (*scroll + 1).min(max_scroll);
+                    } else if self.last_pty_size.0 > 0 {
+                        self.scroll_pty(ScrollDirection::Down, 1);
                     }
                 }
                 _ => {}
@@ -1446,6 +1468,36 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
         assert_eq!(
             bindings.lookup(&key, BindingScope::Interactive),
+            Some(Action::ScrollLineDown),
+        );
+    }
+
+    #[test]
+    fn scroll_line_up_resolves_arrow_up_in_center_scope() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Center),
+            Some(Action::ScrollLineUp),
+        );
+    }
+
+    #[test]
+    fn scroll_line_down_resolves_arrow_down_in_center_scope() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Center),
+            Some(Action::ScrollLineDown),
+        );
+    }
+
+    #[test]
+    fn scroll_line_down_resolves_space_in_center_scope() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Center),
             Some(Action::ScrollLineDown),
         );
     }
