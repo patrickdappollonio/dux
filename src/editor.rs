@@ -85,13 +85,12 @@ pub fn detect_installed_editors() -> Vec<DetectedEditor> {
 
 pub fn preferred_editor(detected: &[DetectedEditor], configured: &str) -> Option<DetectedEditor> {
     let configured = normalize_editor_name(configured);
-    if !configured.is_empty() {
-        if let Some(editor) = detected
+    if !configured.is_empty()
+        && let Some(editor) = detected
             .iter()
             .find(|editor| matches_configured_editor(editor, &configured))
-        {
-            return Some(editor.clone());
-        }
+    {
+        return Some(editor.clone());
     }
     detected.first().cloned()
 }
@@ -145,11 +144,7 @@ fn detect_editors_from_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Ve
 }
 
 fn normalize_editor_name(value: &str) -> String {
-    value
-        .trim()
-        .to_ascii_lowercase()
-        .replace('_', "-")
-        .replace(' ', "-")
+    value.trim().to_ascii_lowercase().replace(['_', ' '], "-")
 }
 
 fn normalize_executable_name(value: &str) -> String {

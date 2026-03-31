@@ -587,11 +587,11 @@ impl App {
         let worktree = session.worktree_path.clone();
 
         // Skip the git rename if the branch name is unchanged.
-        if name != old_branch {
-            if let Err(e) = git::rename_branch(Path::new(&worktree), &old_branch, &name) {
-                self.set_error(format!("Rename failed: {e}"));
-                return;
-            }
+        if name != old_branch
+            && let Err(e) = git::rename_branch(Path::new(&worktree), &old_branch, &name)
+        {
+            self.set_error(format!("Rename failed: {e}"));
+            return;
         }
 
         // Git rename succeeded — update the session.

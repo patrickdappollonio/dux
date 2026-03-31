@@ -121,18 +121,24 @@ impl App {
 
     pub(crate) fn spawn_pty_for_session(&self, session: &AgentSession) -> Result<PtyClient> {
         let cfg = provider_config(&self.config, &session.provider);
+        let launch_args = cfg.interactive_args(true);
         let (rows, cols) = if self.last_pty_size != (0, 0) {
             self.last_pty_size
         } else {
             (24, 80)
         };
         logger::debug(&format!(
-            "spawning PTY {:?} {:?} in {} ({}x{})",
-            cfg.command, cfg.args, session.worktree_path, cols, rows
+            "spawning PTY {:?} {:?} in {} ({}x{}, resume_supported={})",
+            cfg.command,
+            launch_args,
+            session.worktree_path,
+            cols,
+            rows,
+            cfg.supports_session_resume()
         ));
         PtyClient::spawn(
             &cfg.command,
-            &cfg.args,
+            launch_args,
             Path::new(&session.worktree_path),
             rows,
             cols,

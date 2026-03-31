@@ -82,6 +82,7 @@ mod tests {
         ProviderCommandConfig {
             command: "echo".to_string(),
             args: Vec::new(),
+            resume_args: None,
             oneshot_args: vec!["-p".to_string(), "{prompt}".to_string()],
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
@@ -92,6 +93,7 @@ mod tests {
         ProviderCommandConfig {
             command: "bash".to_string(),
             args: Vec::new(),
+            resume_args: None,
             oneshot_args: vec!["-c".to_string(), "echo {prompt} > {tempfile}".to_string()],
             oneshot_output: OneshotOutput::Tempfile,
             install_hint: None,
@@ -161,6 +163,7 @@ mod tests {
         let config = ProviderCommandConfig {
             command: "false".to_string(),
             args: Vec::new(),
+            resume_args: None,
             oneshot_args: Vec::new(),
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
@@ -177,6 +180,7 @@ mod tests {
         let config = ProviderCommandConfig {
             command: "echo".to_string(),
             args: Vec::new(),
+            resume_args: None,
             oneshot_args: vec![
                 "--format".to_string(),
                 "plain".to_string(),

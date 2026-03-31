@@ -84,6 +84,7 @@ pub enum OneshotOutput {
 pub struct ProviderCommandConfig {
     pub command: String,
     pub args: Vec<String>,
+    pub resume_args: Option<Vec<String>>,
     pub oneshot_args: Vec<String>,
     pub oneshot_output: OneshotOutput,
     pub install_hint: Option<String>,
@@ -179,10 +180,29 @@ impl Default for ProviderCommandConfig {
         Self {
             command: String::new(),
             args: Vec::new(),
+            resume_args: None,
             oneshot_args: Vec::new(),
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
         }
+    }
+}
+
+impl ProviderCommandConfig {
+    pub fn interactive_args(&self, resume_session: bool) -> &[String] {
+        if resume_session
+            && let Some(resume_args) = self.resume_args.as_deref().filter(|args| !args.is_empty())
+        {
+            return resume_args;
+        }
+        &self.args
+    }
+
+    pub fn supports_session_resume(&self) -> bool {
+        self.resume_args
+            .as_ref()
+            .map(|args| !args.is_empty())
+            .unwrap_or(false)
     }
 }
 
@@ -221,12 +241,11 @@ impl Config {
     /// Returns the effective commit prompt for a project, checking project-level
     /// override first, then system default, then the hardcoded fallback.
     pub fn commit_prompt_for_project(&self, project_path: &str) -> String {
-        if let Some(project) = self.projects.iter().find(|p| p.path == project_path) {
-            if let Some(ref prompt) = project.commit_prompt {
-                if !prompt.is_empty() {
-                    return prompt.clone();
-                }
-            }
+        if let Some(project) = self.projects.iter().find(|p| p.path == project_path)
+            && let Some(ref prompt) = project.commit_prompt
+            && !prompt.is_empty()
+        {
+            return prompt.clone();
         }
         self.defaults
             .commit_prompt
@@ -244,7 +263,16 @@ impl ProvidersConfig {
 
     pub fn ensure_defaults(&mut self) {
         for (name, config) in default_provider_commands() {
-            self.commands.entry(name.to_string()).or_insert(config);
+            match self.commands.entry(name.to_string()) {
+                indexmap::map::Entry::Vacant(entry) => {
+                    entry.insert(config);
+                }
+                indexmap::map::Entry::Occupied(mut entry) => {
+                    if entry.get().resume_args.is_none() {
+                        entry.get_mut().resume_args = config.resume_args;
+                    }
+                }
+            }
         }
     }
 }
@@ -634,6 +662,7 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 2] {
             ProviderCommandConfig {
                 command: "claude".to_string(),
                 args: Vec::new(),
+                resume_args: Some(vec!["--continue".to_string()]),
                 oneshot_args: vec!["-p".to_string(), "{prompt}".to_string()],
                 oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("npm install -g @anthropic-ai/claude-code".to_string()),
@@ -644,6 +673,7 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 2] {
             ProviderCommandConfig {
                 command: "codex".to_string(),
                 args: Vec::new(),
+                resume_args: Some(vec!["resume".to_string(), "--last".to_string()]),
                 oneshot_args: vec![
                     "exec".to_string(),
                     "-o".to_string(),
@@ -671,6 +701,14 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
         escape_toml_string(&config.command)
     ));
     out.push_str(&format!("args = {}\n", render_string_list(&config.args)));
+    out.push_str(
+        "# Optional args dux should use when reconnecting a detached session.\n\
+         # Leave this empty for CLIs that do not support cwd/repo-scoped session resume.\n",
+    );
+    out.push_str(&format!(
+        "resume_args = {}\n",
+        render_string_list(config.resume_args.as_deref().unwrap_or(&[]))
+    ));
     out.push_str("# Oneshot args for non-interactive use (e.g. AI commit messages).\n");
     out.push_str("# Placeholders: {prompt} = the prompt text, {tempfile} = temp file path.\n");
     out.push_str(&format!(
@@ -798,6 +836,7 @@ mod tests {
         assert!(rendered.contains("[providers.codex]"));
         assert!(rendered.contains("oneshot_args = "));
         assert!(rendered.contains("oneshot_output = "));
+        assert!(rendered.contains("resume_args = "));
         assert!(rendered.contains("[ui]"));
         assert!(rendered.contains("agent_scrollback_lines = 10000"));
         assert!(rendered.contains("[editor]"));
@@ -895,6 +934,163 @@ mod tests {
         let rendered = render_config_default(&config);
         let parsed: Config = toml::from_str(&rendered).expect("config should parse");
         assert_eq!(parsed.editor.default, "zed");
+    }
+
+    #[test]
+    fn built_in_providers_ship_resume_args() {
+        let config = Config::default();
+        let claude = config
+            .providers
+            .get("claude")
+            .expect("claude provider should exist");
+        assert_eq!(
+            claude.resume_args.clone(),
+            Some(vec!["--continue".to_string()])
+        );
+        assert!(claude.supports_session_resume());
+
+        let codex = config
+            .providers
+            .get("codex")
+            .expect("codex provider should exist");
+        assert_eq!(
+            codex.resume_args.clone(),
+            Some(vec!["resume".to_string(), "--last".to_string()])
+        );
+        assert!(codex.supports_session_resume());
+    }
+
+    #[test]
+    fn provider_command_config_selects_resume_args_only_when_available() {
+        let cfg = ProviderCommandConfig {
+            command: "example".to_string(),
+            args: vec!["--interactive".to_string()],
+            resume_args: Some(vec!["--resume".to_string(), "--last".to_string()]),
+            oneshot_args: Vec::new(),
+            oneshot_output: OneshotOutput::Stdout,
+            install_hint: None,
+        };
+        assert_eq!(cfg.interactive_args(false), ["--interactive"]);
+        assert_eq!(cfg.interactive_args(true), ["--resume", "--last"]);
+
+        let unsupported = ProviderCommandConfig {
+            command: "example".to_string(),
+            args: vec!["--interactive".to_string()],
+            resume_args: None,
+            oneshot_args: Vec::new(),
+            oneshot_output: OneshotOutput::Stdout,
+            install_hint: None,
+        };
+        assert_eq!(unsupported.interactive_args(true), ["--interactive"]);
+        assert!(!unsupported.supports_session_resume());
+    }
+
+    #[test]
+    fn ensure_defaults_backfills_missing_resume_args_for_builtins() {
+        let mut providers = ProvidersConfig {
+            commands: IndexMap::from([(
+                "claude".to_string(),
+                ProviderCommandConfig {
+                    command: "claude".to_string(),
+                    args: Vec::new(),
+                    resume_args: None,
+                    oneshot_args: Vec::new(),
+                    oneshot_output: OneshotOutput::Stdout,
+                    install_hint: None,
+                },
+            )]),
+        };
+
+        providers.ensure_defaults();
+
+        let claude = providers
+            .get("claude")
+            .expect("claude provider should still exist");
+        assert_eq!(
+            claude.resume_args.clone(),
+            Some(vec!["--continue".to_string()])
+        );
+    }
+
+    #[test]
+    fn ensure_defaults_preserves_explicit_resume_disable() {
+        let mut providers = ProvidersConfig {
+            commands: IndexMap::from([(
+                "claude".to_string(),
+                ProviderCommandConfig {
+                    command: "claude".to_string(),
+                    args: Vec::new(),
+                    resume_args: Some(Vec::new()),
+                    oneshot_args: Vec::new(),
+                    oneshot_output: OneshotOutput::Stdout,
+                    install_hint: None,
+                },
+            )]),
+        };
+
+        providers.ensure_defaults();
+
+        let claude = providers
+            .get("claude")
+            .expect("claude provider should still exist");
+        assert_eq!(claude.resume_args, Some(Vec::new()));
+        assert!(!claude.supports_session_resume());
+    }
+
+    #[test]
+    fn provider_configs_without_resume_args_still_parse() {
+        let parsed: Config = toml::from_str(
+            r#"
+            [defaults]
+            provider = "claude"
+
+            [logging]
+            level = "info"
+            path = "dux.log"
+
+            [ui]
+            left_width_pct = 20
+            right_width_pct = 23
+            agent_scrollback_lines = 10000
+
+            [editor]
+            default = "cursor"
+
+            [keys]
+            show_terminal_keys = true
+
+            [providers.custom]
+            command = "custom-agent"
+            args = ["chat"]
+            oneshot_args = ["ask", "{prompt}"]
+            oneshot_output = "stdout"
+            "#,
+        )
+        .expect("legacy provider config should parse");
+
+        let provider = parsed
+            .providers
+            .get("custom")
+            .expect("custom provider should exist");
+        assert_eq!(provider.resume_args, None);
+        assert_eq!(provider.interactive_args(true), ["chat"]);
+    }
+
+    #[test]
+    fn legacy_provider_config_without_resume_args_still_parses() {
+        let parsed: ProviderCommandConfig = toml::from_str(
+            r#"
+command = "legacy-agent"
+args = ["serve"]
+oneshot_args = ["--prompt", "{prompt}"]
+oneshot_output = "stdout"
+"#,
+        )
+        .expect("legacy provider config should parse");
+        assert_eq!(parsed.command, "legacy-agent");
+        assert_eq!(parsed.args, vec!["serve"]);
+        assert_eq!(parsed.resume_args, None);
+        assert!(!parsed.supports_session_resume());
     }
 
     #[cfg(target_os = "macos")]
