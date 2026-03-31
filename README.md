@@ -33,7 +33,7 @@ On first launch, `dux` creates the config file with the full default configurati
 
 ## Provider Setup
 
-The provider commands in `config.toml` point to the CLI tools you want dux to run. By default, `claude` and `codex` are configured. dux launches the configured command in a PTY inside the session's worktree directory, so the CLI tool sees the worktree as its working directory.
+The provider commands in `config.toml` point to the CLI tools you want dux to run. By default, `claude` and `codex` are configured, and new sessions start with `claude` unless you override it per project or in `[defaults]`. dux launches the configured command in a PTY inside the session's worktree directory, so the CLI tool sees the worktree as its working directory.
 
 To use a different CLI tool, set the `command` field in the `[providers.<name>]` section of your config.
 

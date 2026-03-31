@@ -158,7 +158,7 @@ impl Default for Defaults {
     fn default() -> Self {
         let start_directory = home::home_dir().map(|p| p.to_string_lossy().to_string());
         Self {
-            provider: "codex".to_string(),
+            provider: "claude".to_string(),
             start_directory,
             commit_prompt: Some(DEFAULT_COMMIT_PROMPT.to_string()),
         }
@@ -832,6 +832,7 @@ mod tests {
         let rendered = render_default_config();
         assert!(rendered.contains("# dux configuration"));
         assert!(rendered.contains("[defaults]"));
+        assert!(rendered.contains("provider = \"claude\""));
         assert!(rendered.contains("[providers.claude]"));
         assert!(rendered.contains("[providers.codex]"));
         assert!(rendered.contains("oneshot_args = "));
@@ -939,6 +940,7 @@ mod tests {
     #[test]
     fn built_in_providers_ship_resume_args() {
         let config = Config::default();
+        assert_eq!(config.defaults.provider, "claude");
         let claude = config
             .providers
             .get("claude")
