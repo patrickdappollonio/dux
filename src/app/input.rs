@@ -2,10 +2,16 @@ use super::*;
 
 impl App {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
-        // Interactive mode: ALL keys go to the PTY except Ctrl-G
-        // (ExitInteractive, handled inside handle_agent_input). This must be
-        // the very first check so that no global binding — including
-        // CloseOverlay / Escape — intercepts keys during interactive mode.
+        // Prompts take precedence over every other input target so modal text
+        // fields can safely capture keystrokes even when other modes were
+        // previously active.
+        if !matches!(self.prompt, PromptState::None) {
+            return self.handle_prompt_key(key);
+        }
+        // Interactive mode: ALL remaining keys go to the PTY except Ctrl-G
+        // (ExitInteractive, handled inside handle_agent_input). This must
+        // happen before global bindings so CloseOverlay / Escape do not
+        // intercept agent input during interactive mode.
         if self.input_target == InputTarget::Agent {
             return self.handle_agent_input(key);
         }
@@ -40,9 +46,6 @@ impl App {
                 *scroll = (*scroll + 1).min(max_help);
             }
             return Ok(false);
-        }
-        if !matches!(self.prompt, PromptState::None) {
-            return self.handle_prompt_key(key);
         }
         // When typing a commit message, route all keys to the commit input
         // handler so that q, ?, [ etc. are typed instead of triggering
@@ -1247,48 +1250,58 @@ impl App {
             cursor,
         } = &mut self.prompt
         {
-            match key.code {
-                KeyCode::Esc => {
+            let is_plain_char = matches!(key.code, KeyCode::Char(_))
+                && !key.modifiers.contains(KeyModifiers::CONTROL);
+            let action = if is_plain_char {
+                None
+            } else {
+                self.bindings.lookup(&key, BindingScope::Dialog)
+            };
+
+            match action {
+                Some(Action::CloseOverlay) => {
                     self.prompt = PromptState::None;
                 }
-                KeyCode::Enter => {
+                Some(Action::Confirm) => {
                     let id = session_id.clone();
                     let new_name = input.clone();
                     self.prompt = PromptState::None;
                     self.apply_rename_session(&id, new_name);
                 }
-                KeyCode::Backspace => {
-                    if *cursor > 0 {
-                        input.remove(*cursor - 1);
-                        *cursor -= 1;
+                _ => match key.code {
+                    KeyCode::Backspace => {
+                        if *cursor > 0 {
+                            input.remove(*cursor - 1);
+                            *cursor -= 1;
+                        }
                     }
-                }
-                KeyCode::Delete => {
-                    if *cursor < input.len() {
-                        input.remove(*cursor);
+                    KeyCode::Delete => {
+                        if *cursor < input.len() {
+                            input.remove(*cursor);
+                        }
                     }
-                }
-                KeyCode::Left => {
-                    if *cursor > 0 {
-                        *cursor -= 1;
+                    KeyCode::Left => {
+                        if *cursor > 0 {
+                            *cursor -= 1;
+                        }
                     }
-                }
-                KeyCode::Right => {
-                    if *cursor < input.len() {
+                    KeyCode::Right => {
+                        if *cursor < input.len() {
+                            *cursor += 1;
+                        }
+                    }
+                    KeyCode::Home => {
+                        *cursor = 0;
+                    }
+                    KeyCode::End => {
+                        *cursor = input.len();
+                    }
+                    KeyCode::Char(c) if is_plain_char => {
+                        input.insert(*cursor, c);
                         *cursor += 1;
                     }
-                }
-                KeyCode::Home => {
-                    *cursor = 0;
-                }
-                KeyCode::End => {
-                    *cursor = input.len();
-                }
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    input.insert(*cursor, c);
-                    *cursor += 1;
-                }
-                _ => {}
+                    _ => {}
+                },
             }
             return Ok(false);
         }
@@ -1386,8 +1399,20 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex, mpsc};
+
+    use crate::app::{App, CenterMode, FocusPane, InputTarget, PromptState, RightSection};
+    use crate::config::{Config, DuxPaths};
     use crate::keybindings::{Action, BINDING_DEFS, BindingScope, RuntimeBindings};
+    use crate::model::{AgentSession, Project, ProviderKind, SessionStatus};
+    use crate::statusline::StatusLine;
+    use crate::storage::SessionStore;
+    use crate::theme::Theme;
+    use chrono::Utc;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use tempfile::tempdir;
 
     fn default_bindings() -> RuntimeBindings {
         RuntimeBindings::new(
@@ -1400,6 +1425,186 @@ mod tests {
             },
             true,
         )
+    }
+
+    fn bindings_with_overrides(overrides: &[(Action, &[&str])]) -> RuntimeBindings {
+        RuntimeBindings::new(
+            |action| {
+                if let Some((_, keys)) =
+                    overrides.iter().find(|(candidate, _)| *candidate == action)
+                {
+                    return keys
+                        .iter()
+                        .map(|key| crokey::parse(key).expect("valid test binding"))
+                        .collect();
+                }
+                BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == action)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default()
+            },
+            true,
+        )
+    }
+
+    fn test_app(bindings: RuntimeBindings) -> App {
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            root: root.clone(),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).expect("worktrees dir");
+        let session_store = SessionStore::open(&paths.sessions_db_path).expect("session store");
+        let now = Utc::now();
+        let project = Project {
+            id: "project-1".to_string(),
+            name: "demo".to_string(),
+            path: root.to_string_lossy().to_string(),
+            default_provider: ProviderKind::from_str("codex"),
+            current_branch: "main".to_string(),
+        };
+        let session = AgentSession {
+            id: "session-1".to_string(),
+            project_id: project.id.clone(),
+            project_path: Some(project.path.clone()),
+            provider: ProviderKind::from_str("codex"),
+            source_branch: "main".to_string(),
+            branch_name: "agent-branch".to_string(),
+            worktree_path: paths.worktrees_root.to_string_lossy().to_string(),
+            title: None,
+            status: SessionStatus::Detached,
+            created_at: now,
+            updated_at: now,
+        };
+        let (worker_tx, worker_rx) = mpsc::channel();
+        let mut app = App {
+            config: Config::default(),
+            paths,
+            bindings,
+            session_store,
+            projects: vec![project],
+            sessions: vec![session],
+            staged_files: Vec::new(),
+            unstaged_files: Vec::new(),
+            selected_left: 0,
+            right_section: RightSection::Unstaged,
+            files_index: 0,
+            commit_input: String::new(),
+            commit_input_cursor: 0,
+            commit_scroll: 0,
+            commit_generating: false,
+            left_width_pct: 20,
+            right_width_pct: 23,
+            focus: FocusPane::Left,
+            center_mode: CenterMode::Agent,
+            left_collapsed: false,
+            resize_mode: false,
+            help_scroll: None,
+            last_help_height: 0,
+            last_help_lines: 0,
+            fullscreen_agent: false,
+            status: StatusLine::new("ready"),
+            prompt: PromptState::None,
+            input_target: InputTarget::None,
+            worker_tx,
+            worker_rx,
+            providers: std::collections::HashMap::new(),
+            create_agent_in_flight: false,
+            last_pty_size: (0, 0),
+            last_diff_height: 0,
+            last_diff_visual_lines: 0,
+            theme: Theme::default_dark(),
+            tick_count: 0,
+            watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
+            has_active_agent: Arc::new(AtomicBool::new(false)),
+            collapsed_projects: std::collections::HashSet::new(),
+            left_items_cache: Vec::new(),
+        };
+        app.rebuild_left_items();
+        app.selected_left = 1;
+        app
+    }
+
+    #[test]
+    fn rename_session_prompt_accepts_text_before_agent_input() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::RenameSession {
+            session_id: "session-1".to_string(),
+            input: "agent".to_string(),
+            cursor: 5,
+        };
+        app.input_target = InputTarget::Agent;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::RenameSession { input, cursor, .. } => {
+                assert_eq!(input, "agentx");
+                assert_eq!(*cursor, 6);
+            }
+            other => panic!("expected rename prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rename_session_text_ignores_printable_close_overlay_binding() {
+        let mut app = test_app(bindings_with_overrides(&[(Action::CloseOverlay, &["x"])]));
+        app.prompt = PromptState::RenameSession {
+            session_id: "session-1".to_string(),
+            input: "agent".to_string(),
+            cursor: 5,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::RenameSession { input, cursor, .. } => {
+                assert_eq!(input, "agentx");
+                assert_eq!(*cursor, 6);
+            }
+            other => panic!("expected rename prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rename_session_uses_custom_dialog_confirm_binding() {
+        let mut app = test_app(bindings_with_overrides(&[(Action::Confirm, &["tab"])]));
+        app.prompt = PromptState::RenameSession {
+            session_id: "session-1".to_string(),
+            input: "agent-branch".to_string(),
+            cursor: "agent-branch".len(),
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(
+            app.sessions[0].title.as_deref(),
+            Some("agent-branch"),
+            "custom confirm binding should apply the rename"
+        );
+    }
+
+    #[test]
+    fn open_rename_session_clears_interactive_target() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_agent = true;
+
+        app.open_rename_session().unwrap();
+
+        assert!(matches!(app.prompt, PromptState::RenameSession { .. }));
+        assert_eq!(app.input_target, InputTarget::None);
+        assert!(!app.fullscreen_agent);
     }
 
     #[test]

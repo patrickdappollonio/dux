@@ -556,14 +556,13 @@ impl App {
     }
 
     pub(crate) fn open_rename_session(&mut self) -> Result<()> {
-        if let Some(session) = self.selected_session() {
-            let current_name = session
-                .title
-                .clone()
-                .unwrap_or_else(|| session.branch_name.clone());
+        if let Some(session) = self.selected_session().cloned() {
+            let current_name = session.title.unwrap_or_else(|| session.branch_name.clone());
             let cursor = current_name.len();
+            self.input_target = InputTarget::None;
+            self.fullscreen_agent = false;
             self.prompt = PromptState::RenameSession {
-                session_id: session.id.clone(),
+                session_id: session.id,
                 input: current_name,
                 cursor,
             };
