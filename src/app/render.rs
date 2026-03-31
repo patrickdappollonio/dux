@@ -1857,20 +1857,18 @@ impl App {
             }
             PromptState::RenameSession { input, cursor, .. } => {
                 self.render_dim_overlay(frame);
-                let area = centered_rect(56, 14, frame.area());
+                let area = centered_rect_exact(56, 9, frame.area());
                 Clear.render(area, frame.buffer_mut());
 
                 let outer = self.themed_overlay_block("Rename Agent");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
 
-                let [label_area, _, input_area, _, hint_area] = Layout::default()
+                let [label_area, input_area, hint_area] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(1),
-                        Constraint::Length(1),
                         Constraint::Length(3),
-                        Constraint::Length(1),
                         Constraint::Min(1),
                     ])
                     .areas(inner);
@@ -2038,6 +2036,14 @@ pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect 
         .split(vertical)[1]
 }
 
+pub(crate) fn centered_rect_exact(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width.max(1));
+    let height = height.min(area.height.max(1));
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect::new(x, y, width, height)
+}
+
 fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {
     if scrolled == 0 {
         return None;
@@ -2168,6 +2174,18 @@ mod tests {
     #[test]
     fn wrap_width_zero_returns_unchanged() {
         assert_eq!(wrap_text_at_width("abc", 0), "abc");
+    }
+
+    #[test]
+    fn centered_rect_exact_centers_requested_size() {
+        let area = Rect::new(0, 0, 100, 40);
+        assert_eq!(centered_rect_exact(56, 9, area), Rect::new(22, 15, 56, 9));
+    }
+
+    #[test]
+    fn centered_rect_exact_clamps_to_available_area() {
+        let area = Rect::new(0, 0, 40, 6);
+        assert_eq!(centered_rect_exact(56, 9, area), area);
     }
 
     // ── Unit tests for cursor_pos_in_wrapped ───────────────────────
