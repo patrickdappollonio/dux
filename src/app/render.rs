@@ -269,11 +269,7 @@ impl App {
             .iter()
             .map(|l| {
                 let lw = l.width();
-                if lw <= w {
-                    1u16
-                } else {
-                    ((lw + w - 1) / w) as u16
-                }
+                if lw <= w { 1u16 } else { lw.div_ceil(w) as u16 }
             })
             .sum();
 
@@ -376,154 +372,149 @@ impl App {
             .map(|id| self.providers.contains_key(id))
             .unwrap_or(false);
 
-        if let Some(ref sid) = session_id {
-            if let Some(provider) = self.providers.get(sid) {
-                rendered_content = true;
-                // Resize PTY if needed.
-                let new_size = (term_area.height, term_area.width);
-                if new_size != self.last_pty_size && new_size.0 > 0 && new_size.1 > 0 {
-                    let _ = provider.resize(new_size.0, new_size.1);
-                    self.last_pty_size = new_size;
+        if let Some(ref sid) = session_id
+            && let Some(provider) = self.providers.get(sid)
+        {
+            rendered_content = true;
+            // Resize PTY if needed.
+            let new_size = (term_area.height, term_area.width);
+            if new_size != self.last_pty_size && new_size.0 > 0 && new_size.1 > 0 {
+                let _ = provider.resize(new_size.0, new_size.1);
+                self.last_pty_size = new_size;
+            }
+
+            if !provider.has_output() {
+                // Show a centered loading card until the PTY produces output.
+                let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+                let idx = (self.tick_count as usize) % spinner_chars.len();
+                let spinner = spinner_chars[idx];
+                let (label_spans, label_len) = match session_provider_name.as_deref() {
+                    Some(name) => {
+                        let text_len = "Starting ".len() + name.len() + "...".len();
+                        let spans = vec![
+                            Span::styled("Starting ", Style::default().fg(self.theme.hint_desc_fg)),
+                            Span::styled(
+                                name.to_owned(),
+                                Style::default().fg(self.theme.branch_fg),
+                            ),
+                            Span::styled("...", Style::default().fg(self.theme.hint_desc_fg)),
+                        ];
+                        (spans, text_len)
+                    }
+                    None => {
+                        let text = "Starting agent...";
+                        let spans = vec![Span::styled(
+                            text,
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        )];
+                        (spans, text.len())
+                    }
+                };
+
+                // Card dimensions: border + padding + content + padding + border.
+                // +2 for spinner + space prefix.
+                let content_w = label_len as u16 + 2;
+                let card_w = (content_w + 2 + 6).min(term_area.width); // 2 borders + 6 padding
+                let card_h: u16 = 5; // top border, blank, spinner, blank, bottom border
+
+                if term_area.width >= card_w && term_area.height >= card_h {
+                    let cx = term_area.x + (term_area.width - card_w) / 2;
+                    let cy = term_area.y + (term_area.height - card_h) / 2;
+                    let card_area = Rect::new(cx, cy, card_w, card_h);
+
+                    let card_block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(ratatui::widgets::BorderType::Rounded)
+                        .border_style(Style::default().fg(self.theme.border_normal));
+                    let card_inner = card_block.inner(card_area);
+                    card_block.render(card_area, frame.buffer_mut());
+
+                    // Render spinner + label centered inside the card.
+                    let mut spans = vec![Span::styled(
+                        format!("{spinner} "),
+                        Style::default()
+                            .fg(self.theme.hint_key_fg)
+                            .add_modifier(Modifier::BOLD),
+                    )];
+                    spans.extend(label_spans);
+                    let line = Line::from(spans);
+                    Paragraph::new(line)
+                        .alignment(ratatui::layout::Alignment::Center)
+                        .render(
+                            Rect::new(
+                                card_inner.x,
+                                card_inner.y + card_inner.height / 2,
+                                card_inner.width,
+                                1,
+                            ),
+                            frame.buffer_mut(),
+                        );
+                }
+            } else {
+                // Render the current terminal viewport into the ratatui
+                // buffer from an owned snapshot to avoid holding locks
+                // during painting.
+                let snapshot = provider.snapshot();
+                scrollback_offset = snapshot.scrollback_offset;
+                let buf = frame.buffer_mut();
+                for cell in &snapshot.cells {
+                    if cell.row >= snapshot.rows
+                        || cell.col >= snapshot.cols
+                        || cell.row >= term_area.height
+                        || cell.col >= term_area.width
+                    {
+                        continue;
+                    }
+                    let x = term_area.x + cell.col;
+                    let y = term_area.y + cell.row;
+                    let style = Style::default()
+                        .fg(cell.fg)
+                        .bg(cell.bg)
+                        .add_modifier(cell.modifier);
+                    let ratatui_cell = &mut buf[(x, y)];
+                    ratatui_cell.set_symbol(&cell.symbol);
+                    ratatui_cell.set_style(style);
                 }
 
-                if !provider.has_output() {
-                    // Show a centered loading card until the PTY produces output.
-                    let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-                    let idx = (self.tick_count as usize) % spinner_chars.len();
-                    let spinner = spinner_chars[idx];
-                    let (label_spans, label_len) = match session_provider_name.as_deref() {
-                        Some(name) => {
-                            let text_len = "Starting ".len() + name.len() + "...".len();
-                            let spans = vec![
-                                Span::styled(
-                                    "Starting ",
-                                    Style::default().fg(self.theme.hint_desc_fg),
-                                ),
-                                Span::styled(
-                                    name.to_owned(),
-                                    Style::default().fg(self.theme.branch_fg),
-                                ),
-                                Span::styled("...", Style::default().fg(self.theme.hint_desc_fg)),
-                            ];
-                            (spans, text_len)
-                        }
-                        None => {
-                            let text = "Starting agent...";
-                            let spans = vec![Span::styled(
-                                text,
-                                Style::default().fg(self.theme.hint_desc_fg),
-                            )];
-                            (spans, text.len())
-                        }
-                    };
-
-                    // Card dimensions: border + padding + content + padding + border.
-                    // +2 for spinner + space prefix.
-                    let content_w = label_len as u16 + 2;
-                    let card_w = (content_w + 2 + 6).min(term_area.width); // 2 borders + 6 padding
-                    let card_h: u16 = 5; // top border, blank, spinner, blank, bottom border
-
-                    if term_area.width >= card_w && term_area.height >= card_h {
-                        let cx = term_area.x + (term_area.width - card_w) / 2;
-                        let cy = term_area.y + (term_area.height - card_h) / 2;
-                        let card_area = Rect::new(cx, cy, card_w, card_h);
-
-                        let card_block = Block::default()
-                            .borders(Borders::ALL)
-                            .border_type(ratatui::widgets::BorderType::Rounded)
-                            .border_style(Style::default().fg(self.theme.border_normal));
-                        let card_inner = card_block.inner(card_area);
-                        card_block.render(card_area, frame.buffer_mut());
-
-                        // Render spinner + label centered inside the card.
-                        let mut spans = vec![Span::styled(
-                            format!("{spinner} "),
+                // Render cursor if in input mode.
+                if is_input
+                    && let Some(cursor) = snapshot.cursor
+                    && cursor.row < snapshot.rows
+                    && cursor.col < snapshot.cols
+                {
+                    let cx = term_area.x + cursor.col;
+                    let cy = term_area.y + cursor.row;
+                    if cx < term_area.x + term_area.width && cy < term_area.y + term_area.height {
+                        let cursor_cell = &mut buf[(cx, cy)];
+                        cursor_cell.set_style(
                             Style::default()
-                                .fg(self.theme.hint_key_fg)
-                                .add_modifier(Modifier::BOLD),
-                        )];
-                        spans.extend(label_spans);
-                        let line = Line::from(spans);
-                        Paragraph::new(line)
-                            .alignment(ratatui::layout::Alignment::Center)
+                                .fg(Color::Black)
+                                .bg(self.theme.prompt_cursor),
+                        );
+                    }
+                }
+
+                if let Some(label) = scrollback_indicator_label(
+                    snapshot.scrollback_offset,
+                    snapshot.scrollback_total,
+                ) {
+                    let badge_width = label.len() as u16;
+                    if term_area.height > 0 && badge_width <= term_area.width {
+                        Paragraph::new(label)
+                            .style(
+                                Style::default()
+                                    .fg(self.theme.scroll_indicator_fg)
+                                    .bg(self.theme.scroll_indicator_bg),
+                            )
                             .render(
                                 Rect::new(
-                                    card_inner.x,
-                                    card_inner.y + card_inner.height / 2,
-                                    card_inner.width,
+                                    term_area.x + term_area.width - badge_width,
+                                    term_area.y,
+                                    badge_width,
                                     1,
                                 ),
                                 frame.buffer_mut(),
                             );
-                    }
-                } else {
-                    // Render the current terminal viewport into the ratatui
-                    // buffer from an owned snapshot to avoid holding locks
-                    // during painting.
-                    let snapshot = provider.snapshot();
-                    scrollback_offset = snapshot.scrollback_offset;
-                    let buf = frame.buffer_mut();
-                    for cell in &snapshot.cells {
-                        if cell.row >= snapshot.rows
-                            || cell.col >= snapshot.cols
-                            || cell.row >= term_area.height
-                            || cell.col >= term_area.width
-                        {
-                            continue;
-                        }
-                        let x = term_area.x + cell.col;
-                        let y = term_area.y + cell.row;
-                        let style = Style::default()
-                            .fg(cell.fg)
-                            .bg(cell.bg)
-                            .add_modifier(cell.modifier);
-                        let ratatui_cell = &mut buf[(x, y)];
-                        ratatui_cell.set_symbol(&cell.symbol);
-                        ratatui_cell.set_style(style);
-                    }
-
-                    // Render cursor if in input mode.
-                    if is_input {
-                        if let Some(cursor) = snapshot.cursor {
-                            if cursor.row < snapshot.rows && cursor.col < snapshot.cols {
-                                let cx = term_area.x + cursor.col;
-                                let cy = term_area.y + cursor.row;
-                                if cx < term_area.x + term_area.width
-                                    && cy < term_area.y + term_area.height
-                                {
-                                    let cursor_cell = &mut buf[(cx, cy)];
-                                    cursor_cell.set_style(
-                                        Style::default()
-                                            .fg(Color::Black)
-                                            .bg(self.theme.prompt_cursor),
-                                    );
-                                }
-                            }
-                        }
-                    }
-
-                    if let Some(label) = scrollback_indicator_label(
-                        snapshot.scrollback_offset,
-                        snapshot.scrollback_total,
-                    ) {
-                        let badge_width = label.len() as u16;
-                        if term_area.height > 0 && badge_width <= term_area.width {
-                            Paragraph::new(label)
-                                .style(
-                                    Style::default()
-                                        .fg(self.theme.scroll_indicator_fg)
-                                        .bg(self.theme.scroll_indicator_bg),
-                                )
-                                .render(
-                                    Rect::new(
-                                        term_area.x + term_area.width - badge_width,
-                                        term_area.y,
-                                        badge_width,
-                                        1,
-                                    ),
-                                    frame.buffer_mut(),
-                                );
-                        }
                     }
                 }
             }
@@ -636,7 +627,6 @@ impl App {
                 "Changes",
                 &self.unstaged_files,
                 RightSection::Unstaged,
-                focused,
                 true,
             );
             self.render_staged_with_commit(frame, chunks[1], focused);
@@ -647,7 +637,6 @@ impl App {
                 "Changes",
                 &self.unstaged_files,
                 RightSection::Unstaged,
-                focused,
                 true,
             );
         }
@@ -669,7 +658,6 @@ impl App {
             "Staged Changes",
             &self.staged_files,
             RightSection::Staged,
-            pane_focused,
             false,
         );
 
@@ -684,9 +672,9 @@ impl App {
         title_prefix: &str,
         files: &[ChangedFile],
         section: RightSection,
-        pane_focused: bool,
         show_hint: bool,
     ) {
+        let pane_focused = self.focus == FocusPane::Files;
         let is_active_section = pane_focused && self.right_section == section;
         let title = format!("{title_prefix} ({})", files.len());
         let block = self.themed_block(&title, is_active_section);
@@ -2257,9 +2245,8 @@ mod tests {
                      col {col} > line len {} at row {row}",
                     line.len()
                 );
-            } else {
+            } else if let Some(expected_char) = at_char {
                 // Cursor points at a visible character; it should match.
-                let expected_char = at_char.unwrap();
                 let actual_char = line[col..].chars().next().unwrap_or('\0');
                 assert_eq!(
                     actual_char, expected_char,
@@ -2335,7 +2322,7 @@ mod tests {
                 .unwrap();
 
             let buf = terminal.backend().buffer();
-            let cell = buf.cell((ccol as u16, crow as u16)).unwrap();
+            let cell = buf.cell((ccol as u16, crow)).unwrap();
             let expected = &text[cursor..cursor + 1];
             assert_eq!(
                 cell.symbol(),
@@ -2372,7 +2359,7 @@ mod tests {
             .unwrap();
 
         let buf = terminal.backend().buffer();
-        let cell = buf.cell((ccol as u16, crow as u16)).unwrap();
+        let cell = buf.cell((ccol as u16, crow)).unwrap();
         let expected_char = after_delete[new_cursor..].chars().next().unwrap();
         assert_eq!(
             cell.symbol(),

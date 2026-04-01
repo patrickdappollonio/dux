@@ -1222,10 +1222,10 @@ impl RuntimeBindings {
             if let Some(name) = b.palette_name {
                 if name.contains(&needle) {
                     name_matches.push(b);
-                } else if let Some(desc) = b.palette_description {
-                    if desc.to_lowercase().contains(&needle) {
-                        desc_matches.push(b);
-                    }
+                } else if let Some(desc) = b.palette_description
+                    && desc.to_lowercase().contains(&needle)
+                {
+                    desc_matches.push(b);
                 }
             }
         }

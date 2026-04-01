@@ -217,14 +217,13 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     if let Ok(ns) = Command::new("git")
         .args(["-C", wt.as_ref(), "diff", "--numstat"])
         .output()
+        && ns.status.success()
     {
-        if ns.status.success() {
-            let stats = parse_numstat(&ns.stdout);
-            for file in &mut unstaged {
-                if let Some(&(a, d)) = stats.get(&file.path) {
-                    file.additions = a;
-                    file.deletions = d;
-                }
+        let stats = parse_numstat(&ns.stdout);
+        for file in &mut unstaged {
+            if let Some(&(a, d)) = stats.get(&file.path) {
+                file.additions = a;
+                file.deletions = d;
             }
         }
     }
@@ -232,14 +231,13 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     if let Ok(ns) = Command::new("git")
         .args(["-C", wt.as_ref(), "diff", "--cached", "--numstat"])
         .output()
+        && ns.status.success()
     {
-        if ns.status.success() {
-            let stats = parse_numstat(&ns.stdout);
-            for file in &mut staged {
-                if let Some(&(a, d)) = stats.get(&file.path) {
-                    file.additions = a;
-                    file.deletions = d;
-                }
+        let stats = parse_numstat(&ns.stdout);
+        for file in &mut staged {
+            if let Some(&(a, d)) = stats.get(&file.path) {
+                file.additions = a;
+                file.deletions = d;
             }
         }
     }

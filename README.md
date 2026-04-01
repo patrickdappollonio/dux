@@ -11,7 +11,7 @@ This means:
 - **Bring any CLI.** Any AI coding tool that runs in a terminal works with dux. Configure the command and args in `config.toml` and you're set.
 - **No banning risks.** You're running the official CLI the way it was designed to be used — the same binary, the same auth, the same API calls.
 - **Full CLI feature support.** Hooks, MCP servers, skills, slash commands, permission dialogs, thinking indicators — everything the CLI supports works out of the box because dux is just hosting the real terminal session.
-- **Crash recovery.** If dux crashes, the agent process dies — and that's fine. Just start a new session on the same worktree. The worktree and all file changes are preserved.
+- **Crash recovery.** If dux crashes, the agent process dies, but dux can reconnect in the same worktree. Providers with configured `resume_args` (like the built-in Claude and Codex defaults) can resume the CLI conversation for that folder/worktree.
 
 ## Features
 
@@ -33,9 +33,18 @@ On first launch, `dux` creates the config file with the full default configurati
 
 ## Provider Setup
 
-The provider commands in `config.toml` point to the CLI tools you want dux to run. By default, `claude` and `codex` are configured. dux launches the configured command in a PTY inside the session's worktree directory, so the CLI tool sees the worktree as its working directory.
+The provider commands in `config.toml` point to the CLI tools you want dux to run. By default, `claude` and `codex` are configured, and new sessions start with `claude` unless you override it per project or in `[defaults]`. dux launches the configured command in a PTY inside the session's worktree directory, so the CLI tool sees the worktree as its working directory.
 
 To use a different CLI tool, set the `command` field in the `[providers.<name>]` section of your config.
+
+If your CLI supports resuming the most recent session for the current repository/folder, add `resume_args` for reconnects after a crash or detached session. If `resume_args` is omitted or empty, dux assumes that CLI does **not** support session resume and will relaunch it normally.
+
+```toml
+[providers.example]
+command = "example-agent"
+args = []
+resume_args = ["resume", "--last"]
+```
 
 ## Logging
 

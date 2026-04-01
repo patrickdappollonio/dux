@@ -364,10 +364,10 @@ impl App {
     }
 
     fn reset_pty_scrollback(&self) {
-        if let Some(session) = self.selected_session() {
-            if let Some(provider) = self.providers.get(&session.id) {
-                provider.set_scrollback(0);
-            }
+        if let Some(session) = self.selected_session()
+            && let Some(provider) = self.providers.get(&session.id)
+        {
+            provider.set_scrollback(0);
         }
     }
 
@@ -778,10 +778,10 @@ impl App {
                     }
                 }
                 Some(Action::MoveUp) => {
-                    if let PromptState::Command { selected, .. } = &mut self.prompt {
-                        if *selected > 0 {
-                            *selected -= 1;
-                        }
+                    if let PromptState::Command { selected, .. } = &mut self.prompt
+                        && *selected > 0
+                    {
+                        *selected -= 1;
                     }
                 }
                 Some(Action::Confirm) => {
@@ -1034,10 +1034,10 @@ impl App {
                     }
                 }
                 Some(Action::MoveUp) => {
-                    if let PromptState::BrowseProjects { selected, .. } = &mut self.prompt {
-                        if *selected > 0 {
-                            *selected -= 1;
-                        }
+                    if let PromptState::BrowseProjects { selected, .. } = &mut self.prompt
+                        && *selected > 0
+                    {
+                        *selected -= 1;
                     }
                 }
                 Some(Action::GoToPath) if !is_searching => {
@@ -1102,22 +1102,21 @@ impl App {
                 }
                 _ => {
                     // Text input fallback for search mode.
-                    if is_searching {
-                        if let PromptState::BrowseProjects {
+                    if is_searching
+                        && let PromptState::BrowseProjects {
                             filter, selected, ..
                         } = &mut self.prompt
-                        {
-                            match key.code {
-                                KeyCode::Backspace => {
-                                    filter.pop();
-                                    *selected = 0;
-                                }
-                                KeyCode::Char(c) if is_plain_char => {
-                                    filter.push(c);
-                                    *selected = 0;
-                                }
-                                _ => {}
+                    {
+                        match key.code {
+                            KeyCode::Backspace => {
+                                filter.pop();
+                                *selected = 0;
                             }
+                            KeyCode::Char(c) if is_plain_char => {
+                                filter.push(c);
+                                *selected = 0;
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -1152,10 +1151,10 @@ impl App {
                     let worktree = worktree_path.clone();
                     let label = session_label.clone();
                     self.prompt = PromptState::None;
-                    if let Some(editor) = editor {
-                        if let Err(e) = self.open_worktree_in_editor(&worktree, &label, &editor) {
-                            self.set_error(format!("{e:#}"));
-                        }
+                    if let Some(editor) = editor
+                        && let Err(e) = self.open_worktree_in_editor(&worktree, &label, &editor)
+                    {
+                        self.set_error(format!("{e:#}"));
                     }
                 }
                 _ => {}
@@ -1349,7 +1348,10 @@ impl App {
         match mouse.kind {
             MouseEventKind::Down(_) => {
                 self.set_info(
-                    &format!("Mouse support is available for wheel navigation; resize has a keyboard fallback via {}.", self.bindings.label_for(Action::ToggleResizeMode)),
+                    format!(
+                        "Mouse support is available for wheel navigation; resize has a keyboard fallback via {}.",
+                        self.bindings.label_for(Action::ToggleResizeMode)
+                    ),
                 );
             }
             MouseEventKind::ScrollDown => match self.focus {

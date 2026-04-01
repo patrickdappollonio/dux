@@ -140,11 +140,11 @@ impl PtyClient {
                     let data = &buf[..n];
                     if let Ok(mut terminal) = terminal.lock() {
                         let replies = terminal.process(data);
-                        if !replies.is_empty() {
-                            if let Ok(mut w) = writer.lock() {
-                                let _ = w.write_all(&replies);
-                                let _ = w.flush();
-                            }
+                        if !replies.is_empty()
+                            && let Ok(mut w) = writer.lock()
+                        {
+                            let _ = w.write_all(&replies);
+                            let _ = w.flush();
                         }
                         if !has_output.load(Ordering::Acquire) && terminal.has_visible_output() {
                             has_output.store(true, Ordering::Release);

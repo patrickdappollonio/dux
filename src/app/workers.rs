@@ -93,12 +93,11 @@ impl App {
                         selected,
                         ..
                     } = &mut self.prompt
+                        && *current_dir == dir
                     {
-                        if *current_dir == dir {
-                            *current_entries = entries;
-                            *loading = false;
-                            *selected = 0;
-                        }
+                        *current_entries = entries;
+                        *loading = false;
+                        *selected = 0;
                     }
                 }
             }
@@ -116,16 +115,16 @@ impl App {
         }
         if !exited.is_empty() {
             // If the currently-viewed session just exited, leave interactive mode.
-            if let Some(current) = self.selected_session() {
-                if exited.contains(&current.id) {
-                    self.input_target = InputTarget::None;
-                    self.fullscreen_agent = false;
-                    self.focus = FocusPane::Left;
-                    let key = self.bindings.label_for(Action::ReconnectAgent);
-                    self.set_info(format!(
-                        "Agent CLI process has exited. Press \"{key}\" to relaunch."
-                    ));
-                }
+            if let Some(current) = self.selected_session()
+                && exited.contains(&current.id)
+            {
+                self.input_target = InputTarget::None;
+                self.fullscreen_agent = false;
+                self.focus = FocusPane::Left;
+                let key = self.bindings.label_for(Action::ReconnectAgent);
+                self.set_info(format!(
+                    "Agent CLI process has exited. Press \"{key}\" to relaunch."
+                ));
             }
         }
         // Keep the poller's interval flag in sync with whether any agent is running.
@@ -163,15 +162,13 @@ impl App {
                 };
                 thread::sleep(interval);
                 let path = watched.lock().ok().and_then(|guard| guard.clone());
-                if let Some(worktree_path) = path {
-                    if let Ok((staged, unstaged)) = git::changed_files(&worktree_path) {
-                        if tx
-                            .send(WorkerEvent::ChangedFilesReady { staged, unstaged })
-                            .is_err()
-                        {
-                            break; // receiver dropped, app is shutting down
-                        }
-                    }
+                if let Some(worktree_path) = path
+                    && let Ok((staged, unstaged)) = git::changed_files(&worktree_path)
+                    && tx
+                        .send(WorkerEvent::ChangedFilesReady { staged, unstaged })
+                        .is_err()
+                {
+                    break; // receiver dropped, app is shutting down
                 }
             }
         });
