@@ -2289,6 +2289,21 @@ mod tests {
     }
 
     #[test]
+    fn mouse_journey_can_switch_focus_across_all_panes() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 99, 0));
+        assert_eq!(app.focus, FocusPane::Files);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        assert_eq!(app.focus, FocusPane::Center);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0, 0));
+        assert_eq!(app.focus, FocusPane::Left);
+    }
+
+    #[test]
     fn mouse_wheel_left_pane_advances_selection_under_cursor() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
@@ -2299,6 +2314,32 @@ mod tests {
 
         assert_eq!(app.focus, FocusPane::Left);
         assert_eq!(app.selected_left, 1);
+    }
+
+    #[test]
+    fn mouse_journey_can_switch_files_sections_by_clicking_rows() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.unstaged_files = vec![ChangedFile {
+            path: "a.txt".into(),
+            status: "M".into(),
+            additions: 1,
+            deletions: 0,
+        }];
+        app.staged_files = vec![ChangedFile {
+            path: "b.txt".into(),
+            status: "A".into(),
+            additions: 3,
+            deletions: 0,
+        }];
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 79, 1));
+        assert_eq!(app.right_section, RightSection::Unstaged);
+        assert_eq!(app.files_index, 0);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 79, 9));
+        assert_eq!(app.right_section, RightSection::Staged);
+        assert_eq!(app.files_index, 0);
     }
 
     #[test]
@@ -2359,6 +2400,22 @@ mod tests {
     }
 
     #[test]
+    fn mouse_journey_commit_chrome_then_text_enters_editing() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.commit_input = "hello".to_string();
+        app.focus = FocusPane::Center;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 80, 14));
+        assert_eq!(app.focus, FocusPane::Files);
+        assert_eq!(app.right_section, RightSection::CommitInput);
+        assert_eq!(app.input_target, InputTarget::None);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 80, 15));
+        assert_eq!(app.input_target, InputTarget::CommitMessage);
+    }
+
+    #[test]
     fn mouse_wheel_commit_text_scrolls_commit_viewport() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
@@ -2369,6 +2426,23 @@ mod tests {
 
         assert!(app.commit_scroll > 0);
         assert_eq!(app.right_section, RightSection::CommitInput);
+    }
+
+    #[test]
+    fn mouse_journey_divider_drag_persists_widths_on_release() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        let original_left = app.config.ui.left_width_pct;
+        let original_right = app.config.ui.right_width_pct;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 19, 5));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
+
+        assert_ne!(app.left_width_pct, original_left);
+        assert_eq!(app.config.ui.left_width_pct, app.left_width_pct);
+        assert_eq!(app.config.ui.right_width_pct, app.right_width_pct);
+        assert_eq!(app.config.ui.right_width_pct, original_right);
     }
 
     #[test]
