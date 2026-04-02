@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::Utc;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::prelude::{Color, Modifier, Style};
@@ -77,6 +79,8 @@ pub struct App {
     pub(crate) has_active_agent: Arc<AtomicBool>,
     pub(crate) collapsed_projects: HashSet<String>,
     pub(crate) left_items_cache: Vec<LeftItem>,
+    pub(crate) mouse_layout: MouseLayoutState,
+    pub(crate) mouse_drag: Option<ResizeDragState>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -222,6 +226,39 @@ pub(crate) enum ScrollDirection {
     Down,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct MouseLayoutState {
+    pub(crate) body: Rect,
+    pub(crate) left: Rect,
+    pub(crate) center: Rect,
+    pub(crate) right: Rect,
+    pub(crate) left_list: Rect,
+    pub(crate) agent_term: Option<Rect>,
+    pub(crate) unstaged_list: Option<Rect>,
+    pub(crate) staged_list: Option<Rect>,
+    pub(crate) commit_area: Option<Rect>,
+}
+
+impl MouseLayoutState {
+    pub(crate) fn reset(&mut self, body: Rect, left: Rect, center: Rect, right: Rect) {
+        self.body = body;
+        self.left = left;
+        self.center = center;
+        self.right = right;
+        self.left_list = Rect::default();
+        self.agent_term = None;
+        self.unstaged_list = None;
+        self.staged_list = None;
+        self.commit_area = None;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResizeDragState {
+    LeftDivider,
+    RightDivider,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum LeftItem {
     Project(usize),
@@ -327,6 +364,8 @@ impl App {
             has_active_agent: Arc::new(AtomicBool::new(false)),
             collapsed_projects: HashSet::new(),
             left_items_cache: Vec::new(),
+            mouse_layout: MouseLayoutState::default(),
+            mouse_drag: None,
         };
         app.restore_sessions();
         app.rebuild_left_items();

@@ -1,4 +1,133 @@
 use super::*;
+use alacritty_terminal::term::TermMode;
+
+const MOUSE_WHEEL_LINES: usize = 3;
+const MIN_LEFT_WIDTH_PCT: u16 = 14;
+const MAX_LEFT_WIDTH_PCT: u16 = 38;
+const MIN_RIGHT_WIDTH_PCT: u16 = 14;
+const MAX_RIGHT_WIDTH_PCT: u16 = 50;
+const MIN_CENTER_WIDTH_PCT: u16 = 20;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgentWheelRoute {
+    HostScrollback,
+    ForwardMouse,
+    ForwardAlternateScroll,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MouseTarget {
+    LeftRow(usize),
+    Center,
+    UnstagedFile(Option<usize>),
+    StagedFile(Option<usize>),
+    CommitInput,
+}
+
+fn contains_point(rect: Rect, column: u16, row: u16) -> bool {
+    rect.width > 0
+        && rect.height > 0
+        && column >= rect.x
+        && column < rect.x + rect.width
+        && row >= rect.y
+        && row < rect.y + rect.height
+}
+
+fn clamp_left_width_pct(left_width_pct: u16, right_width_pct: u16) -> u16 {
+    let max_left = MAX_LEFT_WIDTH_PCT.min(100 - MIN_CENTER_WIDTH_PCT - right_width_pct);
+    left_width_pct.clamp(MIN_LEFT_WIDTH_PCT, max_left.max(MIN_LEFT_WIDTH_PCT))
+}
+
+fn clamp_right_width_pct(right_width_pct: u16, left_width_pct: u16) -> u16 {
+    let max_right = MAX_RIGHT_WIDTH_PCT.min(100 - MIN_CENTER_WIDTH_PCT - left_width_pct);
+    right_width_pct.clamp(MIN_RIGHT_WIDTH_PCT, max_right.max(MIN_RIGHT_WIDTH_PCT))
+}
+
+fn pct_from_columns(columns: u16, total_width: u16) -> u16 {
+    if total_width == 0 {
+        return 0;
+    }
+
+    (((u32::from(columns) * 100) + (u32::from(total_width) / 2)) / u32::from(total_width)) as u16
+}
+
+fn encode_cursor_key(code: KeyCode, term_mode: TermMode) -> &'static [u8] {
+    let application_cursor = term_mode.contains(TermMode::APP_CURSOR);
+    match (code, application_cursor) {
+        (KeyCode::Up, true) => b"\x1bOA",
+        (KeyCode::Down, true) => b"\x1bOB",
+        (KeyCode::Right, true) => b"\x1bOC",
+        (KeyCode::Left, true) => b"\x1bOD",
+        (KeyCode::Up, false) => b"\x1b[A",
+        (KeyCode::Down, false) => b"\x1b[B",
+        (KeyCode::Right, false) => b"\x1b[C",
+        (KeyCode::Left, false) => b"\x1b[D",
+        _ => b"",
+    }
+}
+
+fn agent_wheel_route(term_mode: TermMode) -> AgentWheelRoute {
+    let mouse_reporting = term_mode
+        .intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION);
+
+    if mouse_reporting {
+        AgentWheelRoute::ForwardMouse
+    } else if term_mode.contains(TermMode::ALT_SCREEN)
+        && term_mode.contains(TermMode::ALTERNATE_SCROLL)
+    {
+        AgentWheelRoute::ForwardAlternateScroll
+    } else {
+        AgentWheelRoute::HostScrollback
+    }
+}
+
+fn push_mouse_codepoint(bytes: &mut Vec<u8>, value: u32) -> Option<()> {
+    let ch = char::from_u32(value)?;
+    let mut buf = [0u8; 4];
+    bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+    Some(())
+}
+
+fn encode_mouse_scroll(mouse: MouseEvent, area: Rect, term_mode: TermMode) -> Option<Vec<u8>> {
+    let mut cb = match mouse.kind {
+        MouseEventKind::ScrollUp => 64u16,
+        MouseEventKind::ScrollDown => 65u16,
+        MouseEventKind::ScrollLeft => 66u16,
+        MouseEventKind::ScrollRight => 67u16,
+        _ => return None,
+    };
+
+    if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+        cb += 4;
+    }
+    if mouse.modifiers.contains(KeyModifiers::ALT) {
+        cb += 8;
+    }
+    if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+        cb += 16;
+    }
+
+    let column = u32::from(mouse.column.saturating_sub(area.x).saturating_add(1));
+    let row = u32::from(mouse.row.saturating_sub(area.y).saturating_add(1));
+
+    if term_mode.contains(TermMode::SGR_MOUSE) {
+        return Some(format!("\x1b[<{cb};{column};{row}M").into_bytes());
+    }
+
+    if term_mode.contains(TermMode::UTF8_MOUSE) {
+        let mut bytes = Vec::with_capacity(16);
+        bytes.extend_from_slice(b"\x1b[M");
+        push_mouse_codepoint(&mut bytes, u32::from(cb) + 32)?;
+        push_mouse_codepoint(&mut bytes, column + 32)?;
+        push_mouse_codepoint(&mut bytes, row + 32)?;
+        return Some(bytes);
+    }
+
+    let cb = u8::try_from(cb + 32).ok()?;
+    let column = u8::try_from(column + 32).ok()?;
+    let row = u8::try_from(row + 32).ok()?;
+    Some(vec![0x1b, b'[', b'M', cb, column, row])
+}
 
 impl App {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -708,16 +837,19 @@ impl App {
                 let _ = provider.write_bytes(b"\t");
             }
             KeyCode::Up => {
-                let _ = provider.write_bytes(b"\x1b[A");
+                let _ = provider.write_bytes(encode_cursor_key(KeyCode::Up, provider.term_mode()));
             }
             KeyCode::Down => {
-                let _ = provider.write_bytes(b"\x1b[B");
+                let _ =
+                    provider.write_bytes(encode_cursor_key(KeyCode::Down, provider.term_mode()));
             }
             KeyCode::Right => {
-                let _ = provider.write_bytes(b"\x1b[C");
+                let _ =
+                    provider.write_bytes(encode_cursor_key(KeyCode::Right, provider.term_mode()));
             }
             KeyCode::Left => {
-                let _ = provider.write_bytes(b"\x1b[D");
+                let _ =
+                    provider.write_bytes(encode_cursor_key(KeyCode::Left, provider.term_mode()));
             }
             KeyCode::Home => {
                 let _ = provider.write_bytes(b"\x1b[H");
@@ -1312,25 +1444,235 @@ impl App {
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Resize) {
             if self.focus == FocusPane::Files {
                 match action {
-                    Action::ResizeShrink => {
-                        self.right_width_pct = self.right_width_pct.saturating_add(2).min(50)
-                    }
+                    Action::ResizeShrink => self.set_right_width_pct(self.right_width_pct + 2),
                     Action::ResizeGrow => {
-                        self.right_width_pct = self.right_width_pct.saturating_sub(2).max(14)
+                        self.set_right_width_pct(self.right_width_pct.saturating_sub(2))
                     }
                     _ => {}
                 }
             } else {
                 match action {
                     Action::ResizeShrink => {
-                        self.left_width_pct = self.left_width_pct.saturating_sub(2).max(14)
+                        self.set_left_width_pct(self.left_width_pct.saturating_sub(2))
                     }
-                    Action::ResizeGrow => {
-                        self.left_width_pct = self.left_width_pct.saturating_add(2).min(38)
-                    }
+                    Action::ResizeGrow => self.set_left_width_pct(self.left_width_pct + 2),
                     _ => {}
                 }
             }
+        }
+    }
+
+    fn set_left_width_pct(&mut self, left_width_pct: u16) {
+        self.left_width_pct = clamp_left_width_pct(left_width_pct, self.right_width_pct);
+        self.right_width_pct = clamp_right_width_pct(self.right_width_pct, self.left_width_pct);
+    }
+
+    fn set_right_width_pct(&mut self, right_width_pct: u16) {
+        self.right_width_pct = clamp_right_width_pct(right_width_pct, self.left_width_pct);
+        self.left_width_pct = clamp_left_width_pct(self.left_width_pct, self.right_width_pct);
+    }
+
+    fn mouse_target(&self, column: u16, row: u16) -> Option<MouseTarget> {
+        if self.fullscreen_agent {
+            return self
+                .mouse_layout
+                .agent_term
+                .filter(|rect| contains_point(*rect, column, row))
+                .map(|_| MouseTarget::Center);
+        }
+
+        if contains_point(self.mouse_layout.left_list, column, row) {
+            let index = usize::from(row.saturating_sub(self.mouse_layout.left_list.y));
+            if index < self.left_items().len() {
+                return Some(MouseTarget::LeftRow(index));
+            }
+            return Some(MouseTarget::LeftRow(self.selected_left));
+        }
+
+        if let Some(area) = self.mouse_layout.unstaged_list
+            && contains_point(area, column, row)
+        {
+            let index = usize::from(row.saturating_sub(area.y));
+            let file_index = (index < self.unstaged_files.len()).then_some(index);
+            return Some(MouseTarget::UnstagedFile(file_index));
+        }
+
+        if let Some(area) = self.mouse_layout.staged_list
+            && contains_point(area, column, row)
+        {
+            let index = usize::from(row.saturating_sub(area.y));
+            let file_index = (index < self.staged_files.len()).then_some(index);
+            return Some(MouseTarget::StagedFile(file_index));
+        }
+
+        if let Some(area) = self.mouse_layout.commit_area
+            && contains_point(area, column, row)
+        {
+            return Some(MouseTarget::CommitInput);
+        }
+
+        if contains_point(self.mouse_layout.center, column, row) {
+            return Some(MouseTarget::Center);
+        }
+
+        None
+    }
+
+    fn resize_drag_at_mouse(&self, column: u16, row: u16) -> Option<ResizeDragState> {
+        let body = self.mouse_layout.body;
+        if !contains_point(body, column, row) {
+            return None;
+        }
+
+        let left_edge = self.mouse_layout.left.x + self.mouse_layout.left.width.saturating_sub(1);
+        let center_left = self.mouse_layout.center.x;
+        let center_right =
+            self.mouse_layout.center.x + self.mouse_layout.center.width.saturating_sub(1);
+        let right_left = self.mouse_layout.right.x;
+
+        if !self.left_collapsed && (column == left_edge || column == center_left) {
+            return Some(ResizeDragState::LeftDivider);
+        }
+
+        if column == center_right || column == right_left {
+            return Some(ResizeDragState::RightDivider);
+        }
+
+        None
+    }
+
+    fn set_left_selection(&mut self, index: usize) {
+        if index >= self.left_items().len() {
+            return;
+        }
+        self.focus = FocusPane::Left;
+        self.input_target = InputTarget::None;
+        self.fullscreen_agent = false;
+        if self.selected_left != index {
+            self.selected_left = index;
+            self.reload_changed_files();
+        }
+    }
+
+    fn set_file_selection(&mut self, section: RightSection, index: Option<usize>) {
+        self.focus = FocusPane::Files;
+        self.input_target = InputTarget::None;
+        self.fullscreen_agent = false;
+        self.right_section = section;
+        if let Some(index) = index {
+            self.files_index = index;
+        }
+        self.clamp_files_cursor();
+    }
+
+    fn scroll_file_selection(&mut self, section: RightSection, down: bool) {
+        self.set_file_selection(section, Some(self.files_index));
+        if self.right_section == RightSection::CommitInput {
+            return;
+        }
+
+        let len = self.current_files_len();
+        if len == 0 {
+            return;
+        }
+
+        if down {
+            if self.files_index + 1 < len {
+                self.files_index += 1;
+            }
+        } else if self.files_index > 0 {
+            self.files_index -= 1;
+        }
+    }
+
+    fn handle_left_mouse_wheel(&mut self, down: bool, column: u16, row: u16) {
+        let target_index = match self.mouse_target(column, row) {
+            Some(MouseTarget::LeftRow(index)) => index,
+            _ => self.selected_left,
+        };
+        self.set_left_selection(target_index);
+
+        if down {
+            if self.selected_left + 1 < self.left_items().len() {
+                self.selected_left += 1;
+                self.reload_changed_files();
+            }
+        } else if self.selected_left > 0 {
+            self.selected_left -= 1;
+            self.reload_changed_files();
+        }
+    }
+
+    fn handle_center_mouse_wheel(&mut self, mouse: MouseEvent) {
+        self.focus = FocusPane::Center;
+        if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
+            let delta = MOUSE_WHEEL_LINES as u16;
+            if matches!(mouse.kind, MouseEventKind::ScrollDown) {
+                let max_scroll = self
+                    .last_diff_visual_lines
+                    .saturating_sub(self.last_diff_height.max(1));
+                *scroll = (*scroll + delta).min(max_scroll);
+            } else if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                *scroll = scroll.saturating_sub(delta);
+            }
+            return;
+        }
+
+        let Some(area) = self.mouse_layout.agent_term else {
+            return;
+        };
+        let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
+            return;
+        };
+        let Some(provider) = self.providers.get(&session_id) else {
+            return;
+        };
+
+        match agent_wheel_route(provider.term_mode()) {
+            AgentWheelRoute::HostScrollback => {
+                provider.scroll(
+                    matches!(mouse.kind, MouseEventKind::ScrollUp),
+                    MOUSE_WHEEL_LINES,
+                );
+            }
+            AgentWheelRoute::ForwardMouse => {
+                provider.set_scrollback(0);
+                if let Some(bytes) = encode_mouse_scroll(mouse, area, provider.term_mode()) {
+                    let _ = provider.write_bytes(&bytes);
+                }
+            }
+            AgentWheelRoute::ForwardAlternateScroll => {
+                provider.set_scrollback(0);
+                let code = match mouse.kind {
+                    MouseEventKind::ScrollUp => KeyCode::Up,
+                    MouseEventKind::ScrollDown => KeyCode::Down,
+                    _ => return,
+                };
+                let _ = provider.write_bytes(encode_cursor_key(code, provider.term_mode()));
+            }
+        }
+    }
+
+    fn update_dragged_widths(&mut self, column: u16) {
+        let body = self.mouse_layout.body;
+        if body.width == 0 {
+            return;
+        }
+
+        let body_right = body.x + body.width;
+        match self.mouse_drag {
+            Some(ResizeDragState::LeftDivider) => {
+                let columns = column
+                    .saturating_sub(body.x)
+                    .saturating_add(1)
+                    .clamp(1, body.width);
+                self.set_left_width_pct(pct_from_columns(columns, body.width));
+            }
+            Some(ResizeDragState::RightDivider) => {
+                let columns = body_right.saturating_sub(column).clamp(1, body.width);
+                self.set_right_width_pct(pct_from_columns(columns, body.width));
+            }
+            None => {}
         }
     }
 
@@ -1345,54 +1687,86 @@ impl App {
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) {
-        match mouse.kind {
-            MouseEventKind::Down(_) => {
-                self.set_info(
-                    format!(
-                        "Mouse support is available for wheel navigation; resize has a keyboard fallback via {}.",
-                        self.bindings.label_for(Action::ToggleResizeMode)
-                    ),
-                );
+        if !matches!(self.prompt, PromptState::None) {
+            return;
+        }
+
+        if let Some(ref mut scroll) = self.help_scroll {
+            let max_help = self
+                .last_help_lines
+                .saturating_sub(self.last_help_height.max(1));
+            match mouse.kind {
+                MouseEventKind::ScrollDown => {
+                    *scroll = (*scroll + MOUSE_WHEEL_LINES as u16).min(max_help)
+                }
+                MouseEventKind::ScrollUp => {
+                    *scroll = scroll.saturating_sub(MOUSE_WHEEL_LINES as u16)
+                }
+                _ => {}
             }
-            MouseEventKind::ScrollDown => match self.focus {
-                FocusPane::Left => {
-                    let items = self.left_items();
-                    if self.selected_left + 1 < items.len() {
-                        self.selected_left += 1;
-                        self.reload_changed_files();
-                    }
+            return;
+        }
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row) {
+                    self.mouse_drag = Some(drag);
+                    self.update_dragged_widths(mouse.column);
+                    return;
                 }
-                FocusPane::Center => {
-                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
-                        let max_scroll = self
-                            .last_diff_visual_lines
-                            .saturating_sub(self.last_diff_height.max(1));
-                        *scroll = (*scroll + 3).min(max_scroll);
+
+                match self.mouse_target(mouse.column, mouse.row) {
+                    Some(MouseTarget::LeftRow(index)) => self.set_left_selection(index),
+                    Some(MouseTarget::Center) => {
+                        self.focus = FocusPane::Center;
                     }
-                }
-                FocusPane::Files => {
-                    if self.files_index + 1 < self.current_files_len() {
-                        self.files_index += 1;
+                    Some(MouseTarget::UnstagedFile(index)) => {
+                        self.set_file_selection(RightSection::Unstaged, index);
                     }
+                    Some(MouseTarget::StagedFile(index)) => {
+                        self.set_file_selection(RightSection::Staged, index);
+                    }
+                    Some(MouseTarget::CommitInput) => {
+                        self.set_file_selection(RightSection::CommitInput, None);
+                    }
+                    None => {}
                 }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.mouse_drag.is_some() {
+                    self.update_dragged_widths(mouse.column);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if self.mouse_drag.take().is_some() {
+                    self.persist_pane_widths();
+                }
+            }
+            MouseEventKind::ScrollDown => match self.mouse_target(mouse.column, mouse.row) {
+                Some(MouseTarget::LeftRow(_)) => {
+                    self.handle_left_mouse_wheel(true, mouse.column, mouse.row)
+                }
+                Some(MouseTarget::Center) => self.handle_center_mouse_wheel(mouse),
+                Some(MouseTarget::UnstagedFile(_)) => {
+                    self.scroll_file_selection(RightSection::Unstaged, true)
+                }
+                Some(MouseTarget::StagedFile(_)) => {
+                    self.scroll_file_selection(RightSection::Staged, true)
+                }
+                _ => {}
             },
-            MouseEventKind::ScrollUp => match self.focus {
-                FocusPane::Left => {
-                    if self.selected_left > 0 {
-                        self.selected_left -= 1;
-                        self.reload_changed_files();
-                    }
+            MouseEventKind::ScrollUp => match self.mouse_target(mouse.column, mouse.row) {
+                Some(MouseTarget::LeftRow(_)) => {
+                    self.handle_left_mouse_wheel(false, mouse.column, mouse.row)
                 }
-                FocusPane::Center => {
-                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
-                        *scroll = scroll.saturating_sub(3);
-                    }
+                Some(MouseTarget::Center) => self.handle_center_mouse_wheel(mouse),
+                Some(MouseTarget::UnstagedFile(_)) => {
+                    self.scroll_file_selection(RightSection::Unstaged, false)
                 }
-                FocusPane::Files => {
-                    if self.files_index > 0 {
-                        self.files_index -= 1;
-                    }
+                Some(MouseTarget::StagedFile(_)) => {
+                    self.scroll_file_selection(RightSection::Staged, false)
                 }
+                _ => {}
             },
             _ => {}
         }
@@ -1405,15 +1779,21 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex, mpsc};
 
-    use crate::app::{App, CenterMode, FocusPane, InputTarget, PromptState, RightSection};
+    use crate::app::{
+        App, CenterMode, FocusPane, InputTarget, MouseLayoutState, PromptState, RightSection,
+    };
     use crate::config::{Config, DuxPaths};
     use crate::keybindings::{Action, BINDING_DEFS, BindingScope, RuntimeBindings};
-    use crate::model::{AgentSession, Project, ProviderKind, SessionStatus};
+    use crate::model::{AgentSession, ChangedFile, Project, ProviderKind, SessionStatus};
     use crate::statusline::StatusLine;
     use crate::storage::SessionStore;
     use crate::theme::Theme;
+    use alacritty_terminal::term::TermMode;
     use chrono::Utc;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+    use ratatui::text::Line;
     use tempfile::tempdir;
 
     fn default_bindings() -> RuntimeBindings {
@@ -1527,10 +1907,35 @@ mod tests {
             has_active_agent: Arc::new(AtomicBool::new(false)),
             collapsed_projects: std::collections::HashSet::new(),
             left_items_cache: Vec::new(),
+            mouse_layout: MouseLayoutState::default(),
+            mouse_drag: None,
         };
         app.rebuild_left_items();
         app.selected_left = 1;
         app
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn install_mouse_layout(app: &mut App) {
+        app.mouse_layout = MouseLayoutState {
+            body: Rect::new(0, 0, 100, 20),
+            left: Rect::new(0, 0, 20, 20),
+            center: Rect::new(20, 0, 57, 20),
+            right: Rect::new(77, 0, 23, 20),
+            left_list: Rect::new(1, 1, 18, 10),
+            agent_term: Some(Rect::new(21, 1, 55, 16)),
+            unstaged_list: Some(Rect::new(78, 1, 21, 8)),
+            staged_list: Some(Rect::new(78, 9, 21, 5)),
+            commit_area: Some(Rect::new(77, 14, 23, 6)),
+        };
     }
 
     #[test]
@@ -1706,6 +2111,107 @@ mod tests {
         assert_eq!(
             bindings.lookup(&key, BindingScope::Center),
             Some(Action::ScrollLineDown),
+        );
+    }
+
+    #[test]
+    fn mouse_click_left_row_focuses_and_selects_it() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.focus = FocusPane::Center;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 1));
+
+        assert_eq!(app.focus, FocusPane::Left);
+        assert_eq!(app.selected_left, 0);
+    }
+
+    #[test]
+    fn mouse_click_right_row_focuses_and_selects_unstaged_file() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.unstaged_files = vec![
+            ChangedFile {
+                path: "a.txt".into(),
+                status: "M".into(),
+                additions: 1,
+                deletions: 0,
+            },
+            ChangedFile {
+                path: "b.txt".into(),
+                status: "M".into(),
+                additions: 2,
+                deletions: 1,
+            },
+        ];
+        app.focus = FocusPane::Center;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 79, 2));
+
+        assert_eq!(app.focus, FocusPane::Files);
+        assert_eq!(app.right_section, RightSection::Unstaged);
+        assert_eq!(app.files_index, 1);
+    }
+
+    #[test]
+    fn mouse_wheel_left_pane_advances_selection_under_cursor() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.focus = FocusPane::Center;
+        app.selected_left = 0;
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, 2, 1));
+
+        assert_eq!(app.focus, FocusPane::Left);
+        assert_eq!(app.selected_left, 1);
+    }
+
+    #[test]
+    fn mouse_wheel_center_diff_scrolls_lines() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.center_mode = CenterMode::Diff {
+            lines: vec![Line::from("one"), Line::from("two"), Line::from("three")],
+            scroll: 0,
+        };
+        app.last_diff_height = 2;
+        app.last_diff_visual_lines = 10;
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, 30, 5));
+
+        match app.center_mode {
+            CenterMode::Diff { scroll, .. } => assert_eq!(scroll, 3),
+            _ => panic!("expected diff mode"),
+        }
+    }
+
+    #[test]
+    fn mouse_drag_left_divider_updates_widths() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 19, 5));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 30, 5));
+
+        assert!(app.left_width_pct > 20);
+        assert!(app.left_width_pct + app.right_width_pct <= 80);
+    }
+
+    #[test]
+    fn agent_wheel_route_prefers_mouse_reporting_over_host_scrollback() {
+        let mode = TermMode::ALT_SCREEN | TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
+        assert_eq!(
+            super::agent_wheel_route(mode),
+            super::AgentWheelRoute::ForwardMouse
+        );
+    }
+
+    #[test]
+    fn agent_wheel_route_uses_alternate_scroll_for_alt_screen_apps() {
+        let mode = TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL;
+        assert_eq!(
+            super::agent_wheel_route(mode),
+            super::AgentWheelRoute::ForwardAlternateScroll
         );
     }
 }
