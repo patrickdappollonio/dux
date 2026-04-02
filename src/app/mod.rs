@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::stdout;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -10,8 +11,10 @@ use std::time::Duration;
 use anyhow::Result;
 use chrono::Utc;
 use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind,
 };
+use crossterm::execute;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::prelude::{Color, Modifier, Style};
@@ -378,25 +381,32 @@ impl App {
     pub fn run(&mut self) -> Result<()> {
         self.spawn_changed_files_poller();
         let mut terminal = ratatui::init();
-        loop {
-            self.drain_events();
-            self.tick_count = self.tick_count.wrapping_add(1);
-            terminal.draw(|frame| self.render(frame))?;
-            if event::poll(Duration::from_millis(100))? {
-                match event::read()? {
-                    Event::Key(key) => {
-                        if self.handle_key(key)? {
-                            break;
+        execute!(stdout(), EnableMouseCapture)?;
+
+        let result = (|| -> Result<()> {
+            loop {
+                self.drain_events();
+                self.tick_count = self.tick_count.wrapping_add(1);
+                terminal.draw(|frame| self.render(frame))?;
+                if event::poll(Duration::from_millis(100))? {
+                    match event::read()? {
+                        Event::Key(key) => {
+                            if self.handle_key(key)? {
+                                break;
+                            }
                         }
+                        Event::Mouse(mouse) => self.handle_mouse(mouse),
+                        Event::Resize(_, _) => {}
+                        _ => {}
                     }
-                    Event::Mouse(mouse) => self.handle_mouse(mouse),
-                    Event::Resize(_, _) => {}
-                    _ => {}
                 }
             }
-        }
+            Ok(())
+        })();
+
+        let _ = execute!(stdout(), DisableMouseCapture);
         ratatui::restore();
-        Ok(())
+        result
     }
 
     fn restore_sessions(&mut self) {
