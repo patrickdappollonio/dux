@@ -1,3 +1,5 @@
+use std::env;
+use std::ffi::OsStr;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -80,7 +82,7 @@ impl PtyClient {
             cmd.arg(arg);
         }
         cmd.cwd(cwd);
-        cmd.env("TERM", "xterm-256color");
+        apply_terminal_env(&mut cmd);
 
         let child = pair
             .slave
@@ -268,7 +270,15 @@ impl TerminalState {
 
     fn process(&mut self, data: &[u8]) -> Vec<u8> {
         self.parser.advance(&mut self.term, data);
-        self.event_proxy.take_pending_bytes()
+        let pending = self.event_proxy.take_pending();
+        let mut replies = pending.bytes;
+
+        for request in pending.color_requests {
+            let rgb = resolve_color_request_rgb(request.index, self.term.colors());
+            replies.extend_from_slice((request.formatter)(rgb).as_bytes());
+        }
+
+        replies
     }
 
     fn has_visible_output(&self) -> bool {
@@ -386,25 +396,33 @@ impl TerminalState {
 
 #[derive(Clone)]
 struct EventProxy {
-    pending: Arc<Mutex<Vec<u8>>>,
+    pending: Arc<Mutex<PendingEvents>>,
     size: Arc<Mutex<(u16, u16)>>,
 }
 
 impl EventProxy {
     fn new(rows: u16, cols: u16) -> Self {
         Self {
-            pending: Arc::new(Mutex::new(Vec::new())),
+            pending: Arc::new(Mutex::new(PendingEvents::default())),
             size: Arc::new(Mutex::new((rows, cols))),
         }
     }
 
     fn push_bytes(&self, bytes: &[u8]) {
         if let Ok(mut pending) = self.pending.lock() {
-            pending.extend_from_slice(bytes);
+            pending.bytes.extend_from_slice(bytes);
         }
     }
 
-    fn take_pending_bytes(&self) -> Vec<u8> {
+    fn push_color_request(&self, index: usize, formatter: ColorRequestFormatter) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending
+                .color_requests
+                .push(PendingColorRequest { index, formatter });
+        }
+    }
+
+    fn take_pending(&self) -> PendingEvents {
         self.pending
             .lock()
             .map(|mut pending| std::mem::take(&mut *pending))
@@ -422,6 +440,7 @@ impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         match event {
             Event::PtyWrite(text) => self.push_bytes(text.as_bytes()),
+            Event::ColorRequest(index, formatter) => self.push_color_request(index, formatter),
             Event::TextAreaSizeRequest(formatter) => {
                 let (rows, cols) = self.size.lock().map(|size| *size).unwrap_or((24, 80));
                 let response = formatter(WindowSize {
@@ -435,6 +454,19 @@ impl EventListener for EventProxy {
             _ => {}
         }
     }
+}
+
+type ColorRequestFormatter = Arc<dyn Fn(Rgb) -> String + Sync + Send + 'static>;
+
+#[derive(Default)]
+struct PendingEvents {
+    bytes: Vec<u8>,
+    color_requests: Vec<PendingColorRequest>,
+}
+
+struct PendingColorRequest {
+    index: usize,
+    formatter: ColorRequestFormatter,
 }
 
 struct TerminalDimensions {
@@ -514,9 +546,135 @@ fn named_color_to_tui(color: NamedColor) -> Color {
     }
 }
 
+fn apply_terminal_env(cmd: &mut CommandBuilder) {
+    apply_terminal_env_from_parent(
+        cmd,
+        env::var_os("TERM").as_deref(),
+        env::var_os("COLORTERM").as_deref(),
+    );
+}
+
+fn apply_terminal_env_from_parent(
+    cmd: &mut CommandBuilder,
+    parent_term: Option<&OsStr>,
+    parent_colorterm: Option<&OsStr>,
+) {
+    let term = resolve_term_from_parent(parent_term);
+    cmd.env("TERM", term);
+
+    if let Some(colorterm) = parent_colorterm.filter(|value| !value.is_empty()) {
+        cmd.env("COLORTERM", colorterm);
+    }
+}
+
+fn resolve_term_from_parent(parent_term: Option<&OsStr>) -> String {
+    let Some(parent_term) = parent_term else {
+        return "xterm-256color".to_string();
+    };
+
+    let candidate = parent_term.to_string_lossy().trim().to_string();
+    if candidate.is_empty() {
+        return "xterm-256color".to_string();
+    }
+
+    let normalized = candidate.to_ascii_lowercase();
+    if normalized == "dumb" {
+        return "xterm-256color".to_string();
+    }
+
+    if term_supports_extended_color(&normalized) {
+        return candidate;
+    }
+
+    "xterm-256color".to_string()
+}
+
+fn term_supports_extended_color(term: &str) -> bool {
+    term.contains("256color")
+        || term.contains("kitty")
+        || term.contains("wezterm")
+        || term.contains("alacritty")
+        || term.contains("ghostty")
+        || term.contains("foot")
+        || term.contains("tmux")
+        || term.contains("screen")
+}
+
+fn resolve_color_request_rgb(
+    index: usize,
+    palette: &alacritty_terminal::term::color::Colors,
+) -> Rgb {
+    (index < alacritty_terminal::term::color::COUNT)
+        .then(|| palette[index])
+        .flatten()
+        .or_else(|| default_palette_rgb(index))
+        .unwrap_or(Rgb {
+            r: 0x00,
+            g: 0x00,
+            b: 0x00,
+        })
+}
+
+fn default_palette_rgb(index: usize) -> Option<Rgb> {
+    match index {
+        0 => Some(rgb(0x00, 0x00, 0x00)),
+        1 => Some(rgb(0xcd, 0x00, 0x00)),
+        2 => Some(rgb(0x00, 0xcd, 0x00)),
+        3 => Some(rgb(0xcd, 0xcd, 0x00)),
+        4 => Some(rgb(0x00, 0x00, 0xee)),
+        5 => Some(rgb(0xcd, 0x00, 0xcd)),
+        6 => Some(rgb(0x00, 0xcd, 0xcd)),
+        7 => Some(rgb(0xe5, 0xe5, 0xe5)),
+        8 => Some(rgb(0x7f, 0x7f, 0x7f)),
+        9 => Some(rgb(0xff, 0x00, 0x00)),
+        10 => Some(rgb(0x00, 0xff, 0x00)),
+        11 => Some(rgb(0xff, 0xff, 0x00)),
+        12 => Some(rgb(0x5c, 0x5c, 0xff)),
+        13 => Some(rgb(0xff, 0x00, 0xff)),
+        14 => Some(rgb(0x00, 0xff, 0xff)),
+        15 => Some(rgb(0xff, 0xff, 0xff)),
+        16..=231 => Some(xterm_color_cube(index)),
+        232..=255 => Some(xterm_grayscale(index)),
+        x if x == NamedColor::Foreground as usize => Some(rgb(0xff, 0xff, 0xff)),
+        x if x == NamedColor::Background as usize => Some(rgb(0x00, 0x00, 0x00)),
+        x if x == NamedColor::Cursor as usize => Some(rgb(0xff, 0xff, 0xff)),
+        x if x == NamedColor::DimBlack as usize => Some(rgb(0x00, 0x00, 0x00)),
+        x if x == NamedColor::DimRed as usize => Some(rgb(0x80, 0x00, 0x00)),
+        x if x == NamedColor::DimGreen as usize => Some(rgb(0x00, 0x80, 0x00)),
+        x if x == NamedColor::DimYellow as usize => Some(rgb(0x80, 0x80, 0x00)),
+        x if x == NamedColor::DimBlue as usize => Some(rgb(0x00, 0x00, 0x80)),
+        x if x == NamedColor::DimMagenta as usize => Some(rgb(0x80, 0x00, 0x80)),
+        x if x == NamedColor::DimCyan as usize => Some(rgb(0x00, 0x80, 0x80)),
+        x if x == NamedColor::DimWhite as usize => Some(rgb(0x80, 0x80, 0x80)),
+        x if x == NamedColor::BrightForeground as usize => Some(rgb(0xff, 0xff, 0xff)),
+        x if x == NamedColor::DimForeground as usize => Some(rgb(0x80, 0x80, 0x80)),
+        _ => None,
+    }
+}
+
+fn xterm_color_cube(index: usize) -> Rgb {
+    const STEPS: [u8; 6] = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
+
+    let idx = index - 16;
+    let r = STEPS[idx / 36];
+    let g = STEPS[(idx / 6) % 6];
+    let b = STEPS[idx % 6];
+    rgb(r, g, b)
+}
+
+fn xterm_grayscale(index: usize) -> Rgb {
+    let level = 8 + ((index - 232) as u8 * 10);
+    rgb(level, level, level)
+}
+
+const fn rgb(r: u8, g: u8, b: u8) -> Rgb {
+    Rgb { r, g, b }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use portable_pty::CommandBuilder;
 
     fn viewport_lines(snapshot: &TerminalSnapshot) -> Vec<String> {
         let mut rows = vec![String::new(); usize::from(snapshot.rows)];
@@ -574,5 +732,87 @@ mod tests {
         terminal.set_scrollback(2);
 
         assert_eq!(terminal.scrollback_offset(), 2);
+    }
+
+    #[test]
+    fn osc_color_queries_produce_terminal_replies() {
+        let mut terminal = TerminalState::with_scrollback(3, 16, 100);
+
+        let response = terminal.process(b"\x1b]11;?\x07");
+        let response = String::from_utf8(response).expect("color query response should be utf-8");
+
+        assert!(
+            response.contains("\x1b]11;rgb:0000/0000/0000"),
+            "expected background color response, got: {response:?}"
+        );
+    }
+
+    #[test]
+    fn snapshot_preserves_ansi_background_colors() {
+        let mut terminal = TerminalState::with_scrollback(2, 8, 100);
+        terminal.process(b"\x1b[48;5;238mX\x1b[0m\x1b[48;2;10;20;30mY\x1b[0m");
+
+        let snapshot = terminal.snapshot();
+        let x = snapshot
+            .cells
+            .iter()
+            .find(|cell| cell.symbol == "X")
+            .expect("expected cell for X");
+        let y = snapshot
+            .cells
+            .iter()
+            .find(|cell| cell.symbol == "Y")
+            .expect("expected cell for Y");
+
+        assert_eq!(x.bg, Color::Indexed(238));
+        assert_eq!(y.bg, Color::Rgb(10, 20, 30));
+    }
+
+    #[test]
+    fn preserves_rich_parent_term_values() {
+        assert_eq!(
+            resolve_term_from_parent(Some(OsStr::new("tmux-256color"))),
+            "tmux-256color"
+        );
+        assert_eq!(
+            resolve_term_from_parent(Some(OsStr::new("xterm-kitty"))),
+            "xterm-kitty"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_xterm_256color_for_missing_or_low_capability_terms() {
+        assert_eq!(resolve_term_from_parent(None), "xterm-256color");
+        assert_eq!(
+            resolve_term_from_parent(Some(OsStr::new(""))),
+            "xterm-256color"
+        );
+        assert_eq!(
+            resolve_term_from_parent(Some(OsStr::new("dumb"))),
+            "xterm-256color"
+        );
+        assert_eq!(
+            resolve_term_from_parent(Some(OsStr::new("vt100"))),
+            "xterm-256color"
+        );
+    }
+
+    #[test]
+    fn apply_terminal_env_sets_expected_term_override() {
+        let mut cmd = CommandBuilder::new("printf");
+        apply_terminal_env_from_parent(
+            &mut cmd,
+            Some(OsStr::new("vt100")),
+            Some(OsStr::new("truecolor")),
+        );
+
+        assert_eq!(
+            cmd.get_env("TERM").and_then(|value| value.to_str()),
+            Some("xterm-256color")
+        );
+        assert_eq!(
+            cmd.get_env("COLORTERM").and_then(|value| value.to_str()),
+            Some("truecolor")
+        );
     }
 }
