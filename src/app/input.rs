@@ -357,29 +357,7 @@ impl App {
         let in_diff = matches!(self.center_mode, CenterMode::Diff { .. });
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Center) {
             match action {
-                Action::FocusAgent if !in_diff => {
-                    if self.selected_session().is_some()
-                        && self
-                            .selected_session()
-                            .map(|s| self.providers.contains_key(&s.id))
-                            .unwrap_or(false)
-                    {
-                        self.reset_pty_scrollback();
-                        self.input_target = InputTarget::Agent;
-                        self.fullscreen_agent = true;
-                        let exit_key = self.bindings.label_for(Action::ExitInteractive);
-                        self.set_info(format!(
-                            "Interactive mode. Keys forwarded to agent. {exit_key} exits."
-                        ));
-                    } else if self.selected_session().is_some() {
-                        self.reconnect_selected_session()?;
-                    } else {
-                        let n = self.bindings.label_for(Action::NewAgent);
-                        self.set_error(format!(
-                            "No agent selected. Press \"{n}\" to create a new one."
-                        ));
-                    }
-                }
+                Action::FocusAgent if !in_diff => self.activate_center_agent()?,
                 Action::ReconnectAgent if !in_diff => {
                     // Allow relaunching an exited agent from the center pane,
                     // or entering interactive mode if the agent is active.
@@ -1602,6 +1580,40 @@ impl App {
         }
     }
 
+    fn activate_center_agent(&mut self) -> Result<()> {
+        if !matches!(self.center_mode, CenterMode::Agent) {
+            return Ok(());
+        }
+        if self.selected_session().is_some()
+            && self
+                .selected_session()
+                .map(|s| self.providers.contains_key(&s.id))
+                .unwrap_or(false)
+        {
+            self.reset_pty_scrollback();
+            self.input_target = InputTarget::Agent;
+            self.fullscreen_agent = true;
+            let exit_key = self.bindings.label_for(Action::ExitInteractive);
+            self.set_info(format!(
+                "Interactive mode. Keys forwarded to agent. {exit_key} exits."
+            ));
+        } else if self.selected_session().is_some() {
+            self.reconnect_selected_session()?;
+        } else {
+            let n = self.bindings.label_for(Action::NewAgent);
+            self.set_error(format!(
+                "No agent selected. Press \"{n}\" to create a new one."
+            ));
+        }
+        Ok(())
+    }
+
+    fn activate_center_agent_from_mouse(&mut self) {
+        if let Err(err) = self.activate_center_agent() {
+            self.set_error(format!("Mouse activation failed: {err}"));
+        }
+    }
+
     fn set_file_selection(&mut self, section: RightSection, index: Option<usize>) {
         self.focus = FocusPane::Files;
         self.input_target = InputTarget::None;
@@ -1827,7 +1839,11 @@ impl App {
                         }
                     }
                     Some(MouseTarget::Center) => {
+                        let double_click = self.register_mouse_click(MouseClickTarget::CenterPane);
                         self.focus = FocusPane::Center;
+                        if double_click {
+                            self.activate_center_agent_from_mouse();
+                        }
                     }
                     Some(MouseTarget::FilesPane) => {
                         self.focus = FocusPane::Files;
@@ -1913,6 +1929,7 @@ mod tests {
     use crate::config::{Config, DuxPaths};
     use crate::keybindings::{Action, BINDING_DEFS, BindingScope, RuntimeBindings};
     use crate::model::{AgentSession, ChangedFile, Project, ProviderKind, SessionStatus};
+    use crate::pty::PtyClient;
     use crate::statusline::StatusLine;
     use crate::storage::SessionStore;
     use crate::theme::Theme;
@@ -2363,6 +2380,34 @@ mod tests {
         assert_eq!(app.focus, FocusPane::Center);
         assert!(matches!(app.center_mode, CenterMode::Agent));
         assert_eq!(app.selected_left, 1);
+    }
+
+    #[test]
+    fn mouse_double_click_center_agent_pane_opens_fullscreen() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.selected_left = 1;
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Center;
+        app.providers.insert(
+            "session-1".to_string(),
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "printf ready; sleep 0.2".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+
+        assert_eq!(app.focus, FocusPane::Center);
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert!(app.fullscreen_agent);
     }
 
     #[test]
