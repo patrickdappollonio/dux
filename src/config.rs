@@ -807,10 +807,10 @@ fn discover_root(home: &Path, xdg_config_home: Option<std::ffi::OsString>) -> Pa
 
     #[cfg(not(target_os = "macos"))]
     {
-        if let Some(xdg) = xdg_config_home.map(PathBuf::from) {
-            if xdg.is_absolute() {
-                return xdg.join("dux");
-            }
+        if let Some(xdg) = xdg_config_home.map(PathBuf::from)
+            && xdg.is_absolute()
+        {
+            return xdg.join("dux");
         }
         home.join(".config").join("dux")
     }
