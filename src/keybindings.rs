@@ -36,6 +36,8 @@ pub enum Action {
     EngageCommitInput,
     PushToRemote,
     PullFromRemote,
+    SearchFiles,
+    SearchNext,
     // Commit message editor
     ExitCommitInput,
     // Global
@@ -163,6 +165,8 @@ impl Action {
             Action::EngageCommitInput => "engage_commit_input",
             Action::PushToRemote => "push_to_remote",
             Action::PullFromRemote => "pull_from_remote",
+            Action::SearchFiles => "search_files",
+            Action::SearchNext => "search_next",
             Action::ExitCommitInput => "exit_commit_input",
             Action::FocusNext => "focus_next",
             Action::FocusPrev => "focus_prev",
@@ -221,6 +225,8 @@ impl Action {
             Action::EngageCommitInput => "Open the commit message editor.",
             Action::PushToRemote => "Push to remote.",
             Action::PullFromRemote => "Pull from remote.",
+            Action::SearchFiles => "Start searching changed files in the files pane.",
+            Action::SearchNext => "Jump to the next active search match in the files pane.",
             Action::ExitCommitInput => "Exit the commit message editor.",
             Action::FocusNext => "Focus the next pane.",
             Action::FocusPrev => "Focus the previous pane.",
@@ -232,7 +238,7 @@ impl Action {
             Action::CloseOverlay => "Close the current overlay or dialog.",
             Action::ResizeGrow => "Grow the left pane width.",
             Action::ResizeShrink => "Shrink the left pane width.",
-            Action::SearchToggle => "Toggle search mode in palette and project browser.",
+            Action::SearchToggle => "Toggle search mode in search-capable lists and overlays.",
             Action::GoToPath => "Open path editor in the project browser.",
             Action::OpenEntry => "Open or navigate into the selected entry in the project browser.",
             Action::AddCurrentDir => "Add the current directory as a project.",
@@ -273,7 +279,9 @@ impl Action {
             | Action::DiscardChanges
             | Action::EngageCommitInput
             | Action::PushToRemote
-            | Action::PullFromRemote => Some("Files pane"),
+            | Action::PullFromRemote
+            | Action::SearchFiles
+            | Action::SearchNext => Some("Files pane"),
             Action::ExitCommitInput => Some("Commit input"),
             Action::FocusNext
             | Action::FocusPrev
@@ -693,6 +701,31 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Pull from remote",
         }),
         hint_contexts: &[(HintContext::Files, "Pull")],
+        palette: None,
+    },
+    BindingDef {
+        action: Action::SearchFiles,
+        default_keys: &[KeyCombination::one_key(
+            KeyCode::Char('/'),
+            KeyModifiers::NONE,
+        )],
+        scopes: &[BindingScope::Files],
+        help: Some(HelpEntry {
+            section: "Files pane",
+            description: "Search changed files",
+        }),
+        hint_contexts: &[(HintContext::Files, "Search")],
+        palette: None,
+    },
+    BindingDef {
+        action: Action::SearchNext,
+        default_keys: &[key!(n)],
+        scopes: &[BindingScope::Files],
+        help: Some(HelpEntry {
+            section: "Files pane",
+            description: "Jump to next search match",
+        }),
+        hint_contexts: &[(HintContext::Files, "Next match")],
         palette: None,
     },
     // ── Commit message editor ─────────────────────────────────────
@@ -1489,6 +1522,28 @@ mod tests {
         assert!(actions_in_defs.contains(&Action::ExitCommitInput));
         assert!(actions_in_defs.contains(&Action::PushToRemote));
         assert!(actions_in_defs.contains(&Action::AddCurrentDir));
+        assert!(actions_in_defs.contains(&Action::SearchFiles));
+        assert!(actions_in_defs.contains(&Action::SearchNext));
+    }
+
+    #[test]
+    fn files_scope_resolves_slash_to_search_toggle() {
+        let bindings = default_bindings();
+        let slash = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&slash, BindingScope::Files),
+            Some(Action::SearchFiles)
+        );
+    }
+
+    #[test]
+    fn files_scope_resolves_n_to_search_next() {
+        let bindings = default_bindings();
+        let n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&n, BindingScope::Files),
+            Some(Action::SearchNext)
+        );
     }
 
     #[test]

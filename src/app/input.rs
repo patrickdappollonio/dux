@@ -436,7 +436,40 @@ impl App {
         }
     }
 
+    fn handle_files_search_key(&mut self, key: KeyEvent) {
+        let is_plain_char =
+            matches!(key.code, KeyCode::Char(_)) && !key.modifiers.contains(KeyModifiers::CONTROL);
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => {
+                self.files_search_active = false;
+            }
+            KeyCode::Backspace => {
+                let mut query = self.files_search_query.clone();
+                query.pop();
+                let found_match = self.update_files_search(query);
+                if !found_match && self.has_files_search() {
+                    self.set_info("No file matches the current search.");
+                }
+            }
+            KeyCode::Char(c) if is_plain_char => {
+                let mut query = self.files_search_query.clone();
+                query.push(c);
+                let found_match = self.update_files_search(query);
+                if !found_match {
+                    self.set_info("No file matches the current search.");
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn handle_files_key(&mut self, key: KeyEvent) -> Result<()> {
+        if self.files_search_active {
+            self.handle_files_search_key(key);
+            return Ok(());
+        }
+
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Files) {
             match action {
                 Action::MoveDown => {
@@ -486,8 +519,18 @@ impl App {
                 Action::PullFromRemote => {
                     self.pull_from_remote()?;
                 }
+                Action::SearchFiles => {
+                    self.files_search_active = true;
+                }
+                Action::SearchNext => {
+                    if !self.advance_files_search_match() {
+                        self.set_info("No active file search matches.");
+                    }
+                }
                 _ => {}
             }
+        } else if key.code == KeyCode::Esc && self.has_files_search() {
+            self.clear_files_search();
         }
         Ok(())
     }
@@ -2054,6 +2097,8 @@ mod tests {
             selected_left: 0,
             right_section: RightSection::Unstaged,
             files_index: 0,
+            files_search_query: String::new(),
+            files_search_active: false,
             commit_input: String::new(),
             commit_input_cursor: 0,
             commit_scroll: 0,
@@ -2338,6 +2383,89 @@ mod tests {
     }
 
     #[test]
+    fn slash_search_selects_first_match_and_n_advances() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Files;
+        app.right_section = RightSection::Unstaged;
+        app.unstaged_files = vec![
+            ChangedFile {
+                path: "src/lib.rs".into(),
+                status: "M".into(),
+                additions: 1,
+                deletions: 0,
+                binary: false,
+            },
+            ChangedFile {
+                path: "src/main.rs".into(),
+                status: "M".into(),
+                additions: 2,
+                deletions: 1,
+                binary: false,
+            },
+        ];
+        app.staged_files = vec![ChangedFile {
+            path: "tests/main.rs".into(),
+            status: "A".into(),
+            additions: 3,
+            deletions: 0,
+            binary: false,
+        }];
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        for ch in ['m', 'a', 'i', 'n'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap();
+        }
+
+        assert!(app.files_search_active);
+        assert_eq!(app.files_search_query, "main");
+        assert_eq!(app.right_section, RightSection::Unstaged);
+        assert_eq!(app.files_index, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(app.right_section, RightSection::Staged);
+        assert_eq!(app.files_index, 0);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(app.right_section, RightSection::Unstaged);
+        assert_eq!(app.files_index, 1);
+    }
+
+    #[test]
+    fn enter_opens_selected_file_diff_from_files_pane() {
+        let mut app = test_app(default_bindings());
+        init_git_repo_with_modified_file(
+            &app,
+            "src/main.rs",
+            "fn main() {}\n",
+            "fn main() { println!(\"hi\"); }\n",
+        );
+        app.unstaged_files = vec![ChangedFile {
+            path: "src/main.rs".into(),
+            status: "M".into(),
+            additions: 1,
+            deletions: 1,
+            binary: false,
+        }];
+        app.selected_left = 1;
+        app.focus = FocusPane::Files;
+        app.right_section = RightSection::Unstaged;
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(app.focus, FocusPane::Center);
+        assert!(matches!(app.center_mode, CenterMode::Diff { .. }));
+    }
+
+    #[test]
     fn mouse_click_left_row_focuses_and_selects_it() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
@@ -2385,12 +2513,14 @@ mod tests {
                 status: "M".into(),
                 additions: 1,
                 deletions: 0,
+                binary: false,
             },
             ChangedFile {
                 path: "b.txt".into(),
                 status: "M".into(),
                 additions: 2,
                 deletions: 1,
+                binary: false,
             },
         ];
         app.focus = FocusPane::Center;
@@ -2400,6 +2530,7 @@ mod tests {
         assert_eq!(app.focus, FocusPane::Files);
         assert_eq!(app.right_section, RightSection::Unstaged);
         assert_eq!(app.files_index, 1);
+        assert!(matches!(app.center_mode, CenterMode::Agent));
     }
 
     #[test]
@@ -2528,21 +2659,26 @@ mod tests {
             status: "M".into(),
             additions: 1,
             deletions: 0,
+            binary: false,
         }];
         app.staged_files = vec![ChangedFile {
             path: "b.txt".into(),
             status: "A".into(),
             additions: 3,
             deletions: 0,
+            binary: false,
         }];
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 79, 1));
         assert_eq!(app.right_section, RightSection::Unstaged);
         assert_eq!(app.files_index, 0);
+        assert_eq!(app.focus, FocusPane::Files);
+        assert!(matches!(app.center_mode, CenterMode::Agent));
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 79, 9));
         assert_eq!(app.right_section, RightSection::Staged);
         assert_eq!(app.files_index, 0);
+        assert_eq!(app.focus, FocusPane::Files);
     }
 
     #[test]
@@ -2560,6 +2696,7 @@ mod tests {
             status: "M".into(),
             additions: 1,
             deletions: 1,
+            binary: false,
         }];
         app.selected_left = 1;
         app.focus = FocusPane::Files;

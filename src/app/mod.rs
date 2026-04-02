@@ -52,6 +52,8 @@ pub struct App {
     pub(crate) selected_left: usize,
     pub(crate) right_section: RightSection,
     pub(crate) files_index: usize,
+    pub(crate) files_search_query: String,
+    pub(crate) files_search_active: bool,
     pub(crate) commit_input: String,
     pub(crate) commit_input_cursor: usize,
     pub(crate) commit_scroll: u16,
@@ -356,6 +358,8 @@ impl App {
             selected_left: 0,
             right_section: RightSection::Unstaged,
             files_index: 0,
+            files_search_query: String::new(),
+            files_search_active: false,
             commit_input: String::new(),
             commit_input_cursor: 0,
             commit_scroll: 0,
@@ -620,6 +624,81 @@ impl App {
         } else if self.files_index >= len {
             self.files_index = len.saturating_sub(1);
         }
+    }
+
+    pub(crate) fn has_files_search(&self) -> bool {
+        !self.files_search_query.is_empty()
+    }
+
+    pub(crate) fn clear_files_search(&mut self) {
+        self.files_search_query.clear();
+        self.files_search_active = false;
+    }
+
+    pub(crate) fn update_files_search(&mut self, query: String) -> bool {
+        self.files_search_query = query;
+        if self.files_search_query.is_empty() {
+            return false;
+        }
+        self.select_files_search_match(0)
+    }
+
+    pub(crate) fn advance_files_search_match(&mut self) -> bool {
+        let matches = self.files_search_matches();
+        if matches.is_empty() {
+            return false;
+        }
+
+        let current = (self.right_section, self.files_index);
+        let next_index = matches
+            .iter()
+            .position(|candidate| *candidate == current)
+            .map(|index| (index + 1) % matches.len())
+            .unwrap_or(0);
+
+        self.apply_files_match(matches[next_index]);
+        true
+    }
+
+    fn select_files_search_match(&mut self, match_index: usize) -> bool {
+        let matches = self.files_search_matches();
+        if matches.is_empty() {
+            return false;
+        }
+
+        let target = matches[match_index.min(matches.len().saturating_sub(1))];
+        self.apply_files_match(target);
+        true
+    }
+
+    fn apply_files_match(&mut self, target: (RightSection, usize)) {
+        self.right_section = target.0;
+        self.files_index = target.1;
+        self.clamp_files_cursor();
+    }
+
+    fn files_search_matches(&self) -> Vec<(RightSection, usize)> {
+        if self.files_search_query.is_empty() {
+            return Vec::new();
+        }
+
+        let needle = self.files_search_query.to_lowercase();
+        let mut matches = Vec::new();
+        matches.extend(
+            self.unstaged_files
+                .iter()
+                .enumerate()
+                .filter(|(_, file)| file.path.to_lowercase().contains(&needle))
+                .map(|(index, _)| (RightSection::Unstaged, index)),
+        );
+        matches.extend(
+            self.staged_files
+                .iter()
+                .enumerate()
+                .filter(|(_, file)| file.path.to_lowercase().contains(&needle))
+                .map(|(index, _)| (RightSection::Staged, index)),
+        );
+        matches
     }
 
     pub(crate) fn open_rename_session(&mut self) -> Result<()> {

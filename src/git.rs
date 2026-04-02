@@ -4,8 +4,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
+use content_inspector::{ContentType, inspect};
 
 use crate::model::ChangedFile;
+
+enum DiffStat {
+    Text(usize, usize),
+    Binary,
+}
+
+#[cfg(windows)]
+const NULL_DEVICE: &str = "NUL";
+#[cfg(not(windows))]
+const NULL_DEVICE: &str = "/dev/null";
 
 pub fn current_branch(repo_path: &Path) -> Result<String> {
     let output = Command::new("git")
@@ -164,7 +175,13 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     let wt = worktree_path.to_string_lossy();
 
     let output = Command::new("git")
-        .args(["-C", wt.as_ref(), "status", "--porcelain"])
+        .args([
+            "-C",
+            wt.as_ref(),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ])
         .output()?;
     if !output.status.success() {
         return Err(anyhow!(
@@ -191,6 +208,7 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
                 path,
                 additions: 0,
                 deletions: 0,
+                binary: false,
             });
             continue;
         }
@@ -201,6 +219,7 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
                 path: path.clone(),
                 additions: 0,
                 deletions: 0,
+                binary: false,
             });
         }
 
@@ -210,6 +229,7 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
                 path: path.clone(),
                 additions: 0,
                 deletions: 0,
+                binary: false,
             });
         }
     }
@@ -221,9 +241,32 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     {
         let stats = parse_numstat(&ns.stdout);
         for file in &mut unstaged {
-            if let Some(&(a, d)) = stats.get(&file.path) {
-                file.additions = a;
-                file.deletions = d;
+            if let Some(stat) = stats.get(&file.path) {
+                match stat {
+                    DiffStat::Text(a, d) => {
+                        file.additions = *a;
+                        file.deletions = *d;
+                    }
+                    DiffStat::Binary => {
+                        file.binary = true;
+                    }
+                }
+            } else if file.status == "?" {
+                match untracked_file_diff_stat(worktree_path, &file.path) {
+                    Some(DiffStat::Text(a, d)) => {
+                        file.additions = a;
+                        file.deletions = d;
+                    }
+                    Some(DiffStat::Binary) => {
+                        file.binary = true;
+                    }
+                    None => {
+                        let (additions, binary) =
+                            classify_untracked_file_fallback(&worktree_path.join(&file.path));
+                        file.additions = additions;
+                        file.binary = binary;
+                    }
+                }
             }
         }
     }
@@ -235,9 +278,16 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     {
         let stats = parse_numstat(&ns.stdout);
         for file in &mut staged {
-            if let Some(&(a, d)) = stats.get(&file.path) {
-                file.additions = a;
-                file.deletions = d;
+            if let Some(stat) = stats.get(&file.path) {
+                match stat {
+                    DiffStat::Text(a, d) => {
+                        file.additions = *a;
+                        file.deletions = *d;
+                    }
+                    DiffStat::Binary => {
+                        file.binary = true;
+                    }
+                }
             }
         }
     }
@@ -245,17 +295,63 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     Ok((staged, unstaged))
 }
 
-fn parse_numstat(raw: &[u8]) -> HashMap<String, (usize, usize)> {
+fn untracked_file_diff_stat(worktree_path: &Path, rel_path: &str) -> Option<DiffStat> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            worktree_path.to_string_lossy().as_ref(),
+            "diff",
+            "--no-index",
+            "--numstat",
+            "--",
+            NULL_DEVICE,
+            rel_path,
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() && output.status.code() != Some(1) {
+        return None;
+    }
+
+    parse_numstat_line(String::from_utf8_lossy(&output.stdout).lines().next()?)
+}
+
+fn classify_untracked_file_fallback(path: &Path) -> (usize, bool) {
+    let Ok(bytes) = fs::read(path) else {
+        return (0, false);
+    };
+    match inspect(&bytes) {
+        ContentType::UTF_8 => match std::str::from_utf8(&bytes) {
+            Ok(text) => (text.lines().count(), false),
+            Err(_) => (0, true),
+        },
+        _ => (0, true),
+    }
+}
+
+fn parse_numstat(raw: &[u8]) -> HashMap<String, DiffStat> {
     String::from_utf8_lossy(raw)
         .lines()
         .filter_map(|line| {
             let mut parts = line.split('\t');
-            let add = parts.next()?.parse::<usize>().ok()?;
-            let del = parts.next()?.parse::<usize>().ok()?;
+            let _ = parts.next()?;
+            let _ = parts.next()?;
             let path = parts.next()?.to_string();
-            Some((path, (add, del)))
+            Some((path, parse_numstat_line(line)?))
         })
         .collect()
+}
+
+fn parse_numstat_line(line: &str) -> Option<DiffStat> {
+    let mut parts = line.split('\t');
+    let add = parts.next()?;
+    let del = parts.next()?;
+    if add == "-" || del == "-" {
+        Some(DiffStat::Binary)
+    } else {
+        Some(DiffStat::Text(add.parse().ok()?, del.parse().ok()?))
+    }
 }
 
 pub fn stage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
@@ -338,10 +434,10 @@ pub fn push(worktree_path: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-/// Return the contents of a file as it exists at HEAD, or `None` for new
-/// (untracked) files. Uses the plumbing command `cat-file` which is immune
-/// to user configuration.
-pub fn file_at_head(worktree_path: &Path, path: &str) -> Result<Option<String>> {
+/// Return the contents of a file as raw bytes as it exists at HEAD, or `None`
+/// for new (untracked) files. Uses the plumbing command `cat-file` which is
+/// immune to user configuration.
+pub fn file_bytes_at_head(worktree_path: &Path, path: &str) -> Result<Option<Vec<u8>>> {
     let output = Command::new("git")
         .args([
             "-C",
@@ -355,7 +451,7 @@ pub fn file_at_head(worktree_path: &Path, path: &str) -> Result<Option<String>> 
         // File doesn't exist at HEAD (new/untracked file).
         return Ok(None);
     }
-    Ok(Some(String::from_utf8_lossy(&output.stdout).to_string()))
+    Ok(Some(output.stdout))
 }
 
 pub fn is_under(base: &Path, candidate: &Path) -> bool {
@@ -577,5 +673,72 @@ mod tests {
 
         let branch = current_branch(&wt).unwrap();
         assert_eq!(branch, "same-name");
+    }
+
+    #[test]
+    fn changed_files_expands_untracked_directories_into_files() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "changes-pane-folder");
+
+        let nested = wt.join("new-folder").join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(
+            wt.join("new-folder").join("one.txt"),
+            "first line\nsecond line\n",
+        )
+        .unwrap();
+        fs::write(nested.join("two.txt"), "nested line\n").unwrap();
+
+        let (_staged, unstaged) = changed_files(&wt).unwrap();
+        let mut actual: Vec<_> = unstaged
+            .into_iter()
+            .map(|file| {
+                (
+                    file.path,
+                    file.status,
+                    file.additions,
+                    file.deletions,
+                    file.binary,
+                )
+            })
+            .collect();
+        actual.sort();
+
+        assert_eq!(
+            actual,
+            vec![
+                (
+                    "new-folder/nested/two.txt".to_string(),
+                    "?".to_string(),
+                    1,
+                    0,
+                    false,
+                ),
+                (
+                    "new-folder/one.txt".to_string(),
+                    "?".to_string(),
+                    2,
+                    0,
+                    false
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn changed_files_marks_untracked_binary_files() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "changes-pane-binary");
+
+        fs::write(wt.join("image.bin"), [0_u8, 159, 146, 150]).unwrap();
+
+        let (_staged, unstaged) = changed_files(&wt).unwrap();
+        assert_eq!(unstaged.len(), 1);
+        let file = &unstaged[0];
+        assert_eq!(file.path, "image.bin");
+        assert_eq!(file.status, "?");
+        assert_eq!(file.additions, 0);
+        assert_eq!(file.deletions, 0);
+        assert!(file.binary);
     }
 }

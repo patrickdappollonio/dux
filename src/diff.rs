@@ -1,7 +1,7 @@
-use std::fs;
 use std::path::Path;
 
 use anyhow::Result;
+use content_inspector::{ContentType, inspect};
 use ratatui::prelude::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use similar::{ChangeTag, TextDiff};
@@ -21,15 +21,27 @@ pub struct DiffOutput {
 /// `worktree_path` is the root of the git worktree and `rel_path` is the
 /// file path relative to it (as reported by `git status --porcelain`).
 pub fn diff_file(worktree_path: &Path, rel_path: &str, theme: &AppTheme) -> Result<DiffOutput> {
-    let old_text = crate::git::file_at_head(worktree_path, rel_path)?.unwrap_or_default();
+    let old_bytes = crate::git::file_bytes_at_head(worktree_path, rel_path)?.unwrap_or_default();
     let abs_path = worktree_path.join(rel_path);
-    let new_text = fs::read_to_string(&abs_path).unwrap_or_default();
+    let new_bytes = std::fs::read(&abs_path).unwrap_or_default();
 
-    if old_text == new_text {
+    if old_bytes == new_bytes {
         return Ok(DiffOutput {
             lines: vec![Line::from("No changes.")],
         });
     }
+
+    if !is_renderable_text(&old_bytes) || !is_renderable_text(&new_bytes) {
+        return Ok(binary_diff_output(
+            rel_path,
+            old_bytes.len(),
+            new_bytes.len(),
+            theme,
+        ));
+    }
+
+    let old_text = String::from_utf8(old_bytes).unwrap_or_default();
+    let new_text = String::from_utf8(new_bytes).unwrap_or_default();
 
     let syntax_set = SyntaxSet::load_defaults_newlines();
     let theme_set = ThemeSet::load_defaults();
@@ -146,6 +158,38 @@ pub fn diff_file(worktree_path: &Path, rel_path: &str, theme: &AppTheme) -> Resu
     Ok(DiffOutput { lines })
 }
 
+fn is_renderable_text(bytes: &[u8]) -> bool {
+    bytes.is_empty() || matches!(inspect(bytes), ContentType::UTF_8)
+}
+
+fn binary_diff_output(
+    rel_path: &str,
+    old_size: usize,
+    new_size: usize,
+    theme: &AppTheme,
+) -> DiffOutput {
+    DiffOutput {
+        lines: vec![
+            Line::from(Span::styled(
+                format!("--- a/{rel_path}"),
+                Style::default()
+                    .fg(theme.diff_file_header)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                format!("+++ b/{rel_path}"),
+                Style::default()
+                    .fg(theme.diff_file_header)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("Binary file changed."),
+            Line::from(format!("Old size: {old_size} bytes")),
+            Line::from(format!("New size: {new_size} bytes")),
+            Line::from("No text diff available for binary or non-UTF-8 content."),
+        ],
+    }
+}
+
 /// Convert a syntect `Style` to a ratatui `Style`.
 fn syntect_to_ratatui(style: SynStyle) -> Style {
     let fg = syntect_color(style.foreground);
@@ -172,5 +216,72 @@ fn syntect_color(c: SynColor) -> Option<Color> {
         None
     } else {
         Some(Color::Rgb(c.r, c.g, c.b))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use tempfile::tempdir;
+
+    #[test]
+    fn binary_files_render_summary_instead_of_text_diff() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        let file = repo.join("image.bin");
+        std::fs::write(&file, [0_u8, 159, 146, 150]).unwrap();
+        Command::new("git")
+            .args(["add", "image.bin"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        std::fs::write(&file, [0_u8, 159, 146, 151, 152]).unwrap();
+
+        let output = diff_file(repo, "image.bin", &AppTheme::default_dark()).unwrap();
+        let rendered = output
+            .lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("Binary file changed."))
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("Old size: 4 bytes"))
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("New size: 5 bytes"))
+        );
     }
 }
