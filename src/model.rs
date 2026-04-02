@@ -72,4 +72,5 @@ pub struct ChangedFile {
     pub path: String,
     pub additions: usize,
     pub deletions: usize,
+    pub binary: bool,
 }

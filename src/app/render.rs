@@ -703,16 +703,40 @@ impl App {
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
 
+        let show_search =
+            is_active_section && (self.files_search_active || self.has_files_search());
+        let (search_area, list_inner) = if show_search && inner.height >= 4 {
+            let [sa, la] = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(2), Constraint::Min(1)])
+                .areas(inner);
+            (Some(sa), la)
+        } else {
+            (None, inner)
+        };
+
         // Optionally reserve 2 lines at the bottom for the hint bar (border + text).
-        let (list_area, hint_area) = if show_hint && pane_focused && inner.height >= 4 {
+        let (list_area, hint_area) = if show_hint && pane_focused && list_inner.height >= 4 {
             let [la, ha] = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(1), Constraint::Length(2)])
-                .areas(inner);
+                .areas(list_inner);
             (la, Some(ha))
         } else {
-            (inner, None)
+            (list_inner, None)
         };
+
+        if let Some(search_area) = search_area {
+            let query = format!("/ {}", self.files_search_query);
+            Paragraph::new(query)
+                .block(
+                    Block::default()
+                        .borders(Borders::BOTTOM)
+                        .border_style(Style::default().fg(self.theme.border_normal)),
+                )
+                .render(search_area, frame.buffer_mut());
+        }
+
         let inner_width = list_area.width as usize;
         let sel_style = self.theme.selection_style();
         let items = files
@@ -722,7 +746,7 @@ impl App {
                 let is_selected = is_active_section && index == self.files_index;
 
                 // Build the right-aligned stats string, e.g. "+12 -3".
-                let stats = format_line_stats(file.additions, file.deletions);
+                let stats = format_line_stats(file.additions, file.deletions, file.binary);
                 let stats_width = stats.iter().map(|s| s.width()).sum::<usize>();
 
                 // Status prefix takes 3 chars ("M  ").
@@ -785,10 +809,27 @@ impl App {
         // Hint bar inside the block (same style as agent terminal / diff view).
         if let Some(ha) = hint_area {
             let stage_key = self.bindings.label_for(Action::StageUnstage);
+            let search_key = self.bindings.label_for(Action::SearchFiles);
+            let next_key = self.bindings.label_for(Action::SearchNext);
             let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
             let mut spans: Vec<Span> = Vec::new();
             spans.extend(self.theme.dim_key_badge(&stage_key, Color::Reset));
             spans.push(Span::styled(" stage/unstage.", desc_style));
+            spans.push(Span::raw("  "));
+            if self.files_search_active {
+                spans.extend(self.theme.dim_key_badge("Enter", Color::Reset));
+                spans.push(Span::styled(" done  ", desc_style));
+                spans.extend(self.theme.dim_key_badge("Esc", Color::Reset));
+                spans.push(Span::styled(" clear", desc_style));
+            } else {
+                spans.extend(self.theme.dim_key_badge(&search_key, Color::Reset));
+                spans.push(Span::styled(" search", desc_style));
+                if self.has_files_search() {
+                    spans.push(Span::raw("  "));
+                    spans.extend(self.theme.dim_key_badge(&next_key, Color::Reset));
+                    spans.push(Span::styled(" next match", desc_style));
+                }
+            }
             Paragraph::new(Line::from(spans))
                 .block(
                     Block::default()
@@ -2004,8 +2045,15 @@ impl App {
 }
 
 /// Format additions/deletions as right-aligned colored spans.
-/// Returns an empty vec when both counts are zero.
-pub(crate) fn format_line_stats(additions: usize, deletions: usize) -> Vec<Span<'static>> {
+/// Returns an empty vec when both counts are zero for text files.
+pub(crate) fn format_line_stats(
+    additions: usize,
+    deletions: usize,
+    binary: bool,
+) -> Vec<Span<'static>> {
+    if binary {
+        return vec![Span::styled("bin", Style::default().fg(Color::Yellow))];
+    }
     if additions == 0 && deletions == 0 {
         return Vec::new();
     }
