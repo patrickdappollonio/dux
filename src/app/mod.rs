@@ -171,6 +171,7 @@ pub(crate) enum PromptState {
     None,
     Command {
         input: String,
+        cursor: usize,
         selected: usize,
         searching: bool,
     },
@@ -180,9 +181,11 @@ pub(crate) enum PromptState {
         loading: bool,
         selected: usize,
         filter: String,
+        filter_cursor: usize,
         searching: bool,
         editing_path: bool,
         path_input: String,
+        path_cursor: usize,
         tab_completions: Vec<String>,
         tab_index: usize,
     },
@@ -279,11 +282,13 @@ pub(crate) enum OverlayMouseLayout {
     None,
     Help,
     Command {
+        input: Rect,
         list: Rect,
         items: usize,
         offset: usize,
     },
     BrowseProjects {
+        input: Option<Rect>,
         list: Rect,
         items: usize,
         offset: usize,

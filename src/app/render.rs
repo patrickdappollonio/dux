@@ -1185,6 +1185,7 @@ impl App {
         match &self.prompt {
             PromptState::Command {
                 input,
+                cursor,
                 selected,
                 searching,
             } => {
@@ -1278,12 +1279,17 @@ impl App {
                     ));
                 }
                 let prompt_prefix = if *searching { "/ " } else { "> " };
-                Paragraph::new(format!("{prompt_prefix}{input}"))
-                    .block(
-                        self.themed_overlay_block(title)
-                            .title_bottom(Line::from(bottom_spans)),
-                    )
-                    .render(input_area, frame.buffer_mut());
+                let input_block = self
+                    .themed_overlay_block(title)
+                    .title_bottom(Line::from(bottom_spans));
+                let input_inner = input_block.inner(input_area);
+                Paragraph::new(render_single_line_cursor_input(
+                    prompt_prefix,
+                    input,
+                    *cursor,
+                ))
+                .block(input_block)
+                .render(input_area, frame.buffer_mut());
                 let list_block = Block::default()
                     .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
                     .border_type(ratatui::widgets::BorderType::Rounded)
@@ -1298,6 +1304,7 @@ impl App {
                     &mut state,
                 );
                 self.overlay_layout.active = OverlayMouseLayout::Command {
+                    input: input_inner,
                     list: list_inner,
                     items: commands.len(),
                     offset: state.offset(),
@@ -1309,9 +1316,11 @@ impl App {
                 loading,
                 selected,
                 filter,
+                filter_cursor,
                 searching,
                 editing_path,
                 path_input,
+                path_cursor,
                 ..
             } => {
                 self.render_dim_overlay(frame);
@@ -1384,13 +1393,15 @@ impl App {
                 };
                 if let Some(filter_area) = top_areas {
                     let title = format!("Add Project: {}", current_dir.display());
-                    let input_text = if *editing_path {
-                        format!("go: {path_input}█")
+                    let (prefix, text, cursor) = if *editing_path {
+                        ("go: ", path_input.as_str(), *path_cursor)
                     } else {
-                        format!("/ {filter}")
+                        ("/ ", filter.as_str(), *filter_cursor)
                     };
-                    Paragraph::new(input_text)
-                        .block(self.themed_overlay_block(&title))
+                    let input_block = self.themed_overlay_block(&title);
+                    let input_inner = input_block.inner(filter_area);
+                    Paragraph::new(render_single_line_cursor_input(prefix, text, cursor))
+                        .block(input_block)
                         .render(filter_area, frame.buffer_mut());
                     let confirm_key = self.bindings.label_for(Action::Confirm);
                     let close_key = self.bindings.label_for(Action::CloseOverlay);
@@ -1462,6 +1473,7 @@ impl App {
                         &mut state,
                     );
                     self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
+                        input: Some(input_inner),
                         list: list_inner,
                         items: visible.len(),
                         offset: state.offset(),
@@ -1512,6 +1524,7 @@ impl App {
                         &mut state,
                     );
                     self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
+                        input: None,
                         list: list_inner,
                         items: visible.len(),
                         offset: state.offset(),
@@ -2136,6 +2149,30 @@ pub(crate) fn centered_rect_exact(width: u16, height: u16, area: Rect) -> Rect {
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     Rect::new(x, y, width, height)
+}
+
+fn render_single_line_cursor_input(prefix: &str, text: &str, cursor: usize) -> Line<'static> {
+    let cursor = cursor.min(text.len());
+    if cursor < text.len() {
+        let (before, after) = text.split_at(cursor);
+        let cursor_char = after.chars().next().expect("cursor within text");
+        let cursor_len = cursor_char.len_utf8();
+        let rest = &after[cursor_len..];
+        Line::from(vec![
+            Span::raw(prefix.to_string()),
+            Span::raw(before.to_string()),
+            Span::styled(
+                cursor_char.to_string(),
+                Style::default().fg(Color::Black).bg(Color::White),
+            ),
+            Span::raw(rest.to_string()),
+        ])
+    } else {
+        Line::from(vec![
+            Span::raw(format!("{prefix}{text}")),
+            Span::styled(" ", Style::default().fg(Color::Black).bg(Color::White)),
+        ])
+    }
 }
 
 fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {

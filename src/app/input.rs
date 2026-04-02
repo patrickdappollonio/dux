@@ -31,7 +31,9 @@ enum MouseTarget {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PromptMouseTarget {
+    CommandInput,
     CommandItem(usize),
+    BrowseProjectInput,
     BrowseProjectItem(usize),
     PickEditorItem(usize),
     ConfirmDeleteCancel,
@@ -50,6 +52,85 @@ fn contains_point(rect: Rect, column: u16, row: u16) -> bool {
         && column < rect.x + rect.width
         && row >= rect.y
         && row < rect.y + rect.height
+}
+
+fn prev_char_boundary(text: &str, index: usize) -> usize {
+    let index = index.min(text.len());
+    text[..index]
+        .char_indices()
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
+fn next_char_boundary(text: &str, index: usize) -> usize {
+    let index = index.min(text.len());
+    text[index..]
+        .char_indices()
+        .nth(1)
+        .map(|(offset, _)| index + offset)
+        .unwrap_or(text.len())
+}
+
+fn clamp_cursor(text: &str, cursor: usize) -> usize {
+    if cursor >= text.len() {
+        return text.len();
+    }
+    if text.is_char_boundary(cursor) {
+        cursor
+    } else {
+        prev_char_boundary(text, cursor)
+    }
+}
+
+fn move_cursor_left(text: &str, cursor: &mut usize) {
+    *cursor = prev_char_boundary(text, *cursor);
+}
+
+fn move_cursor_right(text: &str, cursor: &mut usize) {
+    *cursor = next_char_boundary(text, *cursor);
+}
+
+fn insert_at_cursor(text: &mut String, cursor: &mut usize, ch: char) {
+    let index = clamp_cursor(text, *cursor);
+    text.insert(index, ch);
+    *cursor = index + ch.len_utf8();
+}
+
+fn backspace_at_cursor(text: &mut String, cursor: &mut usize) {
+    let index = clamp_cursor(text, *cursor);
+    if index == 0 {
+        return;
+    }
+    let prev = prev_char_boundary(text, index);
+    text.replace_range(prev..index, "");
+    *cursor = prev;
+}
+
+fn delete_at_cursor(text: &mut String, cursor: &mut usize) {
+    let index = clamp_cursor(text, *cursor);
+    if index >= text.len() {
+        return;
+    }
+    let next = next_char_boundary(text, index);
+    text.replace_range(index..next, "");
+    *cursor = index;
+}
+
+fn cursor_from_single_line_position(
+    text: &str,
+    text_area: Rect,
+    prefix_width: usize,
+    column: u16,
+) -> usize {
+    let relative_col = usize::from(column.saturating_sub(text_area.x));
+    let target_col = relative_col
+        .saturating_sub(prefix_width)
+        .min(text.chars().count());
+    text.char_indices()
+        .nth(target_col)
+        .map(|(idx, _)| idx)
+        .unwrap_or(text.len())
 }
 
 fn clamp_left_width_pct(left_width_pct: u16, right_width_pct: u16) -> u16 {
@@ -227,6 +308,7 @@ impl App {
                 Action::OpenPalette => {
                     self.prompt = PromptState::Command {
                         input: String::new(),
+                        cursor: 0,
                         selected: 0,
                         searching: false,
                     };
@@ -887,7 +969,14 @@ impl App {
                     }
                 }
                 Some(Action::SearchToggle) if !is_searching => {
-                    if let PromptState::Command { searching, .. } = &mut self.prompt {
+                    if let PromptState::Command {
+                        input,
+                        cursor,
+                        searching,
+                        ..
+                    } = &mut self.prompt
+                    {
+                        *cursor = clamp_cursor(input, input.len());
                         *searching = true;
                     }
                 }
@@ -921,7 +1010,10 @@ impl App {
                 _ => {
                     // Text input fallback: Tab (autocomplete), Backspace, Char.
                     if let PromptState::Command {
-                        input, selected, ..
+                        input,
+                        cursor,
+                        selected,
+                        ..
                     } = &mut self.prompt
                     {
                         match key.code {
@@ -930,15 +1022,32 @@ impl App {
                                     self.bindings.filtered_palette(input).get(*selected)
                                 {
                                     *input = binding.palette_name.unwrap().to_string();
+                                    *cursor = input.len();
                                     *selected = 0;
                                 }
                             }
                             KeyCode::Backspace => {
-                                input.pop();
+                                backspace_at_cursor(input, cursor);
                                 *selected = 0;
                             }
+                            KeyCode::Delete => {
+                                delete_at_cursor(input, cursor);
+                                *selected = 0;
+                            }
+                            KeyCode::Left => {
+                                move_cursor_left(input, cursor);
+                            }
+                            KeyCode::Right => {
+                                move_cursor_right(input, cursor);
+                            }
+                            KeyCode::Home => {
+                                *cursor = 0;
+                            }
+                            KeyCode::End => {
+                                *cursor = input.len();
+                            }
                             KeyCode::Char(c) if is_plain_char => {
-                                input.push(c);
+                                insert_at_cursor(input, cursor, c);
                                 *selected = 0;
                             }
                             _ => {}
@@ -978,6 +1087,7 @@ impl App {
                     filter,
                     editing_path,
                     path_input,
+                    path_cursor,
                     tab_completions,
                     tab_index,
                     ..
@@ -989,11 +1099,13 @@ impl App {
                         KeyCode::Esc => {
                             *editing_path = false;
                             path_input.clear();
+                            *path_cursor = 0;
                             tab_completions.clear();
                             *tab_index = 0;
                         }
                         KeyCode::Backspace => {
-                            path_input.pop();
+                            backspace_at_cursor(path_input, path_cursor);
+                            *path_cursor = clamp_cursor(path_input, *path_cursor);
                             tab_completions.clear();
                             *tab_index = 0;
                         }
@@ -1050,6 +1162,7 @@ impl App {
                             }
                             if let Some(completion) = tab_completions.get(*tab_index) {
                                 *path_input = completion.clone();
+                                *path_cursor = path_input.len();
                             }
                         }
                         KeyCode::Enter => {
@@ -1067,11 +1180,33 @@ impl App {
                             }
                             *editing_path = false;
                             path_input.clear();
+                            *path_cursor = 0;
                             tab_completions.clear();
                             *tab_index = 0;
                         }
                         KeyCode::Char(c) if is_plain_char => {
-                            path_input.push(c);
+                            insert_at_cursor(path_input, path_cursor, c);
+                            tab_completions.clear();
+                            *tab_index = 0;
+                        }
+                        KeyCode::Delete => {
+                            delete_at_cursor(path_input, path_cursor);
+                            tab_completions.clear();
+                            *tab_index = 0;
+                        }
+                        KeyCode::Left => {
+                            move_cursor_left(path_input, path_cursor);
+                        }
+                        KeyCode::Right => {
+                            move_cursor_right(path_input, path_cursor);
+                        }
+                        KeyCode::Home => {
+                            *path_cursor = 0;
+                        }
+                        KeyCode::End => {
+                            *path_cursor = path_input.len();
+                        }
+                        KeyCode::Up | KeyCode::Down => {
                             tab_completions.clear();
                             *tab_index = 0;
                         }
@@ -1099,6 +1234,7 @@ impl App {
                     if let PromptState::BrowseProjects {
                         searching,
                         filter,
+                        filter_cursor,
                         selected,
                         ..
                     } = &mut self.prompt
@@ -1107,6 +1243,7 @@ impl App {
                             *searching = false;
                         } else if !filter.is_empty() {
                             filter.clear();
+                            *filter_cursor = 0;
                             *selected = 0;
                         } else {
                             self.prompt = PromptState::None;
@@ -1114,7 +1251,14 @@ impl App {
                     }
                 }
                 Some(Action::SearchToggle) if !is_searching => {
-                    if let PromptState::BrowseProjects { searching, .. } = &mut self.prompt {
+                    if let PromptState::BrowseProjects {
+                        filter,
+                        filter_cursor,
+                        searching,
+                        ..
+                    } = &mut self.prompt
+                    {
+                        *filter_cursor = filter.len();
                         *searching = true;
                     }
                 }
@@ -1152,6 +1296,7 @@ impl App {
                         current_dir,
                         editing_path,
                         path_input,
+                        path_cursor,
                         ..
                     } = &mut self.prompt
                     {
@@ -1161,6 +1306,7 @@ impl App {
                             p.push('/');
                         }
                         *path_input = p;
+                        *path_cursor = path_input.len();
                     }
                 }
                 Some(Action::Confirm) if is_searching => {
@@ -1184,16 +1330,35 @@ impl App {
                     // Text input fallback for search mode.
                     if is_searching
                         && let PromptState::BrowseProjects {
-                            filter, selected, ..
+                            filter,
+                            filter_cursor,
+                            selected,
+                            ..
                         } = &mut self.prompt
                     {
                         match key.code {
                             KeyCode::Backspace => {
-                                filter.pop();
+                                backspace_at_cursor(filter, filter_cursor);
                                 *selected = 0;
                             }
+                            KeyCode::Delete => {
+                                delete_at_cursor(filter, filter_cursor);
+                                *selected = 0;
+                            }
+                            KeyCode::Left => {
+                                move_cursor_left(filter, filter_cursor);
+                            }
+                            KeyCode::Right => {
+                                move_cursor_right(filter, filter_cursor);
+                            }
+                            KeyCode::Home => {
+                                *filter_cursor = 0;
+                            }
+                            KeyCode::End => {
+                                *filter_cursor = filter.len();
+                            }
                             KeyCode::Char(c) if is_plain_char => {
-                                filter.push(c);
+                                insert_at_cursor(filter, filter_cursor, c);
                                 *selected = 0;
                             }
                             _ => {}
@@ -1396,19 +1561,33 @@ impl App {
         match self.overlay_layout.active {
             OverlayMouseLayout::None | OverlayMouseLayout::Help => None,
             OverlayMouseLayout::Command {
+                input,
                 list,
                 items,
                 offset,
                 ..
-            } => Self::overlay_row_at(list, offset, items, column, row)
-                .map(PromptMouseTarget::CommandItem),
+            } => {
+                if contains_point(input, column, row) {
+                    Some(PromptMouseTarget::CommandInput)
+                } else {
+                    Self::overlay_row_at(list, offset, items, column, row)
+                        .map(PromptMouseTarget::CommandItem)
+                }
+            }
             OverlayMouseLayout::BrowseProjects {
+                input,
                 list,
                 items,
                 offset,
                 ..
-            } => Self::overlay_row_at(list, offset, items, column, row)
-                .map(PromptMouseTarget::BrowseProjectItem),
+            } => {
+                if input.is_some_and(|rect| contains_point(rect, column, row)) {
+                    Some(PromptMouseTarget::BrowseProjectInput)
+                } else {
+                    Self::overlay_row_at(list, offset, items, column, row)
+                        .map(PromptMouseTarget::BrowseProjectItem)
+                }
+            }
             OverlayMouseLayout::PickEditor {
                 list,
                 items,
@@ -1585,6 +1764,17 @@ impl App {
         }
     }
 
+    fn set_command_palette_cursor_from_mouse(&mut self, column: u16) {
+        let input_area = match self.overlay_layout.active {
+            OverlayMouseLayout::Command { input, .. } => input,
+            _ => return,
+        };
+        if let PromptState::Command { input, cursor, .. } = &mut self.prompt {
+            let prefix_width = 2; // "> " or "/ "
+            *cursor = cursor_from_single_line_position(input, input_area, prefix_width, column);
+        }
+    }
+
     fn execute_selected_command_palette(&mut self) {
         let command = if let PromptState::Command {
             input, selected, ..
@@ -1634,6 +1824,32 @@ impl App {
         }
     }
 
+    fn set_browser_input_cursor_from_mouse(&mut self, column: u16) {
+        let input_area = match self.overlay_layout.active {
+            OverlayMouseLayout::BrowseProjects {
+                input: Some(input), ..
+            } => input,
+            _ => return,
+        };
+        if let PromptState::BrowseProjects {
+            filter,
+            filter_cursor,
+            searching,
+            editing_path,
+            path_input,
+            path_cursor,
+            ..
+        } = &mut self.prompt
+        {
+            if *editing_path {
+                *path_cursor = cursor_from_single_line_position(path_input, input_area, 4, column);
+            } else {
+                *filter_cursor = cursor_from_single_line_position(filter, input_area, 2, column);
+                *searching = true;
+            }
+        }
+    }
+
     fn open_selected_browser_entry(&mut self) {
         let visible = self.visible_browser_entries();
         let mut browse_to: Option<PathBuf> = None;
@@ -1643,6 +1859,7 @@ impl App {
             loading,
             selected,
             filter,
+            filter_cursor,
             ..
         } = &mut self.prompt
             && let Some(entry) = visible.get(*selected)
@@ -1653,6 +1870,7 @@ impl App {
             *loading = true;
             *selected = 0;
             filter.clear();
+            *filter_cursor = 0;
             browse_to = Some(new_dir);
         }
         if let Some(dir) = browse_to {
@@ -1747,8 +1965,7 @@ impl App {
             _ => return,
         };
         if let PromptState::RenameSession { input, cursor, .. } = &mut self.prompt {
-            let relative_col = usize::from(column.saturating_sub(input_area.x));
-            *cursor = relative_col.saturating_sub(1).min(input.len());
+            *cursor = cursor_from_single_line_position(input, input_area, 0, column);
         }
     }
 
@@ -1762,12 +1979,18 @@ impl App {
         };
 
         match target {
+            PromptMouseTarget::CommandInput => {
+                self.set_command_palette_cursor_from_mouse(mouse.column);
+            }
             PromptMouseTarget::CommandItem(index) => {
                 let double_click = self.register_mouse_click(MouseClickTarget::CommandItem(index));
                 self.set_command_palette_selection(index);
                 if double_click {
                     self.execute_selected_command_palette();
                 }
+            }
+            PromptMouseTarget::BrowseProjectInput => {
+                self.set_browser_input_cursor_from_mouse(mouse.column);
             }
             PromptMouseTarget::BrowseProjectItem(index) => {
                 let double_click =
@@ -2410,6 +2633,7 @@ mod tests {
 
     fn install_command_overlay(app: &mut App, items: usize) {
         app.overlay_layout.active = OverlayMouseLayout::Command {
+            input: Rect::new(15, 7, 70, 1),
             list: Rect::new(15, 9, 70, 6),
             items,
             offset: 0,
@@ -2418,6 +2642,7 @@ mod tests {
 
     fn install_browser_overlay(app: &mut App, items: usize) {
         app.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
+            input: Some(Rect::new(15, 4, 70, 1)),
             list: Rect::new(15, 6, 70, 8),
             items,
             offset: 0,
@@ -3117,6 +3342,7 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::Command {
             input: "help".to_string(),
+            cursor: 4,
             selected: 0,
             searching: false,
         };
@@ -3131,6 +3357,30 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 15, 9));
         assert!(matches!(app.prompt, PromptState::None));
         assert_eq!(app.help_scroll, Some(0));
+    }
+
+    #[test]
+    fn mouse_click_command_palette_input_moves_cursor_and_keyboard_inserts_there() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::Command {
+            input: "help".to_string(),
+            cursor: 4,
+            selected: 0,
+            searching: false,
+        };
+        install_command_overlay(&mut app, 1);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 19, 7));
+        app.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::Command { input, cursor, .. } => {
+                assert_eq!(input, "heXlp");
+                assert_eq!(*cursor, 3);
+            }
+            other => panic!("expected command prompt, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3149,9 +3399,11 @@ mod tests {
             loading: false,
             selected: 0,
             filter: String::new(),
+            filter_cursor: 0,
             searching: false,
             editing_path: false,
             path_input: String::new(),
+            path_cursor: 0,
             tab_completions: Vec::new(),
             tab_index: 0,
         };
@@ -3176,6 +3428,80 @@ mod tests {
                 assert_eq!(*selected, 0);
             }
             _ => panic!("expected browse projects prompt"),
+        }
+    }
+
+    #[test]
+    fn mouse_click_browser_search_input_moves_cursor_and_edits_filter() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::BrowseProjects {
+            current_dir: PathBuf::from(&app.projects[0].path),
+            entries: Vec::new(),
+            loading: false,
+            selected: 0,
+            filter: "child".to_string(),
+            filter_cursor: 5,
+            searching: false,
+            editing_path: false,
+            path_input: String::new(),
+            path_cursor: 0,
+            tab_completions: Vec::new(),
+            tab_index: 0,
+        };
+        install_browser_overlay(&mut app, 0);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 19, 4));
+        app.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                filter,
+                filter_cursor,
+                searching,
+                ..
+            } => {
+                assert_eq!(filter, "chXild");
+                assert_eq!(*filter_cursor, 3);
+                assert!(*searching);
+            }
+            other => panic!("expected browse projects prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mouse_click_browser_path_input_moves_cursor_and_edits_path() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::BrowseProjects {
+            current_dir: PathBuf::from(&app.projects[0].path),
+            entries: Vec::new(),
+            loading: false,
+            selected: 0,
+            filter: String::new(),
+            filter_cursor: 0,
+            searching: false,
+            editing_path: true,
+            path_input: "abcd".to_string(),
+            path_cursor: 4,
+            tab_completions: Vec::new(),
+            tab_index: 0,
+        };
+        install_browser_overlay(&mut app, 0);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, 4));
+        app.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                path_input,
+                path_cursor,
+                ..
+            } => {
+                assert_eq!(path_input, "aXbcd");
+                assert_eq!(*path_cursor, 2);
+            }
+            other => panic!("expected browse projects prompt, got {other:?}"),
         }
     }
 
@@ -3293,7 +3619,7 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 29, 10));
 
         match app.prompt {
-            PromptState::RenameSession { cursor, .. } => assert_eq!(cursor, 4),
+            PromptState::RenameSession { cursor, .. } => assert_eq!(cursor, 5),
             _ => panic!("expected rename prompt"),
         }
     }
@@ -3304,6 +3630,7 @@ mod tests {
         app.focus = FocusPane::Left;
         app.prompt = PromptState::Command {
             input: "help".to_string(),
+            cursor: 4,
             selected: 0,
             searching: false,
         };
