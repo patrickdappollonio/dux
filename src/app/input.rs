@@ -1,3 +1,4 @@
+use super::render::{cursor_from_wrapped_position, wrap_text_at_width};
 use super::*;
 use alacritty_terminal::term::TermMode;
 
@@ -21,7 +22,8 @@ enum MouseTarget {
     Center,
     UnstagedFile(Option<usize>),
     StagedFile(Option<usize>),
-    CommitInput,
+    CommitChrome,
+    CommitText,
 }
 
 fn contains_point(rect: Rect, column: u16, row: u16) -> bool {
@@ -69,8 +71,10 @@ fn encode_cursor_key(code: KeyCode, term_mode: TermMode) -> &'static [u8] {
 fn agent_wheel_route(term_mode: TermMode) -> AgentWheelRoute {
     let mouse_reporting = term_mode
         .intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION);
+    let modern_mouse_encoding =
+        term_mode.contains(TermMode::SGR_MOUSE) || term_mode.contains(TermMode::UTF8_MOUSE);
 
-    if mouse_reporting {
+    if mouse_reporting && modern_mouse_encoding {
         AgentWheelRoute::ForwardMouse
     } else if term_mode.contains(TermMode::ALT_SCREEN)
         && term_mode.contains(TermMode::ALTERNATE_SCROLL)
@@ -1508,7 +1512,14 @@ impl App {
         if let Some(area) = self.mouse_layout.commit_area
             && contains_point(area, column, row)
         {
-            return Some(MouseTarget::CommitInput);
+            if self
+                .mouse_layout
+                .commit_text_area
+                .is_some_and(|text_area| contains_point(text_area, column, row))
+            {
+                return Some(MouseTarget::CommitText);
+            }
+            return Some(MouseTarget::CommitChrome);
         }
 
         if contains_point(self.mouse_layout.center, column, row) {
@@ -1563,6 +1574,55 @@ impl App {
             self.files_index = index;
         }
         self.clamp_files_cursor();
+    }
+
+    fn engage_commit_input(&mut self) {
+        self.focus = FocusPane::Files;
+        self.right_section = RightSection::CommitInput;
+        self.input_target = InputTarget::CommitMessage;
+        self.fullscreen_agent = false;
+    }
+
+    fn commit_scroll_max(&self) -> u16 {
+        let Some(text_area) = self.mouse_layout.commit_text_area else {
+            return 0;
+        };
+        let width = text_area.width as usize;
+        if width == 0 {
+            return 0;
+        }
+
+        let wrapped = wrap_text_at_width(&self.commit_input, width);
+        let total_lines = wrapped.split('\n').count() as u16;
+        total_lines.saturating_sub(text_area.height)
+    }
+
+    fn set_commit_cursor_from_mouse(&mut self, column: u16, row: u16) {
+        let Some(text_area) = self.mouse_layout.commit_text_area else {
+            self.commit_input_cursor = self.commit_input.len();
+            return;
+        };
+        let width = text_area.width as usize;
+        if width == 0 {
+            self.commit_input_cursor = self.commit_input.len();
+            return;
+        }
+
+        let relative_row = row
+            .saturating_sub(text_area.y)
+            .saturating_add(self.commit_scroll);
+        let relative_col = usize::from(column.saturating_sub(text_area.x));
+        self.commit_input_cursor =
+            cursor_from_wrapped_position(&self.commit_input, width, relative_row, relative_col);
+    }
+
+    fn scroll_commit_input(&mut self, down: bool) {
+        let max_scroll = self.commit_scroll_max();
+        if down {
+            self.commit_scroll = (self.commit_scroll + MOUSE_WHEEL_LINES as u16).min(max_scroll);
+        } else {
+            self.commit_scroll = self.commit_scroll.saturating_sub(MOUSE_WHEEL_LINES as u16);
+        }
     }
 
     fn scroll_file_selection(&mut self, section: RightSection, down: bool) {
@@ -1726,8 +1786,12 @@ impl App {
                     Some(MouseTarget::StagedFile(index)) => {
                         self.set_file_selection(RightSection::Staged, index);
                     }
-                    Some(MouseTarget::CommitInput) => {
+                    Some(MouseTarget::CommitChrome) => {
                         self.set_file_selection(RightSection::CommitInput, None);
+                    }
+                    Some(MouseTarget::CommitText) => {
+                        self.engage_commit_input();
+                        self.set_commit_cursor_from_mouse(mouse.column, mouse.row);
                     }
                     None => {}
                 }
@@ -1753,6 +1817,11 @@ impl App {
                 Some(MouseTarget::StagedFile(_)) => {
                     self.scroll_file_selection(RightSection::Staged, true)
                 }
+                Some(MouseTarget::CommitChrome | MouseTarget::CommitText) => {
+                    self.focus = FocusPane::Files;
+                    self.right_section = RightSection::CommitInput;
+                    self.scroll_commit_input(true);
+                }
                 _ => {}
             },
             MouseEventKind::ScrollUp => match self.mouse_target(mouse.column, mouse.row) {
@@ -1765,6 +1834,11 @@ impl App {
                 }
                 Some(MouseTarget::StagedFile(_)) => {
                     self.scroll_file_selection(RightSection::Staged, false)
+                }
+                Some(MouseTarget::CommitChrome | MouseTarget::CommitText) => {
+                    self.focus = FocusPane::Files;
+                    self.right_section = RightSection::CommitInput;
+                    self.scroll_commit_input(false);
                 }
                 _ => {}
             },
@@ -1935,6 +2009,7 @@ mod tests {
             unstaged_list: Some(Rect::new(78, 1, 21, 8)),
             staged_list: Some(Rect::new(78, 9, 21, 5)),
             commit_area: Some(Rect::new(77, 14, 23, 6)),
+            commit_text_area: Some(Rect::new(78, 15, 21, 4)),
         };
     }
 
@@ -2198,7 +2273,46 @@ mod tests {
     }
 
     #[test]
-    fn agent_wheel_route_prefers_mouse_reporting_over_host_scrollback() {
+    fn mouse_click_commit_text_engages_commit_input() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.commit_input = "hello world".to_string();
+        app.focus = FocusPane::Center;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 80, 15));
+
+        assert_eq!(app.focus, FocusPane::Files);
+        assert_eq!(app.right_section, RightSection::CommitInput);
+        assert_eq!(app.input_target, InputTarget::CommitMessage);
+    }
+
+    #[test]
+    fn mouse_click_commit_text_moves_cursor() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.commit_input = "abc\ndef".to_string();
+        app.commit_input_cursor = 0;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 80, 16));
+
+        assert!(app.commit_input_cursor > 0);
+    }
+
+    #[test]
+    fn mouse_wheel_commit_text_scrolls_commit_viewport() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.commit_input = (0..20).map(|i| format!("line {i}\n")).collect::<String>();
+        app.commit_scroll = 0;
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, 80, 15));
+
+        assert!(app.commit_scroll > 0);
+        assert_eq!(app.right_section, RightSection::CommitInput);
+    }
+
+    #[test]
+    fn agent_wheel_route_prefers_mouse_reporting_with_modern_encoding() {
         let mode = TermMode::ALT_SCREEN | TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
         assert_eq!(
             super::agent_wheel_route(mode),
@@ -2207,11 +2321,20 @@ mod tests {
     }
 
     #[test]
-    fn agent_wheel_route_uses_alternate_scroll_for_alt_screen_apps() {
-        let mode = TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL;
+    fn agent_wheel_route_uses_alternate_scroll_without_modern_encoding() {
+        let mode = TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL | TermMode::MOUSE_REPORT_CLICK;
         assert_eq!(
             super::agent_wheel_route(mode),
             super::AgentWheelRoute::ForwardAlternateScroll
+        );
+    }
+
+    #[test]
+    fn agent_wheel_route_falls_back_to_host_scrollback_without_modern_encoding() {
+        let mode = TermMode::MOUSE_REPORT_CLICK;
+        assert_eq!(
+            super::agent_wheel_route(mode),
+            super::AgentWheelRoute::HostScrollback
         );
     }
 }

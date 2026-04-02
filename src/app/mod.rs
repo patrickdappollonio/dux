@@ -237,6 +237,7 @@ pub(crate) struct MouseLayoutState {
     pub(crate) unstaged_list: Option<Rect>,
     pub(crate) staged_list: Option<Rect>,
     pub(crate) commit_area: Option<Rect>,
+    pub(crate) commit_text_area: Option<Rect>,
 }
 
 impl MouseLayoutState {
@@ -250,6 +251,7 @@ impl MouseLayoutState {
         self.unstaged_list = None;
         self.staged_list = None;
         self.commit_area = None;
+        self.commit_text_area = None;
     }
 }
 
