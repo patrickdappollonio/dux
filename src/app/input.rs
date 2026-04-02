@@ -1841,7 +1841,15 @@ impl App {
                             self.register_mouse_click(MouseClickTarget::LeftRow(index));
                         self.set_left_selection(index);
                         if double_click {
-                            self.activate_selected_left_item_from_mouse();
+                            match self.left_items().get(self.selected_left) {
+                                Some(LeftItem::Project(_)) => {
+                                    self.toggle_collapse_selected_project()
+                                }
+                                Some(LeftItem::Session(_)) => {
+                                    self.activate_selected_left_item_from_mouse()
+                                }
+                                None => {}
+                            }
                         }
                     }
                     Some(MouseTarget::Center) => {
@@ -2421,18 +2429,21 @@ mod tests {
     }
 
     #[test]
-    fn mouse_double_click_project_row_activates_like_enter() {
+    fn mouse_double_click_project_row_toggles_collapse_like_space() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
         app.selected_left = 0;
         app.focus = FocusPane::Left;
+        let project_id = app.projects[0].id.clone();
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 1));
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 1));
 
-        assert_eq!(app.focus, FocusPane::Center);
-        assert!(matches!(app.center_mode, CenterMode::Agent));
-        assert_eq!(app.selected_left, 1);
+        assert_eq!(app.focus, FocusPane::Left);
+        assert!(app.collapsed_projects.contains(&project_id));
+        assert_eq!(app.selected_left, 0);
+        assert_eq!(app.input_target, InputTarget::None);
+        assert!(!app.fullscreen_agent);
     }
 
     #[test]
