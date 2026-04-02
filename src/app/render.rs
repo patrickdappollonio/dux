@@ -56,6 +56,7 @@ impl App {
                 ])
                 .areas(body)
         };
+        self.mouse_layout.reset(body, left, center, right);
         self.render_left(frame, left);
         self.render_center(frame, center);
         self.render_files(frame, right);
@@ -108,10 +109,11 @@ impl App {
             .render(area, frame.buffer_mut());
     }
 
-    fn render_left(&self, frame: &mut Frame, area: Rect) {
+    fn render_left(&mut self, frame: &mut Frame, area: Rect) {
         let focused = self.focus == FocusPane::Left;
 
         if self.left_collapsed {
+            self.mouse_layout.left_list = self.themed_block("", focused).inner(area);
             let collapsed_left_items = self.left_items();
             let items = collapsed_left_items
                 .iter()
@@ -211,6 +213,7 @@ impl App {
             })
             .collect::<Vec<_>>();
         let title = format!("Projects ({})", self.projects.len());
+        self.mouse_layout.left_list = self.themed_block(&title, focused).inner(area);
         let mut state = ListState::default().with_selected(Some(self.selected_left));
         StatefulWidget::render(
             List::new(items)
@@ -260,6 +263,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
             .areas(inner);
+        self.mouse_layout.agent_term = Some(content_area);
 
         self.last_diff_height = content_area.height;
 
@@ -361,6 +365,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
             .areas(inner);
+        self.mouse_layout.agent_term = Some(term_area);
 
         // Get the selected session's PTY screen.
         let session_id = self.selected_session().map(|s| s.id.clone());
@@ -621,6 +626,7 @@ impl App {
                     Constraint::Min(3), // Staged Changes (with commit input)
                 ])
                 .split(area);
+            self.mouse_layout.unstaged_list = Some(self.file_list_area(chunks[0], true));
             self.render_file_list(
                 frame,
                 chunks[0],
@@ -631,6 +637,7 @@ impl App {
             );
             self.render_staged_with_commit(frame, chunks[1], focused);
         } else {
+            self.mouse_layout.unstaged_list = Some(self.file_list_area(area, true));
             self.render_file_list(
                 frame,
                 area,
@@ -652,6 +659,7 @@ impl App {
             .areas(area);
 
         // Staged files — normal titled block.
+        self.mouse_layout.staged_list = Some(self.file_list_area(files_area, false));
         self.render_file_list(
             frame,
             files_area,
@@ -663,6 +671,20 @@ impl App {
 
         // Commit input block.
         self.render_commit_input_inner(frame, commit_area, pane_focused);
+    }
+
+    fn file_list_area(&self, area: Rect, show_hint: bool) -> Rect {
+        let inner = self.themed_block("", false).inner(area);
+        let pane_focused = self.focus == FocusPane::Files;
+        if show_hint && pane_focused && inner.height >= 4 {
+            let [list_area, _] = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(2)])
+                .areas(inner);
+            list_area
+        } else {
+            inner
+        }
     }
 
     fn render_file_list(
@@ -691,7 +713,6 @@ impl App {
         } else {
             (inner, None)
         };
-
         let inner_width = list_area.width as usize;
         let sel_style = self.theme.selection_style();
         let items = files
@@ -780,6 +801,7 @@ impl App {
 
     /// Render the commit input as its own bordered block.
     fn render_commit_input_inner(&mut self, frame: &mut Frame, area: Rect, pane_focused: bool) {
+        self.mouse_layout.commit_area = Some(area);
         let is_active_section = pane_focused && self.right_section == RightSection::CommitInput;
         let focused = self.input_target == InputTarget::CommitMessage;
 
@@ -792,6 +814,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(1)])
             .areas(inner);
+        self.mouse_layout.commit_text_area = Some(text_area);
 
         if self.commit_generating {
             let dots = ".".repeat((self.tick_count as usize / 5) % 4);
@@ -2044,7 +2067,7 @@ fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {
 
 /// Pre-wrap text at exact character boundaries to match the manual cursor
 /// position calculation used in the commit input box.
-fn wrap_text_at_width(text: &str, width: usize) -> String {
+pub(crate) fn wrap_text_at_width(text: &str, width: usize) -> String {
     if width == 0 {
         return text.to_string();
     }
@@ -2068,7 +2091,7 @@ fn wrap_text_at_width(text: &str, width: usize) -> String {
 
 /// Compute the (row, col) position of a cursor in text that wraps at `width`.
 /// This mirrors the inline cursor calculation used in `render_commit_input_inner`.
-fn cursor_pos_in_wrapped(text: &str, cursor: usize, width: usize) -> (u16, usize) {
+pub(crate) fn cursor_pos_in_wrapped(text: &str, cursor: usize, width: usize) -> (u16, usize) {
     let mut row: u16 = 0;
     let mut col: usize = 0;
     for (i, ch) in text.char_indices() {
@@ -2087,6 +2110,49 @@ fn cursor_pos_in_wrapped(text: &str, cursor: usize, width: usize) -> (u16, usize
         }
     }
     (row, col)
+}
+
+pub(crate) fn cursor_from_wrapped_position(
+    text: &str,
+    width: usize,
+    row: u16,
+    col: usize,
+) -> usize {
+    if width == 0 || text.is_empty() {
+        return 0;
+    }
+
+    let target_row = usize::from(row);
+    let target_col = col.min(width.saturating_sub(1));
+    let mut current_row = 0usize;
+    let mut current_col = 0usize;
+
+    for (index, ch) in text.char_indices() {
+        if current_row == target_row && current_col >= target_col {
+            return index;
+        }
+
+        if ch == '\n' {
+            if current_row == target_row {
+                return index;
+            }
+            current_row += 1;
+            current_col = 0;
+            continue;
+        }
+
+        current_col += 1;
+        if current_row == target_row && current_col > target_col {
+            return index + ch.len_utf8();
+        }
+
+        if current_col >= width {
+            current_row += 1;
+            current_col = 0;
+        }
+    }
+
+    text.len()
 }
 
 #[cfg(test)]
@@ -2208,6 +2274,16 @@ mod tests {
     fn cursor_at_end() {
         // Cursor past last char (len = 5), sits at (1, 0) after wrapping.
         assert_eq!(cursor_pos_in_wrapped("abcde", 5, 5), (1, 0));
+    }
+
+    #[test]
+    fn wrapped_position_maps_back_to_cursor_index() {
+        assert_eq!(cursor_from_wrapped_position("hello world", 5, 1, 0), 5);
+    }
+
+    #[test]
+    fn wrapped_position_handles_newline_rows() {
+        assert_eq!(cursor_from_wrapped_position("ab\ncd", 10, 1, 1), 4);
     }
 
     // ── Consistency: cursor pos matches wrapped text layout ────────

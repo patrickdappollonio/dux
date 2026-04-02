@@ -1,15 +1,20 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::stdout;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use chrono::Utc;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind,
+};
+use crossterm::execute;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::prelude::{Color, Modifier, Style};
@@ -77,6 +82,9 @@ pub struct App {
     pub(crate) has_active_agent: Arc<AtomicBool>,
     pub(crate) collapsed_projects: HashSet<String>,
     pub(crate) left_items_cache: Vec<LeftItem>,
+    pub(crate) mouse_layout: MouseLayoutState,
+    pub(crate) mouse_drag: Option<ResizeDragState>,
+    pub(crate) last_mouse_click: Option<RecentMouseClick>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -222,6 +230,55 @@ pub(crate) enum ScrollDirection {
     Down,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct MouseLayoutState {
+    pub(crate) body: Rect,
+    pub(crate) left: Rect,
+    pub(crate) center: Rect,
+    pub(crate) right: Rect,
+    pub(crate) left_list: Rect,
+    pub(crate) agent_term: Option<Rect>,
+    pub(crate) unstaged_list: Option<Rect>,
+    pub(crate) staged_list: Option<Rect>,
+    pub(crate) commit_area: Option<Rect>,
+    pub(crate) commit_text_area: Option<Rect>,
+}
+
+impl MouseLayoutState {
+    pub(crate) fn reset(&mut self, body: Rect, left: Rect, center: Rect, right: Rect) {
+        self.body = body;
+        self.left = left;
+        self.center = center;
+        self.right = right;
+        self.left_list = Rect::default();
+        self.agent_term = None;
+        self.unstaged_list = None;
+        self.staged_list = None;
+        self.commit_area = None;
+        self.commit_text_area = None;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResizeDragState {
+    LeftDivider,
+    RightDivider,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MouseClickTarget {
+    LeftRow(usize),
+    CenterPane,
+    UnstagedFile(usize),
+    StagedFile(usize),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RecentMouseClick {
+    pub(crate) target: MouseClickTarget,
+    pub(crate) at: Instant,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum LeftItem {
     Project(usize),
@@ -327,6 +384,9 @@ impl App {
             has_active_agent: Arc::new(AtomicBool::new(false)),
             collapsed_projects: HashSet::new(),
             left_items_cache: Vec::new(),
+            mouse_layout: MouseLayoutState::default(),
+            mouse_drag: None,
+            last_mouse_click: None,
         };
         app.restore_sessions();
         app.rebuild_left_items();
@@ -337,25 +397,32 @@ impl App {
     pub fn run(&mut self) -> Result<()> {
         self.spawn_changed_files_poller();
         let mut terminal = ratatui::init();
-        loop {
-            self.drain_events();
-            self.tick_count = self.tick_count.wrapping_add(1);
-            terminal.draw(|frame| self.render(frame))?;
-            if event::poll(Duration::from_millis(100))? {
-                match event::read()? {
-                    Event::Key(key) => {
-                        if self.handle_key(key)? {
-                            break;
+        execute!(stdout(), EnableMouseCapture)?;
+
+        let result = (|| -> Result<()> {
+            loop {
+                self.drain_events();
+                self.tick_count = self.tick_count.wrapping_add(1);
+                terminal.draw(|frame| self.render(frame))?;
+                if event::poll(Duration::from_millis(100))? {
+                    match event::read()? {
+                        Event::Key(key) => {
+                            if self.handle_key(key)? {
+                                break;
+                            }
                         }
+                        Event::Mouse(mouse) => self.handle_mouse(mouse),
+                        Event::Resize(_, _) => {}
+                        _ => {}
                     }
-                    Event::Mouse(mouse) => self.handle_mouse(mouse),
-                    Event::Resize(_, _) => {}
-                    _ => {}
                 }
             }
-        }
+            Ok(())
+        })();
+
+        let _ = execute!(stdout(), DisableMouseCapture);
         ratatui::restore();
-        Ok(())
+        result
     }
 
     fn restore_sessions(&mut self) {

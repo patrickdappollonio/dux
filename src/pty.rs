@@ -7,7 +7,7 @@ use std::thread;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{self, Config, Term};
+use alacritty_terminal::term::{self, Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{
     Color as TermColor, CursorShape, NamedColor, Processor, Rgb, StdSyncHandler,
 };
@@ -177,6 +177,11 @@ impl PtyClient {
     pub fn scrollback_offset(&self) -> usize {
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
         terminal.scrollback_offset()
+    }
+
+    pub fn term_mode(&self) -> TermMode {
+        let terminal = self.terminal.lock().expect("terminal mutex poisoned");
+        terminal.term_mode()
     }
 
     /// Atomically adjust the scrollback offset by the given amount in the
@@ -353,6 +358,10 @@ impl TerminalState {
 
     fn scrollback_offset(&self) -> usize {
         self.term.grid().display_offset()
+    }
+
+    fn term_mode(&self) -> TermMode {
+        *self.term.mode()
     }
 
     fn scroll(&mut self, up: bool, amount: usize) {
