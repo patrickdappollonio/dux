@@ -1425,7 +1425,7 @@ impl App {
             if index < self.left_items().len() {
                 return Some(MouseTarget::LeftRow(index));
             }
-            return Some(MouseTarget::LeftRow(self.selected_left));
+            return Some(MouseTarget::LeftPane);
         }
 
         if contains_point(self.mouse_layout.left, column, row) {
@@ -2446,6 +2446,23 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
 
         assert_eq!(app.focus, FocusPane::Center);
+        assert!(matches!(app.center_mode, CenterMode::Agent));
+        assert_eq!(app.selected_left, 1);
+    }
+
+    #[test]
+    fn mouse_double_click_left_pane_empty_space_does_not_activate_selected_row() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.selected_left = 1;
+        app.focus = FocusPane::Center;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 9));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 9));
+
+        assert_eq!(app.focus, FocusPane::Left);
+        assert!(!app.fullscreen_agent);
+        assert_eq!(app.input_target, InputTarget::None);
         assert!(matches!(app.center_mode, CenterMode::Agent));
         assert_eq!(app.selected_left, 1);
     }
