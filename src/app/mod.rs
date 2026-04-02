@@ -269,6 +269,8 @@ pub(crate) enum ResizeDragState {
 pub(crate) enum MouseClickTarget {
     LeftRow(usize),
     CenterPane,
+    UnstagedFile(usize),
+    StagedFile(usize),
 }
 
 #[derive(Clone, Copy, Debug)]

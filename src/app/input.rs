@@ -1614,6 +1614,12 @@ impl App {
         }
     }
 
+    fn open_selected_file_diff_from_mouse(&mut self) {
+        if let Err(err) = self.open_diff_for_selected_file() {
+            self.set_error(format!("Mouse activation failed: {err}"));
+        }
+    }
+
     fn set_file_selection(&mut self, section: RightSection, index: Option<usize>) {
         self.focus = FocusPane::Files;
         self.input_target = InputTarget::None;
@@ -1851,10 +1857,20 @@ impl App {
                         self.fullscreen_agent = false;
                     }
                     Some(MouseTarget::UnstagedFile(index)) => {
+                        let double_click = index
+                            .map(|i| self.register_mouse_click(MouseClickTarget::UnstagedFile(i)));
                         self.set_file_selection(RightSection::Unstaged, index);
+                        if matches!(double_click, Some(true)) {
+                            self.open_selected_file_diff_from_mouse();
+                        }
                     }
                     Some(MouseTarget::StagedFile(index)) => {
+                        let double_click = index
+                            .map(|i| self.register_mouse_click(MouseClickTarget::StagedFile(i)));
                         self.set_file_selection(RightSection::Staged, index);
+                        if matches!(double_click, Some(true)) {
+                            self.open_selected_file_diff_from_mouse();
+                        }
                     }
                     Some(MouseTarget::CommitChrome) => {
                         self.set_file_selection(RightSection::CommitInput, None);
@@ -1939,6 +1955,7 @@ mod tests {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
     use ratatui::text::Line;
+    use std::process::Command;
     use tempfile::tempdir;
 
     fn default_bindings() -> RuntimeBindings {
@@ -2083,6 +2100,50 @@ mod tests {
             commit_area: Some(Rect::new(77, 14, 23, 6)),
             commit_text_area: Some(Rect::new(78, 15, 21, 4)),
         };
+    }
+
+    fn init_git_repo_with_modified_file(
+        app: &App,
+        relative_path: &str,
+        original: &str,
+        updated: &str,
+    ) {
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        std::fs::create_dir_all(worktree).expect("worktree dir");
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(worktree)
+            .output()
+            .expect("git init");
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(worktree)
+            .output()
+            .expect("git email");
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(worktree)
+            .output()
+            .expect("git name");
+
+        let file_path = worktree.join(relative_path);
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent).expect("file parent");
+        }
+        std::fs::write(&file_path, original).expect("write original");
+        Command::new("git")
+            .args(["add", relative_path])
+            .current_dir(worktree)
+            .output()
+            .expect("git add");
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(worktree)
+            .output()
+            .expect("git commit");
+
+        std::fs::write(&file_path, updated).expect("write updated");
     }
 
     #[test]
@@ -2447,6 +2508,33 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 79, 9));
         assert_eq!(app.right_section, RightSection::Staged);
         assert_eq!(app.files_index, 0);
+    }
+
+    #[test]
+    fn mouse_double_click_unstaged_file_row_opens_diff() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        init_git_repo_with_modified_file(
+            &app,
+            "src/main.rs",
+            "fn main() {}\n",
+            "fn main() { println!(\"hi\"); }\n",
+        );
+        app.unstaged_files = vec![ChangedFile {
+            path: "src/main.rs".into(),
+            status: "M".into(),
+            additions: 1,
+            deletions: 1,
+        }];
+        app.selected_left = 1;
+        app.focus = FocusPane::Files;
+        app.right_section = RightSection::Unstaged;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 79, 1));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 79, 1));
+
+        assert_eq!(app.focus, FocusPane::Center);
+        assert!(matches!(app.center_mode, CenterMode::Diff { .. }));
     }
 
     #[test]
