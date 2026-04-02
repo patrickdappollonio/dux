@@ -1876,8 +1876,15 @@ impl App {
                         self.set_file_selection(RightSection::CommitInput, None);
                     }
                     Some(MouseTarget::CommitText) => {
-                        self.engage_commit_input();
-                        self.set_commit_cursor_from_mouse(mouse.column, mouse.row);
+                        let ready_to_edit = self.focus == FocusPane::Files
+                            && self.right_section == RightSection::CommitInput
+                            && self.input_target != InputTarget::CommitMessage;
+                        if ready_to_edit || self.input_target == InputTarget::CommitMessage {
+                            self.engage_commit_input();
+                            self.set_commit_cursor_from_mouse(mouse.column, mouse.row);
+                        } else {
+                            self.set_file_selection(RightSection::CommitInput, None);
+                        }
                     }
                     None => {}
                 }
@@ -2569,7 +2576,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_click_commit_text_engages_commit_input() {
+    fn mouse_click_commit_text_first_click_only_focuses_commit_input() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
         app.commit_input = "hello world".to_string();
@@ -2579,18 +2586,21 @@ mod tests {
 
         assert_eq!(app.focus, FocusPane::Files);
         assert_eq!(app.right_section, RightSection::CommitInput);
-        assert_eq!(app.input_target, InputTarget::CommitMessage);
+        assert_eq!(app.input_target, InputTarget::None);
     }
 
     #[test]
-    fn mouse_click_commit_text_moves_cursor() {
+    fn mouse_click_commit_text_second_click_enters_edit_mode_and_moves_cursor() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
         app.commit_input = "abc\ndef".to_string();
         app.commit_input_cursor = 0;
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 80, 16));
+        assert_eq!(app.input_target, InputTarget::None);
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 80, 16));
 
+        assert_eq!(app.input_target, InputTarget::CommitMessage);
         assert!(app.commit_input_cursor > 0);
     }
 
