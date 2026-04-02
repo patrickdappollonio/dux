@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use chrono::Utc;
@@ -84,6 +84,7 @@ pub struct App {
     pub(crate) left_items_cache: Vec<LeftItem>,
     pub(crate) mouse_layout: MouseLayoutState,
     pub(crate) mouse_drag: Option<ResizeDragState>,
+    pub(crate) last_mouse_click: Option<RecentMouseClick>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -264,6 +265,17 @@ pub(crate) enum ResizeDragState {
     RightDivider,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MouseClickTarget {
+    LeftRow(usize),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RecentMouseClick {
+    pub(crate) target: MouseClickTarget,
+    pub(crate) at: Instant,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum LeftItem {
     Project(usize),
@@ -371,6 +383,7 @@ impl App {
             left_items_cache: Vec::new(),
             mouse_layout: MouseLayoutState::default(),
             mouse_drag: None,
+            last_mouse_click: None,
         };
         app.restore_sessions();
         app.rebuild_left_items();

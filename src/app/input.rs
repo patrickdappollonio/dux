@@ -8,6 +8,7 @@ const MAX_LEFT_WIDTH_PCT: u16 = 38;
 const MIN_RIGHT_WIDTH_PCT: u16 = 14;
 const MAX_RIGHT_WIDTH_PCT: u16 = 50;
 const MIN_CENTER_WIDTH_PCT: u16 = 20;
+const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AgentWheelRoute {
@@ -310,56 +311,7 @@ impl App {
                         self.reload_changed_files();
                     }
                 }
-                Action::FocusAgent => match self.left_items().get(self.selected_left) {
-                    Some(LeftItem::Project(project_index)) => {
-                        let project_id = self.projects[*project_index].id.clone();
-                        let has_sessions = self.sessions.iter().any(|s| s.project_id == project_id);
-                        if has_sessions {
-                            if self.collapsed_projects.contains(&project_id) {
-                                self.collapsed_projects.remove(&project_id);
-                                self.rebuild_left_items();
-                            }
-                            if let Some(pos) =
-                                    self.left_items().iter().position(|item| {
-                                        matches!(item, LeftItem::Session(si) if self.sessions[*si].project_id == project_id)
-                                    })
-                                {
-                                    self.selected_left = pos;
-                                    self.center_mode = CenterMode::Agent;
-                                    self.focus = FocusPane::Center;
-                                    self.reload_changed_files();
-                                    if self
-                                        .selected_session()
-                                        .map(|s| self.providers.contains_key(&s.id))
-                                        .unwrap_or(false)
-                                    {
-                                        self.input_target = InputTarget::Agent;
-                                        self.fullscreen_agent = true;
-                                    } else if self.selected_session().is_some() {
-                                        self.reconnect_selected_session()?;
-                                    }
-                                }
-                        } else {
-                            self.create_agent_for_selected_project()?;
-                        }
-                    }
-                    Some(LeftItem::Session(_)) => {
-                        self.center_mode = CenterMode::Agent;
-                        self.focus = FocusPane::Center;
-                        self.reload_changed_files();
-                        if self
-                            .selected_session()
-                            .map(|s| self.providers.contains_key(&s.id))
-                            .unwrap_or(false)
-                        {
-                            self.input_target = InputTarget::Agent;
-                            self.fullscreen_agent = true;
-                        } else if self.selected_session().is_some() {
-                            self.reconnect_selected_session()?;
-                        }
-                    }
-                    None => {}
-                },
+                Action::FocusAgent => self.activate_selected_left_item()?,
                 Action::OpenProjectBrowser => {
                     self.open_project_browser()?;
                 }
@@ -1578,6 +1530,78 @@ impl App {
         }
     }
 
+    fn register_mouse_click(&mut self, target: MouseClickTarget) -> bool {
+        let now = Instant::now();
+        if let Some(last) = self.last_mouse_click
+            && last.target == target
+            && now.duration_since(last.at) <= DOUBLE_CLICK_THRESHOLD
+        {
+            self.last_mouse_click = None;
+            return true;
+        }
+
+        self.last_mouse_click = Some(RecentMouseClick { target, at: now });
+        false
+    }
+
+    fn activate_selected_left_item(&mut self) -> Result<()> {
+        match self.left_items().get(self.selected_left) {
+            Some(LeftItem::Project(project_index)) => {
+                let project_id = self.projects[*project_index].id.clone();
+                let has_sessions = self.sessions.iter().any(|s| s.project_id == project_id);
+                if has_sessions {
+                    if self.collapsed_projects.contains(&project_id) {
+                        self.collapsed_projects.remove(&project_id);
+                        self.rebuild_left_items();
+                    }
+                    if let Some(pos) = self.left_items().iter().position(|item| {
+                        matches!(item, LeftItem::Session(si) if self.sessions[*si].project_id == project_id)
+                    }) {
+                        self.selected_left = pos;
+                        self.center_mode = CenterMode::Agent;
+                        self.focus = FocusPane::Center;
+                        self.reload_changed_files();
+                        if self
+                            .selected_session()
+                            .map(|s| self.providers.contains_key(&s.id))
+                            .unwrap_or(false)
+                        {
+                            self.input_target = InputTarget::Agent;
+                            self.fullscreen_agent = true;
+                        } else if self.selected_session().is_some() {
+                            self.reconnect_selected_session()?;
+                        }
+                    }
+                } else {
+                    self.create_agent_for_selected_project()?;
+                }
+            }
+            Some(LeftItem::Session(_)) => {
+                self.center_mode = CenterMode::Agent;
+                self.focus = FocusPane::Center;
+                self.reload_changed_files();
+                if self
+                    .selected_session()
+                    .map(|s| self.providers.contains_key(&s.id))
+                    .unwrap_or(false)
+                {
+                    self.input_target = InputTarget::Agent;
+                    self.fullscreen_agent = true;
+                } else if self.selected_session().is_some() {
+                    self.reconnect_selected_session()?;
+                }
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
+    fn activate_selected_left_item_from_mouse(&mut self) {
+        if let Err(err) = self.activate_selected_left_item() {
+            self.set_error(format!("Mouse activation failed: {err}"));
+        }
+    }
+
     fn set_file_selection(&mut self, section: RightSection, index: Option<usize>) {
         self.focus = FocusPane::Files;
         self.input_target = InputTarget::None;
@@ -1794,7 +1818,14 @@ impl App {
                         self.input_target = InputTarget::None;
                         self.fullscreen_agent = false;
                     }
-                    Some(MouseTarget::LeftRow(index)) => self.set_left_selection(index),
+                    Some(MouseTarget::LeftRow(index)) => {
+                        let double_click =
+                            self.register_mouse_click(MouseClickTarget::LeftRow(index));
+                        self.set_left_selection(index);
+                        if double_click {
+                            self.activate_selected_left_item_from_mouse();
+                        }
+                    }
                     Some(MouseTarget::Center) => {
                         self.focus = FocusPane::Center;
                     }
@@ -2006,6 +2037,7 @@ mod tests {
             left_items_cache: Vec::new(),
             mouse_layout: MouseLayoutState::default(),
             mouse_drag: None,
+            last_mouse_click: None,
         };
         app.rebuild_left_items();
         app.selected_left = 1;
@@ -2301,6 +2333,36 @@ mod tests {
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0, 0));
         assert_eq!(app.focus, FocusPane::Left);
+    }
+
+    #[test]
+    fn mouse_double_click_project_row_activates_like_enter() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.selected_left = 0;
+        app.focus = FocusPane::Left;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 1));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 1));
+
+        assert_eq!(app.focus, FocusPane::Center);
+        assert!(matches!(app.center_mode, CenterMode::Agent));
+        assert_eq!(app.selected_left, 1);
+    }
+
+    #[test]
+    fn mouse_double_click_session_row_activates_like_enter() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.selected_left = 1;
+        app.focus = FocusPane::Left;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
+
+        assert_eq!(app.focus, FocusPane::Center);
+        assert!(matches!(app.center_mode, CenterMode::Agent));
+        assert_eq!(app.selected_left, 1);
     }
 
     #[test]
