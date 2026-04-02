@@ -1488,6 +1488,9 @@ impl App {
         }
 
         if contains_point(self.mouse_layout.left_list, column, row) {
+            if self.left_items().is_empty() {
+                return Some(MouseTarget::LeftPane);
+            }
             let index = usize::from(row.saturating_sub(self.mouse_layout.left_list.y));
             if index < self.left_items().len() {
                 return Some(MouseTarget::LeftRow(index));
@@ -2228,6 +2231,21 @@ mod tests {
         app.focus = FocusPane::Files;
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0, 0));
+
+        assert_eq!(app.focus, FocusPane::Left);
+    }
+
+    #[test]
+    fn mouse_click_empty_left_list_focuses_left_pane() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.projects.clear();
+        app.sessions.clear();
+        app.left_items_cache.clear();
+        app.selected_left = 0;
+        app.focus = FocusPane::Center;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 1));
 
         assert_eq!(app.focus, FocusPane::Left);
     }
