@@ -23,9 +23,11 @@ impl App {
             loading: true,
             selected: 0,
             filter: String::new(),
+            filter_cursor: 0,
             searching: false,
             editing_path: false,
             path_input: String::new(),
+            path_cursor: 0,
             tab_completions: Vec::new(),
             tab_index: 0,
         };
