@@ -18,8 +18,10 @@ enum AgentWheelRoute {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MouseTarget {
+    LeftPane,
     LeftRow(usize),
     Center,
+    FilesPane,
     UnstagedFile(Option<usize>),
     StagedFile(Option<usize>),
     CommitChrome,
@@ -1493,6 +1495,10 @@ impl App {
             return Some(MouseTarget::LeftRow(self.selected_left));
         }
 
+        if contains_point(self.mouse_layout.left, column, row) {
+            return Some(MouseTarget::LeftPane);
+        }
+
         if let Some(area) = self.mouse_layout.unstaged_list
             && contains_point(area, column, row)
         {
@@ -1520,6 +1526,10 @@ impl App {
                 return Some(MouseTarget::CommitText);
             }
             return Some(MouseTarget::CommitChrome);
+        }
+
+        if contains_point(self.mouse_layout.right, column, row) {
+            return Some(MouseTarget::FilesPane);
         }
 
         if contains_point(self.mouse_layout.center, column, row) {
@@ -1776,9 +1786,19 @@ impl App {
                 }
 
                 match self.mouse_target(mouse.column, mouse.row) {
+                    Some(MouseTarget::LeftPane) => {
+                        self.focus = FocusPane::Left;
+                        self.input_target = InputTarget::None;
+                        self.fullscreen_agent = false;
+                    }
                     Some(MouseTarget::LeftRow(index)) => self.set_left_selection(index),
                     Some(MouseTarget::Center) => {
                         self.focus = FocusPane::Center;
+                    }
+                    Some(MouseTarget::FilesPane) => {
+                        self.focus = FocusPane::Files;
+                        self.input_target = InputTarget::None;
+                        self.fullscreen_agent = false;
                     }
                     Some(MouseTarget::UnstagedFile(index)) => {
                         self.set_file_selection(RightSection::Unstaged, index);
@@ -2202,6 +2222,17 @@ mod tests {
     }
 
     #[test]
+    fn mouse_click_left_pane_chrome_focuses_left_pane() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.focus = FocusPane::Files;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0, 0));
+
+        assert_eq!(app.focus, FocusPane::Left);
+    }
+
+    #[test]
     fn mouse_click_right_row_focuses_and_selects_unstaged_file() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
@@ -2226,6 +2257,17 @@ mod tests {
         assert_eq!(app.focus, FocusPane::Files);
         assert_eq!(app.right_section, RightSection::Unstaged);
         assert_eq!(app.files_index, 1);
+    }
+
+    #[test]
+    fn mouse_click_right_pane_chrome_focuses_files_pane() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.focus = FocusPane::Left;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 99, 0));
+
+        assert_eq!(app.focus, FocusPane::Files);
     }
 
     #[test]
