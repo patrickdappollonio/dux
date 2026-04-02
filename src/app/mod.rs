@@ -85,6 +85,7 @@ pub struct App {
     pub(crate) collapsed_projects: HashSet<String>,
     pub(crate) left_items_cache: Vec<LeftItem>,
     pub(crate) mouse_layout: MouseLayoutState,
+    pub(crate) overlay_layout: OverlayMouseLayoutState,
     pub(crate) mouse_drag: Option<ResizeDragState>,
     pub(crate) last_mouse_click: Option<RecentMouseClick>,
 }
@@ -261,6 +262,54 @@ impl MouseLayoutState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct OverlayMouseLayoutState {
+    pub(crate) active: OverlayMouseLayout,
+}
+
+impl OverlayMouseLayoutState {
+    pub(crate) fn reset(&mut self) {
+        self.active = OverlayMouseLayout::None;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) enum OverlayMouseLayout {
+    #[default]
+    None,
+    Help,
+    Command {
+        list: Rect,
+        items: usize,
+        offset: usize,
+    },
+    BrowseProjects {
+        list: Rect,
+        items: usize,
+        offset: usize,
+    },
+    PickEditor {
+        list: Rect,
+        items: usize,
+        offset: usize,
+    },
+    ConfirmDeleteAgent {
+        cancel_button: Rect,
+        delete_button: Rect,
+    },
+    ConfirmQuit {
+        cancel_button: Rect,
+        quit_button: Rect,
+    },
+    ConfirmDiscardFile {
+        cancel_button: Rect,
+        discard_button: Rect,
+    },
+    RenameSession {
+        input: Rect,
+    },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ResizeDragState {
     LeftDivider,
@@ -273,6 +322,9 @@ pub(crate) enum MouseClickTarget {
     CenterPane,
     UnstagedFile(usize),
     StagedFile(usize),
+    CommandItem(usize),
+    BrowseProjectItem(usize),
+    PickEditorItem(usize),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -389,6 +441,7 @@ impl App {
             collapsed_projects: HashSet::new(),
             left_items_cache: Vec::new(),
             mouse_layout: MouseLayoutState::default(),
+            overlay_layout: OverlayMouseLayoutState::default(),
             mouse_drag: None,
             last_mouse_click: None,
         };
@@ -415,7 +468,11 @@ impl App {
                                 break;
                             }
                         }
-                        Event::Mouse(mouse) => self.handle_mouse(mouse),
+                        Event::Mouse(mouse) => {
+                            if self.handle_mouse(mouse) {
+                                break;
+                            }
+                        }
                         Event::Resize(_, _) => {}
                         _ => {}
                     }

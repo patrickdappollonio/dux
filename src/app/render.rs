@@ -57,6 +57,7 @@ impl App {
                 .areas(body)
         };
         self.mouse_layout.reset(body, left, center, right);
+        self.overlay_layout.reset();
         self.render_left(frame, left);
         self.render_center(frame, center);
         self.render_files(frame, right);
@@ -1033,6 +1034,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
             .areas(inner);
+        self.overlay_layout.active = OverlayMouseLayout::Help;
 
         // Build help content lines.
         let mut lines: Vec<Line> = Vec::new();
@@ -1179,7 +1181,7 @@ impl App {
         }
     }
 
-    fn render_prompt(&self, frame: &mut Frame) {
+    fn render_prompt(&mut self, frame: &mut Frame) {
         match &self.prompt {
             PromptState::Command {
                 input,
@@ -1282,19 +1284,24 @@ impl App {
                             .title_bottom(Line::from(bottom_spans)),
                     )
                     .render(input_area, frame.buffer_mut());
+                let list_block = Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                    .border_type(ratatui::widgets::BorderType::Rounded)
+                    .border_style(Style::default().fg(self.theme.overlay_border));
+                let list_inner = list_block.inner(list_area);
                 StatefulWidget::render(
                     List::new(items)
-                        .block(
-                            Block::default()
-                                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                                .border_type(ratatui::widgets::BorderType::Rounded)
-                                .border_style(Style::default().fg(self.theme.overlay_border)),
-                        )
+                        .block(list_block)
                         .highlight_style(self.theme.selection_style()),
                     list_area,
                     frame.buffer_mut(),
                     &mut state,
                 );
+                self.overlay_layout.active = OverlayMouseLayout::Command {
+                    list: list_inner,
+                    items: commands.len(),
+                    offset: state.offset(),
+                };
             }
             PromptState::BrowseProjects {
                 current_dir,
@@ -1441,19 +1448,24 @@ impl App {
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
                     }
+                    let list_block = Block::default()
+                        .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                        .border_style(Style::default().fg(self.theme.overlay_border))
+                        .title_bottom(Line::from(bottom_spans));
+                    let list_inner = list_block.inner(list_render_area);
                     StatefulWidget::render(
                         List::new(items)
-                            .block(
-                                Block::default()
-                                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                                    .border_style(Style::default().fg(self.theme.overlay_border))
-                                    .title_bottom(Line::from(bottom_spans)),
-                            )
+                            .block(list_block)
                             .highlight_style(self.theme.selection_style()),
                         list_render_area,
                         frame.buffer_mut(),
                         &mut state,
                     );
+                    self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
+                        list: list_inner,
+                        items: visible.len(),
+                        offset: state.offset(),
+                    };
                 } else {
                     let search_key = self.bindings.label_for(Action::SearchToggle);
                     let open_key = self.bindings.label_for(Action::OpenEntry);
@@ -1486,20 +1498,24 @@ impl App {
                         " cancel",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
+                    let title = format!("Add Project: {}", current_dir.display());
+                    let list_block = self
+                        .themed_overlay_block(&title)
+                        .title_bottom(Line::from(bottom_spans));
+                    let list_inner = list_block.inner(list_render_area);
                     StatefulWidget::render(
                         List::new(items)
-                            .block(
-                                self.themed_overlay_block(&format!(
-                                    "Add Project: {}",
-                                    current_dir.display()
-                                ))
-                                .title_bottom(Line::from(bottom_spans)),
-                            )
+                            .block(list_block)
                             .highlight_style(self.theme.selection_style()),
                         list_render_area,
                         frame.buffer_mut(),
                         &mut state,
                     );
+                    self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
+                        list: list_inner,
+                        items: visible.len(),
+                        offset: state.offset(),
+                    };
                 }
             }
             PromptState::PickEditor {
@@ -1588,18 +1604,23 @@ impl App {
                     .collect::<Vec<_>>();
                 let mut state = ListState::default()
                     .with_selected(Some((*selected).min(editors.len().saturating_sub(1))));
+                let list_block = Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                    .border_style(Style::default().fg(self.theme.overlay_border));
+                let list_inner = list_block.inner(list_area);
                 StatefulWidget::render(
                     List::new(items)
-                        .block(
-                            Block::default()
-                                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                                .border_style(Style::default().fg(self.theme.overlay_border)),
-                        )
+                        .block(list_block)
                         .highlight_style(self.theme.selection_style()),
                     list_area,
                     frame.buffer_mut(),
                     &mut state,
                 );
+                self.overlay_layout.active = OverlayMouseLayout::PickEditor {
+                    list: list_inner,
+                    items: editors.len(),
+                    offset: state.offset(),
+                };
             }
             PromptState::ConfirmDeleteAgent {
                 branch_name,
@@ -1703,6 +1724,10 @@ impl App {
                         .border_style(Style::default().fg(delete_border)),
                 )
                 .render(delete_area, frame.buffer_mut());
+                self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
+                    cancel_button: cancel_area,
+                    delete_button: delete_area,
+                };
             }
             PromptState::ConfirmQuit {
                 active_count,
@@ -1807,6 +1832,10 @@ impl App {
                         .border_style(Style::default().fg(quit_border)),
                 )
                 .render(quit_area, frame.buffer_mut());
+                self.overlay_layout.active = OverlayMouseLayout::ConfirmQuit {
+                    cancel_button: cancel_area,
+                    quit_button: quit_area,
+                };
             }
             PromptState::ConfirmDiscardFile {
                 file_path,
@@ -1906,6 +1935,10 @@ impl App {
                         .border_style(Style::default().fg(discard_border)),
                 )
                 .render(discard_area, frame.buffer_mut());
+                self.overlay_layout.active = OverlayMouseLayout::ConfirmDiscardFile {
+                    cancel_button: cancel_area,
+                    discard_button: discard_area,
+                };
             }
             PromptState::RenameSession { input, cursor, .. } => {
                 self.render_dim_overlay(frame);
@@ -1949,13 +1982,13 @@ impl App {
                         Span::styled(" ", Style::default().fg(Color::Black).bg(Color::White)),
                     ])
                 };
+                let input_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_set(border::ROUNDED)
+                    .border_style(Style::default().fg(Color::Cyan));
+                let input_inner = input_block.inner(input_area);
                 Paragraph::new(display)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_set(border::ROUNDED)
-                            .border_style(Style::default().fg(Color::Cyan)),
-                    )
+                    .block(input_block)
                     .render(input_area, frame.buffer_mut());
 
                 let confirm_key = self.bindings.label_for(Action::Confirm);
@@ -1972,6 +2005,8 @@ impl App {
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
                 Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
+                self.overlay_layout.active =
+                    OverlayMouseLayout::RenameSession { input: input_inner };
             }
             PromptState::None => {}
         }

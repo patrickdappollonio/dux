@@ -29,6 +29,20 @@ enum MouseTarget {
     CommitText,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptMouseTarget {
+    CommandItem(usize),
+    BrowseProjectItem(usize),
+    PickEditorItem(usize),
+    ConfirmDeleteCancel,
+    ConfirmDeleteConfirm,
+    ConfirmQuitCancel,
+    ConfirmQuitConfirm,
+    ConfirmDiscardCancel,
+    ConfirmDiscardConfirm,
+    RenameInput,
+}
+
 fn contains_point(rect: Rect, column: u16, row: u16) -> bool {
     rect.width > 0
         && rect.height > 0
@@ -901,24 +915,7 @@ impl App {
                             *searching = false;
                         }
                     } else {
-                        let command = if let PromptState::Command {
-                            input, selected, ..
-                        } = &self.prompt
-                        {
-                            if let Some(binding) =
-                                self.bindings.filtered_palette(input).get(*selected)
-                            {
-                                binding.palette_name.unwrap().to_string()
-                            } else {
-                                input.trim().to_string()
-                            }
-                        } else {
-                            String::new()
-                        };
-                        self.prompt = PromptState::None;
-                        if let Err(e) = self.execute_command(command) {
-                            self.set_error(format!("{e:#}"));
-                        }
+                        self.execute_selected_command_palette();
                     }
                 }
                 _ => {
@@ -1097,7 +1094,6 @@ impl App {
                 self.bindings.lookup(&key, BindingScope::Browser)
             };
 
-            let mut browse_to: Option<PathBuf> = None;
             match action {
                 Some(Action::CloseOverlay) => {
                     if let PromptState::BrowseProjects {
@@ -1173,34 +1169,7 @@ impl App {
                     }
                 }
                 Some(Action::OpenEntry) if !is_searching => {
-                    if let PromptState::BrowseProjects {
-                        current_dir,
-                        entries,
-                        loading,
-                        selected,
-                        filter,
-                        ..
-                    } = &mut self.prompt
-                    {
-                        let visible: Vec<_> = if filter.is_empty() {
-                            entries.iter().collect()
-                        } else {
-                            let needle = filter.to_lowercase();
-                            entries
-                                .iter()
-                                .filter(|e| e.label.to_lowercase().contains(&needle))
-                                .collect()
-                        };
-                        if let Some(entry) = visible.get(*selected).cloned() {
-                            let new_dir = entry.path.clone();
-                            *current_dir = new_dir.clone();
-                            entries.clear();
-                            *loading = true;
-                            *selected = 0;
-                            filter.clear();
-                            browse_to = Some(new_dir);
-                        }
-                    }
+                    self.open_selected_browser_entry();
                 }
                 Some(Action::AddCurrentDir) if !is_searching => {
                     if let PromptState::BrowseProjects { current_dir, .. } = &self.prompt {
@@ -1232,17 +1201,11 @@ impl App {
                     }
                 }
             }
-            if let Some(dir) = browse_to {
-                self.spawn_browser_entries(&dir);
-            }
             return Ok(false);
         }
 
         if let PromptState::PickEditor {
-            session_label,
-            worktree_path,
-            editors,
-            selected,
+            editors, selected, ..
         } = &mut self.prompt
         {
             match self.bindings.lookup(&key, BindingScope::Palette) {
@@ -1258,15 +1221,7 @@ impl App {
                     }
                 }
                 Some(Action::Confirm) => {
-                    let editor = editors.get(*selected).cloned();
-                    let worktree = worktree_path.clone();
-                    let label = session_label.clone();
-                    self.prompt = PromptState::None;
-                    if let Some(editor) = editor
-                        && let Err(e) = self.open_worktree_in_editor(&worktree, &label, &editor)
-                    {
-                        self.set_error(format!("{e:#}"));
-                    }
+                    self.open_selected_pick_editor();
                 }
                 _ => {}
             }
@@ -1274,9 +1229,7 @@ impl App {
         }
 
         if let PromptState::ConfirmDeleteAgent {
-            session_id,
-            confirm_selected,
-            ..
+            confirm_selected, ..
         } = &mut self.prompt
         {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
@@ -1285,15 +1238,8 @@ impl App {
                     *confirm_selected = !*confirm_selected;
                 }
                 Some(Action::Confirm) => {
-                    if *confirm_selected {
-                        let id = session_id.clone();
-                        self.prompt = PromptState::None;
-                        if let Err(e) = self.do_delete_session(&id) {
-                            self.set_error(format!("{e:#}"));
-                        }
-                    } else {
-                        self.prompt = PromptState::None;
-                    }
+                    let confirm = *confirm_selected;
+                    return Ok(self.resolve_confirm_delete_agent(confirm));
                 }
                 _ => {}
             }
@@ -1309,20 +1255,15 @@ impl App {
                     *confirm_selected = !*confirm_selected;
                 }
                 Some(Action::Confirm) => {
-                    if *confirm_selected {
-                        return Ok(true);
-                    } else {
-                        self.prompt = PromptState::None;
-                    }
+                    let confirm = *confirm_selected;
+                    return Ok(self.resolve_confirm_quit(confirm));
                 }
                 _ => {}
             }
         }
 
         if let PromptState::ConfirmDiscardFile {
-            file_path,
-            is_untracked,
-            confirm_selected,
+            confirm_selected, ..
         } = &mut self.prompt
         {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
@@ -1331,23 +1272,8 @@ impl App {
                     *confirm_selected = !*confirm_selected;
                 }
                 Some(Action::Confirm) => {
-                    if *confirm_selected {
-                        let fp = file_path.clone();
-                        let ut = *is_untracked;
-                        self.prompt = PromptState::None;
-                        if let Some(session) = self.selected_session() {
-                            let worktree = PathBuf::from(&session.worktree_path);
-                            match git::discard_file(&worktree, &fp, ut) {
-                                Ok(()) => {
-                                    self.set_info(format!("Discarded changes to \"{fp}\". File restored to last committed state."));
-                                    self.reload_changed_files();
-                                }
-                                Err(e) => self.set_error(format!("Discard failed: {e}")),
-                            }
-                        }
-                    } else {
-                        self.prompt = PromptState::None;
-                    }
+                    let confirm = *confirm_selected;
+                    return Ok(self.resolve_confirm_discard_file(confirm));
                 }
                 _ => {}
             }
@@ -1449,6 +1375,87 @@ impl App {
     fn set_right_width_pct(&mut self, right_width_pct: u16) {
         self.right_width_pct = clamp_right_width_pct(right_width_pct, self.left_width_pct);
         self.left_width_pct = clamp_left_width_pct(self.left_width_pct, self.right_width_pct);
+    }
+
+    fn overlay_row_at(
+        rect: Rect,
+        offset: usize,
+        items: usize,
+        column: u16,
+        row: u16,
+    ) -> Option<usize> {
+        if !contains_point(rect, column, row) {
+            return None;
+        }
+        let relative_row = usize::from(row.saturating_sub(rect.y));
+        let index = offset.saturating_add(relative_row);
+        (index < items).then_some(index)
+    }
+
+    fn prompt_mouse_target(&self, column: u16, row: u16) -> Option<PromptMouseTarget> {
+        match self.overlay_layout.active {
+            OverlayMouseLayout::None | OverlayMouseLayout::Help => None,
+            OverlayMouseLayout::Command {
+                list,
+                items,
+                offset,
+                ..
+            } => Self::overlay_row_at(list, offset, items, column, row)
+                .map(PromptMouseTarget::CommandItem),
+            OverlayMouseLayout::BrowseProjects {
+                list,
+                items,
+                offset,
+                ..
+            } => Self::overlay_row_at(list, offset, items, column, row)
+                .map(PromptMouseTarget::BrowseProjectItem),
+            OverlayMouseLayout::PickEditor {
+                list,
+                items,
+                offset,
+                ..
+            } => Self::overlay_row_at(list, offset, items, column, row)
+                .map(PromptMouseTarget::PickEditorItem),
+            OverlayMouseLayout::ConfirmDeleteAgent {
+                cancel_button,
+                delete_button,
+            } => {
+                if contains_point(cancel_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmDeleteCancel)
+                } else if contains_point(delete_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmDeleteConfirm)
+                } else {
+                    None
+                }
+            }
+            OverlayMouseLayout::ConfirmQuit {
+                cancel_button,
+                quit_button,
+            } => {
+                if contains_point(cancel_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmQuitCancel)
+                } else if contains_point(quit_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmQuitConfirm)
+                } else {
+                    None
+                }
+            }
+            OverlayMouseLayout::ConfirmDiscardFile {
+                cancel_button,
+                discard_button,
+            } => {
+                if contains_point(cancel_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmDiscardCancel)
+                } else if contains_point(discard_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmDiscardConfirm)
+                } else {
+                    None
+                }
+            }
+            OverlayMouseLayout::RenameSession { input } => {
+                contains_point(input, column, row).then_some(PromptMouseTarget::RenameInput)
+            }
+        }
     }
 
     fn mouse_target(&self, column: u16, row: u16) -> Option<MouseTarget> {
@@ -1562,6 +1569,241 @@ impl App {
         }
 
         self.last_mouse_click = Some(RecentMouseClick { target, at: now });
+        false
+    }
+
+    fn set_command_palette_selection(&mut self, index: usize) {
+        let count = match &self.prompt {
+            PromptState::Command { input, .. } => self.bindings.filtered_palette(input).len(),
+            _ => 0,
+        };
+        if count == 0 {
+            return;
+        }
+        if let PromptState::Command { selected, .. } = &mut self.prompt {
+            *selected = index.min(count.saturating_sub(1));
+        }
+    }
+
+    fn execute_selected_command_palette(&mut self) {
+        let command = if let PromptState::Command {
+            input, selected, ..
+        } = &self.prompt
+        {
+            if let Some(binding) = self.bindings.filtered_palette(input).get(*selected) {
+                binding.palette_name.unwrap().to_string()
+            } else {
+                input.trim().to_string()
+            }
+        } else {
+            String::new()
+        };
+        self.prompt = PromptState::None;
+        if let Err(e) = self.execute_command(command) {
+            self.set_error(format!("{e:#}"));
+        }
+    }
+
+    fn visible_browser_entries(&self) -> Vec<BrowserEntry> {
+        if let PromptState::BrowseProjects {
+            entries, filter, ..
+        } = &self.prompt
+        {
+            if filter.is_empty() {
+                entries.clone()
+            } else {
+                let needle = filter.to_lowercase();
+                entries
+                    .iter()
+                    .filter(|entry| entry.label.to_lowercase().contains(&needle))
+                    .cloned()
+                    .collect()
+            }
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn set_browser_selection(&mut self, index: usize) {
+        let count = self.visible_browser_entries().len();
+        if count == 0 {
+            return;
+        }
+        if let PromptState::BrowseProjects { selected, .. } = &mut self.prompt {
+            *selected = index.min(count.saturating_sub(1));
+        }
+    }
+
+    fn open_selected_browser_entry(&mut self) {
+        let visible = self.visible_browser_entries();
+        let mut browse_to: Option<PathBuf> = None;
+        if let PromptState::BrowseProjects {
+            current_dir,
+            entries,
+            loading,
+            selected,
+            filter,
+            ..
+        } = &mut self.prompt
+            && let Some(entry) = visible.get(*selected)
+        {
+            let new_dir = entry.path.clone();
+            *current_dir = new_dir.clone();
+            entries.clear();
+            *loading = true;
+            *selected = 0;
+            filter.clear();
+            browse_to = Some(new_dir);
+        }
+        if let Some(dir) = browse_to {
+            self.spawn_browser_entries(&dir);
+        }
+    }
+
+    fn set_pick_editor_selection(&mut self, index: usize) {
+        let count = match &self.prompt {
+            PromptState::PickEditor { editors, .. } => editors.len(),
+            _ => 0,
+        };
+        if count == 0 {
+            return;
+        }
+        if let PromptState::PickEditor { selected, .. } = &mut self.prompt {
+            *selected = index.min(count.saturating_sub(1));
+        }
+    }
+
+    fn open_selected_pick_editor(&mut self) {
+        let (editor, worktree, label) = if let PromptState::PickEditor {
+            session_label,
+            worktree_path,
+            editors,
+            selected,
+        } = &self.prompt
+        {
+            (
+                editors.get(*selected).cloned(),
+                worktree_path.clone(),
+                session_label.clone(),
+            )
+        } else {
+            return;
+        };
+        self.prompt = PromptState::None;
+        if let Some(editor) = editor
+            && let Err(e) = self.open_worktree_in_editor(&worktree, &label, &editor)
+        {
+            self.set_error(format!("{e:#}"));
+        }
+    }
+
+    fn resolve_confirm_delete_agent(&mut self, confirm: bool) -> bool {
+        let session_id = match &self.prompt {
+            PromptState::ConfirmDeleteAgent { session_id, .. } => session_id.clone(),
+            _ => return false,
+        };
+        self.prompt = PromptState::None;
+        if confirm && let Err(e) = self.do_delete_session(&session_id) {
+            self.set_error(format!("{e:#}"));
+        }
+        false
+    }
+
+    fn resolve_confirm_quit(&mut self, confirm: bool) -> bool {
+        if matches!(self.prompt, PromptState::ConfirmQuit { .. }) {
+            self.prompt = PromptState::None;
+        }
+        confirm
+    }
+
+    fn resolve_confirm_discard_file(&mut self, confirm: bool) -> bool {
+        let (file_path, is_untracked) = match &self.prompt {
+            PromptState::ConfirmDiscardFile {
+                file_path,
+                is_untracked,
+                ..
+            } => (file_path.clone(), *is_untracked),
+            _ => return false,
+        };
+        self.prompt = PromptState::None;
+        if confirm && let Some(session) = self.selected_session() {
+            let worktree = PathBuf::from(&session.worktree_path);
+            match git::discard_file(&worktree, &file_path, is_untracked) {
+                Ok(()) => {
+                    self.set_info(format!(
+                        "Discarded changes to \"{file_path}\". File restored to last committed state."
+                    ));
+                    self.reload_changed_files();
+                }
+                Err(e) => self.set_error(format!("Discard failed: {e}")),
+            }
+        }
+        false
+    }
+
+    fn set_rename_cursor_from_mouse(&mut self, column: u16) {
+        let input_area = match self.overlay_layout.active {
+            OverlayMouseLayout::RenameSession { input } => input,
+            _ => return,
+        };
+        if let PromptState::RenameSession { input, cursor, .. } = &mut self.prompt {
+            let relative_col = usize::from(column.saturating_sub(input_area.x));
+            *cursor = relative_col.saturating_sub(1).min(input.len());
+        }
+    }
+
+    fn handle_prompt_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return false;
+        }
+
+        let Some(target) = self.prompt_mouse_target(mouse.column, mouse.row) else {
+            return false;
+        };
+
+        match target {
+            PromptMouseTarget::CommandItem(index) => {
+                let double_click = self.register_mouse_click(MouseClickTarget::CommandItem(index));
+                self.set_command_palette_selection(index);
+                if double_click {
+                    self.execute_selected_command_palette();
+                }
+            }
+            PromptMouseTarget::BrowseProjectItem(index) => {
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::BrowseProjectItem(index));
+                self.set_browser_selection(index);
+                if double_click {
+                    self.open_selected_browser_entry();
+                }
+            }
+            PromptMouseTarget::PickEditorItem(index) => {
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::PickEditorItem(index));
+                self.set_pick_editor_selection(index);
+                if double_click {
+                    self.open_selected_pick_editor();
+                }
+            }
+            PromptMouseTarget::ConfirmDeleteCancel => {
+                return self.resolve_confirm_delete_agent(false);
+            }
+            PromptMouseTarget::ConfirmDeleteConfirm => {
+                return self.resolve_confirm_delete_agent(true);
+            }
+            PromptMouseTarget::ConfirmQuitCancel => return self.resolve_confirm_quit(false),
+            PromptMouseTarget::ConfirmQuitConfirm => return self.resolve_confirm_quit(true),
+            PromptMouseTarget::ConfirmDiscardCancel => {
+                return self.resolve_confirm_discard_file(false);
+            }
+            PromptMouseTarget::ConfirmDiscardConfirm => {
+                return self.resolve_confirm_discard_file(true);
+            }
+            PromptMouseTarget::RenameInput => {
+                self.set_rename_cursor_from_mouse(mouse.column);
+            }
+        }
+
         false
     }
 
@@ -1844,9 +2086,9 @@ impl App {
         }
     }
 
-    pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) {
+    pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
         if !matches!(self.prompt, PromptState::None) {
-            return;
+            return self.handle_prompt_mouse(mouse);
         }
 
         if let Some(ref mut scroll) = self.help_scroll {
@@ -1862,7 +2104,7 @@ impl App {
                 }
                 _ => {}
             }
-            return;
+            return false;
         }
 
         match mouse.kind {
@@ -1870,7 +2112,7 @@ impl App {
                 if let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row) {
                     self.mouse_drag = Some(drag);
                     self.update_dragged_widths(mouse.column);
-                    return;
+                    return false;
                 }
 
                 match self.mouse_target(mouse.column, mouse.row) {
@@ -1988,6 +2230,7 @@ impl App {
             },
             _ => {}
         }
+        false
     }
 }
 
@@ -1998,9 +2241,11 @@ mod tests {
     use std::sync::{Arc, Mutex, mpsc};
 
     use crate::app::{
-        App, CenterMode, FocusPane, InputTarget, MouseLayoutState, PromptState, RightSection,
+        App, CenterMode, FocusPane, InputTarget, MouseLayoutState, OverlayMouseLayout,
+        OverlayMouseLayoutState, PromptState, RightSection,
     };
     use crate::config::{Config, DuxPaths};
+    use crate::editor::{DetectedEditor, EditorKind};
     use crate::keybindings::{Action, BINDING_DEFS, BindingScope, RuntimeBindings};
     use crate::model::{AgentSession, ChangedFile, Project, ProviderKind, SessionStatus};
     use crate::pty::PtyClient;
@@ -2130,6 +2375,7 @@ mod tests {
             collapsed_projects: std::collections::HashSet::new(),
             left_items_cache: Vec::new(),
             mouse_layout: MouseLayoutState::default(),
+            overlay_layout: OverlayMouseLayoutState::default(),
             mouse_drag: None,
             last_mouse_click: None,
         };
@@ -2159,6 +2405,57 @@ mod tests {
             staged_list: Some(Rect::new(78, 9, 21, 5)),
             commit_area: Some(Rect::new(77, 14, 23, 6)),
             commit_text_area: Some(Rect::new(78, 15, 21, 4)),
+        };
+    }
+
+    fn install_command_overlay(app: &mut App, items: usize) {
+        app.overlay_layout.active = OverlayMouseLayout::Command {
+            list: Rect::new(15, 9, 70, 6),
+            items,
+            offset: 0,
+        };
+    }
+
+    fn install_browser_overlay(app: &mut App, items: usize) {
+        app.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
+            list: Rect::new(15, 6, 70, 8),
+            items,
+            offset: 0,
+        };
+    }
+
+    fn install_pick_editor_overlay(app: &mut App, items: usize) {
+        app.overlay_layout.active = OverlayMouseLayout::PickEditor {
+            list: Rect::new(19, 8, 62, 6),
+            items,
+            offset: 0,
+        };
+    }
+
+    fn install_confirm_delete_overlay(app: &mut App) {
+        app.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
+            cancel_button: Rect::new(34, 10, 16, 3),
+            delete_button: Rect::new(52, 10, 16, 3),
+        };
+    }
+
+    fn install_confirm_quit_overlay(app: &mut App) {
+        app.overlay_layout.active = OverlayMouseLayout::ConfirmQuit {
+            cancel_button: Rect::new(34, 10, 16, 3),
+            quit_button: Rect::new(52, 10, 16, 3),
+        };
+    }
+
+    fn install_confirm_discard_overlay(app: &mut App) {
+        app.overlay_layout.active = OverlayMouseLayout::ConfirmDiscardFile {
+            cancel_button: Rect::new(34, 10, 16, 3),
+            discard_button: Rect::new(52, 10, 16, 3),
+        };
+    }
+
+    fn install_rename_overlay(app: &mut App) {
+        app.overlay_layout.active = OverlayMouseLayout::RenameSession {
+            input: Rect::new(24, 10, 30, 1),
         };
     }
 
@@ -2813,6 +3110,209 @@ mod tests {
         assert_eq!(app.config.ui.left_width_pct, app.left_width_pct);
         assert_eq!(app.config.ui.right_width_pct, app.right_width_pct);
         assert_eq!(app.config.ui.right_width_pct, original_right);
+    }
+
+    #[test]
+    fn mouse_click_command_palette_row_selects_then_double_click_executes() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::Command {
+            input: "help".to_string(),
+            selected: 0,
+            searching: false,
+        };
+        install_command_overlay(&mut app, 1);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 15, 9));
+        assert!(matches!(
+            app.prompt,
+            PromptState::Command { selected: 0, .. }
+        ));
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 15, 9));
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(app.help_scroll, Some(0));
+    }
+
+    #[test]
+    fn mouse_click_project_browser_row_selects_then_double_click_opens_entry() {
+        let mut app = test_app(default_bindings());
+        let root = PathBuf::from(&app.projects[0].path);
+        let child = root.join("child");
+        std::fs::create_dir_all(&child).expect("child dir");
+        app.prompt = PromptState::BrowseProjects {
+            current_dir: root.clone(),
+            entries: vec![crate::app::BrowserEntry {
+                path: child.clone(),
+                label: "child/".to_string(),
+                is_git_repo: false,
+            }],
+            loading: false,
+            selected: 0,
+            filter: String::new(),
+            searching: false,
+            editing_path: false,
+            path_input: String::new(),
+            tab_completions: Vec::new(),
+            tab_index: 0,
+        };
+        install_browser_overlay(&mut app, 1);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 15, 6));
+        assert!(matches!(
+            app.prompt,
+            PromptState::BrowseProjects { selected: 0, .. }
+        ));
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 15, 6));
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                current_dir,
+                loading,
+                selected,
+                ..
+            } => {
+                assert_eq!(current_dir, &child);
+                assert!(*loading);
+                assert_eq!(*selected, 0);
+            }
+            _ => panic!("expected browse projects prompt"),
+        }
+    }
+
+    #[test]
+    fn mouse_click_pick_editor_row_selects_then_double_click_opens_editor() {
+        let mut app = test_app(default_bindings());
+        std::fs::create_dir_all(&app.sessions[0].worktree_path).expect("worktree");
+        app.prompt = PromptState::PickEditor {
+            session_label: "agent-branch".to_string(),
+            worktree_path: app.sessions[0].worktree_path.clone(),
+            editors: vec![DetectedEditor {
+                kind: EditorKind::VsCode,
+                label: "VS Code",
+                config_key: "vscode",
+                command: "true".to_string(),
+            }],
+            selected: 0,
+        };
+        install_pick_editor_overlay(&mut app, 1);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, 8));
+        assert!(matches!(
+            app.prompt,
+            PromptState::PickEditor { selected: 0, .. }
+        ));
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, 8));
+        assert!(matches!(app.prompt, PromptState::None));
+        assert!(app.status.text().contains("Opened agent"));
+    }
+
+    #[test]
+    fn mouse_click_quit_dialog_buttons_cancel_or_exit() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmQuit {
+            active_count: 1,
+            confirm_selected: false,
+        };
+        install_confirm_quit_overlay(&mut app);
+        let should_quit = app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 35, 10));
+        assert!(!should_quit);
+        assert!(matches!(app.prompt, PromptState::None));
+
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmQuit {
+            active_count: 1,
+            confirm_selected: true,
+        };
+        install_confirm_quit_overlay(&mut app);
+        let should_quit = app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 53, 10));
+        assert!(should_quit);
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    #[test]
+    fn mouse_click_discard_dialog_button_discards_changes() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        init_git_repo_with_modified_file(
+            &app,
+            "src/main.rs",
+            "fn main() {}\n",
+            "fn main() { println!(\"hi\"); }\n",
+        );
+        app.selected_left = 1;
+        app.unstaged_files = vec![ChangedFile {
+            path: "src/main.rs".into(),
+            status: "M".into(),
+            additions: 1,
+            deletions: 1,
+            binary: false,
+        }];
+        app.prompt = PromptState::ConfirmDiscardFile {
+            file_path: "src/main.rs".to_string(),
+            is_untracked: false,
+            confirm_selected: true,
+        };
+        install_confirm_discard_overlay(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 53, 10));
+
+        assert!(matches!(app.prompt, PromptState::None));
+        let contents = std::fs::read_to_string(
+            PathBuf::from(&app.sessions[0].worktree_path).join("src/main.rs"),
+        )
+        .expect("discarded file");
+        assert_eq!(contents, "fn main() {}\n");
+    }
+
+    #[test]
+    fn mouse_click_delete_dialog_cancel_button_closes_prompt() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmDeleteAgent {
+            session_id: app.sessions[0].id.clone(),
+            branch_name: app.sessions[0].branch_name.clone(),
+            confirm_selected: false,
+        };
+        install_confirm_delete_overlay(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 35, 10));
+
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    #[test]
+    fn mouse_click_rename_input_moves_cursor() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::RenameSession {
+            session_id: app.sessions[0].id.clone(),
+            input: "rename me".to_string(),
+            cursor: 0,
+        };
+        install_rename_overlay(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 29, 10));
+
+        match app.prompt {
+            PromptState::RenameSession { cursor, .. } => assert_eq!(cursor, 4),
+            _ => panic!("expected rename prompt"),
+        }
+    }
+
+    #[test]
+    fn mouse_click_while_prompt_open_does_not_change_underlying_focus() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Left;
+        app.prompt = PromptState::Command {
+            input: "help".to_string(),
+            selected: 0,
+            searching: false,
+        };
+        install_command_overlay(&mut app, 1);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0, 0));
+
+        assert_eq!(app.focus, FocusPane::Left);
+        assert!(matches!(app.prompt, PromptState::Command { .. }));
     }
 
     #[test]
