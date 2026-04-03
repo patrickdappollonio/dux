@@ -13,9 +13,6 @@ enum DiffStat {
     Binary,
 }
 
-#[cfg(windows)]
-const NULL_DEVICE: &str = "NUL";
-#[cfg(not(windows))]
 const NULL_DEVICE: &str = "/dev/null";
 
 pub fn current_branch(repo_path: &Path) -> Result<String> {

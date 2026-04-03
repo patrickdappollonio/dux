@@ -26,10 +26,9 @@ impl App {
                         .position(|item| matches!(item, LeftItem::Session(index) if self.sessions.get(*index).map(|candidate| candidate.id.as_str()) == Some(session.id.as_str())))
                         .unwrap_or(0);
                     self.reload_changed_files();
-                    self.focus = FocusPane::Center;
-                    self.center_mode = CenterMode::Agent;
+                    self.show_agent_surface();
                     self.input_target = InputTarget::Agent;
-                    self.fullscreen_agent = true;
+                    self.fullscreen_overlay = FullscreenOverlay::Agent;
                     let proj_name = self.project_name_for_session(&session);
                     self.set_info(format!(
                         "Created {} agent \"{}\" in project \"{}\"",
@@ -118,18 +117,57 @@ impl App {
             if let Some(current) = self.selected_session()
                 && exited.contains(&current.id)
             {
-                self.input_target = InputTarget::None;
-                self.fullscreen_agent = false;
-                self.focus = FocusPane::Left;
                 let key = self.bindings.label_for(Action::ReconnectAgent);
-                self.set_info(format!(
-                    "Agent CLI process has exited. Press \"{key}\" to relaunch."
-                ));
+                if self.session_surface == SessionSurface::Agent {
+                    self.input_target = InputTarget::None;
+                    self.fullscreen_overlay = FullscreenOverlay::None;
+                    self.focus = FocusPane::Left;
+                    self.set_info(format!(
+                        "Agent CLI process has exited. Press \"{key}\" to relaunch."
+                    ));
+                } else {
+                    self.set_info(format!(
+                        "Agent CLI process exited. Companion terminal is still available; press \"{key}\" to relaunch the agent."
+                    ));
+                }
             }
         }
-        // Keep the poller's interval flag in sync with whether any agent is running.
-        self.has_active_agent
-            .store(!self.providers.is_empty(), Ordering::Relaxed);
+
+        let mut exited_terminal_ids = Vec::new();
+        for (terminal_id, terminal) in &mut self.companion_terminals {
+            if terminal.client.is_exited() || terminal.client.try_wait().is_some() {
+                exited_terminal_ids.push(terminal_id.clone());
+            }
+        }
+        for terminal_id in &exited_terminal_ids {
+            self.companion_terminals.remove(terminal_id);
+        }
+        if !exited_terminal_ids.is_empty() {
+            // If the active terminal just exited, close the overlay.
+            if let Some(ref active_id) = self.active_terminal_id
+                && exited_terminal_ids.contains(active_id)
+            {
+                self.active_terminal_id = None;
+                if self.input_target == InputTarget::Terminal {
+                    self.input_target = InputTarget::None;
+                }
+                self.fullscreen_overlay = FullscreenOverlay::None;
+                self.session_surface = SessionSurface::Agent;
+                self.set_info("Terminal exited. Press the terminal key to launch a new one.");
+            }
+            self.clamp_terminal_cursor();
+        }
+
+        // Poll foreground process names every ~2 seconds (every 20 ticks).
+        if self.tick_count.is_multiple_of(20) {
+            for terminal in self.companion_terminals.values_mut() {
+                terminal.foreground_cmd = terminal.client.foreground_process_name();
+            }
+        }
+
+        // Keep the poller's interval flag in sync with whether any runtime PTY is alive.
+        self.has_active_processes
+            .store(self.running_process_count() > 0, Ordering::Relaxed);
     }
 
     pub(crate) fn spawn_browser_entries(&self, dir: &Path) {
@@ -152,7 +190,7 @@ impl App {
     pub(crate) fn spawn_changed_files_poller(&self) {
         let tx = self.worker_tx.clone();
         let watched = Arc::clone(&self.watched_worktree);
-        let has_agent = Arc::clone(&self.has_active_agent);
+        let has_agent = Arc::clone(&self.has_active_processes);
         thread::spawn(move || {
             loop {
                 let interval = if has_agent.load(Ordering::Relaxed) {

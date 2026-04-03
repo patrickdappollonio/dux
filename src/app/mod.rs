@@ -33,7 +33,10 @@ use crate::editor::DetectedEditor;
 use crate::git;
 use crate::keybindings::{Action, BindingScope, HintContext, RuntimeBindings};
 use crate::logger;
-use crate::model::{AgentSession, ChangedFile, Project, ProviderKind, SessionStatus};
+use crate::model::{
+    AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProviderKind, SessionStatus,
+    SessionSurface,
+};
 use crate::provider;
 use crate::pty::PtyClient;
 use crate::statusline::{StatusLine, StatusTone};
@@ -50,6 +53,8 @@ pub struct App {
     pub(crate) staged_files: Vec<ChangedFile>,
     pub(crate) unstaged_files: Vec<ChangedFile>,
     pub(crate) selected_left: usize,
+    pub(crate) left_section: LeftSection,
+    pub(crate) selected_terminal_index: usize,
     pub(crate) right_section: RightSection,
     pub(crate) files_index: usize,
     pub(crate) files_search_query: String,
@@ -60,6 +65,7 @@ pub struct App {
     pub(crate) commit_generating: bool,
     pub(crate) left_width_pct: u16,
     pub(crate) right_width_pct: u16,
+    pub(crate) terminal_pane_height_pct: u16,
     pub(crate) focus: FocusPane,
     pub(crate) center_mode: CenterMode,
     pub(crate) left_collapsed: bool,
@@ -67,13 +73,17 @@ pub struct App {
     pub(crate) help_scroll: Option<u16>,
     pub(crate) last_help_height: u16,
     pub(crate) last_help_lines: u16,
-    pub(crate) fullscreen_agent: bool,
+    pub(crate) fullscreen_overlay: FullscreenOverlay,
     pub(crate) status: StatusLine,
     pub(crate) prompt: PromptState,
     pub(crate) input_target: InputTarget,
+    pub(crate) session_surface: SessionSurface,
     pub(crate) worker_tx: Sender<WorkerEvent>,
     pub(crate) worker_rx: Receiver<WorkerEvent>,
     pub(crate) providers: HashMap<String, PtyClient>,
+    pub(crate) companion_terminals: HashMap<String, CompanionTerminal>,
+    pub(crate) active_terminal_id: Option<String>,
+    pub(crate) terminal_counter: usize,
     pub(crate) create_agent_in_flight: bool,
     pub(crate) last_pty_size: (u16, u16),
     pub(crate) last_diff_height: u16,
@@ -81,7 +91,7 @@ pub struct App {
     pub(crate) theme: Theme,
     pub(crate) tick_count: u64,
     pub(crate) watched_worktree: Arc<Mutex<Option<PathBuf>>>,
-    pub(crate) has_active_agent: Arc<AtomicBool>,
+    pub(crate) has_active_processes: Arc<AtomicBool>,
     pub(crate) collapsed_projects: HashSet<String>,
     pub(crate) left_items_cache: Vec<LeftItem>,
     pub(crate) mouse_layout: MouseLayoutState,
@@ -157,6 +167,13 @@ impl RightSection {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FullscreenOverlay {
+    None,
+    Agent,
+    Terminal,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum CenterMode {
     Agent,
@@ -195,7 +212,8 @@ pub(crate) enum PromptState {
         confirm_selected: bool, // false = Cancel (default), true = Delete
     },
     ConfirmQuit {
-        active_count: usize,
+        agent_count: usize,
+        terminal_count: usize,
         confirm_selected: bool, // false = Cancel (default), true = Quit
     },
     ConfirmDiscardFile {
@@ -227,6 +245,7 @@ pub(crate) struct BrowserEntry {
 pub(crate) enum InputTarget {
     None,
     Agent,
+    Terminal,
     CommitMessage,
 }
 
@@ -243,6 +262,7 @@ pub(crate) struct MouseLayoutState {
     pub(crate) center: Rect,
     pub(crate) right: Rect,
     pub(crate) left_list: Rect,
+    pub(crate) terminal_list: Rect,
     pub(crate) agent_term: Option<Rect>,
     pub(crate) unstaged_list: Option<Rect>,
     pub(crate) staged_list: Option<Rect>,
@@ -257,6 +277,7 @@ impl MouseLayoutState {
         self.center = center;
         self.right = right;
         self.left_list = Rect::default();
+        self.terminal_list = Rect::default();
         self.agent_term = None;
         self.unstaged_list = None;
         self.staged_list = None;
@@ -316,14 +337,17 @@ pub(crate) enum OverlayMouseLayout {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum ResizeDragState {
     LeftDivider,
     RightDivider,
+    TerminalDivider,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MouseClickTarget {
     LeftRow(usize),
+    TerminalRow(usize),
     CenterPane,
     UnstagedFile(usize),
     StagedFile(usize),
@@ -338,10 +362,23 @@ pub(crate) struct RecentMouseClick {
     pub(crate) at: Instant,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LeftSection {
+    Projects,
+    Terminals,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum LeftItem {
     Project(usize),
     Session(usize),
+}
+
+pub(crate) struct CompanionTerminal {
+    pub(crate) session_id: String,
+    pub(crate) label: String,
+    pub(crate) foreground_cmd: Option<String>,
+    pub(crate) client: PtyClient,
 }
 
 pub(crate) struct AgentReadyData {
@@ -404,6 +441,7 @@ impl App {
         let mut app = Self {
             left_width_pct: config.ui.left_width_pct,
             right_width_pct: config.ui.right_width_pct,
+            terminal_pane_height_pct: config.ui.terminal_pane_height_pct,
             bindings,
             config,
             paths,
@@ -413,6 +451,8 @@ impl App {
             staged_files: Vec::new(),
             unstaged_files: Vec::new(),
             selected_left: 0,
+            left_section: LeftSection::Projects,
+            selected_terminal_index: 0,
             right_section: RightSection::Unstaged,
             files_index: 0,
             files_search_query: String::new(),
@@ -428,13 +468,17 @@ impl App {
             help_scroll: None,
             last_help_height: 0,
             last_help_lines: 0,
-            fullscreen_agent: false,
+            fullscreen_overlay: FullscreenOverlay::None,
             status: StatusLine::new(initial_status),
             prompt: PromptState::None,
             input_target: InputTarget::None,
+            session_surface: SessionSurface::Agent,
             worker_tx,
             worker_rx,
             providers: HashMap::new(),
+            companion_terminals: HashMap::new(),
+            active_terminal_id: None,
+            terminal_counter: 0,
             create_agent_in_flight: false,
             last_pty_size: (0, 0),
             last_diff_height: 0,
@@ -442,7 +486,7 @@ impl App {
             theme: Theme::default_dark(),
             tick_count: 0,
             watched_worktree: Arc::clone(&watched_worktree),
-            has_active_agent: Arc::new(AtomicBool::new(false)),
+            has_active_processes: Arc::new(AtomicBool::new(false)),
             collapsed_projects: HashSet::new(),
             left_items_cache: Vec::new(),
             mouse_layout: MouseLayoutState::default(),
@@ -511,6 +555,13 @@ impl App {
     }
 
     pub(crate) fn close_top_overlay(&mut self) -> bool {
+        if matches!(self.fullscreen_overlay, FullscreenOverlay::Terminal) {
+            self.fullscreen_overlay = FullscreenOverlay::None;
+            self.session_surface = SessionSurface::Agent;
+            self.input_target = InputTarget::None;
+            self.set_info("Closed terminal overlay.");
+            return true;
+        }
         if !matches!(self.prompt, PromptState::None) {
             self.prompt = PromptState::None;
             self.set_info("Closed overlay.");
@@ -553,6 +604,8 @@ impl App {
             "delete-agent" => self.confirm_delete_selected_session(),
             "rename-agent" => self.open_rename_session(),
             "reconnect-agent" => self.reconnect_selected_session(),
+            "show-agent" => self.activate_center_agent(),
+            "show-terminal" => self.show_companion_terminal(),
             "add-project" => self.open_project_browser(),
             "copy-path" => self.copy_selected_path(),
             "open-worktree" => self.open_selected_worktree_in_default_editor(),
@@ -768,7 +821,7 @@ impl App {
             let current_name = session.title.unwrap_or_else(|| session.branch_name.clone());
             let cursor = current_name.len();
             self.input_target = InputTarget::None;
-            self.fullscreen_agent = false;
+            self.fullscreen_overlay = FullscreenOverlay::None;
             self.prompt = PromptState::RenameSession {
                 session_id: session.id,
                 input: current_name,
@@ -824,6 +877,90 @@ impl App {
             session.status = status;
             session.updated_at = Utc::now();
             let _ = self.session_store.upsert_session(session);
+        }
+    }
+
+    /// Derives a companion terminal status for a session from the multi-terminal map.
+    /// Running if any terminal exists for this session, NotLaunched otherwise.
+    pub(crate) fn companion_terminal_status(&self, session_id: &str) -> CompanionTerminalStatus {
+        if self.session_terminal_count(session_id) > 0 {
+            CompanionTerminalStatus::Running
+        } else {
+            CompanionTerminalStatus::NotLaunched
+        }
+    }
+
+    pub(crate) fn selected_companion_terminal_status(&self) -> CompanionTerminalStatus {
+        self.selected_session()
+            .map(|session| self.companion_terminal_status(&session.id))
+            .unwrap_or(CompanionTerminalStatus::NotLaunched)
+    }
+
+    pub(crate) fn clear_companion_terminals_for_session(&mut self, session_id: &str) {
+        self.companion_terminals
+            .retain(|_, t| t.session_id != session_id);
+        if let Some(ref id) = self.active_terminal_id
+            && !self.companion_terminals.contains_key(id)
+        {
+            self.active_terminal_id = None;
+        }
+    }
+
+    pub(crate) fn running_process_count(&self) -> usize {
+        self.providers.len() + self.companion_terminals.len()
+    }
+
+    pub(crate) fn running_companion_terminal_count(&self) -> usize {
+        self.companion_terminals.len()
+    }
+
+    /// Returns all running companion terminals as (terminal_id, terminal) pairs,
+    /// sorted by creation order (terminal_id encodes the counter).
+    pub(crate) fn terminal_items(&self) -> Vec<(&String, &CompanionTerminal)> {
+        let mut items: Vec<_> = self.companion_terminals.iter().collect();
+        items.sort_by_key(|(id, _)| (*id).clone());
+        items
+    }
+
+    pub(crate) fn has_terminal_items(&self) -> bool {
+        !self.companion_terminals.is_empty()
+    }
+
+    pub(crate) fn clamp_terminal_cursor(&mut self) {
+        let count = self.terminal_items().len();
+        if count == 0 {
+            self.selected_terminal_index = 0;
+            if self.left_section == LeftSection::Terminals {
+                self.left_section = LeftSection::Projects;
+            }
+        } else if self.selected_terminal_index >= count {
+            self.selected_terminal_index = count.saturating_sub(1);
+        }
+    }
+
+    pub(crate) fn next_terminal_id(&mut self) -> String {
+        self.terminal_counter += 1;
+        format!("term-{}", self.terminal_counter)
+    }
+
+    /// Returns the number of running companion terminals for a given session.
+    pub(crate) fn session_terminal_count(&self, session_id: &str) -> usize {
+        self.companion_terminals
+            .values()
+            .filter(|t| t.session_id == session_id)
+            .count()
+    }
+
+    pub(crate) fn selected_terminal_surface_client(&self) -> Option<&PtyClient> {
+        match self.session_surface {
+            SessionSurface::Agent => {
+                let session_id = self.selected_session()?.id.as_str();
+                self.providers.get(session_id)
+            }
+            SessionSurface::Terminal => {
+                let id = self.active_terminal_id.as_ref()?;
+                self.companion_terminals.get(id).map(|t| &t.client)
+            }
         }
     }
 }

@@ -51,6 +51,25 @@ impl SessionStatus {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompanionTerminalStatus {
+    NotLaunched,
+    Running,
+    Exited,
+}
+
+impl CompanionTerminalStatus {
+    pub fn is_running(self) -> bool {
+        matches!(self, Self::Running)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionSurface {
+    Agent,
+    Terminal,
+}
+
 #[derive(Clone, Debug)]
 pub struct AgentSession {
     pub id: String,

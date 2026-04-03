@@ -21,6 +21,8 @@ enum AgentWheelRoute {
 enum MouseTarget {
     LeftPane,
     LeftRow(usize),
+    TerminalRow(usize),
+    TerminalPane,
     Center,
     FilesPane,
     UnstagedFile(Option<usize>),
@@ -143,6 +145,9 @@ fn clamp_right_width_pct(right_width_pct: u16, left_width_pct: u16) -> u16 {
     right_width_pct.clamp(MIN_RIGHT_WIDTH_PCT, max_right.max(MIN_RIGHT_WIDTH_PCT))
 }
 
+const MIN_TERMINAL_PANE_HEIGHT_PCT: u16 = 10;
+const MAX_TERMINAL_PANE_HEIGHT_PCT: u16 = 80;
+
 fn pct_from_columns(columns: u16, total_width: u16) -> u16 {
     if total_width == 0 {
         return 0;
@@ -243,7 +248,10 @@ impl App {
         // (ExitInteractive, handled inside handle_agent_input). This must
         // happen before global bindings so CloseOverlay / Escape do not
         // intercept agent input during interactive mode.
-        if self.input_target == InputTarget::Agent {
+        if matches!(
+            self.input_target,
+            InputTarget::Agent | InputTarget::Terminal
+        ) {
             return self.handle_agent_input(key);
         }
         if self.bindings.lookup(&key, BindingScope::Global) == Some(Action::CloseOverlay)
@@ -288,10 +296,12 @@ impl App {
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Global) {
             match action {
                 Action::Quit => {
-                    let active_count = self.providers.len();
-                    if active_count > 0 {
+                    let agent_count = self.providers.len();
+                    let terminal_count = self.running_companion_terminal_count();
+                    if agent_count + terminal_count > 0 {
                         self.prompt = PromptState::ConfirmQuit {
-                            active_count,
+                            agent_count,
+                            terminal_count,
                             confirm_selected: false,
                         };
                         return Ok(false);
@@ -316,7 +326,18 @@ impl App {
                 }
                 Action::FocusNext => {
                     let has_staged = !self.staged_files.is_empty();
-                    if self.focus == FocusPane::Files {
+                    if self.focus == FocusPane::Left
+                        && self.left_section == LeftSection::Projects
+                        && self.has_terminal_items()
+                    {
+                        self.left_section = LeftSection::Terminals;
+                        self.clamp_terminal_cursor();
+                    } else if self.focus == FocusPane::Left
+                        && self.left_section == LeftSection::Terminals
+                    {
+                        self.left_section = LeftSection::Projects;
+                        self.focus = self.focus.next();
+                    } else if self.focus == FocusPane::Files {
                         match self.right_section.next(has_staged) {
                             Some(next) => {
                                 self.right_section = next;
@@ -324,6 +345,7 @@ impl App {
                             }
                             None => {
                                 self.focus = self.focus.next();
+                                self.left_section = LeftSection::Projects;
                             }
                         }
                     } else {
@@ -331,14 +353,27 @@ impl App {
                         if self.focus == FocusPane::Files {
                             self.right_section = RightSection::first();
                             self.clamp_files_cursor();
+                        } else if self.focus == FocusPane::Left {
+                            self.left_section = LeftSection::Projects;
                         }
                     }
                     self.input_target = InputTarget::None;
-                    self.fullscreen_agent = false;
+                    self.fullscreen_overlay = FullscreenOverlay::None;
                 }
                 Action::FocusPrev => {
                     let has_staged = !self.staged_files.is_empty();
-                    if self.focus == FocusPane::Files {
+                    if self.focus == FocusPane::Left && self.left_section == LeftSection::Terminals
+                    {
+                        self.left_section = LeftSection::Projects;
+                    } else if self.focus == FocusPane::Left
+                        && self.left_section == LeftSection::Projects
+                    {
+                        self.focus = self.focus.previous();
+                        if self.focus == FocusPane::Files {
+                            self.right_section = RightSection::last(has_staged);
+                            self.clamp_files_cursor();
+                        }
+                    } else if self.focus == FocusPane::Files {
                         match self.right_section.previous() {
                             Some(prev) => {
                                 self.right_section = prev;
@@ -353,10 +388,17 @@ impl App {
                         if self.focus == FocusPane::Files {
                             self.right_section = RightSection::last(has_staged);
                             self.clamp_files_cursor();
+                        } else if self.focus == FocusPane::Left {
+                            if self.has_terminal_items() {
+                                self.left_section = LeftSection::Terminals;
+                                self.clamp_terminal_cursor();
+                            } else {
+                                self.left_section = LeftSection::Projects;
+                            }
                         }
                     }
                     self.input_target = InputTarget::None;
-                    self.fullscreen_agent = false;
+                    self.fullscreen_overlay = FullscreenOverlay::None;
                 }
                 Action::ToggleSidebar => {
                     self.left_collapsed = !self.left_collapsed;
@@ -392,6 +434,10 @@ impl App {
     }
 
     fn handle_left_key(&mut self, key: KeyEvent) -> Result<()> {
+        if self.left_section == LeftSection::Terminals {
+            return self.handle_left_terminal_key(key);
+        }
+
         let item_count = self.left_items().len();
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
             match action {
@@ -399,6 +445,10 @@ impl App {
                     if self.selected_left + 1 < item_count {
                         self.selected_left += 1;
                         self.reload_changed_files();
+                    } else if self.has_terminal_items() {
+                        // Jump to terminals section.
+                        self.left_section = LeftSection::Terminals;
+                        self.selected_terminal_index = 0;
                     }
                 }
                 Action::MoveUp => {
@@ -413,6 +463,7 @@ impl App {
                 }
                 Action::NewAgent => self.create_agent_for_selected_project()?,
                 Action::RefreshProject => self.refresh_selected_project()?,
+                Action::ShowTerminal => self.show_companion_terminal()?,
                 Action::DeleteSession => self.confirm_delete_selected_session()?,
                 Action::RenameSession => self.open_rename_session()?,
                 Action::CycleProvider => self.cycle_selected_project_provider()?,
@@ -430,7 +481,7 @@ impl App {
                         self.focus = FocusPane::Center;
                         self.center_mode = CenterMode::Agent;
                         self.input_target = InputTarget::Agent;
-                        self.fullscreen_agent = true;
+                        self.fullscreen_overlay = FullscreenOverlay::Agent;
                         let exit_key = self.bindings.label_for(Action::ExitInteractive);
                         self.set_info(format!(
                             "Interactive mode. Keys forwarded to agent. {exit_key} exits."
@@ -449,11 +500,46 @@ impl App {
         Ok(())
     }
 
+    fn handle_left_terminal_key(&mut self, key: KeyEvent) -> Result<()> {
+        let term_count = self.terminal_items().len();
+        if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
+            match action {
+                Action::MoveDown => {
+                    if self.selected_terminal_index + 1 < term_count {
+                        self.selected_terminal_index += 1;
+                    }
+                }
+                Action::MoveUp => {
+                    if self.selected_terminal_index > 0 {
+                        self.selected_terminal_index -= 1;
+                    } else {
+                        // Jump back to projects section.
+                        self.left_section = LeftSection::Projects;
+                        let item_count = self.left_items().len();
+                        if item_count > 0 {
+                            self.selected_left = item_count - 1;
+                        }
+                    }
+                }
+                Action::FocusAgent => {
+                    // Open terminal overlay for the selected terminal item.
+                    self.open_terminal_from_terminal_list()?;
+                }
+                Action::ShowTerminal => {
+                    self.open_terminal_from_terminal_list()?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     fn handle_center_key(&mut self, key: KeyEvent) -> Result<()> {
         let in_diff = matches!(self.center_mode, CenterMode::Diff { .. });
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Center) {
             match action {
                 Action::FocusAgent if !in_diff => self.activate_center_agent()?,
+                Action::ShowTerminal if !in_diff => self.show_companion_terminal()?,
                 Action::ReconnectAgent if !in_diff => {
                     // Allow relaunching an exited agent from the center pane,
                     // or entering interactive mode if the agent is active.
@@ -464,7 +550,7 @@ impl App {
                     if has_provider {
                         self.reset_pty_scrollback();
                         self.input_target = InputTarget::Agent;
-                        self.fullscreen_agent = true;
+                        self.fullscreen_overlay = FullscreenOverlay::Agent;
                     } else if self.selected_session().is_some() {
                         self.reconnect_selected_session()?;
                     }
@@ -512,12 +598,8 @@ impl App {
     }
 
     fn scroll_pty(&mut self, direction: ScrollDirection, amount: usize) {
-        let sid = match self.selected_session() {
-            Some(s) => s.id.clone(),
-            None => return,
-        };
-        let provider = match self.providers.get(&sid) {
-            Some(p) => p,
+        let provider = match self.selected_terminal_surface_client() {
+            Some(provider) => provider,
             None => return,
         };
         let up = matches!(direction, ScrollDirection::Up);
@@ -525,9 +607,7 @@ impl App {
     }
 
     fn reset_pty_scrollback(&self) {
-        if let Some(session) = self.selected_session()
-            && let Some(provider) = self.providers.get(&session.id)
-        {
+        if let Some(provider) = self.selected_terminal_surface_client() {
             provider.set_scrollback(0);
         }
     }
@@ -826,18 +906,20 @@ impl App {
     }
 
     fn handle_agent_input(&mut self, key: KeyEvent) -> Result<bool> {
-        let session_id = match self.selected_session() {
-            Some(s) => s.id.clone(),
-            None => {
-                self.input_target = InputTarget::None;
-                return Ok(false);
-            }
-        };
-        let provider = match self.providers.get(&session_id) {
+        if self.selected_session().is_none() {
+            self.input_target = InputTarget::None;
+            return Ok(false);
+        }
+        let surface = self.session_surface;
+        let provider = match self.selected_terminal_surface_client() {
             Some(p) => p,
             None => {
                 self.input_target = InputTarget::None;
-                self.set_error("Agent disconnected.");
+                let label = match surface {
+                    SessionSurface::Agent => "Agent",
+                    SessionSurface::Terminal => "Companion terminal",
+                };
+                self.set_error(format!("{label} disconnected."));
                 return Ok(false);
             }
         };
@@ -846,11 +928,9 @@ impl App {
         if let Some(Action::ExitInteractive) = self.bindings.lookup(&key, BindingScope::Interactive)
         {
             self.input_target = InputTarget::None;
-            self.fullscreen_agent = false;
-            let reenter_key = self.bindings.label_for(Action::FocusAgent);
-            self.set_info(format!(
-                "Exited interactive mode. Press {reenter_key} to re-enter."
-            ));
+            self.fullscreen_overlay = FullscreenOverlay::None;
+            self.session_surface = SessionSurface::Agent;
+            self.set_info("Exited interactive mode.");
             return Ok(false);
         }
 
@@ -1638,7 +1718,7 @@ impl App {
     }
 
     fn mouse_target(&self, column: u16, row: u16) -> Option<MouseTarget> {
-        if self.fullscreen_agent {
+        if !matches!(self.fullscreen_overlay, FullscreenOverlay::None) {
             return self
                 .mouse_layout
                 .agent_term
@@ -1655,6 +1735,18 @@ impl App {
                 return Some(MouseTarget::LeftRow(index));
             }
             return Some(MouseTarget::LeftPane);
+        }
+
+        {
+            let tl = self.mouse_layout.terminal_list;
+            if tl.width > 0 && tl.height > 0 && contains_point(tl, column, row) {
+                let index = usize::from(row.saturating_sub(tl.y));
+                let term_count = self.terminal_items().len();
+                if index < term_count {
+                    return Some(MouseTarget::TerminalRow(index));
+                }
+                return Some(MouseTarget::TerminalPane);
+            }
         }
 
         if contains_point(self.mouse_layout.left, column, row) {
@@ -1721,6 +1813,16 @@ impl App {
             return Some(ResizeDragState::RightDivider);
         }
 
+        // Horizontal divider between Projects and Terminals sections.
+        let tl = self.mouse_layout.terminal_list;
+        if tl.width > 0 && tl.height > 0 {
+            let left = self.mouse_layout.left;
+            let divider_row = tl.y.saturating_sub(1);
+            if row == divider_row && column >= left.x && column < left.x + left.width {
+                return Some(ResizeDragState::TerminalDivider);
+            }
+        }
+
         None
     }
 
@@ -1730,7 +1832,7 @@ impl App {
         }
         self.focus = FocusPane::Left;
         self.input_target = InputTarget::None;
-        self.fullscreen_agent = false;
+        self.fullscreen_overlay = FullscreenOverlay::None;
         if self.selected_left != index {
             self.selected_left = index;
             self.reload_changed_files();
@@ -2053,7 +2155,7 @@ impl App {
                             .unwrap_or(false)
                         {
                             self.input_target = InputTarget::Agent;
-                            self.fullscreen_agent = true;
+                            self.fullscreen_overlay = FullscreenOverlay::Agent;
                         } else if self.selected_session().is_some() {
                             self.reconnect_selected_session()?;
                         }
@@ -2072,7 +2174,7 @@ impl App {
                     .unwrap_or(false)
                 {
                     self.input_target = InputTarget::Agent;
-                    self.fullscreen_agent = true;
+                    self.fullscreen_overlay = FullscreenOverlay::Agent;
                 } else if self.selected_session().is_some() {
                     self.reconnect_selected_session()?;
                 }
@@ -2088,7 +2190,7 @@ impl App {
         }
     }
 
-    fn activate_center_agent(&mut self) -> Result<()> {
+    pub(crate) fn activate_center_agent(&mut self) -> Result<()> {
         if !matches!(self.center_mode, CenterMode::Agent) {
             return Ok(());
         }
@@ -2100,7 +2202,7 @@ impl App {
         {
             self.reset_pty_scrollback();
             self.input_target = InputTarget::Agent;
-            self.fullscreen_agent = true;
+            self.fullscreen_overlay = FullscreenOverlay::Agent;
             let exit_key = self.bindings.label_for(Action::ExitInteractive);
             self.set_info(format!(
                 "Interactive mode. Keys forwarded to agent. {exit_key} exits."
@@ -2131,7 +2233,7 @@ impl App {
     fn set_file_selection(&mut self, section: RightSection, index: Option<usize>) {
         self.focus = FocusPane::Files;
         self.input_target = InputTarget::None;
-        self.fullscreen_agent = false;
+        self.fullscreen_overlay = FullscreenOverlay::None;
         self.right_section = section;
         if let Some(index) = index {
             self.files_index = index;
@@ -2143,7 +2245,7 @@ impl App {
         self.focus = FocusPane::Files;
         self.right_section = RightSection::CommitInput;
         self.input_target = InputTarget::CommitMessage;
-        self.fullscreen_agent = false;
+        self.fullscreen_overlay = FullscreenOverlay::None;
     }
 
     fn commit_scroll_max(&self) -> u16 {
@@ -2244,10 +2346,10 @@ impl App {
         let Some(area) = self.mouse_layout.agent_term else {
             return;
         };
-        let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
+        let Some(_session_id) = self.selected_session().map(|session| session.id.clone()) else {
             return;
         };
-        let Some(provider) = self.providers.get(&session_id) else {
+        let Some(provider) = self.selected_terminal_surface_client() else {
             return;
         };
 
@@ -2276,7 +2378,7 @@ impl App {
         }
     }
 
-    fn update_dragged_widths(&mut self, column: u16) {
+    fn update_dragged_panes(&mut self, column: u16, row: u16) {
         let body = self.mouse_layout.body;
         if body.width == 0 {
             return;
@@ -2295,6 +2397,17 @@ impl App {
                 let columns = body_right.saturating_sub(column).clamp(1, body.width);
                 self.set_right_width_pct(pct_from_columns(columns, body.width));
             }
+            Some(ResizeDragState::TerminalDivider) => {
+                let left = self.mouse_layout.left;
+                if left.height > 0 {
+                    // Terminal height = distance from mouse row to bottom of left pane.
+                    let left_bottom = left.y + left.height;
+                    let term_rows = left_bottom.saturating_sub(row).clamp(1, left.height);
+                    let pct = pct_from_columns(term_rows, left.height); // reuse same % helper
+                    self.terminal_pane_height_pct =
+                        pct.clamp(MIN_TERMINAL_PANE_HEIGHT_PCT, MAX_TERMINAL_PANE_HEIGHT_PCT);
+                }
+            }
             None => {}
         }
     }
@@ -2302,9 +2415,11 @@ impl App {
     fn persist_pane_widths(&mut self) {
         if self.config.ui.left_width_pct != self.left_width_pct
             || self.config.ui.right_width_pct != self.right_width_pct
+            || self.config.ui.terminal_pane_height_pct != self.terminal_pane_height_pct
         {
             self.config.ui.left_width_pct = self.left_width_pct;
             self.config.ui.right_width_pct = self.right_width_pct;
+            self.config.ui.terminal_pane_height_pct = self.terminal_pane_height_pct;
             let _ = save_config(&self.paths.config_path, &self.config, &self.bindings);
         }
     }
@@ -2334,7 +2449,7 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row) {
                     self.mouse_drag = Some(drag);
-                    self.update_dragged_widths(mouse.column);
+                    self.update_dragged_panes(mouse.column, mouse.row);
                     return false;
                 }
 
@@ -2342,11 +2457,12 @@ impl App {
                     Some(MouseTarget::LeftPane) => {
                         self.focus = FocusPane::Left;
                         self.input_target = InputTarget::None;
-                        self.fullscreen_agent = false;
+                        self.fullscreen_overlay = FullscreenOverlay::None;
                     }
                     Some(MouseTarget::LeftRow(index)) => {
                         let double_click =
                             self.register_mouse_click(MouseClickTarget::LeftRow(index));
+                        self.left_section = LeftSection::Projects;
                         self.set_left_selection(index);
                         if double_click {
                             match self.left_items().get(self.selected_left) {
@@ -2360,6 +2476,24 @@ impl App {
                             }
                         }
                     }
+                    Some(MouseTarget::TerminalRow(index)) => {
+                        let double_click =
+                            self.register_mouse_click(MouseClickTarget::TerminalRow(index));
+                        self.focus = FocusPane::Left;
+                        self.left_section = LeftSection::Terminals;
+                        self.selected_terminal_index = index;
+                        self.input_target = InputTarget::None;
+                        self.fullscreen_overlay = FullscreenOverlay::None;
+                        if double_click {
+                            let _ = self.open_terminal_from_terminal_list();
+                        }
+                    }
+                    Some(MouseTarget::TerminalPane) => {
+                        self.focus = FocusPane::Left;
+                        self.left_section = LeftSection::Terminals;
+                        self.input_target = InputTarget::None;
+                        self.fullscreen_overlay = FullscreenOverlay::None;
+                    }
                     Some(MouseTarget::Center) => {
                         let double_click = self.register_mouse_click(MouseClickTarget::CenterPane);
                         self.focus = FocusPane::Center;
@@ -2370,7 +2504,7 @@ impl App {
                     Some(MouseTarget::FilesPane) => {
                         self.focus = FocusPane::Files;
                         self.input_target = InputTarget::None;
-                        self.fullscreen_agent = false;
+                        self.fullscreen_overlay = FullscreenOverlay::None;
                     }
                     Some(MouseTarget::UnstagedFile(index)) => {
                         let double_click = index
@@ -2407,7 +2541,7 @@ impl App {
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 if self.mouse_drag.is_some() {
-                    self.update_dragged_widths(mouse.column);
+                    self.update_dragged_panes(mouse.column, mouse.row);
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
@@ -2464,13 +2598,16 @@ mod tests {
     use std::sync::{Arc, Mutex, mpsc};
 
     use crate::app::{
-        App, CenterMode, FocusPane, InputTarget, MouseLayoutState, OverlayMouseLayout,
-        OverlayMouseLayoutState, PromptState, RightSection,
+        App, CenterMode, FocusPane, FullscreenOverlay, InputTarget, LeftSection, MouseLayoutState,
+        OverlayMouseLayout, OverlayMouseLayoutState, PromptState, RightSection,
     };
     use crate::config::{Config, DuxPaths};
     use crate::editor::{DetectedEditor, EditorKind};
     use crate::keybindings::{Action, BINDING_DEFS, BindingScope, RuntimeBindings};
-    use crate::model::{AgentSession, ChangedFile, Project, ProviderKind, SessionStatus};
+    use crate::model::{
+        AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProviderKind, SessionStatus,
+        SessionSurface,
+    };
     use crate::pty::PtyClient;
     use crate::statusline::StatusLine;
     use crate::storage::SessionStore;
@@ -2563,6 +2700,8 @@ mod tests {
             staged_files: Vec::new(),
             unstaged_files: Vec::new(),
             selected_left: 0,
+            left_section: crate::app::LeftSection::Projects,
+            selected_terminal_index: 0,
             right_section: RightSection::Unstaged,
             files_index: 0,
             files_search_query: String::new(),
@@ -2573,6 +2712,7 @@ mod tests {
             commit_generating: false,
             left_width_pct: 20,
             right_width_pct: 23,
+            terminal_pane_height_pct: 35,
             focus: FocusPane::Left,
             center_mode: CenterMode::Agent,
             left_collapsed: false,
@@ -2580,13 +2720,17 @@ mod tests {
             help_scroll: None,
             last_help_height: 0,
             last_help_lines: 0,
-            fullscreen_agent: false,
+            fullscreen_overlay: FullscreenOverlay::None,
             status: StatusLine::new("ready"),
             prompt: PromptState::None,
             input_target: InputTarget::None,
+            session_surface: crate::model::SessionSurface::Agent,
             worker_tx,
             worker_rx,
             providers: std::collections::HashMap::new(),
+            companion_terminals: std::collections::HashMap::new(),
+            active_terminal_id: None,
+            terminal_counter: 0,
             create_agent_in_flight: false,
             last_pty_size: (0, 0),
             last_diff_height: 0,
@@ -2594,7 +2738,7 @@ mod tests {
             theme: Theme::default_dark(),
             tick_count: 0,
             watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
-            has_active_agent: Arc::new(AtomicBool::new(false)),
+            has_active_processes: Arc::new(AtomicBool::new(false)),
             collapsed_projects: std::collections::HashSet::new(),
             left_items_cache: Vec::new(),
             mouse_layout: MouseLayoutState::default(),
@@ -2623,6 +2767,7 @@ mod tests {
             center: Rect::new(20, 0, 57, 20),
             right: Rect::new(77, 0, 23, 20),
             left_list: Rect::new(1, 1, 18, 10),
+            terminal_list: Rect::default(),
             agent_term: Some(Rect::new(21, 1, 55, 16)),
             unstaged_list: Some(Rect::new(78, 1, 21, 8)),
             staged_list: Some(Rect::new(78, 9, 21, 5)),
@@ -2795,13 +2940,13 @@ mod tests {
     fn open_rename_session_clears_interactive_target() {
         let mut app = test_app(default_bindings());
         app.input_target = InputTarget::Agent;
-        app.fullscreen_agent = true;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
 
         app.open_rename_session().unwrap();
 
         assert!(matches!(app.prompt, PromptState::RenameSession { .. }));
         assert_eq!(app.input_target, InputTarget::None);
-        assert!(!app.fullscreen_agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
     }
 
     #[test]
@@ -3096,7 +3241,7 @@ mod tests {
         assert!(app.collapsed_projects.contains(&project_id));
         assert_eq!(app.selected_left, 0);
         assert_eq!(app.input_target, InputTarget::None);
-        assert!(!app.fullscreen_agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
     }
 
     #[test]
@@ -3125,7 +3270,7 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 9));
 
         assert_eq!(app.focus, FocusPane::Left);
-        assert!(!app.fullscreen_agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
         assert_eq!(app.input_target, InputTarget::None);
         assert!(matches!(app.center_mode, CenterMode::Agent));
         assert_eq!(app.selected_left, 1);
@@ -3156,7 +3301,7 @@ mod tests {
 
         assert_eq!(app.focus, FocusPane::Center);
         assert_eq!(app.input_target, InputTarget::Agent);
-        assert!(app.fullscreen_agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
     }
 
     #[test]
@@ -3537,7 +3682,8 @@ mod tests {
     fn mouse_click_quit_dialog_buttons_cancel_or_exit() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmQuit {
-            active_count: 1,
+            agent_count: 1,
+            terminal_count: 0,
             confirm_selected: false,
         };
         install_confirm_quit_overlay(&mut app);
@@ -3547,13 +3693,205 @@ mod tests {
 
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmQuit {
-            active_count: 1,
+            agent_count: 1,
+            terminal_count: 0,
             confirm_selected: true,
         };
         install_confirm_quit_overlay(&mut app);
         let should_quit = app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 53, 10));
         assert!(should_quit);
         assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    #[test]
+    fn quit_prompt_counts_running_companion_terminals_and_agents() {
+        let mut app = test_app(default_bindings());
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let (command, args) = ("/bin/sh", vec!["-c".to_string(), "sleep 5".to_string()]);
+        let provider =
+            PtyClient::spawn(command, &args, worktree, 24, 80, 1_000).expect("spawn test agent");
+        let session_id = app.sessions[0].id.clone();
+        app.providers.insert(session_id.clone(), provider);
+        // Insert a companion terminal to simulate a running terminal.
+        let term_client =
+            PtyClient::spawn(command, &args, worktree, 24, 80, 1_000).expect("spawn test terminal");
+        app.companion_terminals.insert(
+            "term-test".to_string(),
+            crate::app::CompanionTerminal {
+                session_id,
+                label: "test".to_string(),
+                foreground_cmd: None,
+                client: term_client,
+            },
+        );
+
+        let should_quit = app
+            .handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+            .expect("handle quit");
+
+        assert!(!should_quit);
+        match app.prompt {
+            PromptState::ConfirmQuit {
+                agent_count,
+                terminal_count,
+                ..
+            } => {
+                assert_eq!(agent_count, 1);
+                assert_eq!(terminal_count, 1);
+            }
+            _ => panic!("expected quit confirmation"),
+        }
+    }
+
+    #[test]
+    fn launch_companion_terminal_sets_runtime_state_and_overlay() {
+        let mut app = test_app(default_bindings());
+
+        app.show_companion_terminal()
+            .expect("launch companion terminal");
+
+        assert_eq!(
+            app.selected_companion_terminal_status(),
+            CompanionTerminalStatus::Running
+        );
+        assert_eq!(app.companion_terminals.len(), 1);
+        assert!(app.active_terminal_id.is_some());
+        assert_eq!(app.session_surface, SessionSurface::Terminal);
+        assert_eq!(app.input_target, InputTarget::Terminal);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
+    }
+
+    #[test]
+    fn multiple_terminals_per_session() {
+        let mut app = test_app(default_bindings());
+
+        app.show_companion_terminal().expect("first terminal");
+        let first_id = app.active_terminal_id.clone().unwrap();
+
+        // Close overlay, launch another.
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        app.input_target = InputTarget::None;
+        app.session_surface = SessionSurface::Agent;
+
+        app.show_companion_terminal().expect("second terminal");
+        let second_id = app.active_terminal_id.clone().unwrap();
+
+        assert_ne!(first_id, second_id);
+        assert_eq!(app.companion_terminals.len(), 2);
+        assert_eq!(app.terminal_items().len(), 2);
+    }
+
+    #[test]
+    fn exit_interactive_from_terminal_overlay_resets_state() {
+        let mut app = test_app(default_bindings());
+
+        app.show_companion_terminal()
+            .expect("launch companion terminal");
+
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
+        assert_eq!(app.input_target, InputTarget::Terminal);
+
+        // Simulate Ctrl-G (ExitInteractive).
+        let ctrl_g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        app.handle_key(ctrl_g).unwrap();
+
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+        assert_eq!(app.session_surface, SessionSurface::Agent);
+        assert_eq!(app.input_target, InputTarget::None);
+    }
+
+    #[test]
+    fn close_top_overlay_closes_terminal_overlay() {
+        let mut app = test_app(default_bindings());
+
+        app.show_companion_terminal()
+            .expect("launch companion terminal");
+
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
+
+        let closed = app.close_top_overlay();
+        assert!(closed);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+        assert_eq!(app.session_surface, SessionSurface::Agent);
+        // Terminal PTY should still be alive in the map.
+        assert_eq!(app.companion_terminals.len(), 1);
+    }
+
+    #[test]
+    fn session_switch_closes_terminal_overlay_but_keeps_pty() {
+        let mut app = test_app(default_bindings());
+
+        app.show_companion_terminal()
+            .expect("launch companion terminal");
+
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
+
+        // Switch to project row (index 0) — simulates user clicking a different item.
+        app.set_left_selection(0);
+
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+        // Terminal PTY should still be alive.
+        assert_eq!(app.companion_terminals.len(), 1);
+    }
+
+    #[test]
+    fn terminal_items_returns_running_terminals() {
+        let mut app = test_app(default_bindings());
+
+        // No terminals launched yet.
+        assert!(app.terminal_items().is_empty());
+
+        // Launch a terminal.
+        app.show_companion_terminal()
+            .expect("launch companion terminal");
+
+        assert_eq!(app.terminal_items().len(), 1);
+    }
+
+    #[test]
+    fn left_section_navigation_crosses_to_terminals() {
+        let mut app = test_app(default_bindings());
+        app.show_companion_terminal()
+            .expect("launch companion terminal");
+        // Close overlay and go back to projects section.
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        app.input_target = InputTarget::None;
+        app.session_surface = SessionSurface::Agent;
+        app.left_section = LeftSection::Projects;
+        app.focus = FocusPane::Left;
+
+        // Navigate down past the last project item.
+        let item_count = app.left_items().len();
+        app.selected_left = item_count - 1;
+
+        let down = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        app.handle_key(down).unwrap();
+
+        assert_eq!(app.left_section, LeftSection::Terminals);
+        assert_eq!(app.selected_terminal_index, 0);
+    }
+
+    #[test]
+    fn header_running_terminal_count() {
+        let mut app = test_app(default_bindings());
+
+        assert_eq!(app.running_companion_terminal_count(), 0);
+
+        let session_id = app.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let (command, args) = ("/bin/sh", vec!["-c".to_string(), "sleep 2".to_string()]);
+        let client = PtyClient::spawn(command, &args, worktree, 24, 80, 1_000).expect("spawn");
+        app.companion_terminals.insert(
+            "term-1".to_string(),
+            crate::app::CompanionTerminal {
+                session_id,
+                label: "test".to_string(),
+                foreground_cmd: None,
+                client,
+            },
+        );
+
+        assert_eq!(app.running_companion_terminal_count(), 1);
     }
 
     #[test]
