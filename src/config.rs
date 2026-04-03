@@ -29,6 +29,7 @@ Rules:
 pub struct Config {
     pub defaults: Defaults,
     pub providers: ProvidersConfig,
+    pub terminal: TerminalConfig,
     pub logging: LoggingConfig,
     pub projects: Vec<ProjectConfig>,
     pub ui: UiConfig,
@@ -57,6 +58,13 @@ pub struct Defaults {
 pub struct ProvidersConfig {
     #[serde(flatten)]
     pub commands: IndexMap<String, ProviderCommandConfig>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalConfig {
+    pub command: String,
+    pub args: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -109,6 +117,7 @@ fn new_project_id() -> String {
 pub struct UiConfig {
     pub left_width_pct: u16,
     pub right_width_pct: u16,
+    pub terminal_pane_height_pct: u16,
     pub agent_scrollback_lines: usize,
 }
 
@@ -117,6 +126,7 @@ impl Default for Config {
         Self {
             defaults: Defaults::default(),
             providers: ProvidersConfig::default(),
+            terminal: TerminalConfig::default(),
             logging: LoggingConfig {
                 level: "info".to_string(),
                 path: "dux.log".to_string(),
@@ -125,6 +135,7 @@ impl Default for Config {
             ui: UiConfig {
                 left_width_pct: 20,
                 right_width_pct: 23,
+                terminal_pane_height_pct: 35,
                 agent_scrollback_lines: 10_000,
             },
             editor: EditorConfig::default(),
@@ -215,6 +226,15 @@ impl Default for LoggingConfig {
     }
 }
 
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            command: default_terminal_command(),
+            args: default_terminal_args(),
+        }
+    }
+}
+
 impl Default for EditorConfig {
     fn default() -> Self {
         Self {
@@ -228,6 +248,7 @@ impl Default for UiConfig {
         Self {
             left_width_pct: 17,
             right_width_pct: 19,
+            terminal_pane_height_pct: 35,
             agent_scrollback_lines: 10_000,
         }
     }
@@ -361,6 +382,8 @@ enum ConfigEntry {
     },
     /// Renders all `[providers.*]` sub-tables dynamically.
     Providers,
+    /// Renders the `[terminal]` section.
+    Terminal,
     /// Renders the `[[projects]]` array.
     Projects,
     /// Renders the `[keys]` section with all keybindings.
@@ -401,6 +424,7 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
         },
         ConfigEntry::Blank,
         ConfigEntry::Providers,
+        ConfigEntry::Terminal,
         ConfigEntry::Section("logging"),
         ConfigEntry::Field {
             key: "level",
@@ -429,6 +453,13 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             key: "right_width_pct",
             comment: None,
             value_fn: |c| FieldValue::U16(c.ui.right_width_pct),
+        },
+        ConfigEntry::Field {
+            key: "terminal_pane_height_pct",
+            comment: Some(CommentSource::Static(
+                "# Maximum height percentage of the left pane used by the companion terminals list.",
+            )),
+            value_fn: |c| FieldValue::U16(c.ui.terminal_pane_height_pct),
         },
         ConfigEntry::Field {
             key: "agent_scrollback_lines",
@@ -504,6 +535,7 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
                 }
             }
             ConfigEntry::Providers => render_provider_configs(&mut out, &config.providers),
+            ConfigEntry::Terminal => render_terminal_config(&mut out, &config.terminal),
             ConfigEntry::Projects => render_projects(&mut out, &config.projects),
             ConfigEntry::Keys => render_keys_config(&mut out, &config.keys, bindings),
         }
@@ -655,6 +687,20 @@ fn render_string_list(values: &[String]) -> String {
     format!("[{rendered}]")
 }
 
+fn default_terminal_command() -> String {
+    env::var("SHELL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "/bin/sh".to_string())
+}
+
+fn default_terminal_args() -> Vec<String> {
+    // Launch as a login shell so the user's profile, aliases, and prompt
+    // are loaded. The -l flag is supported by bash, zsh, fish, dash, and
+    // all POSIX shells.
+    vec!["-l".to_string()]
+}
+
 fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 2] {
     [
         (
@@ -691,6 +737,24 @@ fn render_provider_configs(out: &mut String, providers: &ProvidersConfig) {
     for (name, config) in &providers.commands {
         render_provider_config(out, name, config);
     }
+}
+
+fn render_terminal_config(out: &mut String, terminal: &TerminalConfig) {
+    out.push_str("[terminal]\n");
+    out.push_str(
+        "# CLI command dux should use for the companion terminal bound to an agent session.\n",
+    );
+    out.push_str(&format!(
+        "command = \"{}\"\n",
+        escape_toml_string(&terminal.command)
+    ));
+    out.push_str(
+        "# Arguments for the companion terminal command. The default [\"-l\"] launches a login\n# shell so your profile, aliases, and prompt are loaded.\n",
+    );
+    out.push_str(&format!(
+        "args = {}\n\n",
+        render_string_list(&terminal.args)
+    ));
 }
 
 fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommandConfig) {
@@ -838,6 +902,9 @@ mod tests {
         assert!(rendered.contains("oneshot_args = "));
         assert!(rendered.contains("oneshot_output = "));
         assert!(rendered.contains("resume_args = "));
+        assert!(rendered.contains("[terminal]"));
+        assert!(rendered.contains("command = "));
+        assert!(rendered.contains("args = []"));
         assert!(rendered.contains("[ui]"));
         assert!(rendered.contains("agent_scrollback_lines = 10000"));
         assert!(rendered.contains("[editor]"));
@@ -935,6 +1002,17 @@ mod tests {
         let rendered = render_config_default(&config);
         let parsed: Config = toml::from_str(&rendered).expect("config should parse");
         assert_eq!(parsed.editor.default, "zed");
+    }
+
+    #[test]
+    fn default_config_round_trips_terminal_command() {
+        let mut config = Config::default();
+        config.terminal.command = "fish".to_string();
+        config.terminal.args = vec!["-l".to_string()];
+        let rendered = render_config_default(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("config should parse");
+        assert_eq!(parsed.terminal.command, "fish");
+        assert_eq!(parsed.terminal.args, vec!["-l"]);
     }
 
     #[test]

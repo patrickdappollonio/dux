@@ -104,6 +104,19 @@ impl App {
                 project.default_provider.as_str().to_string(),
                 Style::default().fg(self.theme.branch_fg).bg(bg),
             ));
+            let running_terminals = self.running_companion_terminal_count();
+            if running_terminals > 0 {
+                spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
+                let label = if running_terminals == 1 {
+                    "● 1 terminal".to_string()
+                } else {
+                    format!("● {running_terminals} terminals")
+                };
+                spans.push(Span::styled(
+                    label,
+                    Style::default().fg(self.theme.session_active).bg(bg),
+                ));
+            }
         }
         Paragraph::new(Line::from(spans))
             .style(self.theme.header_style())
@@ -158,6 +171,32 @@ impl App {
             return;
         }
 
+        let terminal_items = self.terminal_items();
+        let has_terminals = !terminal_items.is_empty();
+
+        // Split area vertically: projects on top, terminals on bottom (if any).
+        let (projects_area, terminals_area) = if has_terminals {
+            let pct = self.terminal_pane_height_pct.clamp(10, 80);
+            let projects_pct = 100u16.saturating_sub(pct).max(20);
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(projects_pct),
+                    Constraint::Percentage(pct),
+                ])
+                .split(area);
+            (chunks[0], Some(chunks[1]))
+        } else {
+            (area, None)
+        };
+
+        // Collect terminal display info for rendering.
+        // Show the foreground command if one is running, otherwise the session label.
+        let terminal_render_data: Vec<(String, Option<String>)> = terminal_items
+            .iter()
+            .map(|(_, t)| (t.label.clone(), t.foreground_cmd.clone()))
+            .collect();
+
         let session_counts: HashMap<String, usize> = {
             let mut counts = HashMap::new();
             for session in &self.sessions {
@@ -166,6 +205,7 @@ impl App {
             counts
         };
         let left_items = self.left_items();
+        let projects_focused = focused && self.left_section == LeftSection::Projects;
         let items = left_items
             .iter()
             .enumerate()
@@ -201,29 +241,87 @@ impl App {
                         .clone()
                         .unwrap_or_else(|| session.branch_name.clone());
                     let (dot, dot_color) = self.theme.session_dot(&session.status);
-                    ListItem::new(Line::from(vec![
-                        Span::styled(connector, Style::default().fg(self.theme.project_icon)),
-                        Span::styled(format!("{dot} "), Style::default().fg(dot_color)),
-                        Span::styled(label, Style::default().fg(dot_color)),
-                        Span::styled(
-                            format!(" ({})", session.provider.as_str()),
-                            Style::default().fg(self.theme.provider_label_fg),
-                        ),
-                    ]))
+                    ListItem::new(Line::from(
+                        vec![
+                            Span::styled(connector, Style::default().fg(self.theme.project_icon)),
+                            Span::styled(format!("{dot} "), Style::default().fg(dot_color)),
+                            Span::styled(label, Style::default().fg(dot_color)),
+                            Span::styled(
+                                format!(" ({})", session.provider.as_str()),
+                                Style::default().fg(self.theme.provider_label_fg),
+                            ),
+                        ]
+                        .into_iter()
+                        .chain(companion_terminal_row_badge(
+                            self.companion_terminal_status(&session.id),
+                            &self.theme,
+                        ))
+                        .collect::<Vec<_>>(),
+                    ))
                 }
             })
             .collect::<Vec<_>>();
         let title = format!("Projects ({})", self.projects.len());
-        self.mouse_layout.left_list = self.themed_block(&title, focused).inner(area);
-        let mut state = ListState::default().with_selected(Some(self.selected_left));
+        self.mouse_layout.left_list = self
+            .themed_block(&title, projects_focused)
+            .inner(projects_area);
+        let mut state =
+            ListState::default().with_selected(if self.left_section == LeftSection::Projects {
+                Some(self.selected_left)
+            } else {
+                None
+            });
         StatefulWidget::render(
             List::new(items)
-                .block(self.themed_block(&title, focused))
+                .block(self.themed_block(&title, projects_focused))
                 .highlight_style(self.theme.selection_style()),
-            area,
+            projects_area,
             frame.buffer_mut(),
             &mut state,
         );
+
+        // Render terminals section if any terminals exist.
+        if let Some(term_area) = terminals_area {
+            let terminals_focused = focused && self.left_section == LeftSection::Terminals;
+            let term_title = format!("Terminals ({})", terminal_render_data.len());
+            self.mouse_layout.terminal_list = self
+                .themed_block(&term_title, terminals_focused)
+                .inner(term_area);
+            let term_items: Vec<ListItem> = terminal_render_data
+                .iter()
+                .map(|(label, fg_cmd)| {
+                    let color = self.theme.session_active;
+                    let mut spans = vec![Span::styled("● ", Style::default().fg(color))];
+                    if let Some(cmd) = fg_cmd {
+                        spans.push(Span::styled(cmd.clone(), Style::default().fg(color)));
+                        spans.push(Span::styled(
+                            format!(" · {label}"),
+                            Style::default().fg(self.theme.provider_label_fg),
+                        ));
+                    } else {
+                        spans.push(Span::styled(label.clone(), Style::default().fg(color)));
+                    }
+                    ListItem::new(Line::from(spans))
+                })
+                .collect();
+            let mut term_state = ListState::default().with_selected(
+                if self.left_section == LeftSection::Terminals {
+                    Some(self.selected_terminal_index)
+                } else {
+                    None
+                },
+            );
+            StatefulWidget::render(
+                List::new(term_items)
+                    .block(self.themed_block(&term_title, terminals_focused))
+                    .highlight_style(self.theme.selection_style()),
+                term_area,
+                frame.buffer_mut(),
+                &mut term_state,
+            );
+        } else {
+            self.mouse_layout.terminal_list = Rect::default();
+        }
     }
 
     fn render_center(&mut self, frame: &mut Frame, area: Rect) {
@@ -232,15 +330,21 @@ impl App {
             CenterMode::Diff { .. } => {
                 self.render_diff(frame, area, focused);
             }
-            CenterMode::Agent if self.fullscreen_agent => {
+            CenterMode::Agent if !matches!(self.fullscreen_overlay, FullscreenOverlay::None) => {
                 // Skip agent rendering here — fullscreen overlay handles it.
                 // Rendering in both places causes the PTY to be resized twice
                 // per frame (once to the small pane, once to the overlay).
-                self.themed_block("Agent", focused)
+                let title = self.center_pane_agent_title();
+                self.themed_block(&title, focused)
                     .render(area, frame.buffer_mut());
             }
             CenterMode::Agent => {
-                self.render_agent_terminal(frame, area, "Agent", focused);
+                let title = self.center_pane_agent_title();
+                // Center pane always renders the agent; terminal is an overlay.
+                let saved = self.session_surface;
+                self.session_surface = SessionSurface::Agent;
+                self.render_agent_terminal(frame, area, &title, focused);
+                self.session_surface = saved;
             }
         }
     }
@@ -347,6 +451,64 @@ impl App {
         );
     }
 
+    fn render_terminal_placeholder(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        status: CompanionTerminalStatus,
+        command_name: Option<&str>,
+    ) {
+        if area.width < 4 || area.height < 3 {
+            return;
+        }
+
+        let (icon, label) = companion_terminal_status_meta(status);
+        let command_name = command_name.unwrap_or("terminal");
+        let lines = match status {
+            CompanionTerminalStatus::NotLaunched => vec![
+                Line::from(Span::styled(
+                    format!("{icon} Companion terminal not launched"),
+                    Style::default().fg(companion_terminal_status_color(&self.theme, status)),
+                )),
+                Line::from(Span::styled(
+                    format!(
+                        "Launch {command_name} explicitly when you need a shell in this worktree."
+                    ),
+                    Style::default().fg(self.theme.hint_dim_desc_fg),
+                )),
+            ],
+            CompanionTerminalStatus::Running => vec![
+                Line::from(Span::styled(
+                    format!("{icon} Companion terminal {label}"),
+                    Style::default().fg(companion_terminal_status_color(&self.theme, status)),
+                )),
+                Line::from(Span::styled(
+                    "The PTY is alive even when hidden from the center pane.",
+                    Style::default().fg(self.theme.hint_dim_desc_fg),
+                )),
+            ],
+            CompanionTerminalStatus::Exited => vec![
+                Line::from(Span::styled(
+                    format!("{icon} Companion terminal exited"),
+                    Style::default().fg(companion_terminal_status_color(&self.theme, status)),
+                )),
+                Line::from(Span::styled(
+                    "Relaunch it explicitly to start a fresh shell.",
+                    Style::default().fg(self.theme.hint_dim_desc_fg),
+                )),
+            ],
+        };
+
+        let height = lines.len() as u16;
+        let y = area.y + area.height.saturating_sub(height) / 2;
+        Paragraph::new(lines)
+            .alignment(ratatui::layout::Alignment::Center)
+            .render(
+                Rect::new(area.x, y, area.width, height.max(1)),
+                frame.buffer_mut(),
+            );
+    }
+
     fn render_agent_terminal(&mut self, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
         let outer_block = self.themed_block(title, focused);
         let inner = outer_block.inner(area);
@@ -356,7 +518,13 @@ impl App {
             return;
         }
 
-        let is_input = self.input_target == InputTarget::Agent;
+        let active_surface = self.session_surface;
+        let terminal_status = self.selected_companion_terminal_status();
+        let is_input = matches!(
+            (self.input_target, active_surface),
+            (InputTarget::Agent, SessionSurface::Agent)
+                | (InputTarget::Terminal, SessionSurface::Terminal)
+        );
         let mut scrollback_offset: usize = 0;
         let mut rendered_content = false;
 
@@ -370,23 +538,38 @@ impl App {
 
         // Get the selected session's PTY screen.
         let session_id = self.selected_session().map(|s| s.id.clone());
-        let session_provider_name = self
-            .selected_session()
-            .map(|s| s.provider.as_str().to_owned());
-        let session_active = session_id
-            .as_ref()
-            .map(|id| self.providers.contains_key(id))
-            .unwrap_or(false);
+        let session_provider_name = match active_surface {
+            SessionSurface::Agent => self
+                .selected_session()
+                .map(|s| s.provider.as_str().to_owned()),
+            SessionSurface::Terminal => Some(
+                self.config
+                    .terminal
+                    .command
+                    .rsplit(std::path::MAIN_SEPARATOR)
+                    .next()
+                    .unwrap_or(self.config.terminal.command.as_str())
+                    .to_string(),
+            ),
+        };
+        let session_active = match active_surface {
+            SessionSurface::Agent => session_id
+                .as_ref()
+                .map(|id| self.providers.contains_key(id))
+                .unwrap_or(false),
+            SessionSurface::Terminal => terminal_status.is_running(),
+        };
+        let new_size = (term_area.height, term_area.width);
+        let should_resize = new_size != self.last_pty_size && new_size.0 > 0 && new_size.1 > 0;
+        if should_resize {
+            self.last_pty_size = new_size;
+        }
 
-        if let Some(ref sid) = session_id
-            && let Some(provider) = self.providers.get(sid)
-        {
+        if let Some(provider) = self.selected_terminal_surface_client() {
             rendered_content = true;
             // Resize PTY if needed.
-            let new_size = (term_area.height, term_area.width);
-            if new_size != self.last_pty_size && new_size.0 > 0 && new_size.1 > 0 {
+            if should_resize {
                 let _ = provider.resize(new_size.0, new_size.1);
-                self.last_pty_size = new_size;
             }
 
             if !provider.has_output() {
@@ -396,9 +579,13 @@ impl App {
                 let spinner = spinner_chars[idx];
                 let (label_spans, label_len) = match session_provider_name.as_deref() {
                     Some(name) => {
-                        let text_len = "Starting ".len() + name.len() + "...".len();
+                        let prefix = match active_surface {
+                            SessionSurface::Agent => "Starting ",
+                            SessionSurface::Terminal => "Launching ",
+                        };
+                        let text_len = prefix.len() + name.len() + "...".len();
                         let spans = vec![
-                            Span::styled("Starting ", Style::default().fg(self.theme.hint_desc_fg)),
+                            Span::styled(prefix, Style::default().fg(self.theme.hint_desc_fg)),
                             Span::styled(
                                 name.to_owned(),
                                 Style::default().fg(self.theme.branch_fg),
@@ -408,7 +595,10 @@ impl App {
                         (spans, text_len)
                     }
                     None => {
-                        let text = "Starting agent...";
+                        let text = match active_surface {
+                            SessionSurface::Agent => "Starting agent...",
+                            SessionSurface::Terminal => "Launching terminal...",
+                        };
                         let spans = vec![Span::styled(
                             text,
                             Style::default().fg(self.theme.hint_desc_fg),
@@ -527,7 +717,15 @@ impl App {
         }
 
         if !rendered_content {
-            self.render_ascii_logo(frame, term_area);
+            match active_surface {
+                SessionSurface::Agent => self.render_ascii_logo(frame, term_area),
+                SessionSurface::Terminal => self.render_terminal_placeholder(
+                    frame,
+                    term_area,
+                    terminal_status,
+                    session_provider_name.as_deref(),
+                ),
+            }
         }
 
         // Hint bar with top border.
@@ -543,7 +741,12 @@ impl App {
             let hint_line = if is_input {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
-                let cli_name = session_provider_name.as_deref().unwrap_or("agent");
+                let cli_name = session_provider_name
+                    .as_deref()
+                    .unwrap_or(match active_surface {
+                        SessionSurface::Agent => "agent",
+                        SessionSurface::Terminal => "terminal",
+                    });
                 let capitalized = {
                     let mut c = cli_name.chars();
                     match c.next() {
@@ -585,7 +788,28 @@ impl App {
             } else {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
-                if session_active {
+                if matches!(active_surface, SessionSurface::Terminal) {
+                    match terminal_status {
+                        CompanionTerminalStatus::Running => {
+                            spans.push(Span::styled(
+                                "Companion terminal is running. Hidden terminals stay alive in this worktree.",
+                                desc_style,
+                            ));
+                        }
+                        CompanionTerminalStatus::Exited => {
+                            spans.push(Span::styled(
+                                "Companion terminal exited. Relaunch it explicitly to start a fresh shell.",
+                                desc_style,
+                            ));
+                        }
+                        CompanionTerminalStatus::NotLaunched => {
+                            spans.push(Span::styled(
+                                "Companion terminal is not launched yet. Launch it explicitly when needed.",
+                                desc_style,
+                            ));
+                        }
+                    }
+                } else if session_active {
                     spans.extend(self.theme.dim_key_badge(&focus_agent, Color::Reset));
                     spans.push(Span::styled(" to interact. ", desc_style));
                     spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
@@ -1123,6 +1347,43 @@ impl App {
                 Span::raw("  "),
                 Span::styled(
                     desc.to_string(),
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ),
+            ]));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Companion terminal states",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )));
+        for status in [
+            CompanionTerminalStatus::NotLaunched,
+            CompanionTerminalStatus::Running,
+            CompanionTerminalStatus::Exited,
+        ] {
+            let (icon, label) = companion_terminal_status_meta(status);
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    icon,
+                    Style::default().fg(companion_terminal_status_color(&self.theme, status)),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    match status {
+                        CompanionTerminalStatus::NotLaunched => {
+                            format!("{label} — shell has not been started")
+                        }
+                        CompanionTerminalStatus::Running => {
+                            format!("{label} — companion shell is alive")
+                        }
+                        CompanionTerminalStatus::Exited => {
+                            format!("{label} — shell finished and awaits relaunch")
+                        }
+                    },
                     Style::default().fg(self.theme.hint_desc_fg),
                 ),
             ]));
@@ -1743,7 +2004,8 @@ impl App {
                 };
             }
             PromptState::ConfirmQuit {
-                active_count,
+                agent_count,
+                terminal_count,
                 confirm_selected,
             } => {
                 self.render_dim_overlay(frame);
@@ -1762,15 +2024,11 @@ impl App {
                     ])
                     .areas(inner);
 
-                let agent_word = if *active_count == 1 {
-                    "agent"
-                } else {
-                    "agents"
-                };
+                let process_desc = quit_process_description(*agent_count, *terminal_count);
                 let lines = vec![
                     Line::from(""),
                     Line::from(vec![
-                        Span::raw(format!(" {active_count} running {agent_word} will be ")),
+                        Span::raw(format!(" {process_desc} will be ")),
                         Span::styled(
                             "killed",
                             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -1779,7 +2037,7 @@ impl App {
                     ]),
                     Line::from(""),
                     Line::from(Span::styled(
-                        " Any in-progress work by those agents will be lost.",
+                        " Any in-progress work will be lost.",
                         Style::default().fg(Color::Yellow),
                     )),
                     Line::from(Span::styled(
@@ -2026,9 +2284,16 @@ impl App {
     }
 
     fn render_overlay(&mut self, frame: &mut Frame) {
-        if self.fullscreen_agent {
-            self.render_fullscreen_agent(frame);
-            return;
+        match self.fullscreen_overlay {
+            FullscreenOverlay::Agent => {
+                self.render_fullscreen_agent(frame);
+                return;
+            }
+            FullscreenOverlay::Terminal => {
+                self.render_fullscreen_terminal(frame);
+                return;
+            }
+            FullscreenOverlay::None => {}
         }
         if !matches!(self.prompt, PromptState::None) {
             self.render_prompt(frame);
@@ -2043,7 +2308,20 @@ impl App {
         self.render_dim_overlay(frame);
         let area = centered_rect(96, 94, frame.area());
         Clear.render(area, frame.buffer_mut());
+        let saved = self.session_surface;
+        self.session_surface = SessionSurface::Agent;
         self.render_agent_terminal(frame, area, " Agent (fullscreen) ", true);
+        self.session_surface = saved;
+    }
+
+    fn render_fullscreen_terminal(&mut self, frame: &mut Frame) {
+        self.render_dim_overlay(frame);
+        let area = centered_rect(96, 94, frame.area());
+        Clear.render(area, frame.buffer_mut());
+        let saved = self.session_surface;
+        self.session_surface = SessionSurface::Terminal;
+        self.render_agent_terminal(frame, area, " Terminal ", true);
+        self.session_surface = saved;
     }
 
     fn themed_block<'a>(&self, title: &'a str, focused: bool) -> Block<'a> {
@@ -2070,6 +2348,18 @@ impl App {
             .border_style(Style::default().fg(self.theme.overlay_border))
     }
 
+    fn center_pane_agent_title(&self) -> String {
+        if let Some(session) = self.selected_session() {
+            let count = self.session_terminal_count(&session.id);
+            if count == 1 {
+                return "Agent (+ 1 terminal)".to_string();
+            } else if count > 1 {
+                return format!("Agent (+ {count} terminals)");
+            }
+        }
+        "Agent".to_string()
+    }
+
     fn render_dim_overlay(&self, frame: &mut Frame) {
         let full = frame.area();
         // Keep the statusline (bottom rows) undimmed so errors stay visible.
@@ -2090,6 +2380,55 @@ impl App {
             }
         }
     }
+}
+
+fn quit_process_description(agents: usize, terminals: usize) -> String {
+    match (agents, terminals) {
+        (0, 1) => "1 running terminal".to_string(),
+        (0, t) => format!("{t} running terminals"),
+        (1, 0) => "1 running agent".to_string(),
+        (a, 0) => format!("{a} running agents"),
+        (a, t) => {
+            let agent_word = if a == 1 { "agent" } else { "agents" };
+            let term_word = if t == 1 { "terminal" } else { "terminals" };
+            format!("{a} running {agent_word} and {t} {term_word}")
+        }
+    }
+}
+
+fn companion_terminal_status_meta(status: CompanionTerminalStatus) -> (&'static str, &'static str) {
+    match status {
+        CompanionTerminalStatus::NotLaunched => ("○", "not launched"),
+        CompanionTerminalStatus::Running => ("●", "running"),
+        CompanionTerminalStatus::Exited => ("◐", "exited"),
+    }
+}
+
+fn companion_terminal_status_color(theme: &Theme, status: CompanionTerminalStatus) -> Color {
+    match status {
+        CompanionTerminalStatus::NotLaunched => theme.terminal_hint_fg,
+        CompanionTerminalStatus::Running => theme.session_active,
+        CompanionTerminalStatus::Exited => theme.session_detached,
+    }
+}
+
+fn companion_terminal_row_badge(
+    status: CompanionTerminalStatus,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    if matches!(status, CompanionTerminalStatus::NotLaunched) {
+        return Vec::new();
+    }
+    let (icon, label) = companion_terminal_status_meta(status);
+    vec![
+        Span::raw(" "),
+        Span::styled("[", Style::default().fg(theme.provider_label_fg)),
+        Span::styled(
+            format!("{icon} term {label}"),
+            Style::default().fg(companion_terminal_status_color(theme, status)),
+        ),
+        Span::styled("]", Style::default().fg(theme.provider_label_fg)),
+    ]
 }
 
 /// Format additions/deletions as right-aligned colored spans.
@@ -2306,6 +2645,31 @@ mod tests {
     #[test]
     fn scrollback_indicator_hides_at_live_bottom() {
         assert_eq!(scrollback_indicator_label(0, 800), None);
+    }
+
+    #[test]
+    fn companion_terminal_status_meta_covers_v1_states() {
+        assert_eq!(
+            companion_terminal_status_meta(CompanionTerminalStatus::NotLaunched),
+            ("○", "not launched")
+        );
+        assert_eq!(
+            companion_terminal_status_meta(CompanionTerminalStatus::Running),
+            ("●", "running")
+        );
+        assert_eq!(
+            companion_terminal_status_meta(CompanionTerminalStatus::Exited),
+            ("◐", "exited")
+        );
+    }
+
+    #[test]
+    fn row_badge_hidden_until_terminal_is_launched() {
+        let theme = Theme::default_dark();
+        assert!(
+            companion_terminal_row_badge(CompanionTerminalStatus::NotLaunched, &theme).is_empty()
+        );
+        assert!(!companion_terminal_row_badge(CompanionTerminalStatus::Running, &theme).is_empty());
     }
 
     #[test]

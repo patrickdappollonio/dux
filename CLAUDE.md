@@ -56,6 +56,7 @@ The current app provides:
 - User state lives under `~/.dux/` on macOS and `$XDG_CONFIG_HOME/dux/` (or `~/.config/dux/`) on Linux.
 - Worktrees are user data and should not be removed or mutated casually.
 - Git operations should be explicit and conservative, especially around the source checkout.
+- **Target platforms are macOS and Linux only.** Windows users run dux through WSL2, which is Linux. Do not add `#[cfg(windows)]` branches, `cfg!(windows)` checks, or Windows-specific code paths. Assume Unix throughout.
 
 ## App Module Structure
 

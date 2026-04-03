@@ -21,6 +21,7 @@ pub enum Action {
     DeleteSession,
     // Agent pane
     InteractAgent,
+    ShowTerminal,
     ExitInteractive,
     ToggleFullscreen,
     ScrollPageUp,
@@ -151,6 +152,7 @@ impl Action {
             Action::ReconnectAgent => "reconnect_agent",
             Action::DeleteSession => "delete_session",
             Action::InteractAgent => "interact_agent",
+            Action::ShowTerminal => "show_terminal",
             Action::ExitInteractive => "exit_interactive",
             Action::ToggleFullscreen => "toggle_fullscreen",
             Action::ScrollPageUp => "scroll_page_up",
@@ -211,6 +213,9 @@ impl Action {
             Action::ReconnectAgent => "Restart the CLI for the selected agent.",
             Action::DeleteSession => "Delete the selected session and worktree.",
             Action::InteractAgent => "Start a prompt turn for the agent.",
+            Action::ShowTerminal => {
+                "Launch, show, or relaunch the selected agent's companion terminal."
+            }
             Action::ExitInteractive => "Exit interactive mode (stop forwarding keys to agent).",
             Action::ToggleFullscreen => "Toggle fullscreen overlay for the agent terminal.",
             Action::ScrollPageUp => "Scroll up one page in the agent output.",
@@ -270,7 +275,8 @@ impl Action {
             Action::ExitInteractive
             | Action::ToggleFullscreen
             | Action::ScrollPageUp
-            | Action::ScrollPageDown => Some("Agent pane"),
+            | Action::ScrollPageDown
+            | Action::ShowTerminal => Some("Agent pane"),
             Action::ScrollLineUp | Action::ScrollLineDown => Some("Scrolling"),
             Action::OpenDiff
             | Action::StageUnstage
@@ -411,7 +417,10 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             (HintContext::LeftSession, "Focus"),
             (HintContext::Center, "Interact"),
         ],
-        palette: None,
+        palette: Some(PaletteEntry {
+            name: "show-agent",
+            description: "Show and focus the selected agent",
+        }),
     },
     BindingDef {
         action: Action::OpenProjectBrowser,
@@ -515,6 +524,23 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "reconnect-agent",
             description: "Restart the CLI for the selected agent",
+        }),
+    },
+    BindingDef {
+        action: Action::ShowTerminal,
+        default_keys: &[key!(t)],
+        scopes: &[BindingScope::Left, BindingScope::Center],
+        help: Some(HelpEntry {
+            section: "Agent pane",
+            description: "Launch/show companion terminal",
+        }),
+        hint_contexts: &[
+            (HintContext::LeftSession, "Terminal"),
+            (HintContext::Center, "Terminal"),
+        ],
+        palette: Some(PaletteEntry {
+            name: "show-terminal",
+            description: "Launch, show, or relaunch the selected companion terminal",
         }),
     },
     BindingDef {
@@ -1472,6 +1498,26 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn filtered_palette_includes_companion_terminal_commands() {
+        let bindings = default_bindings();
+        let results = bindings.filtered_palette("terminal");
+        let names = results
+            .iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"show-terminal"));
+    }
+
+    #[test]
+    fn left_scope_resolves_t_to_show_terminal() {
+        let bindings = default_bindings();
+        let t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&t, BindingScope::Left),
+            Some(Action::ShowTerminal)
+        );
+    }
     #[test]
     fn every_action_has_config_name() {
         // Ensure no action panics when asked for config_name

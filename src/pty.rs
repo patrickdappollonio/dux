@@ -231,12 +231,65 @@ impl PtyClient {
     pub fn try_wait(&mut self) -> Option<portable_pty::ExitStatus> {
         self.child.try_wait().ok().flatten()
     }
+
+    /// Returns the name of the foreground process running in this PTY, or
+    /// `None` if the shell itself is in the foreground (idle).
+    ///
+    /// Uses `tcgetpgrp()` via rustix to get the foreground process group and
+    /// compares it to the shell PID. If they differ, a child command is
+    /// running and its name is resolved via platform-specific APIs.
+    pub fn foreground_process_name(&self) -> Option<String> {
+        use std::os::unix::io::BorrowedFd;
+
+        let raw_fd = self.master.as_raw_fd()?;
+        // SAFETY: the master fd is valid for the lifetime of PtyClient.
+        let fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
+        let fg_pid = rustix::termios::tcgetpgrp(fd).ok()?;
+
+        let shell_pid = self.child.process_id()?;
+        if fg_pid.as_raw_nonzero().get() as u32 == shell_pid {
+            // Shell itself is in the foreground — no command running.
+            return None;
+        }
+
+        process_name(fg_pid.as_raw_nonzero().get() as u32)
+    }
 }
 
 impl Drop for PtyClient {
     fn drop(&mut self) {
         let _ = self.child.kill();
     }
+}
+
+/// Resolve a process name from its PID.
+///
+/// On Linux, reads `/proc/{pid}/comm` directly (fast, no subprocess).
+/// On macOS (no `/proc`), falls back to `ps -p {pid} -o comm=`.
+fn process_name(pid: u32) -> Option<String> {
+    // Fast path: try /proc/pid/comm (Linux).
+    if let Ok(name) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    // Fallback: use ps (works on macOS and any POSIX system).
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+        .ok()?;
+    let name = String::from_utf8_lossy(&output.stdout);
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // ps may return a full path; extract just the binary name.
+    std::path::Path::new(trimmed)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
 }
 
 struct TerminalState {

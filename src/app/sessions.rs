@@ -148,6 +148,114 @@ impl App {
         )
     }
 
+    pub(crate) fn spawn_companion_terminal_for_session(
+        &self,
+        session: &AgentSession,
+    ) -> Result<PtyClient> {
+        let (rows, cols) = if self.last_pty_size != (0, 0) {
+            self.last_pty_size
+        } else {
+            (24, 80)
+        };
+        logger::debug(&format!(
+            "spawning companion terminal {:?} {:?} in {} ({}x{})",
+            self.config.terminal.command,
+            self.config.terminal.args,
+            session.worktree_path,
+            cols,
+            rows,
+        ));
+        PtyClient::spawn(
+            &self.config.terminal.command,
+            &self.config.terminal.args,
+            Path::new(&session.worktree_path),
+            rows,
+            cols,
+            self.config.ui.agent_scrollback_lines,
+        )
+    }
+
+    pub(crate) fn show_agent_surface(&mut self) {
+        self.focus = FocusPane::Center;
+        self.center_mode = CenterMode::Agent;
+        self.session_surface = SessionSurface::Agent;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+    }
+
+    pub(crate) fn show_companion_terminal_surface(&mut self) {
+        self.session_surface = SessionSurface::Terminal;
+        self.fullscreen_overlay = FullscreenOverlay::Terminal;
+    }
+
+    /// Always spawns a new companion terminal for the selected session.
+    pub(crate) fn show_companion_terminal(&mut self) -> Result<()> {
+        let Some(session) = self.selected_session().cloned() else {
+            self.set_error("Select an agent session first.");
+            return Ok(());
+        };
+
+        let client = self.spawn_companion_terminal_for_session(&session)?;
+        let terminal_id = self.next_terminal_id();
+        let count = self.session_terminal_count(&session.id) + 1;
+        let label = if count == 1 {
+            session
+                .title
+                .clone()
+                .unwrap_or_else(|| session.branch_name.clone())
+        } else {
+            let base = session
+                .title
+                .clone()
+                .unwrap_or_else(|| session.branch_name.clone());
+            format!("{base} ({count})")
+        };
+        self.companion_terminals.insert(
+            terminal_id.clone(),
+            CompanionTerminal {
+                session_id: session.id.clone(),
+                label,
+                foreground_cmd: None,
+                client,
+            },
+        );
+        self.active_terminal_id = Some(terminal_id);
+        self.show_companion_terminal_surface();
+        self.input_target = InputTarget::Terminal;
+        self.set_info(format!(
+            "Launched terminal for agent \"{}\".",
+            session.branch_name
+        ));
+        Ok(())
+    }
+
+    /// Opens the terminal overlay for the terminal selected in the terminals list.
+    pub(crate) fn open_terminal_from_terminal_list(&mut self) -> Result<()> {
+        let items = self.terminal_items();
+        let Some(&(terminal_id, terminal)) = items.get(self.selected_terminal_index) else {
+            return Ok(());
+        };
+        let terminal_id = terminal_id.clone();
+        let session_id = terminal.session_id.clone();
+        let label = terminal.label.clone();
+        drop(items);
+
+        // Select this terminal's session in the left pane.
+        if let Some(pos) = self
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(idx) if self.sessions.get(*idx).map(|s| s.id.as_str()) == Some(session_id.as_str())))
+        {
+            self.selected_left = pos;
+        }
+        self.reload_changed_files();
+
+        self.active_terminal_id = Some(terminal_id);
+        self.show_companion_terminal_surface();
+        self.input_target = InputTarget::Terminal;
+        self.set_info(format!("Opened terminal \"{label}\"."));
+        Ok(())
+    }
+
     pub(crate) fn refresh_selected_project(&mut self) -> Result<()> {
         let Some(project) = self.selected_project().cloned() else {
             self.set_error("Select a project first.");
@@ -211,6 +319,7 @@ impl App {
             &session.branch_name,
         )?;
         self.providers.remove(&session.id);
+        self.clear_companion_terminals_for_session(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
         self.session_store.delete_session(&session.id)?;
         self.rebuild_left_items();
@@ -365,10 +474,9 @@ impl App {
             Ok(client) => {
                 self.providers.insert(session.id.clone(), client);
                 self.mark_session_status(&session.id, SessionStatus::Active);
-                self.focus = FocusPane::Center;
-                self.center_mode = CenterMode::Agent;
+                self.show_agent_surface();
                 self.input_target = InputTarget::Agent;
-                self.fullscreen_agent = true;
+                self.fullscreen_overlay = FullscreenOverlay::Agent;
                 let proj_name = self.project_name_for_session(&session);
                 self.set_info(format!(
                     "Relaunched {} agent \"{}\" in project \"{}\"",
