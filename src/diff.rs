@@ -95,15 +95,10 @@ pub fn diff_file(worktree_path: &Path, rel_path: &str, theme: &AppTheme) -> Resu
                 ChangeTag::Delete => (
                     "-",
                     theme.diff_remove,
-                    Some(Color::Rgb(60, 20, 20)),
+                    Some(theme.diff_remove_bg),
                     &mut hl_old,
                 ),
-                ChangeTag::Insert => (
-                    "+",
-                    theme.diff_add,
-                    Some(Color::Rgb(20, 50, 20)),
-                    &mut hl_new,
-                ),
+                ChangeTag::Insert => ("+", theme.diff_add, Some(theme.diff_add_bg), &mut hl_new),
                 ChangeTag::Equal => (" ", Color::Reset, None, &mut hl_new),
             };
 

@@ -50,6 +50,16 @@ pub struct Theme {
     pub button_active_fg: Color,
     pub button_confirm_border: Color,
     pub button_danger_border: Color,
+    pub overlay_dim_fg: Color,
+    pub diff_add_bg: Color,
+    pub diff_remove_bg: Color,
+    pub help_section_header_fg: Color,
+    pub input_cursor_fg: Color,
+    pub input_cursor_bg: Color,
+    pub input_label_fg: Color,
+    pub diff_binary_fg: Color,
+    pub diff_stat_add_fg: Color,
+    pub diff_stat_remove_fg: Color,
 }
 
 impl Theme {
@@ -101,6 +111,16 @@ impl Theme {
             button_active_fg: Color::White,
             button_confirm_border: Color::Cyan,
             button_danger_border: Color::Red,
+            overlay_dim_fg: Color::DarkGray,
+            diff_add_bg: Color::Rgb(20, 50, 20),
+            diff_remove_bg: Color::Rgb(60, 20, 20),
+            help_section_header_fg: Color::Cyan,
+            input_cursor_fg: Color::Black,
+            input_cursor_bg: Color::White,
+            input_label_fg: Color::White,
+            diff_binary_fg: Color::Yellow,
+            diff_stat_add_fg: Color::Green,
+            diff_stat_remove_fg: Color::Red,
         }
     }
 
@@ -151,7 +171,7 @@ impl Theme {
         match tone {
             crate::statusline::StatusTone::Info => ("●", self.session_active),
             crate::statusline::StatusTone::Busy => ("●", self.session_detached),
-            crate::statusline::StatusTone::Error => ("●", Color::Red),
+            crate::statusline::StatusTone::Error => ("●", self.status_error_fg),
         }
     }
 
@@ -191,5 +211,13 @@ impl Theme {
             ),
             Span::styled(">", Style::default().fg(self.hint_bracket_fg).bg(bg)),
         ]
+    }
+
+    pub fn key_badge_default<'a>(&self, key: &'a str) -> Vec<Span<'a>> {
+        self.key_badge(key, Color::Reset)
+    }
+
+    pub fn dim_key_badge_default<'a>(&self, key: &'a str) -> Vec<Span<'a>> {
+        self.dim_key_badge(key, Color::Reset)
     }
 }
