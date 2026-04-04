@@ -402,6 +402,29 @@ pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -
     Ok(())
 }
 
+/// Return the text of `git diff --cached` for the given worktree.
+/// Uses `-c color.diff=false` to strip ANSI escapes regardless of user config.
+pub fn staged_diff_text(worktree_path: &Path) -> Result<String> {
+    let wt = worktree_path.to_string_lossy();
+    let output = Command::new("git")
+        .args([
+            "-C",
+            wt.as_ref(),
+            "-c",
+            "color.diff=false",
+            "diff",
+            "--cached",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git diff --cached failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 pub fn commit(worktree_path: &Path, message: &str) -> Result<String> {
     let wt = worktree_path.to_string_lossy();
     let output = Command::new("git")
@@ -719,6 +742,43 @@ mod tests {
                     false
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn staged_diff_text_returns_diff_for_staged_changes() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "staged-diff");
+        fs::write(wt.join("hello.txt"), "hello world\n").unwrap();
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&wt)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["add", "hello.txt"]);
+        let diff = staged_diff_text(&wt).unwrap();
+        assert!(diff.contains("hello.txt"), "diff should mention the file");
+        assert!(
+            diff.contains("+hello world"),
+            "diff should contain the added line"
+        );
+    }
+
+    #[test]
+    fn staged_diff_text_empty_when_nothing_staged() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "no-staged");
+        let diff = staged_diff_text(&wt).unwrap();
+        assert!(
+            diff.is_empty(),
+            "diff should be empty when nothing is staged"
         );
     }
 

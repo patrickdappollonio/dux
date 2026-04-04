@@ -827,7 +827,23 @@ impl App {
         };
         let worktree = PathBuf::from(&session.worktree_path);
         let project_path = session.project_path.as_deref().unwrap_or("");
-        let prompt = self.config.commit_prompt_for_project(project_path);
+        let base_prompt = self.config.commit_prompt_for_project(project_path);
+
+        // Capture the staged diff up-front so the provider does not need tool
+        // access to inspect it. The diff is appended after the prompt text.
+        let diff_text = match git::staged_diff_text(&worktree) {
+            Ok(d) if d.is_empty() => {
+                self.set_error("No staged diff found.");
+                return Ok(());
+            }
+            Ok(d) => d,
+            Err(e) => {
+                self.set_error(format!("Failed to read staged diff: {e}"));
+                return Ok(());
+            }
+        };
+        let prompt = format!("{base_prompt}\n\n{diff_text}");
+
         let cfg = provider_config(&self.config, &session.provider);
         let prov = provider::create_provider(session.provider.as_str(), cfg);
         let tx = self.worker_tx.clone();

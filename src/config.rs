@@ -13,7 +13,7 @@ use crate::keybindings;
 use crate::model::ProviderKind;
 
 pub const DEFAULT_COMMIT_PROMPT: &str = "\
-You are a commit message generator. Look at the staged changes (git diff --cached) and write a commit message.
+Write a commit message for the following staged diff.
 
 Rules:
 - Subject line: use Conventional Commits (feat:, fix:, refactor:, docs:, test:, chore:, style:, perf:, ci:, build:). Imperative mood, max 72 chars, no period at the end.
@@ -22,7 +22,7 @@ Rules:
 - Larger changes (4+ files or multiple distinct logical concerns): subject line, blank line, then concise bullet points (one per logical change, each under 80 chars). Use \"- \" for bullets.
 - This is a plain text commit message, not markdown. NEVER use backticks, asterisks, code fences, or any markdown syntax. Refer to functions and files by name without formatting.
 - Focus on intent and impact, not mechanical description of lines added/removed.
-- Output ONLY the raw commit message text.";
+- Output ONLY the raw commit message. No preamble, no quotes, no explanation.";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -417,7 +417,7 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             key: "commit_prompt",
             comment: Some(CommentSource::Dynamic(format!(
                 "# Prompt sent to the AI provider when generating commit messages ({generate_commit_key}).\n\
-                 # The provider will inspect the staged diff on its own.\n\
+                 # The staged diff is appended automatically after the prompt text.\n\
                  # Override per-project by adding commit_prompt in a [[projects]] entry.",
             ))),
             value_fn: |c| FieldValue::MultilineStr(c.defaults.commit_prompt.clone()),
@@ -709,7 +709,15 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 2] {
                 command: "claude".to_string(),
                 args: Vec::new(),
                 resume_args: Some(vec!["--continue".to_string()]),
-                oneshot_args: vec!["-p".to_string(), "{prompt}".to_string()],
+                oneshot_args: vec![
+                    "--bare".to_string(),
+                    "-p".to_string(),
+                    "{prompt}".to_string(),
+                    "--tools".to_string(),
+                    String::new(),
+                    "--max-turns".to_string(),
+                    "1".to_string(),
+                ],
                 oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("npm install -g @anthropic-ai/claude-code".to_string()),
             },
@@ -722,6 +730,10 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 2] {
                 resume_args: Some(vec!["resume".to_string(), "--last".to_string()]),
                 oneshot_args: vec![
                     "exec".to_string(),
+                    "--ephemeral".to_string(),
+                    "--full-auto".to_string(),
+                    "--color".to_string(),
+                    "never".to_string(),
                     "-o".to_string(),
                     "{tempfile}".to_string(),
                     "{prompt}".to_string(),
@@ -1287,6 +1299,35 @@ oneshot_output = "stdout"
         assert!(
             !rendered.contains("(Ctrl+G)"),
             "config comment should NOT contain hardcoded Ctrl+G"
+        );
+    }
+
+    #[test]
+    fn default_claude_oneshot_uses_bare_and_no_tools() {
+        let providers = default_provider_commands();
+        let claude = &providers[0].1;
+        assert!(
+            claude.oneshot_args.contains(&"--bare".to_string()),
+            "claude oneshot_args should include --bare"
+        );
+        assert!(
+            claude.oneshot_args.contains(&"--tools".to_string()),
+            "claude oneshot_args should include --tools flag"
+        );
+        // --tools is followed by an empty string to disable all tools
+        let tools_idx = claude
+            .oneshot_args
+            .iter()
+            .position(|a| a == "--tools")
+            .unwrap();
+        assert_eq!(
+            claude.oneshot_args[tools_idx + 1],
+            "",
+            "--tools should be followed by empty string to disable tools"
+        );
+        assert!(
+            claude.oneshot_args.contains(&"--max-turns".to_string()),
+            "claude oneshot_args should include --max-turns"
         );
     }
 
