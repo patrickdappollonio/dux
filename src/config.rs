@@ -118,6 +118,7 @@ pub struct UiConfig {
     pub left_width_pct: u16,
     pub right_width_pct: u16,
     pub terminal_pane_height_pct: u16,
+    pub staged_pane_height_pct: u16,
     pub agent_scrollback_lines: usize,
 }
 
@@ -136,6 +137,7 @@ impl Default for Config {
                 left_width_pct: 20,
                 right_width_pct: 23,
                 terminal_pane_height_pct: 35,
+                staged_pane_height_pct: 50,
                 agent_scrollback_lines: 10_000,
             },
             editor: EditorConfig::default(),
@@ -249,6 +251,7 @@ impl Default for UiConfig {
             left_width_pct: 17,
             right_width_pct: 19,
             terminal_pane_height_pct: 35,
+            staged_pane_height_pct: 50,
             agent_scrollback_lines: 10_000,
         }
     }
@@ -460,6 +463,13 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
                 "# Maximum height percentage of the left pane used by the companion terminals list.",
             )),
             value_fn: |c| FieldValue::U16(c.ui.terminal_pane_height_pct),
+        },
+        ConfigEntry::Field {
+            key: "staged_pane_height_pct",
+            comment: Some(CommentSource::Static(
+                "# Height percentage of the right pane used by the staged changes and commit sections.\n# The remaining space goes to the unstaged changes list.",
+            )),
+            value_fn: |c| FieldValue::U16(c.ui.staged_pane_height_pct),
         },
         ConfigEntry::Field {
             key: "agent_scrollback_lines",
@@ -907,6 +917,7 @@ mod tests {
         assert!(rendered.contains("args = []"));
         assert!(rendered.contains("[ui]"));
         assert!(rendered.contains("agent_scrollback_lines = 10000"));
+        assert!(rendered.contains("staged_pane_height_pct = "));
         assert!(rendered.contains("[editor]"));
         assert!(rendered.contains("default = \"cursor\""));
         assert!(rendered.contains("[keys]"));
@@ -1013,6 +1024,28 @@ mod tests {
         let parsed: Config = toml::from_str(&rendered).expect("config should parse");
         assert_eq!(parsed.terminal.command, "fish");
         assert_eq!(parsed.terminal.args, vec!["-l"]);
+    }
+
+    #[test]
+    fn default_config_round_trips_staged_pane_height() {
+        let mut config = Config::default();
+        config.ui.staged_pane_height_pct = 65;
+        let rendered = render_config_default(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("config should parse");
+        assert_eq!(parsed.ui.staged_pane_height_pct, 65);
+    }
+
+    #[test]
+    fn old_config_missing_staged_pane_height_defaults_to_50() {
+        let toml_str = r#"
+[ui]
+left_width_pct = 20
+right_width_pct = 23
+terminal_pane_height_pct = 35
+agent_scrollback_lines = 10000
+"#;
+        let parsed: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(parsed.ui.staged_pane_height_pct, 50);
     }
 
     #[test]

@@ -844,11 +844,13 @@ impl App {
         let focused = self.focus == FocusPane::Files;
 
         if has_staged {
+            let pct = self.staged_pane_height_pct.clamp(10, 80);
+            let unstaged_pct = 100u16.saturating_sub(pct).max(20);
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Min(3), // Changes (unstaged) — always on top
-                    Constraint::Min(3), // Staged Changes (with commit input)
+                    Constraint::Percentage(unstaged_pct), // Changes (unstaged) — always on top
+                    Constraint::Percentage(pct),          // Staged Changes (with commit input)
                 ])
                 .split(area);
             self.mouse_layout.unstaged_list = Some(self.file_list_area(chunks[0], true));
