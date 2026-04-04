@@ -880,6 +880,9 @@ impl App {
             .iter_mut()
             .find(|candidate| candidate.id == session_id)
         {
+            if session.status == status {
+                return;
+            }
             session.status = status;
             session.updated_at = Utc::now();
             let _ = self.session_store.upsert_session(session);
