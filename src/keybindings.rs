@@ -64,6 +64,9 @@ pub enum Action {
     RenameSession,
     DeleteProject,
     RemoveProject,
+    SortAgentsByUpdated,
+    SortAgentsByCreated,
+    SortAgentsByName,
 }
 
 /// Where a binding's key combo is matched.
@@ -189,6 +192,9 @@ impl Action {
             Action::RenameSession => "rename_session",
             Action::DeleteProject => "delete_project",
             Action::RemoveProject => "remove_project",
+            Action::SortAgentsByUpdated => "sort_agents_by_updated",
+            Action::SortAgentsByCreated => "sort_agents_by_created",
+            Action::SortAgentsByName => "sort_agents_by_name",
         }
     }
 
@@ -252,6 +258,9 @@ impl Action {
             Action::RenameSession => "Rename the selected agent session.",
             Action::DeleteProject => "Remove the selected project and its sessions.",
             Action::RemoveProject => "Remove project from app (keeps files on disk).",
+            Action::SortAgentsByUpdated => "Sort agents by most recently updated.",
+            Action::SortAgentsByCreated => "Sort agents by creation date (newest first).",
+            Action::SortAgentsByName => "Sort agents alphabetically by name.",
         }
     }
 
@@ -304,7 +313,12 @@ impl Action {
             | Action::AddCurrentDir
             | Action::Confirm
             | Action::ToggleSelection => Some("Overlays"),
-            Action::RenameSession | Action::DeleteProject | Action::RemoveProject => None,
+            Action::RenameSession
+            | Action::DeleteProject
+            | Action::RemoveProject
+            | Action::SortAgentsByUpdated
+            | Action::SortAgentsByCreated
+            | Action::SortAgentsByName => None,
         }
     }
 }
@@ -1011,6 +1025,39 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "remove-project",
             description: "Remove project from app (keeps files on disk)",
+        }),
+    },
+    BindingDef {
+        action: Action::SortAgentsByUpdated,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "sort-agents-by-updated",
+            description: "Sort agents by most recently updated",
+        }),
+    },
+    BindingDef {
+        action: Action::SortAgentsByCreated,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "sort-agents-by-created",
+            description: "Sort agents by creation date (newest first)",
+        }),
+    },
+    BindingDef {
+        action: Action::SortAgentsByName,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "sort-agents-by-name",
+            description: "Sort agents alphabetically by name",
         }),
     },
 ];

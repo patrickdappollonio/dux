@@ -628,6 +628,18 @@ impl App {
                 self.help_scroll = Some(0);
                 Ok(())
             }
+            "sort-agents-by-updated" => {
+                self.sort_sessions_by_updated();
+                Ok(())
+            }
+            "sort-agents-by-created" => {
+                self.sort_sessions_by_created();
+                Ok(())
+            }
+            "sort-agents-by-name" => {
+                self.sort_sessions_by_name();
+                Ok(())
+            }
             "" => Ok(()),
             other => {
                 self.set_error(format!("Unknown command: \"{other}\""));
@@ -654,6 +666,30 @@ impl App {
             }
         }
         self.left_items_cache = items;
+    }
+
+    pub(crate) fn sort_sessions_by_updated(&mut self) {
+        self.sessions
+            .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        self.rebuild_left_items();
+        self.set_info("Agents sorted by most recently updated.");
+    }
+
+    pub(crate) fn sort_sessions_by_created(&mut self) {
+        self.sessions
+            .sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        self.rebuild_left_items();
+        self.set_info("Agents sorted by creation date (newest first).");
+    }
+
+    pub(crate) fn sort_sessions_by_name(&mut self) {
+        self.sessions.sort_by(|a, b| {
+            let name_a = a.title.as_deref().unwrap_or(&a.branch_name);
+            let name_b = b.title.as_deref().unwrap_or(&b.branch_name);
+            name_a.to_lowercase().cmp(&name_b.to_lowercase())
+        });
+        self.rebuild_left_items();
+        self.set_info("Agents sorted alphabetically by name.");
     }
 
     pub(crate) fn toggle_collapse_selected_project(&mut self) {
