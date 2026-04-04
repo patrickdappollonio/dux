@@ -298,7 +298,23 @@ impl App {
             self.handle_commit_input_key(key)?;
             return Ok(false);
         }
-        if let Some(action) = self.bindings.lookup(&key, BindingScope::Global) {
+        // Check if a Global binding should defer to a pane-scoped binding.
+        // For example, `q` is Quit globally but ScrollToBottom in Center — if
+        // the focused pane has a binding for this key, skip the global handler
+        // and let the pane handler run instead.
+        let defer_global = if self.bindings.lookup(&key, BindingScope::Global) == Some(Action::Quit)
+        {
+            let pane_scope = match self.focus {
+                FocusPane::Center => Some(BindingScope::Center),
+                FocusPane::Files => Some(BindingScope::Files),
+                _ => None,
+            };
+            pane_scope.is_some_and(|scope| self.bindings.lookup(&key, scope).is_some())
+        } else {
+            false
+        };
+
+        if !defer_global && let Some(action) = self.bindings.lookup(&key, BindingScope::Global) {
             match action {
                 Action::Quit => {
                     let agent_count = self.providers.len();
@@ -427,7 +443,7 @@ impl App {
                 _ => {}
             }
             return Ok(false);
-        }
+        } // !defer_global
         if self.resize_mode {
             self.handle_resize_key(key);
             return Ok(false);
@@ -598,6 +614,16 @@ impl App {
                         *scroll = (*scroll + 1).min(max_scroll);
                     } else if self.last_pty_size.0 > 0 {
                         self.scroll_pty(ScrollDirection::Down, 1);
+                    }
+                }
+                Action::ScrollToBottom => {
+                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
+                        let max_scroll = self
+                            .last_diff_visual_lines
+                            .saturating_sub(self.last_diff_height.max(1));
+                        *scroll = max_scroll;
+                    } else {
+                        self.reset_pty_scrollback();
                     }
                 }
                 _ => {}
@@ -959,21 +985,21 @@ impl App {
         }
 
         // Poll stdin with 100ms timeout (matches the crossterm poll interval).
-        let stdin_fd = std::io::stdin();
+        let stdin_handle = std::io::stdin();
         let timeout = rustix::time::Timespec {
             tv_sec: 0,
             tv_nsec: 100_000_000, // 100ms
         };
-        let stdin_borrow = stdin_fd.as_fd();
+        let stdin_borrow = stdin_handle.as_fd();
         let mut pollfd = [PollFd::new(&stdin_borrow, PollFlags::IN)];
         let ready = poll(&mut pollfd, Some(&timeout))?;
         if ready == 0 {
             return Ok(false);
         }
 
-        // Read available bytes.
+        // Read available bytes from the same handle used for polling.
         let mut buf = [0u8; 4096];
-        let n = std::io::stdin().read(&mut buf)?;
+        let n = stdin_handle.lock().read(&mut buf)?;
         if n == 0 {
             return Ok(false);
         }
@@ -1045,6 +1071,16 @@ impl App {
                         .is_some_and(|p| p.scrollback_offset() > 0);
                     if conditional && has_scrollback && self.last_pty_size.0 > 0 {
                         self.scroll_pty(ScrollDirection::Down, 1);
+                    } else if let Some(provider) = self.selected_terminal_surface_client() {
+                        let _ = provider.write_bytes(&raw);
+                    }
+                }
+                SeqAction::Intercept(Action::ScrollToBottom, conditional, raw) => {
+                    let has_scrollback = self
+                        .selected_terminal_surface_client()
+                        .is_some_and(|p| p.scrollback_offset() > 0);
+                    if conditional && has_scrollback {
+                        self.reset_pty_scrollback();
                     } else if let Some(provider) = self.selected_terminal_surface_client() {
                         let _ = provider.write_bytes(&raw);
                     }
