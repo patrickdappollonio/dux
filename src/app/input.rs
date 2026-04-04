@@ -248,16 +248,17 @@ impl App {
         if !matches!(self.prompt, PromptState::None) {
             return self.handle_prompt_key(key);
         }
-        // Interactive mode: ALL remaining keys go to the PTY except Ctrl-G
-        // (ExitInteractive, handled inside handle_agent_input). This must
-        // happen before global bindings so CloseOverlay / Escape do not
-        // intercept agent input during interactive mode.
-        if matches!(
-            self.input_target,
-            InputTarget::Agent | InputTarget::Terminal
-        ) {
-            return self.handle_agent_input(key);
-        }
+        // Interactive mode is handled at the event-loop level via raw stdin
+        // passthrough (poll_and_forward_raw_input). When the input target is
+        // Agent or Terminal, crossterm's event reader is not called, so
+        // handle_key is never reached for those modes.
+        debug_assert!(
+            !matches!(
+                self.input_target,
+                InputTarget::Agent | InputTarget::Terminal
+            ),
+            "handle_key should not be called in interactive mode"
+        );
         if self.bindings.lookup(&key, BindingScope::Global) == Some(Action::CloseOverlay)
             && self.close_top_overlay()
         {
@@ -929,118 +930,134 @@ impl App {
         Ok(())
     }
 
-    fn handle_agent_input(&mut self, key: KeyEvent) -> Result<bool> {
+    /// Read raw bytes from stdin, split into terminal sequences, and either
+    /// handle intercepted bindings (exit interactive, scroll) or forward
+    /// verbatim to the active PTY. This bypasses crossterm's event parser so
+    /// all key combinations (Shift+Tab, Alt+Backspace, Ctrl+Right, F-keys,
+    /// kitty keyboard protocol sequences, etc.) reach the child process.
+    pub(crate) fn poll_and_forward_raw_input(&mut self) -> Result<bool> {
+        use rustix::event::{PollFd, PollFlags, poll};
+        use std::io::Read;
+        use std::os::fd::AsFd;
+
+        // Verify we have an active session/provider.
         if self.selected_session().is_none() {
             self.input_target = InputTarget::None;
+            self.raw_input_buf.clear();
             return Ok(false);
         }
         let surface = self.session_surface;
-        let provider = match self.selected_terminal_surface_client() {
-            Some(p) => p,
-            None => {
-                self.input_target = InputTarget::None;
-                let label = match surface {
-                    SessionSurface::Agent => "Agent",
-                    SessionSurface::Terminal => "Companion terminal",
-                };
-                self.set_error(format!("{label} disconnected."));
-                return Ok(false);
-            }
-        };
-
-        // Exit interactive mode via configured binding (default: Ctrl-g).
-        if let Some(Action::ExitInteractive) = self.bindings.lookup(&key, BindingScope::Interactive)
-        {
+        if self.selected_terminal_surface_client().is_none() {
             self.input_target = InputTarget::None;
-            self.fullscreen_overlay = FullscreenOverlay::None;
-            self.session_surface = SessionSurface::Agent;
-            self.set_info("Exited interactive mode.");
+            self.raw_input_buf.clear();
+            let label = match surface {
+                SessionSurface::Agent => "Agent",
+                SessionSurface::Terminal => "Companion terminal",
+            };
+            self.set_error(format!("{label} disconnected."));
             return Ok(false);
         }
 
-        // Scroll bindings are checked before forwarding keys to the PTY so
-        // that the configured keys for ScrollPageUp, ScrollPageDown,
-        // ScrollLineUp, and ScrollLineDown work in interactive mode without
-        // being eaten by the child process.
-        match self.bindings.lookup(&key, BindingScope::Interactive) {
-            Some(Action::ScrollPageUp) => {
-                if self.last_pty_size.0 > 0 {
-                    self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
-                }
-                return Ok(false);
-            }
-            Some(Action::ScrollPageDown) => {
-                if self.last_pty_size.0 > 0 {
-                    self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
-                }
-                return Ok(false);
-            }
-            Some(Action::ScrollLineUp)
-                if provider.scrollback_offset() > 0 && self.last_pty_size.0 > 0 =>
-            {
-                self.scroll_pty(ScrollDirection::Up, 1);
-                return Ok(false);
-            }
-            Some(Action::ScrollLineDown)
-                if provider.scrollback_offset() > 0 && self.last_pty_size.0 > 0 =>
-            {
-                self.scroll_pty(ScrollDirection::Down, 1);
-                return Ok(false);
-            }
-            _ => {}
+        // Poll stdin with 100ms timeout (matches the crossterm poll interval).
+        let stdin_fd = std::io::stdin();
+        let timeout = rustix::time::Timespec {
+            tv_sec: 0,
+            tv_nsec: 100_000_000, // 100ms
+        };
+        let stdin_borrow = stdin_fd.as_fd();
+        let mut pollfd = [PollFd::new(&stdin_borrow, PollFlags::IN)];
+        let ready = poll(&mut pollfd, Some(&timeout))?;
+        if ready == 0 {
+            return Ok(false);
         }
 
-        match key.code {
-            KeyCode::Esc => {
-                let _ = provider.write_bytes(b"\x1b");
-            }
-            KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Map ctrl+a..=ctrl+z to the corresponding control character (0x01..=0x1a).
-                if c.is_ascii_lowercase() {
-                    let ctrl_byte = c as u8 - b'a' + 1;
-                    let _ = provider.write_bytes(&[ctrl_byte]);
+        // Read available bytes.
+        let mut buf = [0u8; 4096];
+        let n = std::io::stdin().read(&mut buf)?;
+        if n == 0 {
+            return Ok(false);
+        }
+
+        self.raw_input_buf.extend_from_slice(&buf[..n]);
+
+        // Split into complete sequences and collect actions to avoid borrow
+        // conflicts between raw_input_buf and &mut self methods.
+        let (sequences, remainder) = crate::raw_input::split_sequences(&self.raw_input_buf);
+        let remainder_len = remainder.len();
+
+        // Collect what to do for each sequence: either an intercepted action
+        // or raw bytes to forward.
+        enum SeqAction {
+            Intercept(Action, bool, Vec<u8>),
+            Forward(Vec<u8>),
+        }
+
+        let actions: Vec<SeqAction> = sequences
+            .iter()
+            .map(|seq| {
+                if let Some((action, conditional)) = self.interactive_patterns.match_sequence(seq) {
+                    SeqAction::Intercept(action, conditional, seq.to_vec())
+                } else {
+                    SeqAction::Forward(seq.to_vec())
+                }
+            })
+            .collect();
+
+        // Trim buffer to remainder.
+        let buf_len = self.raw_input_buf.len();
+        let keep_from = buf_len - remainder_len;
+        self.raw_input_buf = self.raw_input_buf[keep_from..].to_vec();
+
+        // Process collected actions.
+        for action in actions {
+            match action {
+                SeqAction::Intercept(Action::ExitInteractive, _, _) => {
+                    self.input_target = InputTarget::None;
+                    self.fullscreen_overlay = FullscreenOverlay::None;
+                    self.session_surface = SessionSurface::Agent;
+                    self.raw_input_buf.clear();
+                    self.set_info("Exited interactive mode.");
+                    return Ok(false);
+                }
+                SeqAction::Intercept(Action::ScrollPageUp, _, _) => {
+                    if self.last_pty_size.0 > 0 {
+                        self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
+                    }
+                }
+                SeqAction::Intercept(Action::ScrollPageDown, _, _) => {
+                    if self.last_pty_size.0 > 0 {
+                        self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
+                    }
+                }
+                SeqAction::Intercept(Action::ScrollLineUp, conditional, raw) => {
+                    let has_scrollback = self
+                        .selected_terminal_surface_client()
+                        .is_some_and(|p| p.scrollback_offset() > 0);
+                    if conditional && has_scrollback && self.last_pty_size.0 > 0 {
+                        self.scroll_pty(ScrollDirection::Up, 1);
+                    } else if let Some(provider) = self.selected_terminal_surface_client() {
+                        let _ = provider.write_bytes(&raw);
+                    }
+                }
+                SeqAction::Intercept(Action::ScrollLineDown, conditional, raw) => {
+                    let has_scrollback = self
+                        .selected_terminal_surface_client()
+                        .is_some_and(|p| p.scrollback_offset() > 0);
+                    if conditional && has_scrollback && self.last_pty_size.0 > 0 {
+                        self.scroll_pty(ScrollDirection::Down, 1);
+                    } else if let Some(provider) = self.selected_terminal_surface_client() {
+                        let _ = provider.write_bytes(&raw);
+                    }
+                }
+                SeqAction::Intercept(_, _, raw) | SeqAction::Forward(raw) => {
+                    // Unknown intercepted action or normal forward — send to PTY.
+                    if let Some(provider) = self.selected_terminal_surface_client() {
+                        let _ = provider.write_bytes(&raw);
+                    }
                 }
             }
-            KeyCode::Char(c) => {
-                let mut buf = [0u8; 4];
-                let bytes = c.encode_utf8(&mut buf);
-                let _ = provider.write_bytes(bytes.as_bytes());
-            }
-            KeyCode::Enter => {
-                let _ = provider.write_bytes(b"\r");
-            }
-            KeyCode::Backspace => {
-                let _ = provider.write_bytes(b"\x7f");
-            }
-            KeyCode::Tab => {
-                let _ = provider.write_bytes(b"\t");
-            }
-            KeyCode::Up => {
-                let _ = provider.write_bytes(encode_cursor_key(KeyCode::Up, provider.term_mode()));
-            }
-            KeyCode::Down => {
-                let _ =
-                    provider.write_bytes(encode_cursor_key(KeyCode::Down, provider.term_mode()));
-            }
-            KeyCode::Right => {
-                let _ =
-                    provider.write_bytes(encode_cursor_key(KeyCode::Right, provider.term_mode()));
-            }
-            KeyCode::Left => {
-                let _ =
-                    provider.write_bytes(encode_cursor_key(KeyCode::Left, provider.term_mode()));
-            }
-            KeyCode::Home => {
-                let _ = provider.write_bytes(b"\x1b[H");
-            }
-            KeyCode::End => {
-                let _ = provider.write_bytes(b"\x1b[F");
-            }
-            KeyCode::Delete => {
-                let _ = provider.write_bytes(b"\x1b[3~");
-            }
-            _ => {}
         }
+
         Ok(false)
     }
 
@@ -2853,7 +2870,13 @@ mod tests {
             overlay_layout: OverlayMouseLayoutState::default(),
             mouse_drag: None,
             last_mouse_click: None,
+            interactive_patterns: crate::keybindings::InteractiveBytePatterns {
+                bindings: Vec::new(),
+            },
+            raw_input_buf: Vec::new(),
+            sigwinch_flag: Arc::new(AtomicBool::new(false)),
         };
+        app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();
         app.selected_left = 1;
         app
@@ -4259,9 +4282,19 @@ mod tests {
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
         assert_eq!(app.input_target, InputTarget::Terminal);
 
-        // Simulate Ctrl-G (ExitInteractive).
-        let ctrl_g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
-        app.handle_key(ctrl_g).unwrap();
+        // Simulate ExitInteractive via the raw input path: feed Ctrl-G
+        // (0x07) into the raw input buffer and process sequences.
+        app.raw_input_buf = vec![0x07];
+        let (sequences, _) = crate::raw_input::split_sequences(&app.raw_input_buf);
+        assert_eq!(sequences.len(), 1);
+        let matched = app.interactive_patterns.match_sequence(sequences[0]);
+        assert_eq!(matched, Some((Action::ExitInteractive, false)));
+
+        // Apply the same state change that poll_and_forward_raw_input does.
+        app.input_target = InputTarget::None;
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        app.session_surface = SessionSurface::Agent;
+        app.raw_input_buf.clear();
 
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
         assert_eq!(app.session_surface, SessionSurface::Agent);

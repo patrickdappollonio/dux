@@ -31,7 +31,9 @@ use crate::config::{
 };
 use crate::editor::DetectedEditor;
 use crate::git;
-use crate::keybindings::{Action, BindingScope, HintContext, RuntimeBindings};
+use crate::keybindings::{
+    Action, BindingScope, HintContext, InteractiveBytePatterns, RuntimeBindings,
+};
 use crate::logger;
 use crate::model::{
     AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProviderKind, SessionStatus,
@@ -100,6 +102,9 @@ pub struct App {
     pub(crate) overlay_layout: OverlayMouseLayoutState,
     pub(crate) mouse_drag: Option<ResizeDragState>,
     pub(crate) last_mouse_click: Option<RecentMouseClick>,
+    pub(crate) interactive_patterns: InteractiveBytePatterns,
+    pub(crate) raw_input_buf: Vec<u8>,
+    pub(crate) sigwinch_flag: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -399,7 +404,7 @@ pub(crate) enum CreateAgentRequest {
     },
     ForkSession {
         project: Project,
-        source_session: AgentSession,
+        source_session: Box<AgentSession>,
         source_label: String,
     },
 }
@@ -443,6 +448,12 @@ impl App {
             std::process::exit(1);
         }
         let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        let interactive_patterns = bindings.interactive_byte_patterns();
+
+        // Register SIGWINCH handler so we can detect terminal resizes even when
+        // bypassing crossterm's event reader during interactive mode.
+        let sigwinch_flag = Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&sigwinch_flag))?;
 
         let session_store = SessionStore::open(&paths.sessions_db_path)?;
         let projects = load_projects(&config);
@@ -512,6 +523,9 @@ impl App {
             overlay_layout: OverlayMouseLayoutState::default(),
             mouse_drag: None,
             last_mouse_click: None,
+            interactive_patterns,
+            raw_input_buf: Vec::new(),
+            sigwinch_flag,
         };
         app.restore_sessions();
         app.rebuild_left_items();
@@ -528,21 +542,43 @@ impl App {
             loop {
                 self.drain_events();
                 self.tick_count = self.tick_count.wrapping_add(1);
+
+                // Check SIGWINCH — needed when bypassing crossterm's event
+                // reader (which would otherwise deliver Resize events).
+                if self.sigwinch_flag.swap(false, Ordering::Relaxed) {
+                    terminal.autoresize()?;
+                }
+
                 terminal.draw(|frame| self.render(frame))?;
-                if event::poll(Duration::from_millis(100))? {
-                    match event::read()? {
-                        Event::Key(key) => {
-                            if self.handle_key(key)? {
-                                break;
+
+                if matches!(
+                    self.input_target,
+                    InputTarget::Agent | InputTarget::Terminal
+                ) {
+                    // Interactive mode: read raw stdin and forward to PTY.
+                    // crossterm's event reader is not called — all bytes
+                    // (keyboard, mouse, paste) go to the child process
+                    // except intercepted bindings.
+                    if self.poll_and_forward_raw_input()? {
+                        break;
+                    }
+                } else {
+                    // Normal UI mode: use crossterm's structured event reader.
+                    if event::poll(Duration::from_millis(100))? {
+                        match event::read()? {
+                            Event::Key(key) => {
+                                if self.handle_key(key)? {
+                                    break;
+                                }
                             }
-                        }
-                        Event::Mouse(mouse) => {
-                            if self.handle_mouse(mouse) {
-                                break;
+                            Event::Mouse(mouse) => {
+                                if self.handle_mouse(mouse) {
+                                    break;
+                                }
                             }
+                            Event::Resize(_, _) => {}
+                            _ => {}
                         }
-                        Event::Resize(_, _) => {}
-                        _ => {}
                     }
                 }
             }
