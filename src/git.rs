@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -13,6 +14,12 @@ enum DiffStat {
     Binary,
 }
 
+struct StatusEntry {
+    index_status: char,
+    worktree_status: char,
+    path: String,
+}
+
 const NULL_DEVICE: &str = "/dev/null";
 
 pub fn current_branch(repo_path: &Path) -> Result<String> {
@@ -20,14 +27,16 @@ pub fn current_branch(repo_path: &Path) -> Result<String> {
         .args([
             "-C",
             repo_path.to_string_lossy().as_ref(),
-            "branch",
-            "--show-current",
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "HEAD",
         ])
         .output()
         .with_context(|| format!("failed to inspect {}", repo_path.display()))?;
     if !output.status.success() {
         return Err(anyhow!(
-            "git branch failed for {}: {}",
+            "git symbolic-ref failed for {}: {}",
             repo_path.display(),
             String::from_utf8_lossy(&output.stderr)
         ));
@@ -54,7 +63,9 @@ pub fn is_dirty(repo_path: &Path) -> Result<bool> {
             "-C",
             repo_path.to_string_lossy().as_ref(),
             "status",
-            "--porcelain",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=no",
         ])
         .output()?;
     if !output.status.success() {
@@ -92,21 +103,35 @@ pub fn create_worktree(
     worktrees_root: &Path,
     project_name: &str,
 ) -> Result<(String, PathBuf)> {
+    create_worktree_from_start_point(repo_path, worktrees_root, project_name, None)
+}
+
+pub fn create_worktree_from_start_point(
+    repo_path: &Path,
+    worktrees_root: &Path,
+    project_name: &str,
+    start_point: Option<&str>,
+) -> Result<(String, PathBuf)> {
     let branch_name = docker_style_name();
     let project_root = worktrees_root.join(project_name);
     fs::create_dir_all(&project_root)?;
     let worktree_path = project_root.join(&branch_name);
-    let output = Command::new("git")
-        .args([
-            "-C",
-            repo_path.to_string_lossy().as_ref(),
-            "worktree",
-            "add",
-            "-b",
-            &branch_name,
-            worktree_path.to_string_lossy().as_ref(),
-        ])
-        .output()?;
+    let repo = repo_path.to_string_lossy();
+    let worktree = worktree_path.to_string_lossy();
+    let mut command = Command::new("git");
+    command.args([
+        "-C",
+        repo.as_ref(),
+        "worktree",
+        "add",
+        "-b",
+        &branch_name,
+        worktree.as_ref(),
+    ]);
+    if let Some(start_point) = start_point {
+        command.arg(start_point);
+    }
+    let output = command.output()?;
     if !output.status.success() {
         return Err(anyhow!(
             "git worktree add failed: {}",
@@ -115,6 +140,41 @@ pub fn create_worktree(
     }
     let canonical = worktree_path.canonicalize().unwrap_or(worktree_path);
     Ok((branch_name, canonical))
+}
+
+pub fn head_commit(repo_path: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "rev-parse",
+            "HEAD",
+        ])
+        .output()
+        .with_context(|| format!("failed to inspect HEAD for {}", repo_path.display()))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git rev-parse HEAD failed for {}: {}",
+            repo_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub fn mirror_worktree_contents(source: &Path, destination: &Path) -> Result<()> {
+    let source = source
+        .canonicalize()
+        .with_context(|| format!("failed to resolve {}", source.display()))?;
+    let destination = destination
+        .canonicalize()
+        .with_context(|| format!("failed to resolve {}", destination.display()))?;
+    if source == destination {
+        return Err(anyhow!(
+            "source and destination worktrees must be different"
+        ));
+    }
+    sync_directory_contents(&source, &destination)
 }
 
 pub struct RemoveResult {
@@ -176,7 +236,8 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
             "-C",
             wt.as_ref(),
             "status",
-            "--porcelain",
+            "--porcelain=v1",
+            "-z",
             "--untracked-files=all",
         ])
         .output()?;
@@ -190,14 +251,10 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     let mut staged = Vec::new();
     let mut unstaged = Vec::new();
 
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if line.len() < 4 {
-            continue;
-        }
-        let bytes = line.as_bytes();
-        let index_status = bytes[0] as char;
-        let worktree_status = bytes[1] as char;
-        let path = line[3..].to_string();
+    for entry in parse_status_porcelain_z(&output.stdout) {
+        let index_status = entry.index_status;
+        let worktree_status = entry.worktree_status;
+        let path = entry.path;
 
         if index_status == '?' && worktree_status == '?' {
             unstaged.push(ChangedFile {
@@ -232,7 +289,7 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     }
 
     if let Ok(ns) = Command::new("git")
-        .args(["-C", wt.as_ref(), "diff", "--numstat"])
+        .args(["-C", wt.as_ref(), "diff", "--numstat", "-z"])
         .output()
         && ns.status.success()
     {
@@ -269,7 +326,7 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     }
 
     if let Ok(ns) = Command::new("git")
-        .args(["-C", wt.as_ref(), "diff", "--cached", "--numstat"])
+        .args(["-C", wt.as_ref(), "diff", "--cached", "--numstat", "-z"])
         .output()
         && ns.status.success()
     {
@@ -300,6 +357,7 @@ fn untracked_file_diff_stat(worktree_path: &Path, rel_path: &str) -> Option<Diff
             "diff",
             "--no-index",
             "--numstat",
+            "-z",
             "--",
             NULL_DEVICE,
             rel_path,
@@ -311,7 +369,7 @@ fn untracked_file_diff_stat(worktree_path: &Path, rel_path: &str) -> Option<Diff
         return None;
     }
 
-    parse_numstat_line(String::from_utf8_lossy(&output.stdout).lines().next()?)
+    parse_numstat(&output.stdout).into_values().next()
 }
 
 fn classify_untracked_file_fallback(path: &Path) -> (usize, bool) {
@@ -328,16 +386,20 @@ fn classify_untracked_file_fallback(path: &Path) -> (usize, bool) {
 }
 
 fn parse_numstat(raw: &[u8]) -> HashMap<String, DiffStat> {
-    String::from_utf8_lossy(raw)
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split('\t');
-            let _ = parts.next()?;
-            let _ = parts.next()?;
-            let path = parts.next()?.to_string();
-            Some((path, parse_numstat_line(line)?))
-        })
-        .collect()
+    let mut stats = HashMap::new();
+    let mut records = raw.split(|byte| *byte == 0).peekable();
+
+    while let Some(record) = records.next() {
+        if record.is_empty() {
+            continue;
+        }
+        let Some((path, stat)) = parse_numstat_record(record, &mut records) else {
+            continue;
+        };
+        stats.insert(path, stat);
+    }
+
+    stats
 }
 
 fn parse_numstat_line(line: &str) -> Option<DiffStat> {
@@ -349,6 +411,62 @@ fn parse_numstat_line(line: &str) -> Option<DiffStat> {
     } else {
         Some(DiffStat::Text(add.parse().ok()?, del.parse().ok()?))
     }
+}
+
+fn parse_status_porcelain_z(raw: &[u8]) -> Vec<StatusEntry> {
+    let mut entries = Vec::new();
+    let mut records = raw.split(|byte| *byte == 0).peekable();
+
+    while let Some(record) = records.next() {
+        if record.len() < 4 {
+            continue;
+        }
+
+        let index_status = record[0] as char;
+        let worktree_status = record[1] as char;
+        let path = String::from_utf8_lossy(&record[3..]).to_string();
+
+        if path.is_empty() {
+            continue;
+        }
+
+        if matches!(index_status, 'R' | 'C') || matches!(worktree_status, 'R' | 'C') {
+            let _ = records.next();
+        }
+
+        entries.push(StatusEntry {
+            index_status,
+            worktree_status,
+            path,
+        });
+    }
+
+    entries
+}
+
+fn parse_numstat_record<'a, I>(
+    record: &[u8],
+    records: &mut std::iter::Peekable<I>,
+) -> Option<(String, DiffStat)>
+where
+    I: Iterator<Item = &'a [u8]>,
+{
+    let first_tab = record.iter().position(|byte| *byte == b'\t')?;
+    let second_tab = record[first_tab + 1..]
+        .iter()
+        .position(|byte| *byte == b'\t')?
+        + first_tab
+        + 1;
+    let stat = parse_numstat_line(std::str::from_utf8(record).ok()?)?;
+    let path_bytes = &record[second_tab + 1..];
+
+    if !path_bytes.is_empty() {
+        return Some((String::from_utf8_lossy(path_bytes).to_string(), stat));
+    }
+
+    let _old_path = records.next()?;
+    let new_path = records.next()?;
+    Some((String::from_utf8_lossy(new_path).to_string(), stat))
 }
 
 pub fn stage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
@@ -532,6 +650,94 @@ pub fn docker_style_name() -> String {
         .expect("petname generation should not fail")
 }
 
+fn sync_directory_contents(source: &Path, destination: &Path) -> Result<()> {
+    let mut source_entries = Vec::new();
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if is_git_admin_entry(&name) {
+            continue;
+        }
+        source_entries.push(name);
+        sync_entry(&entry.path(), &destination.join(entry.file_name()))?;
+    }
+
+    for entry in fs::read_dir(destination)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if is_git_admin_entry(&name) {
+            continue;
+        }
+        if !source_entries.iter().any(|candidate| candidate == &name) {
+            remove_path(&entry.path())?;
+        }
+    }
+
+    Ok(())
+}
+
+fn sync_entry(source: &Path, destination: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        sync_symlink(source, destination)?;
+        return Ok(());
+    }
+
+    if file_type.is_dir() {
+        if destination.exists() {
+            let destination_meta = fs::symlink_metadata(destination)?;
+            if !destination_meta.file_type().is_dir() || destination_meta.file_type().is_symlink() {
+                remove_path(destination)?;
+            }
+        }
+        if !destination.exists() {
+            fs::create_dir(destination)?;
+        }
+        sync_directory_contents(source, destination)?;
+        fs::set_permissions(destination, metadata.permissions())?;
+        return Ok(());
+    }
+
+    if destination.exists() {
+        let destination_meta = fs::symlink_metadata(destination)?;
+        if destination_meta.file_type().is_dir() || destination_meta.file_type().is_symlink() {
+            remove_path(destination)?;
+        }
+    }
+    fs::copy(source, destination)?;
+    fs::set_permissions(destination, metadata.permissions())?;
+    Ok(())
+}
+
+fn sync_symlink(source: &Path, destination: &Path) -> Result<()> {
+    let target = fs::read_link(source)?;
+    if let Ok(existing_target) = fs::read_link(destination)
+        && existing_target == target
+    {
+        return Ok(());
+    }
+    if destination.exists() || fs::symlink_metadata(destination).is_ok() {
+        remove_path(destination)?;
+    }
+    symlink(&target, destination)?;
+    Ok(())
+}
+
+fn remove_path(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn is_git_admin_entry(name: &std::ffi::OsStr) -> bool {
+    name == ".git"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,16 +791,9 @@ mod tests {
             );
         };
         run(&["init", "-b", "main"]);
-        run(&[
-            "-c",
-            "user.name=test",
-            "-c",
-            "user.email=t@t",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "init",
-        ]);
+        run(&["config", "user.name", "test"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["commit", "--allow-empty", "-m", "init"]);
         dir
     }
 
@@ -619,6 +818,93 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         wt
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed in {}: {}",
+            args,
+            cwd.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn commit_all(cwd: &Path, message: &str) {
+        run_git(cwd, &["add", "-A"]);
+        run_git(cwd, &["commit", "-m", message]);
+    }
+
+    #[test]
+    fn create_worktree_from_start_point_uses_explicit_head_commit() {
+        let repo = init_test_repo();
+        let source = add_worktree(repo.path(), "source-head");
+        fs::write(source.join("fork.txt"), "from source branch\n").unwrap();
+        commit_all(&source, "source commit");
+        let source_head = head_commit(&source).unwrap();
+
+        let worktrees_root = repo.path().join("forks");
+        let (_branch_name, forked) = create_worktree_from_start_point(
+            repo.path(),
+            &worktrees_root,
+            "demo",
+            Some(&source_head),
+        )
+        .unwrap();
+
+        assert_eq!(head_commit(&forked).unwrap(), source_head);
+        assert_eq!(
+            fs::read_to_string(forked.join("fork.txt")).unwrap(),
+            "from source branch\n"
+        );
+    }
+
+    #[test]
+    fn mirror_worktree_contents_copies_visible_tree_and_preserves_git_admin_state() {
+        let repo = init_test_repo();
+        fs::write(repo.path().join("tracked.txt"), "original tracked\n").unwrap();
+        fs::write(repo.path().join("delete-me.txt"), "delete me\n").unwrap();
+        commit_all(repo.path(), "tracked files");
+
+        let source = add_worktree(repo.path(), "mirror-source");
+        let destination = add_worktree(repo.path(), "mirror-destination");
+
+        fs::write(source.join("tracked.txt"), "modified tracked\n").unwrap();
+        fs::remove_file(source.join("delete-me.txt")).unwrap();
+        fs::write(source.join(".env"), "TOKEN=abc\n").unwrap();
+        fs::create_dir_all(source.join("scratch").join("nested")).unwrap();
+        fs::write(
+            source.join("scratch").join("nested").join("note.txt"),
+            "untracked\n",
+        )
+        .unwrap();
+
+        let destination_git_before = fs::read_to_string(destination.join(".git")).unwrap();
+        mirror_worktree_contents(&source, &destination).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(destination.join("tracked.txt")).unwrap(),
+            "modified tracked\n"
+        );
+        assert!(!destination.join("delete-me.txt").exists());
+        assert_eq!(
+            fs::read_to_string(destination.join(".env")).unwrap(),
+            "TOKEN=abc\n"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("scratch").join("nested").join("note.txt"))
+                .unwrap(),
+            "untracked\n"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join(".git")).unwrap(),
+            destination_git_before
+        );
     }
 
     // ── rename_branch tests ──────────────────────────────────────
@@ -797,5 +1083,84 @@ mod tests {
         assert_eq!(file.additions, 0);
         assert_eq!(file.deletions, 0);
         assert!(file.binary);
+    }
+
+    #[test]
+    fn parse_status_porcelain_z_handles_untracked_and_spaces() {
+        let raw = b"?? spaced name.txt\0";
+        let entries = parse_status_porcelain_z(raw);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].index_status, '?');
+        assert_eq!(entries[0].worktree_status, '?');
+        assert_eq!(entries[0].path, "spaced name.txt");
+    }
+
+    #[test]
+    fn parse_status_porcelain_z_uses_destination_path_for_renames() {
+        let raw = b"R  new name.txt\0old name.txt\0";
+        let entries = parse_status_porcelain_z(raw);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].index_status, 'R');
+        assert_eq!(entries[0].worktree_status, ' ');
+        assert_eq!(entries[0].path, "new name.txt");
+    }
+
+    #[test]
+    fn parse_status_porcelain_z_skips_empty_records() {
+        let raw = b"\0M  file.txt\0\0";
+        let entries = parse_status_porcelain_z(raw);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "file.txt");
+    }
+
+    #[test]
+    fn parse_numstat_handles_regular_path_with_spaces() {
+        let stats = parse_numstat(b"1\t2\tsp ace.txt\0");
+        let stat = stats.get("sp ace.txt").expect("stat present");
+        match stat {
+            DiffStat::Text(additions, deletions) => {
+                assert_eq!((*additions, *deletions), (1, 2));
+            }
+            DiffStat::Binary => panic!("expected text stat"),
+        }
+    }
+
+    #[test]
+    fn parse_numstat_handles_rename_records() {
+        let stats = parse_numstat(b"0\t0\t\0old name.txt\0new name.txt\0");
+        let stat = stats.get("new name.txt").expect("stat present");
+        match stat {
+            DiffStat::Text(additions, deletions) => {
+                assert_eq!((*additions, *deletions), (0, 0));
+            }
+            DiffStat::Binary => panic!("expected text stat"),
+        }
+    }
+
+    #[test]
+    fn parse_numstat_handles_binary_records() {
+        let stats = parse_numstat(b"-\t-\tbinary.bin\0");
+        assert!(matches!(stats.get("binary.bin"), Some(DiffStat::Binary)));
+    }
+
+    #[test]
+    fn changed_files_uses_destination_path_for_staged_rename() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "rename-status");
+
+        fs::write(wt.join("old name.txt"), "hello\n").unwrap();
+        run_git(&wt, &["add", "old name.txt"]);
+        run_git(&wt, &["commit", "-m", "add file"]);
+        run_git(&wt, &["mv", "old name.txt", "new name.txt"]);
+
+        let (staged, unstaged) = changed_files(&wt).unwrap();
+
+        assert!(unstaged.is_empty());
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].path, "new name.txt");
+        assert_eq!(staged[0].status, "R");
     }
 }

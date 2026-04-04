@@ -389,6 +389,19 @@ pub(crate) struct AgentReadyData {
     pub session: AgentSession,
     pub client: PtyClient,
     pub pty_size: (u16, u16), // (rows, cols) the PTY was spawned with
+    pub status_message: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum CreateAgentRequest {
+    NewProject {
+        project: Project,
+    },
+    ForkSession {
+        project: Project,
+        source_session: AgentSession,
+        source_label: String,
+    },
 }
 
 pub(crate) enum WorkerEvent {
@@ -607,6 +620,7 @@ impl App {
         let command = command.trim();
         match command {
             "new-agent" => self.create_agent_for_selected_project(),
+            "fork-agent" => self.fork_selected_session(),
             "provider" => self.cycle_selected_project_provider(),
             "refresh-project" => self.refresh_selected_project(),
             "delete-project" => self.delete_selected_project(),

@@ -10,6 +10,7 @@ pub enum Action {
     // Projects pane
     ToggleProject,
     NewAgent,
+    ForkAgent,
     FocusAgent,
     OpenProjectBrowser,
     CopyPath,
@@ -145,6 +146,7 @@ impl Action {
             Action::MoveUp => "move_up",
             Action::ToggleProject => "toggle_project",
             Action::NewAgent => "new_agent",
+            Action::ForkAgent => "fork_agent",
             Action::FocusAgent => "focus_agent",
             Action::OpenProjectBrowser => "open_project_browser",
             Action::CopyPath => "copy_path",
@@ -205,6 +207,7 @@ impl Action {
             Action::MoveUp => "Navigate up through projects, sessions, files, and lists.",
             Action::ToggleProject => "Collapse or expand the selected project.",
             Action::NewAgent => "Create a new agent session (worktree).",
+            Action::ForkAgent => "Fork the selected agent into a fresh worktree and session.",
             Action::FocusAgent => "Focus the selected agent's output pane.",
             Action::OpenProjectBrowser => "Open the project browser.",
             Action::CopyPath => "Copy the selected agent's worktree path.",
@@ -271,6 +274,7 @@ impl Action {
             | Action::MoveUp
             | Action::ToggleProject
             | Action::NewAgent
+            | Action::ForkAgent
             | Action::FocusAgent
             | Action::OpenProjectBrowser
             | Action::CopyPath
@@ -417,6 +421,20 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "new-agent",
             description: "Create a new agent for the selected project",
+        }),
+    },
+    BindingDef {
+        action: Action::ForkAgent,
+        default_keys: &[key!(f)],
+        scopes: &[BindingScope::Left],
+        help: Some(HelpEntry {
+            section: "Projects pane",
+            description: "Fork selected agent into a fresh worktree",
+        }),
+        hint_contexts: &[(HintContext::LeftSession, "Fork")],
+        palette: Some(PaletteEntry {
+            name: "fork-agent",
+            description: "Fork the selected agent into a fresh worktree and session",
         }),
     },
     BindingDef {
@@ -1557,12 +1575,33 @@ mod tests {
     }
 
     #[test]
+    fn filtered_palette_includes_fork_agent_command() {
+        let bindings = default_bindings();
+        let results = bindings.filtered_palette("fork");
+        let names = results
+            .iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"fork-agent"));
+    }
+
+    #[test]
     fn left_scope_resolves_t_to_show_terminal() {
         let bindings = default_bindings();
         let t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE);
         assert_eq!(
             bindings.lookup(&t, BindingScope::Left),
             Some(Action::ShowTerminal)
+        );
+    }
+
+    #[test]
+    fn left_scope_resolves_f_to_fork_agent() {
+        let bindings = default_bindings();
+        let f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&f, BindingScope::Left),
+            Some(Action::ForkAgent)
         );
     }
     #[test]

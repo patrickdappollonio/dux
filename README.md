@@ -16,6 +16,7 @@ This means:
 ## Features
 
 - Left pane for projects and worktree sessions
+- Fork an existing agent session into a new worktree with the current files copied over
 - Center pane for live agent terminal output or file diffs
 - Right pane for changed files and diffs
 - Resizable panes with keyboard shortcuts and mouse drag
