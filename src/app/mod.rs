@@ -573,7 +573,7 @@ impl App {
         }
         if !matches!(self.prompt, PromptState::None) {
             self.prompt = PromptState::None;
-            self.set_info("Dismissed dialog.");
+            self.set_info("Dismissed dialog. Resume your work in the current pane.");
             return true;
         }
         if self.help_scroll.is_some() {

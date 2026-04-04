@@ -100,7 +100,7 @@ impl Theme {
             hint_bar_bg: Color::Rgb(25, 25, 25),
             overlay_border: Color::Cyan,
             overlay_bg: Color::Rgb(20, 20, 20),
-            overlay_dim_bg: Color::Rgb(15, 15, 15),
+            overlay_dim_bg: Color::Rgb(10, 10, 10),
             prompt_cursor: Color::Cyan,
             provider_label_fg: Color::Rgb(100, 100, 100),
             branch_fg: Color::Cyan,
