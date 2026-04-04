@@ -97,26 +97,65 @@ impl App {
     }
 
     pub(crate) fn create_agent_for_selected_project(&mut self) -> Result<()> {
-        if self.create_agent_in_flight {
-            self.set_error("An agent is already being created.");
-            return Ok(());
-        }
         let Some(project) = self.selected_project().cloned() else {
             self.set_error("Select a project first.");
             return Ok(());
         };
         logger::info(&format!("creating agent for project {}", project.path));
-        self.create_agent_in_flight = true;
-        self.set_busy(format!(
-            "Creating worktree for project \"{}\"...",
-            project.name
+        self.dispatch_create_agent_request(
+            CreateAgentRequest::NewProject {
+                project: project.clone(),
+            },
+            format!(
+                "Creating a new agent worktree for project \"{}\" and launching a fresh session...",
+                project.name
+            ),
+        )
+    }
+
+    pub(crate) fn fork_selected_session(&mut self) -> Result<()> {
+        let Some(source_session) = self.selected_session().cloned() else {
+            self.set_error("Select an agent session first to fork.");
+            return Ok(());
+        };
+        let Some(project) = self.selected_project().cloned() else {
+            self.set_error("Select an agent session first to fork.");
+            return Ok(());
+        };
+        let source_label = self.session_label(&source_session);
+        logger::info(&format!(
+            "forking session {} from worktree {}",
+            source_session.id, source_session.worktree_path
         ));
+        self.dispatch_create_agent_request(
+            CreateAgentRequest::ForkSession {
+                project: project.clone(),
+                source_session,
+                source_label: source_label.clone(),
+            },
+            format!(
+                "Forking agent \"{source_label}\" by cloning its current worktree contents into a fresh session...",
+            ),
+        )
+    }
+
+    fn dispatch_create_agent_request(
+        &mut self,
+        request: CreateAgentRequest,
+        busy_message: String,
+    ) -> Result<()> {
+        if self.create_agent_in_flight {
+            self.set_error("An agent is already being created or forked.");
+            return Ok(());
+        }
+        self.create_agent_in_flight = true;
+        self.set_busy(busy_message);
         let paths = self.paths.clone();
         let config = self.config.clone();
         let worker_tx = self.worker_tx.clone();
         let term_size = crossterm::terminal::size().unwrap_or((80, 24));
         thread::spawn(move || {
-            super::workers::run_create_agent_job(project, paths, config, worker_tx, term_size);
+            super::workers::run_create_agent_job(request, paths, config, worker_tx, term_size);
         });
         Ok(())
     }

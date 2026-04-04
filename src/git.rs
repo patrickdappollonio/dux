@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -92,21 +93,35 @@ pub fn create_worktree(
     worktrees_root: &Path,
     project_name: &str,
 ) -> Result<(String, PathBuf)> {
+    create_worktree_from_start_point(repo_path, worktrees_root, project_name, None)
+}
+
+pub fn create_worktree_from_start_point(
+    repo_path: &Path,
+    worktrees_root: &Path,
+    project_name: &str,
+    start_point: Option<&str>,
+) -> Result<(String, PathBuf)> {
     let branch_name = docker_style_name();
     let project_root = worktrees_root.join(project_name);
     fs::create_dir_all(&project_root)?;
     let worktree_path = project_root.join(&branch_name);
-    let output = Command::new("git")
-        .args([
-            "-C",
-            repo_path.to_string_lossy().as_ref(),
-            "worktree",
-            "add",
-            "-b",
-            &branch_name,
-            worktree_path.to_string_lossy().as_ref(),
-        ])
-        .output()?;
+    let repo = repo_path.to_string_lossy();
+    let worktree = worktree_path.to_string_lossy();
+    let mut command = Command::new("git");
+    command.args([
+        "-C",
+        repo.as_ref(),
+        "worktree",
+        "add",
+        "-b",
+        &branch_name,
+        worktree.as_ref(),
+    ]);
+    if let Some(start_point) = start_point {
+        command.arg(start_point);
+    }
+    let output = command.output()?;
     if !output.status.success() {
         return Err(anyhow!(
             "git worktree add failed: {}",
@@ -115,6 +130,41 @@ pub fn create_worktree(
     }
     let canonical = worktree_path.canonicalize().unwrap_or(worktree_path);
     Ok((branch_name, canonical))
+}
+
+pub fn head_commit(repo_path: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "rev-parse",
+            "HEAD",
+        ])
+        .output()
+        .with_context(|| format!("failed to inspect HEAD for {}", repo_path.display()))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git rev-parse HEAD failed for {}: {}",
+            repo_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub fn mirror_worktree_contents(source: &Path, destination: &Path) -> Result<()> {
+    let source = source
+        .canonicalize()
+        .with_context(|| format!("failed to resolve {}", source.display()))?;
+    let destination = destination
+        .canonicalize()
+        .with_context(|| format!("failed to resolve {}", destination.display()))?;
+    if source == destination {
+        return Err(anyhow!(
+            "source and destination worktrees must be different"
+        ));
+    }
+    sync_directory_contents(&source, &destination)
 }
 
 pub struct RemoveResult {
@@ -532,6 +582,94 @@ pub fn docker_style_name() -> String {
         .expect("petname generation should not fail")
 }
 
+fn sync_directory_contents(source: &Path, destination: &Path) -> Result<()> {
+    let mut source_entries = Vec::new();
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if is_git_admin_entry(&name) {
+            continue;
+        }
+        source_entries.push(name);
+        sync_entry(&entry.path(), &destination.join(entry.file_name()))?;
+    }
+
+    for entry in fs::read_dir(destination)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if is_git_admin_entry(&name) {
+            continue;
+        }
+        if !source_entries.iter().any(|candidate| candidate == &name) {
+            remove_path(&entry.path())?;
+        }
+    }
+
+    Ok(())
+}
+
+fn sync_entry(source: &Path, destination: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        sync_symlink(source, destination)?;
+        return Ok(());
+    }
+
+    if file_type.is_dir() {
+        if destination.exists() {
+            let destination_meta = fs::symlink_metadata(destination)?;
+            if !destination_meta.file_type().is_dir() || destination_meta.file_type().is_symlink() {
+                remove_path(destination)?;
+            }
+        }
+        if !destination.exists() {
+            fs::create_dir(destination)?;
+        }
+        sync_directory_contents(source, destination)?;
+        fs::set_permissions(destination, metadata.permissions())?;
+        return Ok(());
+    }
+
+    if destination.exists() {
+        let destination_meta = fs::symlink_metadata(destination)?;
+        if destination_meta.file_type().is_dir() || destination_meta.file_type().is_symlink() {
+            remove_path(destination)?;
+        }
+    }
+    fs::copy(source, destination)?;
+    fs::set_permissions(destination, metadata.permissions())?;
+    Ok(())
+}
+
+fn sync_symlink(source: &Path, destination: &Path) -> Result<()> {
+    let target = fs::read_link(source)?;
+    if let Ok(existing_target) = fs::read_link(destination)
+        && existing_target == target
+    {
+        return Ok(());
+    }
+    if destination.exists() || fs::symlink_metadata(destination).is_ok() {
+        remove_path(destination)?;
+    }
+    symlink(&target, destination)?;
+    Ok(())
+}
+
+fn remove_path(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn is_git_admin_entry(name: &std::ffi::OsStr) -> bool {
+    name == ".git"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,16 +723,9 @@ mod tests {
             );
         };
         run(&["init", "-b", "main"]);
-        run(&[
-            "-c",
-            "user.name=test",
-            "-c",
-            "user.email=t@t",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "init",
-        ]);
+        run(&["config", "user.name", "test"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["commit", "--allow-empty", "-m", "init"]);
         dir
     }
 
@@ -619,6 +750,93 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         wt
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed in {}: {}",
+            args,
+            cwd.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn commit_all(cwd: &Path, message: &str) {
+        run_git(cwd, &["add", "-A"]);
+        run_git(cwd, &["commit", "-m", message]);
+    }
+
+    #[test]
+    fn create_worktree_from_start_point_uses_explicit_head_commit() {
+        let repo = init_test_repo();
+        let source = add_worktree(repo.path(), "source-head");
+        fs::write(source.join("fork.txt"), "from source branch\n").unwrap();
+        commit_all(&source, "source commit");
+        let source_head = head_commit(&source).unwrap();
+
+        let worktrees_root = repo.path().join("forks");
+        let (_branch_name, forked) = create_worktree_from_start_point(
+            repo.path(),
+            &worktrees_root,
+            "demo",
+            Some(&source_head),
+        )
+        .unwrap();
+
+        assert_eq!(head_commit(&forked).unwrap(), source_head);
+        assert_eq!(
+            fs::read_to_string(forked.join("fork.txt")).unwrap(),
+            "from source branch\n"
+        );
+    }
+
+    #[test]
+    fn mirror_worktree_contents_copies_visible_tree_and_preserves_git_admin_state() {
+        let repo = init_test_repo();
+        fs::write(repo.path().join("tracked.txt"), "original tracked\n").unwrap();
+        fs::write(repo.path().join("delete-me.txt"), "delete me\n").unwrap();
+        commit_all(repo.path(), "tracked files");
+
+        let source = add_worktree(repo.path(), "mirror-source");
+        let destination = add_worktree(repo.path(), "mirror-destination");
+
+        fs::write(source.join("tracked.txt"), "modified tracked\n").unwrap();
+        fs::remove_file(source.join("delete-me.txt")).unwrap();
+        fs::write(source.join(".env"), "TOKEN=abc\n").unwrap();
+        fs::create_dir_all(source.join("scratch").join("nested")).unwrap();
+        fs::write(
+            source.join("scratch").join("nested").join("note.txt"),
+            "untracked\n",
+        )
+        .unwrap();
+
+        let destination_git_before = fs::read_to_string(destination.join(".git")).unwrap();
+        mirror_worktree_contents(&source, &destination).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(destination.join("tracked.txt")).unwrap(),
+            "modified tracked\n"
+        );
+        assert!(!destination.join("delete-me.txt").exists());
+        assert_eq!(
+            fs::read_to_string(destination.join(".env")).unwrap(),
+            "TOKEN=abc\n"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("scratch").join("nested").join("note.txt"))
+                .unwrap(),
+            "untracked\n"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join(".git")).unwrap(),
+            destination_git_before
+        );
     }
 
     // ── rename_branch tests ──────────────────────────────────────

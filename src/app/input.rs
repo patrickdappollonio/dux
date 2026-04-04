@@ -469,6 +469,7 @@ impl App {
                     self.open_project_browser()?;
                 }
                 Action::NewAgent => self.create_agent_for_selected_project()?,
+                Action::ForkAgent => self.fork_selected_session()?,
                 Action::RefreshProject => self.refresh_selected_project()?,
                 Action::ShowTerminal => self.show_companion_terminal()?,
                 Action::DeleteSession => self.confirm_delete_selected_session()?,
@@ -3054,6 +3055,33 @@ mod tests {
         assert!(matches!(app.prompt, PromptState::RenameSession { .. }));
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    #[test]
+    fn fork_selected_session_sets_busy_state_and_keeps_fresh_create_flow() {
+        let mut app = test_app(default_bindings());
+
+        app.fork_selected_session().unwrap();
+
+        assert!(app.create_agent_in_flight);
+        assert!(app.status.text().contains("Forking agent"));
+        assert!(app.status.text().contains("fresh session"));
+    }
+
+    #[test]
+    fn fork_action_requires_selected_session() {
+        let mut app = test_app(default_bindings());
+        app.selected_left = 0;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            app.status
+                .text()
+                .contains("Select an agent session first to fork.")
+        );
     }
 
     #[test]
