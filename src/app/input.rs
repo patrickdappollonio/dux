@@ -149,6 +149,8 @@ const MIN_TERMINAL_PANE_HEIGHT_PCT: u16 = 10;
 const MAX_TERMINAL_PANE_HEIGHT_PCT: u16 = 80;
 const MIN_STAGED_PANE_HEIGHT_PCT: u16 = 10;
 const MAX_STAGED_PANE_HEIGHT_PCT: u16 = 80;
+const MIN_COMMIT_PANE_HEIGHT_PCT: u16 = 10;
+const MAX_COMMIT_PANE_HEIGHT_PCT: u16 = 80;
 
 fn pct_from_columns(columns: u16, total_width: u16) -> u16 {
     if total_width == 0 {
@@ -1847,6 +1849,22 @@ impl App {
             }
         }
 
+        // Horizontal divider between Staged Changes and Commit Message on the right.
+        if let (Some(staged), Some(commit)) =
+            (self.mouse_layout.staged_list, self.mouse_layout.commit_area)
+        {
+            let right = self.mouse_layout.right;
+            let gap_top = staged.y + staged.height;
+            let gap_bottom = commit.y;
+            if row >= gap_top
+                && row < gap_bottom
+                && column >= right.x
+                && column < right.x + right.width
+            {
+                return Some(ResizeDragState::CommitDivider);
+            }
+        }
+
         None
     }
 
@@ -2443,6 +2461,24 @@ impl App {
                         pct.clamp(MIN_STAGED_PANE_HEIGHT_PCT, MAX_STAGED_PANE_HEIGHT_PCT);
                 }
             }
+            Some(ResizeDragState::CommitDivider) => {
+                // The commit divider resizes the split between "Staged Changes"
+                // and "Commit Message" within the staged sub-area.  We derive
+                // the sub-area span from the staged_list and commit_area rects.
+                if let (Some(staged), Some(commit)) =
+                    (self.mouse_layout.staged_list, self.mouse_layout.commit_area)
+                {
+                    let sub_top = staged.y.saturating_sub(1); // include staged border
+                    let sub_bottom = commit.y + commit.height;
+                    let sub_height = sub_bottom.saturating_sub(sub_top);
+                    if sub_height > 0 {
+                        let commit_rows = sub_bottom.saturating_sub(row).clamp(1, sub_height);
+                        let pct = pct_from_columns(commit_rows, sub_height);
+                        self.commit_pane_height_pct =
+                            pct.clamp(MIN_COMMIT_PANE_HEIGHT_PCT, MAX_COMMIT_PANE_HEIGHT_PCT);
+                    }
+                }
+            }
             None => {}
         }
     }
@@ -2452,11 +2488,13 @@ impl App {
             || self.config.ui.right_width_pct != self.right_width_pct
             || self.config.ui.terminal_pane_height_pct != self.terminal_pane_height_pct
             || self.config.ui.staged_pane_height_pct != self.staged_pane_height_pct
+            || self.config.ui.commit_pane_height_pct != self.commit_pane_height_pct
         {
             self.config.ui.left_width_pct = self.left_width_pct;
             self.config.ui.right_width_pct = self.right_width_pct;
             self.config.ui.terminal_pane_height_pct = self.terminal_pane_height_pct;
             self.config.ui.staged_pane_height_pct = self.staged_pane_height_pct;
+            self.config.ui.commit_pane_height_pct = self.commit_pane_height_pct;
             let _ = save_config(&self.paths.config_path, &self.config, &self.bindings);
         }
     }
@@ -2751,6 +2789,7 @@ mod tests {
             right_width_pct: 23,
             terminal_pane_height_pct: 35,
             staged_pane_height_pct: 50,
+            commit_pane_height_pct: 40,
             focus: FocusPane::Left,
             center_mode: CenterMode::Agent,
             left_collapsed: false,
@@ -3605,6 +3644,75 @@ mod tests {
         // Drag upward to grow the staged section.
         app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 80, 3));
         assert!(app.staged_pane_height_pct > original);
+    }
+
+    #[test]
+    fn mouse_drag_commit_divider_updates_height() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        // staged inner content: rows 9..12 (y=9, height=3)
+        // border gap: row 12
+        // commit_area: rows 13..19 (y=13, height=6) — includes border
+        app.mouse_layout.staged_list = Some(Rect::new(78, 9, 21, 3));
+        app.mouse_layout.commit_area = Some(Rect::new(77, 13, 23, 6));
+        app.staged_files = vec![ChangedFile {
+            path: "b.txt".into(),
+            status: "A".into(),
+            additions: 1,
+            deletions: 0,
+            binary: false,
+        }];
+        let original = app.commit_pane_height_pct;
+
+        // Click on the gap row (12), which is inside the divider zone.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 80, 12));
+        assert!(app.mouse_drag.is_some());
+
+        // Drag upward to grow the commit section.
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 80, 10));
+        assert!(app.commit_pane_height_pct > original);
+
+        // Release persists.
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 80, 10));
+        assert_eq!(
+            app.config.ui.commit_pane_height_pct,
+            app.commit_pane_height_pct
+        );
+    }
+
+    #[test]
+    fn mouse_commit_divider_not_detected_without_staged_files() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        // No staged files means no staged_list and no commit_area.
+        app.mouse_layout.staged_list = None;
+        app.mouse_layout.commit_area = None;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 80, 12));
+        assert!(app.mouse_drag.is_none());
+    }
+
+    #[test]
+    fn mouse_drag_commit_divider_downward_shrinks_commit_section() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.mouse_layout.staged_list = Some(Rect::new(78, 9, 21, 3));
+        app.mouse_layout.commit_area = Some(Rect::new(77, 13, 23, 6));
+        app.staged_files = vec![ChangedFile {
+            path: "b.txt".into(),
+            status: "A".into(),
+            additions: 1,
+            deletions: 0,
+            binary: false,
+        }];
+        let original = app.commit_pane_height_pct;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 80, 12));
+        assert!(app.mouse_drag.is_some());
+
+        // Drag downward to shrink the commit section.
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 80, 16));
+        assert!(app.commit_pane_height_pct < original);
     }
 
     #[test]

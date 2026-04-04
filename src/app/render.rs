@@ -879,10 +879,14 @@ impl App {
     /// Render the "Staged Changes" file list and the commit input as two
     /// separate bordered blocks (bubbles).
     fn render_staged_with_commit(&mut self, frame: &mut Frame, area: Rect, pane_focused: bool) {
-        let commit_height = 10u16;
+        let commit_pct = self.commit_pane_height_pct.clamp(10, 80);
+        let staged_pct = 100u16.saturating_sub(commit_pct).max(20);
         let [files_area, commit_area] = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(commit_height)])
+            .constraints([
+                Constraint::Percentage(staged_pct),
+                Constraint::Percentage(commit_pct),
+            ])
             .areas(area);
 
         // Staged files — normal titled block.

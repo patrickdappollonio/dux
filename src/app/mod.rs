@@ -67,6 +67,7 @@ pub struct App {
     pub(crate) right_width_pct: u16,
     pub(crate) terminal_pane_height_pct: u16,
     pub(crate) staged_pane_height_pct: u16,
+    pub(crate) commit_pane_height_pct: u16,
     pub(crate) focus: FocusPane,
     pub(crate) center_mode: CenterMode,
     pub(crate) left_collapsed: bool,
@@ -344,6 +345,7 @@ pub(crate) enum ResizeDragState {
     RightDivider,
     TerminalDivider,
     StagedDivider,
+    CommitDivider,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -445,6 +447,7 @@ impl App {
             right_width_pct: config.ui.right_width_pct,
             terminal_pane_height_pct: config.ui.terminal_pane_height_pct,
             staged_pane_height_pct: config.ui.staged_pane_height_pct,
+            commit_pane_height_pct: config.ui.commit_pane_height_pct,
             bindings,
             config,
             paths,
