@@ -377,12 +377,18 @@ impl App {
         for session in self
             .sessions
             .iter_mut()
-            .filter(|s| s.project_id == project.id)
+            // Active is currently the only running session state. If SessionStatus
+            // gains additional running variants, update this filter to keep
+            // provider cycling limited to new and non-running agents.
+            .filter(|s| s.project_id == project.id && !matches!(s.status, SessionStatus::Active))
         {
             session.provider = next.clone();
             self.session_store.upsert_session(session)?;
         }
-        self.set_info(format!("Changed CLI agent to \"{}\"", next.as_str()));
+        self.set_info(format!(
+            "Changed default CLI agent to \"{}\" for new and stopped agents",
+            next.as_str()
+        ));
         Ok(())
     }
 
