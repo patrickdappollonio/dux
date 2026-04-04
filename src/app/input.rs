@@ -3483,6 +3483,52 @@ mod tests {
         assert!(matches!(app.center_mode, CenterMode::Diff { .. }));
     }
 
+    /// Regression test: double-clicking a file when focus starts on Center
+    /// must open the diff even though focus changes (and the mouse layout
+    /// shifts due to the hint bar appearing) between the two clicks.
+    #[test]
+    fn mouse_double_click_unstaged_file_opens_diff_from_center_focus() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        init_git_repo_with_modified_file(
+            &app,
+            "src/main.rs",
+            "fn main() {}\n",
+            "fn main() { println!(\"hi\"); }\n",
+        );
+        app.unstaged_files = vec![ChangedFile {
+            path: "src/main.rs".into(),
+            status: "M".into(),
+            additions: 1,
+            deletions: 1,
+            binary: false,
+        }];
+        app.selected_left = 1;
+
+        // Focus starts on the center pane (agent output), NOT on Files.
+        app.focus = FocusPane::Center;
+        app.right_section = RightSection::Unstaged;
+
+        // Layout before first click: full inner area (no hint bar because
+        // the pane is not focused).  unstaged_list rows 1..19 (height 18).
+        app.mouse_layout.unstaged_list = Some(Rect::new(78, 1, 21, 18));
+
+        // First click selects the file and moves focus to Files.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 79, 1));
+        assert_eq!(app.focus, FocusPane::Files);
+        assert!(!matches!(app.center_mode, CenterMode::Diff { .. }));
+
+        // Simulate the render cycle that happens between clicks: the pane is
+        // now focused so the hint bar appears, shrinking the list area by 2
+        // rows at the bottom (height 18 → 16).
+        app.mouse_layout.unstaged_list = Some(Rect::new(78, 1, 21, 16));
+
+        // Second click at the same position must still detect the double-click.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 79, 1));
+        assert_eq!(app.focus, FocusPane::Center);
+        assert!(matches!(app.center_mode, CenterMode::Diff { .. }));
+    }
+
     #[test]
     fn mouse_wheel_center_diff_scrolls_lines() {
         let mut app = test_app(default_bindings());
