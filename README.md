@@ -18,7 +18,7 @@ This means:
 - Left pane for projects and worktree sessions
 - Center pane for live agent terminal output or file diffs
 - Right pane for changed files and diffs
-- Resizable panes with keyboard shortcuts
+- Resizable panes with keyboard shortcuts and mouse drag
 - Collapsible project sidebar
 - Command palette with fuzzy search
 - Config written to `~/.config/dux/config.toml` (Linux) or `~/.dux/config.toml` (macOS)
