@@ -105,9 +105,13 @@ When shelling out to git, **always ensure the command output is immune to user-s
 
 - **Prefer plumbing commands** (`cat-file`, `rev-parse`, `for-each-ref`) over porcelain when you need machine-readable output. Plumbing commands are guaranteed stable.
 - **Use `--porcelain`** for `git status`. Never use `--short` — it is affected by user config (`status.branch`, `status.relativePaths`, etc.).
+- **Prefer `--porcelain=v1 -z` when parsing status paths.** Parse NUL-delimited records instead of line-based output so spaces, quotes, Unicode, and embedded newlines in paths are handled safely.
 - **Use `--numstat`** for line-level diff statistics. It outputs tab-separated values unaffected by config.
+- **Prefer `--numstat -z` when parsing file paths from diff stats.** Rename and copy records should be parsed from NUL-delimited output, not from whitespace- or newline-delimited text.
 - **Override config with `-c`** when a porcelain/plumbing alternative doesn't exist (e.g., `git -c color.diff=false diff`).
 - **Imperative commands** that aren't parsed (`worktree add`, `branch -D`, `pull`) are fine as-is.
+- **For imperative git commands, rely on exit status rather than parsing stdout.** Treat stdout/stderr as user-facing diagnostics only unless Git explicitly documents the format as machine-stable.
+- **Do not parse human-facing commands like `git branch --show-current` when a plumbing-style alternative exists.** Prefer commands such as `symbolic-ref --quiet --short HEAD` or `rev-parse`.
 - **Avoid shelling out to `git diff` for display** — the project computes diffs in-process using the `similar` crate and applies syntax highlighting with `syntect`. Use `git::file_at_head()` to get the base version and read the working copy from disk.
 
 ## Recommendations For Editing

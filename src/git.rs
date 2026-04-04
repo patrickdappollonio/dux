@@ -14,6 +14,12 @@ enum DiffStat {
     Binary,
 }
 
+struct StatusEntry {
+    index_status: char,
+    worktree_status: char,
+    path: String,
+}
+
 const NULL_DEVICE: &str = "/dev/null";
 
 pub fn current_branch(repo_path: &Path) -> Result<String> {
@@ -21,14 +27,16 @@ pub fn current_branch(repo_path: &Path) -> Result<String> {
         .args([
             "-C",
             repo_path.to_string_lossy().as_ref(),
-            "branch",
-            "--show-current",
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "HEAD",
         ])
         .output()
         .with_context(|| format!("failed to inspect {}", repo_path.display()))?;
     if !output.status.success() {
         return Err(anyhow!(
-            "git branch failed for {}: {}",
+            "git symbolic-ref failed for {}: {}",
             repo_path.display(),
             String::from_utf8_lossy(&output.stderr)
         ));
@@ -55,7 +63,9 @@ pub fn is_dirty(repo_path: &Path) -> Result<bool> {
             "-C",
             repo_path.to_string_lossy().as_ref(),
             "status",
-            "--porcelain",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=no",
         ])
         .output()?;
     if !output.status.success() {
@@ -226,7 +236,8 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
             "-C",
             wt.as_ref(),
             "status",
-            "--porcelain",
+            "--porcelain=v1",
+            "-z",
             "--untracked-files=all",
         ])
         .output()?;
@@ -240,14 +251,10 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     let mut staged = Vec::new();
     let mut unstaged = Vec::new();
 
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if line.len() < 4 {
-            continue;
-        }
-        let bytes = line.as_bytes();
-        let index_status = bytes[0] as char;
-        let worktree_status = bytes[1] as char;
-        let path = line[3..].to_string();
+    for entry in parse_status_porcelain_z(&output.stdout) {
+        let index_status = entry.index_status;
+        let worktree_status = entry.worktree_status;
+        let path = entry.path;
 
         if index_status == '?' && worktree_status == '?' {
             unstaged.push(ChangedFile {
@@ -282,7 +289,7 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     }
 
     if let Ok(ns) = Command::new("git")
-        .args(["-C", wt.as_ref(), "diff", "--numstat"])
+        .args(["-C", wt.as_ref(), "diff", "--numstat", "-z"])
         .output()
         && ns.status.success()
     {
@@ -319,7 +326,7 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     }
 
     if let Ok(ns) = Command::new("git")
-        .args(["-C", wt.as_ref(), "diff", "--cached", "--numstat"])
+        .args(["-C", wt.as_ref(), "diff", "--cached", "--numstat", "-z"])
         .output()
         && ns.status.success()
     {
@@ -350,6 +357,7 @@ fn untracked_file_diff_stat(worktree_path: &Path, rel_path: &str) -> Option<Diff
             "diff",
             "--no-index",
             "--numstat",
+            "-z",
             "--",
             NULL_DEVICE,
             rel_path,
@@ -361,7 +369,7 @@ fn untracked_file_diff_stat(worktree_path: &Path, rel_path: &str) -> Option<Diff
         return None;
     }
 
-    parse_numstat_line(String::from_utf8_lossy(&output.stdout).lines().next()?)
+    parse_numstat(&output.stdout).into_values().next()
 }
 
 fn classify_untracked_file_fallback(path: &Path) -> (usize, bool) {
@@ -378,16 +386,20 @@ fn classify_untracked_file_fallback(path: &Path) -> (usize, bool) {
 }
 
 fn parse_numstat(raw: &[u8]) -> HashMap<String, DiffStat> {
-    String::from_utf8_lossy(raw)
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split('\t');
-            let _ = parts.next()?;
-            let _ = parts.next()?;
-            let path = parts.next()?.to_string();
-            Some((path, parse_numstat_line(line)?))
-        })
-        .collect()
+    let mut stats = HashMap::new();
+    let mut records = raw.split(|byte| *byte == 0).peekable();
+
+    while let Some(record) = records.next() {
+        if record.is_empty() {
+            continue;
+        }
+        let Some((path, stat)) = parse_numstat_record(record, &mut records) else {
+            continue;
+        };
+        stats.insert(path, stat);
+    }
+
+    stats
 }
 
 fn parse_numstat_line(line: &str) -> Option<DiffStat> {
@@ -399,6 +411,62 @@ fn parse_numstat_line(line: &str) -> Option<DiffStat> {
     } else {
         Some(DiffStat::Text(add.parse().ok()?, del.parse().ok()?))
     }
+}
+
+fn parse_status_porcelain_z(raw: &[u8]) -> Vec<StatusEntry> {
+    let mut entries = Vec::new();
+    let mut records = raw.split(|byte| *byte == 0).peekable();
+
+    while let Some(record) = records.next() {
+        if record.len() < 4 {
+            continue;
+        }
+
+        let index_status = record[0] as char;
+        let worktree_status = record[1] as char;
+        let path = String::from_utf8_lossy(&record[3..]).to_string();
+
+        if path.is_empty() {
+            continue;
+        }
+
+        if matches!(index_status, 'R' | 'C') || matches!(worktree_status, 'R' | 'C') {
+            let _ = records.next();
+        }
+
+        entries.push(StatusEntry {
+            index_status,
+            worktree_status,
+            path,
+        });
+    }
+
+    entries
+}
+
+fn parse_numstat_record<'a, I>(
+    record: &[u8],
+    records: &mut std::iter::Peekable<I>,
+) -> Option<(String, DiffStat)>
+where
+    I: Iterator<Item = &'a [u8]>,
+{
+    let first_tab = record.iter().position(|byte| *byte == b'\t')?;
+    let second_tab = record[first_tab + 1..]
+        .iter()
+        .position(|byte| *byte == b'\t')?
+        + first_tab
+        + 1;
+    let stat = parse_numstat_line(std::str::from_utf8(record).ok()?)?;
+    let path_bytes = &record[second_tab + 1..];
+
+    if !path_bytes.is_empty() {
+        return Some((String::from_utf8_lossy(path_bytes).to_string(), stat));
+    }
+
+    let _old_path = records.next()?;
+    let new_path = records.next()?;
+    Some((String::from_utf8_lossy(new_path).to_string(), stat))
 }
 
 pub fn stage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
@@ -1015,5 +1083,84 @@ mod tests {
         assert_eq!(file.additions, 0);
         assert_eq!(file.deletions, 0);
         assert!(file.binary);
+    }
+
+    #[test]
+    fn parse_status_porcelain_z_handles_untracked_and_spaces() {
+        let raw = b"?? spaced name.txt\0";
+        let entries = parse_status_porcelain_z(raw);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].index_status, '?');
+        assert_eq!(entries[0].worktree_status, '?');
+        assert_eq!(entries[0].path, "spaced name.txt");
+    }
+
+    #[test]
+    fn parse_status_porcelain_z_uses_destination_path_for_renames() {
+        let raw = b"R  new name.txt\0old name.txt\0";
+        let entries = parse_status_porcelain_z(raw);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].index_status, 'R');
+        assert_eq!(entries[0].worktree_status, ' ');
+        assert_eq!(entries[0].path, "new name.txt");
+    }
+
+    #[test]
+    fn parse_status_porcelain_z_skips_empty_records() {
+        let raw = b"\0M  file.txt\0\0";
+        let entries = parse_status_porcelain_z(raw);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "file.txt");
+    }
+
+    #[test]
+    fn parse_numstat_handles_regular_path_with_spaces() {
+        let stats = parse_numstat(b"1\t2\tsp ace.txt\0");
+        let stat = stats.get("sp ace.txt").expect("stat present");
+        match stat {
+            DiffStat::Text(additions, deletions) => {
+                assert_eq!((*additions, *deletions), (1, 2));
+            }
+            DiffStat::Binary => panic!("expected text stat"),
+        }
+    }
+
+    #[test]
+    fn parse_numstat_handles_rename_records() {
+        let stats = parse_numstat(b"0\t0\t\0old name.txt\0new name.txt\0");
+        let stat = stats.get("new name.txt").expect("stat present");
+        match stat {
+            DiffStat::Text(additions, deletions) => {
+                assert_eq!((*additions, *deletions), (0, 0));
+            }
+            DiffStat::Binary => panic!("expected text stat"),
+        }
+    }
+
+    #[test]
+    fn parse_numstat_handles_binary_records() {
+        let stats = parse_numstat(b"-\t-\tbinary.bin\0");
+        assert!(matches!(stats.get("binary.bin"), Some(DiffStat::Binary)));
+    }
+
+    #[test]
+    fn changed_files_uses_destination_path_for_staged_rename() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "rename-status");
+
+        fs::write(wt.join("old name.txt"), "hello\n").unwrap();
+        run_git(&wt, &["add", "old name.txt"]);
+        run_git(&wt, &["commit", "-m", "add file"]);
+        run_git(&wt, &["mv", "old name.txt", "new name.txt"]);
+
+        let (staged, unstaged) = changed_files(&wt).unwrap();
+
+        assert!(unstaged.is_empty());
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].path, "new name.txt");
+        assert_eq!(staged[0].status, "R");
     }
 }
