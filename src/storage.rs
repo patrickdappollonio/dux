@@ -120,6 +120,83 @@ fn parse_time(value: &str) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
+/// Opens an in-memory session store for tests.
+#[cfg(test)]
+fn test_store() -> SessionStore {
+    SessionStore::open(std::path::Path::new(":memory:")).unwrap()
+}
+
+/// Builds a minimal `AgentSession` with the given id, `created_at`, and `updated_at`.
+#[cfg(test)]
+fn test_session(
+    id: &str,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+) -> crate::model::AgentSession {
+    crate::model::AgentSession {
+        id: id.to_string(),
+        project_id: "proj".to_string(),
+        project_path: None,
+        provider: crate::model::ProviderKind::new("claude"),
+        source_branch: "main".to_string(),
+        branch_name: format!("branch-{id}"),
+        worktree_path: format!("/tmp/{id}"),
+        title: None,
+        status: SessionStatus::Active,
+        created_at,
+        updated_at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    #[test]
+    fn load_sessions_ordered_by_updated_at_desc() {
+        let store = test_store();
+        let now = Utc::now();
+
+        // Insert three sessions with different updated_at values.
+        // oldest updated first, newest updated last.
+        let s1 = test_session("a", now - Duration::hours(3), now - Duration::hours(3));
+        let s2 = test_session("b", now - Duration::hours(2), now - Duration::hours(1));
+        let s3 = test_session("c", now - Duration::hours(1), now - Duration::hours(2));
+
+        store.upsert_session(&s1).unwrap();
+        store.upsert_session(&s2).unwrap();
+        store.upsert_session(&s3).unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        let ids: Vec<&str> = loaded.iter().map(|s| s.id.as_str()).collect();
+
+        // s2 has the most recent updated_at, then s3, then s1.
+        assert_eq!(ids, vec!["b", "c", "a"]);
+    }
+
+    #[test]
+    fn upsert_without_changing_updated_at_preserves_order() {
+        let store = test_store();
+        let now = Utc::now();
+
+        let s1 = test_session("a", now - Duration::hours(2), now - Duration::hours(2));
+        let s2 = test_session("b", now - Duration::hours(1), now - Duration::hours(1));
+
+        store.upsert_session(&s1).unwrap();
+        store.upsert_session(&s2).unwrap();
+
+        // Re-upsert s1 with same timestamps (simulating a no-op status update).
+        store.upsert_session(&s1).unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        let ids: Vec<&str> = loaded.iter().map(|s| s.id.as_str()).collect();
+
+        // Order unchanged: s2 still has the more recent updated_at.
+        assert_eq!(ids, vec!["b", "a"]);
+    }
+}
+
 fn ensure_column(conn: &Connection, table: &str, column: &str, sql_type: &str) -> Result<()> {
     let mut stmt = conn.prepare(&format!("pragma table_info({table})"))?;
     let existing = stmt
