@@ -31,6 +31,12 @@ Download the latest binary for your platform from the [GitHub Releases](https://
 
 On first launch, `dux` creates the config file with the full default configuration and comments.
 
+## Reset
+
+`dux reset` removes local config and logs so dux can recover from a broken or outdated configuration while keeping saved agents and their worktrees intact.
+
+If you want a full wipe, run `dux reset --delete-agent-data` to also remove `sessions.sqlite3` and the managed `worktrees/` directory.
+
 ## Provider Setup
 
 The provider commands in `config.toml` point to the CLI tools you want dux to run. By default, `claude` and `codex` are configured, and new sessions start with `claude` unless you override it per project or in `[defaults]`. dux launches the configured command in a PTY inside the session's worktree directory, so the CLI tool sees the worktree as its working directory.
