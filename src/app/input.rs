@@ -2707,7 +2707,7 @@ mod tests {
         App, CenterMode, FocusPane, FullscreenOverlay, InputTarget, LeftSection, MouseLayoutState,
         OverlayMouseLayout, OverlayMouseLayoutState, PromptState, RightSection,
     };
-    use crate::config::{Config, DuxPaths};
+    use crate::config::{Config, DuxPaths, ProjectConfig};
     use crate::editor::{DetectedEditor, EditorKind};
     use crate::keybindings::{Action, BINDING_DEFS, BindingScope, RuntimeBindings};
     use crate::model::{
@@ -4080,6 +4080,135 @@ mod tests {
             }
             _ => panic!("expected quit confirmation"),
         }
+    }
+
+    #[test]
+    fn cycle_provider_only_updates_new_and_stopped_agents() {
+        let mut app = test_app(default_bindings());
+        let root = PathBuf::from(&app.projects[0].path);
+        let now = Utc::now();
+
+        app.config.projects.push(ProjectConfig {
+            id: app.projects[0].id.clone(),
+            path: app.projects[0].path.clone(),
+            name: Some(app.projects[0].name.clone()),
+            default_provider: Some(app.projects[0].default_provider.as_str().to_string()),
+            commit_prompt: None,
+        });
+
+        app.sessions[0].provider = ProviderKind::from_str("codex");
+        app.sessions[0].status = SessionStatus::Active;
+        app.session_store
+            .upsert_session(&app.sessions[0])
+            .expect("persist active session");
+
+        let detached = AgentSession {
+            id: "session-2".to_string(),
+            project_id: app.projects[0].id.clone(),
+            project_path: Some(app.projects[0].path.clone()),
+            provider: ProviderKind::from_str("codex"),
+            source_branch: "main".to_string(),
+            branch_name: "detached-branch".to_string(),
+            worktree_path: app
+                .paths
+                .worktrees_root
+                .join("detached")
+                .display()
+                .to_string(),
+            title: None,
+            status: SessionStatus::Detached,
+            created_at: now,
+            updated_at: now,
+        };
+        let exited = AgentSession {
+            id: "session-3".to_string(),
+            project_id: app.projects[0].id.clone(),
+            project_path: Some(app.projects[0].path.clone()),
+            provider: ProviderKind::from_str("codex"),
+            source_branch: "main".to_string(),
+            branch_name: "exited-branch".to_string(),
+            worktree_path: app
+                .paths
+                .worktrees_root
+                .join("exited")
+                .display()
+                .to_string(),
+            title: None,
+            status: SessionStatus::Exited,
+            created_at: now,
+            updated_at: now,
+        };
+        let other_project = Project {
+            id: "project-2".to_string(),
+            name: "other".to_string(),
+            path: root.join("other-project").display().to_string(),
+            default_provider: ProviderKind::from_str("codex"),
+            current_branch: "main".to_string(),
+        };
+        let other_session = AgentSession {
+            id: "session-4".to_string(),
+            project_id: other_project.id.clone(),
+            project_path: Some(other_project.path.clone()),
+            provider: ProviderKind::from_str("codex"),
+            source_branch: "main".to_string(),
+            branch_name: "other-branch".to_string(),
+            worktree_path: app.paths.worktrees_root.join("other").display().to_string(),
+            title: None,
+            status: SessionStatus::Detached,
+            created_at: now,
+            updated_at: now,
+        };
+
+        app.config.projects.push(ProjectConfig {
+            id: other_project.id.clone(),
+            path: other_project.path.clone(),
+            name: Some(other_project.name.clone()),
+            default_provider: Some(other_project.default_provider.as_str().to_string()),
+            commit_prompt: None,
+        });
+        app.projects.push(other_project);
+        app.sessions.push(detached);
+        app.sessions.push(exited);
+        app.sessions.push(other_session);
+        for session in &app.sessions[1..] {
+            app.session_store
+                .upsert_session(session)
+                .expect("persist session");
+        }
+
+        app.rebuild_left_items();
+        app.selected_left = 0;
+
+        app.cycle_selected_project_provider()
+            .expect("cycle provider");
+
+        assert_eq!(app.projects[0].default_provider.as_str(), "claude");
+        assert_eq!(
+            app.config.projects[0].default_provider.as_deref(),
+            Some("claude")
+        );
+        assert_eq!(app.sessions[0].provider.as_str(), "codex");
+        assert_eq!(app.sessions[1].provider.as_str(), "claude");
+        assert_eq!(app.sessions[2].provider.as_str(), "claude");
+        assert_eq!(app.sessions[3].provider.as_str(), "codex");
+
+        let persisted = app.session_store.load_sessions().expect("load sessions");
+        let provider_for = |id: &str| {
+            persisted
+                .iter()
+                .find(|session| session.id == id)
+                .map(|session| session.provider.as_str())
+        };
+        assert_eq!(provider_for("session-1"), Some("codex"));
+        assert_eq!(provider_for("session-2"), Some("claude"));
+        assert_eq!(provider_for("session-3"), Some("claude"));
+        assert_eq!(provider_for("session-4"), Some("codex"));
+
+        assert!(
+            app.status
+                .text()
+                .contains("Changed default CLI agent to \"claude\"")
+        );
     }
 
     #[test]
