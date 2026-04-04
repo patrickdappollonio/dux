@@ -853,8 +853,7 @@ impl App {
                     Constraint::Percentage(pct),          // Staged Changes (with commit input)
                 ])
                 .split(area);
-            self.mouse_layout.unstaged_list = Some(self.file_list_area(chunks[0], true));
-            self.render_file_list(
+            let list_rect = self.render_file_list(
                 frame,
                 chunks[0],
                 "Changes",
@@ -862,10 +861,10 @@ impl App {
                 RightSection::Unstaged,
                 true,
             );
+            self.mouse_layout.unstaged_list = Some(list_rect);
             self.render_staged_with_commit(frame, chunks[1], focused);
         } else {
-            self.mouse_layout.unstaged_list = Some(self.file_list_area(area, true));
-            self.render_file_list(
+            let list_rect = self.render_file_list(
                 frame,
                 area,
                 "Changes",
@@ -873,6 +872,7 @@ impl App {
                 RightSection::Unstaged,
                 true,
             );
+            self.mouse_layout.unstaged_list = Some(list_rect);
         }
     }
 
@@ -890,8 +890,7 @@ impl App {
             .areas(area);
 
         // Staged files — normal titled block.
-        self.mouse_layout.staged_list = Some(self.file_list_area(files_area, false));
-        self.render_file_list(
+        let list_rect = self.render_file_list(
             frame,
             files_area,
             "Staged Changes",
@@ -899,25 +898,15 @@ impl App {
             RightSection::Staged,
             false,
         );
+        self.mouse_layout.staged_list = Some(list_rect);
 
         // Commit input block.
         self.render_commit_input_inner(frame, commit_area, pane_focused);
     }
 
-    fn file_list_area(&self, area: Rect, show_hint: bool) -> Rect {
-        let inner = self.themed_block("", false).inner(area);
-        let pane_focused = self.focus == FocusPane::Files;
-        if show_hint && pane_focused && inner.height >= 4 {
-            let [list_area, _] = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(1), Constraint::Length(2)])
-                .areas(inner);
-            list_area
-        } else {
-            inner
-        }
-    }
-
+    /// Render a file list inside a bordered block and return the inner `Rect`
+    /// where file rows were actually placed.  Callers store this in
+    /// `mouse_layout` so that mouse-hit detection matches the real rendering.
     fn render_file_list(
         &self,
         frame: &mut Frame,
@@ -926,7 +915,7 @@ impl App {
         files: &[ChangedFile],
         section: RightSection,
         show_hint: bool,
-    ) {
+    ) -> Rect {
         let pane_focused = self.focus == FocusPane::Files;
         let is_active_section = pane_focused && self.right_section == section;
         let title = format!("{title_prefix} ({})", files.len());
@@ -1070,6 +1059,8 @@ impl App {
                 )
                 .render(ha, frame.buffer_mut());
         }
+
+        list_area
     }
 
     /// Render the commit input as its own bordered block.
