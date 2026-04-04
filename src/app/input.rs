@@ -1827,21 +1827,27 @@ impl App {
             }
         }
 
-        // Horizontal divider between Unstaged and Staged sections on the right.
-        // The unstaged_list and staged_list rects represent the inner content
-        // areas. The border row sits between them — it is the row just after
-        // the bottom of unstaged_list's outer block and just before staged_list's
-        // outer block. We detect the single row that belongs to neither list.
+        // Horizontal dividers inside the right pane.
+        //
+        // The inner content rects (unstaged_list, staged_list) exclude the
+        // surrounding block borders, so the gap between two adjacent rects is
+        // typically only 1-2 rows of border chrome.  We extend the hit zone
+        // outward from each content rect by 1 row to cover the border that
+        // belongs to each block, making the target at least 3 rows wide
+        // (bottom border + gap + top border) without overlapping the content.
+
+        // Between Unstaged and Staged.
         if let (Some(unstaged), Some(staged)) = (
             self.mouse_layout.unstaged_list,
             self.mouse_layout.staged_list,
         ) {
             let right = self.mouse_layout.right;
-            // The gap between the two inner rects contains the border row(s).
-            let gap_top = unstaged.y + unstaged.height; // first row after unstaged content
-            let gap_bottom = staged.y; // first row of staged content
-            if row >= gap_top
-                && row < gap_bottom
+            // The content rects don't include their enclosing block borders.
+            // Extend one row past each content edge to cover the border row.
+            let hit_top = unstaged.y + unstaged.height; // first row after unstaged content (border)
+            let hit_bottom = staged.y.saturating_sub(1); // last row before staged content (border)
+            if row >= hit_top
+                && row <= hit_bottom
                 && column >= right.x
                 && column < right.x + right.width
             {
@@ -1849,15 +1855,16 @@ impl App {
             }
         }
 
-        // Horizontal divider between Staged Changes and Commit Message on the right.
+        // Between Staged Changes and Commit Message.
+        // staged_list is an inner rect; commit_area is an outer rect (includes border).
         if let (Some(staged), Some(commit)) =
             (self.mouse_layout.staged_list, self.mouse_layout.commit_area)
         {
             let right = self.mouse_layout.right;
-            let gap_top = staged.y + staged.height;
-            let gap_bottom = commit.y;
-            if row >= gap_top
-                && row < gap_bottom
+            let hit_top = staged.y + staged.height; // first row after staged content (border)
+            let hit_bottom = commit.y; // top border row of commit block
+            if row >= hit_top
+                && row <= hit_bottom
                 && column >= right.x
                 && column < right.x + right.width
             {
@@ -2463,13 +2470,17 @@ impl App {
             }
             Some(ResizeDragState::CommitDivider) => {
                 // The commit divider resizes the split between "Staged Changes"
-                // and "Commit Message" within the staged sub-area.  We derive
-                // the sub-area span from the staged_list and commit_area rects.
-                if let (Some(staged), Some(commit)) =
-                    (self.mouse_layout.staged_list, self.mouse_layout.commit_area)
-                {
+                // and "Commit Message".  We compute relative to the staged
+                // sub-area of the right pane.  The sub-area spans from where
+                // the staged section starts to the bottom of the right pane.
+                // Using the right pane bottom as reference keeps the
+                // calculation stable even when layout rects are stale during
+                // multi-frame drags.
+                if let Some(staged) = self.mouse_layout.staged_list {
+                    let right = self.mouse_layout.right;
+                    // Sub-area = staged block top to right pane bottom.
                     let sub_top = staged.y.saturating_sub(1); // include staged border
-                    let sub_bottom = commit.y + commit.height;
+                    let sub_bottom = right.y + right.height;
                     let sub_height = sub_bottom.saturating_sub(sub_top);
                     if sub_height > 0 {
                         let commit_rows = sub_bottom.saturating_sub(row).clamp(1, sub_height);
@@ -3520,12 +3531,14 @@ mod tests {
         app.commit_input = "hello".to_string();
         app.focus = FocusPane::Center;
 
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 80, 14));
+        // Click inside the commit block (below the border row that the divider
+        // occupies) so that the first click focuses the commit section.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 80, 15));
         assert_eq!(app.focus, FocusPane::Files);
         assert_eq!(app.right_section, RightSection::CommitInput);
         assert_eq!(app.input_target, InputTarget::None);
 
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 80, 15));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 80, 16));
         assert_eq!(app.input_target, InputTarget::CommitMessage);
     }
 
