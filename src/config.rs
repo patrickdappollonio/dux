@@ -457,7 +457,9 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
         },
         ConfigEntry::Field {
             key: "right_width_pct",
-            comment: None,
+            comment: Some(CommentSource::Static(
+                "# Percentage of the terminal width for the right (files/diff) pane (5-80).",
+            )),
             value_fn: |c| FieldValue::U16(c.ui.right_width_pct),
         },
         ConfigEntry::Field {
@@ -590,10 +592,10 @@ fn render_keys_config(
         "# Key format: single chars (\"j\"), special names (\"up\", \"enter\", \"space\",\n",
     );
     out.push_str(
-        "# \"tab\", \"shift-tab\", \"pageup\", \"esc\"), or modifier combos (\"ctrl-d\").\n",
+        "# \"tab\", \"shift-tab\", \"pageup\", \"esc\"), or modifier combos (\"Ctrl-d\").\n",
     );
     out.push_str("#\n");
-    out.push_str("# Some keys shown in hints are terminal conventions (e.g. ctrl-j for newline)\n");
+    out.push_str("# Some keys shown in hints are terminal conventions (e.g. Ctrl-j for newline)\n");
     out.push_str("# that dux documents but does not control. Set this to false to hide them.\n");
     let _ = writeln!(out, "show_terminal_keys = {}", keys.show_terminal_keys);
     out.push('\n');
@@ -796,6 +798,9 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
         "command = \"{}\"\n",
         escape_toml_string(&config.command)
     ));
+    out.push_str(
+        "# Arguments passed to the provider command when launching an interactive PTY session.\n",
+    );
     out.push_str(&format!("args = {}\n", render_string_list(&config.args)));
     out.push_str(
         "# Optional args dux should use when reconnecting a detached session.\n\
@@ -815,8 +820,10 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
         OneshotOutput::Stdout => "stdout",
         OneshotOutput::Tempfile => "tempfile",
     };
+    out.push_str("# Where to read the provider's oneshot response: \"stdout\" or \"tempfile\".\n");
     out.push_str(&format!("oneshot_output = \"{output_str}\"\n"));
     if let Some(hint) = &config.install_hint {
+        out.push_str("# Hint shown to the user when the provider command is not found on PATH.\n");
         out.push_str(&format!(
             "install_hint = \"{}\"\n",
             escape_toml_string(hint)

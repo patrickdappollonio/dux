@@ -407,21 +407,21 @@ impl App {
                     format!("Scrolled back {scroll} lines. "),
                     Style::default().fg(self.theme.hint_key_fg),
                 ));
-                spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
+                spans.extend(self.theme.dim_key_badge_default(&scroll_down));
                 spans.push(Span::styled(" down, ", desc_style));
-                spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
+                spans.extend(self.theme.dim_key_badge_default(&scroll_up));
                 spans.push(Span::styled(" up, ", desc_style));
-                spans.extend(self.theme.dim_key_badge(&scroll_line, Color::Reset));
+                spans.extend(self.theme.dim_key_badge_default(&scroll_line));
                 spans.push(Span::styled(" one line. ", desc_style));
             } else {
-                spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
+                spans.extend(self.theme.dim_key_badge_default(&scroll_up));
                 spans.push(Span::styled(" ", desc_style));
-                spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
+                spans.extend(self.theme.dim_key_badge_default(&scroll_down));
                 spans.push(Span::styled(" to scroll. ", desc_style));
-                spans.extend(self.theme.dim_key_badge(&scroll_line, Color::Reset));
+                spans.extend(self.theme.dim_key_badge_default(&scroll_line));
                 spans.push(Span::styled(" one line. ", desc_style));
             }
-            spans.extend(self.theme.dim_key_badge(&close, Color::Reset));
+            spans.extend(self.theme.dim_key_badge_default(&close));
             spans.push(Span::styled(" close diff.", desc_style));
 
             Paragraph::new(Line::from(spans))
@@ -684,7 +684,7 @@ impl App {
                         let cursor_cell = &mut buf[(cx, cy)];
                         cursor_cell.set_style(
                             Style::default()
-                                .fg(Color::Black)
+                                .fg(self.theme.input_cursor_fg)
                                 .bg(self.theme.prompt_cursor),
                         );
                     }
@@ -758,14 +758,14 @@ impl App {
                     format!("{capitalized} is holding focus. Press "),
                     desc_style,
                 ));
-                spans.extend(self.theme.dim_key_badge(&exit_key, Color::Reset));
+                spans.extend(self.theme.dim_key_badge_default(&exit_key));
                 spans.push(Span::styled(" to return to the app. ", desc_style));
-                spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
+                spans.extend(self.theme.dim_key_badge_default(&scroll_up));
                 spans.push(Span::styled(" up, ", desc_style));
-                spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
+                spans.extend(self.theme.dim_key_badge_default(&scroll_down));
                 if scrollback_offset > 0 {
                     spans.push(Span::styled(" page down, or ", desc_style));
-                    spans.extend(self.theme.dim_key_badge(&scroll_line, Color::Reset));
+                    spans.extend(self.theme.dim_key_badge_default(&scroll_line));
                     spans.push(Span::styled(" down one line.", desc_style));
                 } else {
                     spans.push(Span::styled(" page down.", desc_style));
@@ -778,11 +778,11 @@ impl App {
                     format!("Scrolled back {scrollback_offset} lines. "),
                     Style::default().fg(self.theme.hint_key_fg),
                 ));
-                spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
+                spans.extend(self.theme.dim_key_badge_default(&scroll_down));
                 spans.push(Span::styled(" down, ", desc_style));
-                spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
+                spans.extend(self.theme.dim_key_badge_default(&scroll_up));
                 spans.push(Span::styled(" up, ", desc_style));
-                spans.extend(self.theme.dim_key_badge(&scroll_line, Color::Reset));
+                spans.extend(self.theme.dim_key_badge_default(&scroll_line));
                 spans.push(Span::styled(" one line.", desc_style));
                 Line::from(spans)
             } else {
@@ -810,19 +810,19 @@ impl App {
                         }
                     }
                 } else if session_active {
-                    spans.extend(self.theme.dim_key_badge(&focus_agent, Color::Reset));
+                    spans.extend(self.theme.dim_key_badge_default(&focus_agent));
                     spans.push(Span::styled(" to interact. ", desc_style));
-                    spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
+                    spans.extend(self.theme.dim_key_badge_default(&scroll_up));
                     spans.push(Span::styled(" ", desc_style));
-                    spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
+                    spans.extend(self.theme.dim_key_badge_default(&scroll_down));
                     spans.push(Span::styled(" to scroll. ", desc_style));
-                    spans.extend(self.theme.dim_key_badge(&scroll_line, Color::Reset));
+                    spans.extend(self.theme.dim_key_badge_default(&scroll_line));
                     spans.push(Span::styled(" one line.", desc_style));
                 } else if session_id.is_some() {
                     spans.push(Span::styled("Agent CLI exited. Press ", desc_style));
-                    spans.extend(self.theme.dim_key_badge(&reconnect, Color::Reset));
+                    spans.extend(self.theme.dim_key_badge_default(&reconnect));
                     spans.push(Span::styled(" to relaunch or ", desc_style));
-                    spans.extend(self.theme.dim_key_badge(&focus_agent, Color::Reset));
+                    spans.extend(self.theme.dim_key_badge_default(&focus_agent));
                     spans.push(Span::styled(" to interact.", desc_style));
                 } else {
                     spans.push(Span::styled("No agent selected.", desc_style));
@@ -977,7 +977,8 @@ impl App {
                 let is_selected = is_active_section && index == self.files_index;
 
                 // Build the right-aligned stats string, e.g. "+12 -3".
-                let stats = format_line_stats(file.additions, file.deletions, file.binary);
+                let stats =
+                    format_line_stats(file.additions, file.deletions, file.binary, &self.theme);
                 let stats_width = stats.iter().map(|s| s.width()).sum::<usize>();
 
                 // Status prefix takes 3 chars ("M  ").
@@ -1044,20 +1045,20 @@ impl App {
             let next_key = self.bindings.label_for(Action::SearchNext);
             let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
             let mut spans: Vec<Span> = Vec::new();
-            spans.extend(self.theme.dim_key_badge(&stage_key, Color::Reset));
+            spans.extend(self.theme.dim_key_badge_default(&stage_key));
             spans.push(Span::styled(" stage/unstage.", desc_style));
             spans.push(Span::raw("  "));
             if self.files_search_active {
-                spans.extend(self.theme.dim_key_badge("Enter", Color::Reset));
+                spans.extend(self.theme.dim_key_badge_default("Enter"));
                 spans.push(Span::styled(" done  ", desc_style));
-                spans.extend(self.theme.dim_key_badge("Esc", Color::Reset));
+                spans.extend(self.theme.dim_key_badge_default("Esc"));
                 spans.push(Span::styled(" clear", desc_style));
             } else {
-                spans.extend(self.theme.dim_key_badge(&search_key, Color::Reset));
+                spans.extend(self.theme.dim_key_badge_default(&search_key));
                 spans.push(Span::styled(" search", desc_style));
                 if self.has_files_search() {
                     spans.push(Span::raw("  "));
-                    spans.extend(self.theme.dim_key_badge(&next_key, Color::Reset));
+                    spans.extend(self.theme.dim_key_badge_default(&next_key));
                     spans.push(Span::styled(" next match", desc_style));
                 }
             }
@@ -1149,14 +1150,14 @@ impl App {
             let commit = self.bindings.label_for(Action::CommitChanges);
             let mut spans: Vec<Span> = Vec::new();
             if focused {
-                spans.extend(self.theme.dim_key_badge(&exit, Color::Reset));
+                spans.extend(self.theme.dim_key_badge_default(&exit));
                 spans.push(Span::styled(" Exit", desc_style));
             } else {
-                spans.extend(self.theme.dim_key_badge(&engage, Color::Reset));
+                spans.extend(self.theme.dim_key_badge_default(&engage));
                 spans.push(Span::styled(" Edit  ", desc_style));
-                spans.extend(self.theme.dim_key_badge(&ai_msg, Color::Reset));
+                spans.extend(self.theme.dim_key_badge_default(&ai_msg));
                 spans.push(Span::styled(" AI msg  ", desc_style));
-                spans.extend(self.theme.dim_key_badge(&commit, Color::Reset));
+                spans.extend(self.theme.dim_key_badge_default(&commit));
                 spans.push(Span::styled(" Commit", desc_style));
             }
             Paragraph::new(Line::from(spans)).render(hint_area, frame.buffer_mut());
@@ -1289,13 +1290,13 @@ impl App {
             lines.push(Line::from(Span::styled(
                 section.to_string(),
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(self.theme.help_section_header_fg)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             )));
             for (key, desc) in bindings {
                 let padding = 14usize.saturating_sub(key.len() + 2);
                 let mut spans = vec![Span::raw("  ")];
-                spans.extend(self.theme.key_badge(key, Color::Reset));
+                spans.extend(self.theme.key_badge_default(key));
                 spans.push(Span::raw(" ".repeat(padding)));
                 spans.push(Span::styled(
                     desc.to_string(),
@@ -1309,7 +1310,7 @@ impl App {
         lines.push(Line::from(Span::styled(
             "Key notation",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(self.theme.help_section_header_fg)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         )));
         {
@@ -1317,7 +1318,7 @@ impl App {
             let desc = "Hold Ctrl and press X (e.g. Ctrl-p)";
             let padding = 14usize.saturating_sub(key.len() + 2);
             let mut spans = vec![Span::raw("  ")];
-            spans.extend(self.theme.key_badge(key, Color::Reset));
+            spans.extend(self.theme.key_badge_default(key));
             spans.push(Span::raw(" ".repeat(padding)));
             spans.push(Span::styled(
                 desc,
@@ -1330,7 +1331,7 @@ impl App {
         lines.push(Line::from(Span::styled(
             "Session states",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(self.theme.help_section_header_fg)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         )));
         let session_states: &[(&str, Color, &str)] = &[
@@ -1362,7 +1363,7 @@ impl App {
         lines.push(Line::from(Span::styled(
             "Companion terminal states",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(self.theme.help_section_header_fg)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         )));
         for status in [
@@ -1425,17 +1426,17 @@ impl App {
                     Style::default().fg(self.theme.hint_key_fg),
                 ));
             }
-            spans.extend(self.theme.dim_key_badge(&move_down, Color::Reset));
+            spans.extend(self.theme.dim_key_badge_default(&move_down));
             spans.push(Span::styled(" ", desc_style));
-            spans.extend(self.theme.dim_key_badge(&move_up, Color::Reset));
+            spans.extend(self.theme.dim_key_badge_default(&move_up));
             spans.push(Span::styled(" or ", desc_style));
-            spans.extend(self.theme.dim_key_badge("Space", Color::Reset));
+            spans.extend(self.theme.dim_key_badge_default("Space"));
             spans.push(Span::styled(" scroll, ", desc_style));
-            spans.extend(self.theme.dim_key_badge(&scroll_down, Color::Reset));
+            spans.extend(self.theme.dim_key_badge_default(&scroll_down));
             spans.push(Span::styled(" ", desc_style));
-            spans.extend(self.theme.dim_key_badge(&scroll_up, Color::Reset));
+            spans.extend(self.theme.dim_key_badge_default(&scroll_up));
             spans.push(Span::styled(" page. ", desc_style));
-            spans.extend(self.theme.dim_key_badge(&close, Color::Reset));
+            spans.extend(self.theme.dim_key_badge_default(&close));
             spans.push(Span::styled(" close.", desc_style));
 
             Paragraph::new(Line::from(spans))
@@ -1478,7 +1479,7 @@ impl App {
                             let mut spans = vec![Span::styled(
                                 name_padded,
                                 Style::default()
-                                    .fg(Color::Cyan)
+                                    .fg(self.theme.help_section_header_fg)
                                     .add_modifier(Modifier::BOLD),
                             )];
                             let desc_avail = inner_w.saturating_sub(name_col + gap);
@@ -1512,34 +1513,34 @@ impl App {
                 let search_key = self.bindings.label_for(Action::SearchToggle);
                 let mut bottom_spans = vec![Span::raw(" ")];
                 if *searching {
-                    bottom_spans.extend(self.theme.key_badge(&confirm_key, Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
                     bottom_spans.push(Span::styled(
                         " done  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
-                    bottom_spans.extend(self.theme.key_badge(&close_key, Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge_default(&close_key));
                     bottom_spans.push(Span::styled(
                         " clear",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
                 } else {
-                    bottom_spans.extend(self.theme.key_badge(&search_key, Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge_default(&search_key));
                     bottom_spans.push(Span::styled(
                         " search  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
-                    bottom_spans.extend(self.theme.key_badge(&confirm_key, Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
                     bottom_spans.push(Span::styled(
                         " run  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
                     // Tab autocomplete is text-input behavior, not a rebindable action.
-                    bottom_spans.extend(self.theme.key_badge("Tab", Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge_default("Tab"));
                     bottom_spans.push(Span::styled(
                         " complete  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
-                    bottom_spans.extend(self.theme.key_badge(&close_key, Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge_default(&close_key));
                     bottom_spans.push(Span::styled(
                         " cancel",
                         Style::default().fg(self.theme.hint_desc_fg),
@@ -1554,6 +1555,8 @@ impl App {
                     prompt_prefix,
                     input,
                     *cursor,
+                    self.theme.input_cursor_fg,
+                    self.theme.input_cursor_bg,
                 ))
                 .block(input_block)
                 .render(input_area, frame.buffer_mut());
@@ -1667,9 +1670,15 @@ impl App {
                     };
                     let input_block = self.themed_overlay_block(&title);
                     let input_inner = input_block.inner(filter_area);
-                    Paragraph::new(render_single_line_cursor_input(prefix, text, cursor))
-                        .block(input_block)
-                        .render(filter_area, frame.buffer_mut());
+                    Paragraph::new(render_single_line_cursor_input(
+                        prefix,
+                        text,
+                        cursor,
+                        self.theme.input_cursor_fg,
+                        self.theme.input_cursor_bg,
+                    ))
+                    .block(input_block)
+                    .render(filter_area, frame.buffer_mut());
                     let confirm_key = self.bindings.label_for(Action::Confirm);
                     let close_key = self.bindings.label_for(Action::CloseOverlay);
                     let search_key = self.bindings.label_for(Action::SearchToggle);
@@ -1678,49 +1687,49 @@ impl App {
                     let mut bottom_spans = vec![Span::raw(" ")];
                     if *editing_path {
                         // Path editor: Tab/Enter/Esc are text-input controls, not rebindable.
-                        bottom_spans.extend(self.theme.key_badge("Tab", Color::Reset));
+                        bottom_spans.extend(self.theme.key_badge_default("Tab"));
                         bottom_spans.push(Span::styled(
                             " complete  ",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
-                        bottom_spans.extend(self.theme.key_badge("Enter", Color::Reset));
+                        bottom_spans.extend(self.theme.key_badge_default("Enter"));
                         bottom_spans.push(Span::styled(
                             " go  ",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
-                        bottom_spans.extend(self.theme.key_badge("Esc", Color::Reset));
+                        bottom_spans.extend(self.theme.key_badge_default("Esc"));
                         bottom_spans.push(Span::styled(
                             " cancel",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
                     } else if *searching {
-                        bottom_spans.extend(self.theme.key_badge(&confirm_key, Color::Reset));
+                        bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
                         bottom_spans.push(Span::styled(
                             " done  ",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
-                        bottom_spans.extend(self.theme.key_badge(&close_key, Color::Reset));
+                        bottom_spans.extend(self.theme.key_badge_default(&close_key));
                         bottom_spans.push(Span::styled(
                             " clear",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
                     } else {
-                        bottom_spans.extend(self.theme.key_badge(&search_key, Color::Reset));
+                        bottom_spans.extend(self.theme.key_badge_default(&search_key));
                         bottom_spans.push(Span::styled(
                             " search  ",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
-                        bottom_spans.extend(self.theme.key_badge(&open_key, Color::Reset));
+                        bottom_spans.extend(self.theme.key_badge_default(&open_key));
                         bottom_spans.push(Span::styled(
                             " open  ",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
-                        bottom_spans.extend(self.theme.key_badge(&goto_key, Color::Reset));
+                        bottom_spans.extend(self.theme.key_badge_default(&goto_key));
                         bottom_spans.push(Span::styled(
                             " go to  ",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
-                        bottom_spans.extend(self.theme.key_badge(&close_key, Color::Reset));
+                        bottom_spans.extend(self.theme.key_badge_default(&close_key));
                         bottom_spans.push(Span::styled(
                             " cancel",
                             Style::default().fg(self.theme.hint_desc_fg),
@@ -1752,27 +1761,27 @@ impl App {
                     let goto_key = self.bindings.label_for(Action::GoToPath);
                     let close_key = self.bindings.label_for(Action::CloseOverlay);
                     let mut bottom_spans = vec![Span::raw(" ")];
-                    bottom_spans.extend(self.theme.key_badge(&search_key, Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge_default(&search_key));
                     bottom_spans.push(Span::styled(
                         " search  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
-                    bottom_spans.extend(self.theme.key_badge(&open_key, Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge_default(&open_key));
                     bottom_spans.push(Span::styled(
                         " open  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
-                    bottom_spans.extend(self.theme.key_badge(&add_key, Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge_default(&add_key));
                     bottom_spans.push(Span::styled(
                         " add current  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
-                    bottom_spans.extend(self.theme.key_badge(&goto_key, Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge_default(&goto_key));
                     bottom_spans.push(Span::styled(
                         " go to  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
-                    bottom_spans.extend(self.theme.key_badge(&close_key, Color::Reset));
+                    bottom_spans.extend(self.theme.key_badge_default(&close_key));
                     bottom_spans.push(Span::styled(
                         " cancel",
                         Style::default().fg(self.theme.hint_desc_fg),
@@ -1813,22 +1822,22 @@ impl App {
                 let move_down = self.bindings.label_for(Action::MoveDown);
                 let move_up = self.bindings.label_for(Action::MoveUp);
                 let mut bottom_spans = vec![Span::raw(" ")];
-                bottom_spans.extend(self.theme.key_badge(&move_down, Color::Reset));
+                bottom_spans.extend(self.theme.key_badge_default(&move_down));
                 bottom_spans.push(Span::styled(
                     " down  ",
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
-                bottom_spans.extend(self.theme.key_badge(&move_up, Color::Reset));
+                bottom_spans.extend(self.theme.key_badge_default(&move_up));
                 bottom_spans.push(Span::styled(
                     " up  ",
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
-                bottom_spans.extend(self.theme.key_badge(&confirm_key, Color::Reset));
+                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
                 bottom_spans.push(Span::styled(
                     " open  ",
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
-                bottom_spans.extend(self.theme.key_badge(&close_key, Color::Reset));
+                bottom_spans.extend(self.theme.key_badge_default(&close_key));
                 bottom_spans.push(Span::styled(
                     " cancel",
                     Style::default().fg(self.theme.hint_desc_fg),
@@ -1866,7 +1875,7 @@ impl App {
                         let mut spans = vec![Span::styled(
                             format!("{:<14}", editor.label),
                             Style::default()
-                                .fg(Color::Cyan)
+                                .fg(self.theme.help_section_header_fg)
                                 .add_modifier(Modifier::BOLD),
                         )];
                         spans.push(Span::styled(
@@ -1938,11 +1947,11 @@ impl App {
                     Line::from(""),
                     Line::from(Span::styled(
                         " All uncommitted and unpushed changes in this",
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(self.theme.warning_fg),
                     )),
                     Line::from(Span::styled(
                         " worktree will be permanently lost.",
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(self.theme.warning_fg),
                     )),
                 ];
                 Paragraph::new(lines)
@@ -1969,12 +1978,15 @@ impl App {
                 };
 
                 let (cancel_border, cancel_fg) = if !confirm_selected {
-                    (Color::Cyan, Color::White)
+                    (
+                        self.theme.button_confirm_border,
+                        self.theme.button_active_fg,
+                    )
                 } else {
                     (self.theme.border_normal, self.theme.hint_desc_fg)
                 };
                 let (delete_border, delete_fg) = if *confirm_selected {
-                    (Color::Red, Color::White)
+                    (self.theme.button_danger_border, self.theme.button_active_fg)
                 } else {
                     (self.theme.border_normal, self.theme.hint_desc_fg)
                 };
@@ -2037,14 +2049,16 @@ impl App {
                         Span::raw(format!(" {process_desc} will be ")),
                         Span::styled(
                             "killed",
-                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(self.theme.button_danger_border)
+                                .add_modifier(Modifier::BOLD),
                         ),
                         Span::raw(" if you quit."),
                     ]),
                     Line::from(""),
                     Line::from(Span::styled(
                         " Any in-progress work will be lost.",
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(self.theme.warning_fg),
                     )),
                     Line::from(Span::styled(
                         " File changes in worktrees are preserved.",
@@ -2074,12 +2088,15 @@ impl App {
                 };
 
                 let (cancel_border, cancel_fg) = if !confirm_selected {
-                    (Color::Cyan, Color::White)
+                    (
+                        self.theme.button_confirm_border,
+                        self.theme.button_active_fg,
+                    )
                 } else {
                     (self.theme.border_normal, self.theme.hint_desc_fg)
                 };
                 let (quit_border, quit_fg) = if *confirm_selected {
-                    (Color::Red, Color::White)
+                    (self.theme.button_danger_border, self.theme.button_active_fg)
                 } else {
                     (self.theme.border_normal, self.theme.hint_desc_fg)
                 };
@@ -2237,7 +2254,7 @@ impl App {
 
                 Paragraph::new(Line::from(Span::styled(
                     " Enter a new name (empty to reset):",
-                    Style::default().fg(Color::White),
+                    Style::default().fg(self.theme.input_label_fg),
                 )))
                 .render(label_area, frame.buffer_mut());
 
@@ -2249,20 +2266,27 @@ impl App {
                         Span::raw(format!(" {before}")),
                         Span::styled(
                             cursor_char.to_string(),
-                            Style::default().fg(Color::Black).bg(Color::White),
+                            Style::default()
+                                .fg(self.theme.input_cursor_fg)
+                                .bg(self.theme.input_cursor_bg),
                         ),
                         Span::raw(rest.to_string()),
                     ])
                 } else {
                     Line::from(vec![
                         Span::raw(format!(" {input}")),
-                        Span::styled(" ", Style::default().fg(Color::Black).bg(Color::White)),
+                        Span::styled(
+                            " ",
+                            Style::default()
+                                .fg(self.theme.input_cursor_fg)
+                                .bg(self.theme.input_cursor_bg),
+                        ),
                     ])
                 };
                 let input_block = Block::default()
                     .borders(Borders::ALL)
                     .border_set(border::ROUNDED)
-                    .border_style(Style::default().fg(Color::Cyan));
+                    .border_style(Style::default().fg(self.theme.overlay_border));
                 let input_inner = input_block.inner(input_area);
                 Paragraph::new(display)
                     .block(input_block)
@@ -2271,12 +2295,12 @@ impl App {
                 let confirm_key = self.bindings.label_for(Action::Confirm);
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
                 let mut hints = vec![Span::raw(" ")];
-                hints.extend(self.theme.key_badge(&confirm_key, Color::Reset));
+                hints.extend(self.theme.key_badge_default(&confirm_key));
                 hints.push(Span::styled(
                     " confirm  ",
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
-                hints.extend(self.theme.key_badge(&close_key, Color::Reset));
+                hints.extend(self.theme.key_badge_default(&close_key));
                 hints.push(Span::styled(
                     " cancel",
                     Style::default().fg(self.theme.hint_desc_fg),
@@ -2346,7 +2370,7 @@ impl App {
             .title(Line::from(Span::styled(
                 title,
                 Style::default()
-                    .fg(Color::White)
+                    .fg(self.theme.input_label_fg)
                     .add_modifier(Modifier::BOLD),
             )))
             .borders(Borders::ALL)
@@ -2381,8 +2405,8 @@ impl App {
         for y in full.y..full.y + dim_h {
             for x in full.x..full.x + full.width {
                 let cell = &mut buf[(x, y)];
-                cell.set_fg(Color::DarkGray);
-                cell.set_bg(Color::Rgb(10, 10, 10));
+                cell.set_fg(self.theme.overlay_dim_fg);
+                cell.set_bg(self.theme.overlay_dim_bg);
             }
         }
     }
@@ -2443,9 +2467,13 @@ pub(crate) fn format_line_stats(
     additions: usize,
     deletions: usize,
     binary: bool,
+    theme: &crate::theme::Theme,
 ) -> Vec<Span<'static>> {
     if binary {
-        return vec![Span::styled("bin", Style::default().fg(Color::Yellow))];
+        return vec![Span::styled(
+            "bin",
+            Style::default().fg(theme.diff_binary_fg),
+        )];
     }
     if additions == 0 && deletions == 0 {
         return Vec::new();
@@ -2454,7 +2482,7 @@ pub(crate) fn format_line_stats(
     if additions > 0 {
         spans.push(Span::styled(
             format!("+{additions}"),
-            Style::default().fg(Color::Green),
+            Style::default().fg(theme.diff_stat_add_fg),
         ));
     }
     if additions > 0 && deletions > 0 {
@@ -2463,7 +2491,7 @@ pub(crate) fn format_line_stats(
     if deletions > 0 {
         spans.push(Span::styled(
             format!("-{deletions}"),
-            Style::default().fg(Color::Red),
+            Style::default().fg(theme.diff_stat_remove_fg),
         ));
     }
     spans
@@ -2496,7 +2524,13 @@ pub(crate) fn centered_rect_exact(width: u16, height: u16, area: Rect) -> Rect {
     Rect::new(x, y, width, height)
 }
 
-fn render_single_line_cursor_input(prefix: &str, text: &str, cursor: usize) -> Line<'static> {
+fn render_single_line_cursor_input(
+    prefix: &str,
+    text: &str,
+    cursor: usize,
+    cursor_fg: Color,
+    cursor_bg: Color,
+) -> Line<'static> {
     let cursor = cursor.min(text.len());
     if cursor < text.len() {
         let (before, after) = text.split_at(cursor);
@@ -2508,14 +2542,14 @@ fn render_single_line_cursor_input(prefix: &str, text: &str, cursor: usize) -> L
             Span::raw(before.to_string()),
             Span::styled(
                 cursor_char.to_string(),
-                Style::default().fg(Color::Black).bg(Color::White),
+                Style::default().fg(cursor_fg).bg(cursor_bg),
             ),
             Span::raw(rest.to_string()),
         ])
     } else {
         Line::from(vec![
             Span::raw(format!("{prefix}{text}")),
-            Span::styled(" ", Style::default().fg(Color::Black).bg(Color::White)),
+            Span::styled(" ", Style::default().fg(cursor_fg).bg(cursor_bg)),
         ])
     }
 }

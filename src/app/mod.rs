@@ -565,23 +565,27 @@ impl App {
             self.fullscreen_overlay = FullscreenOverlay::None;
             self.session_surface = SessionSurface::Agent;
             self.input_target = InputTarget::None;
-            self.set_info("Closed terminal overlay.");
+            let key = self.bindings.label_for(Action::ToggleFullscreen);
+            self.set_info(format!(
+                "Closed fullscreen terminal. Press {key} to reopen."
+            ));
             return true;
         }
         if !matches!(self.prompt, PromptState::None) {
             self.prompt = PromptState::None;
-            self.set_info("Closed overlay.");
+            self.set_info("Dismissed dialog. Resume your work in the current pane.");
             return true;
         }
         if self.help_scroll.is_some() {
             self.help_scroll = None;
-            self.set_info("Closed overlay.");
+            let key = self.bindings.label_for(Action::ToggleHelp);
+            self.set_info(format!("Closed help overlay. Press {key} to reopen."));
             return true;
         }
         if matches!(self.center_mode, CenterMode::Diff { .. }) {
             self.center_mode = CenterMode::Agent;
             self.focus = FocusPane::Files;
-            self.set_info("Returned to agent view.");
+            self.set_info("Closed diff view, returned to agent output.");
             return true;
         }
         false

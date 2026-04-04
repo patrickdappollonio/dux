@@ -417,7 +417,10 @@ impl App {
                         ));
                     } else {
                         self.persist_pane_widths();
-                        self.set_info("Resize mode off.");
+                        let key = self.bindings.label_for(Action::ToggleResizeMode);
+                        self.set_info(format!(
+                            "Resize mode off. Pane widths saved. Press {key} to re-enter."
+                        ));
                     }
                 }
                 _ => {}
@@ -944,7 +947,7 @@ impl App {
             }
         };
 
-        // Exit interactive mode via configured binding (default: ctrl-g).
+        // Exit interactive mode via configured binding (default: Ctrl-g).
         if let Some(Action::ExitInteractive) = self.bindings.lookup(&key, BindingScope::Interactive)
         {
             self.input_target = InputTarget::None;
