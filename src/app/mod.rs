@@ -689,18 +689,17 @@ impl App {
         let mut terminal = ratatui::init();
         execute!(stdout(), EnableMouseCapture)?;
 
-        let result = (|| -> Result<()> {
+        let result: Result<()> = {
             loop {
                 self.drain_events();
                 self.tick_count = self.tick_count.wrapping_add(1);
 
                 // Check SIGWINCH — needed when bypassing crossterm's event
                 // reader (which would otherwise deliver Resize events).
-                if self.sigwinch_flag.swap(false, Ordering::Relaxed) {
-                    if let Err(err) = crate::io_retry::retry_on_interrupt(|| terminal.autoresize())
-                    {
-                        self.report_runtime_error("terminal resize failed", &err);
-                    }
+                if self.sigwinch_flag.swap(false, Ordering::Relaxed)
+                    && let Err(err) = crate::io_retry::retry_on_interrupt(|| terminal.autoresize())
+                {
+                    self.report_runtime_error("terminal resize failed", &err);
                 }
 
                 if let Err(err) = terminal.draw(|frame| self.render(frame)) {
@@ -783,7 +782,7 @@ impl App {
                 }
             }
             Ok(())
-        })();
+        };
 
         let _ = execute!(stdout(), DisableMouseCapture);
         ratatui::restore();
