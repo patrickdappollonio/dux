@@ -693,7 +693,7 @@ impl App {
             let project_name = self.project_name_for_session(session);
             let label = self.session_label(session);
             let context = format!(
-                "project: {project_name}; provider: {}; agent: {label}",
+                "project: {project_name} | provider: {} | agent: {label}",
                 session.provider.as_str()
             );
             let search_text = format!(
@@ -724,7 +724,7 @@ impl App {
                     )
                 })
                 .unwrap_or_else(|| ("unknown".to_string(), terminal.session_id.clone()));
-            let context = format!("project: {project_name}; agent: {session_label}");
+            let context = format!("project: {project_name} | agent: {session_label}");
             let search_text = format!(
                 "{} {} {}",
                 terminal.label,

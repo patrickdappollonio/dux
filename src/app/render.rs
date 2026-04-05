@@ -1980,9 +1980,13 @@ impl App {
                 } else {
                     (None, popup)
                 };
-                let [list_area, buttons_area] = Layout::default()
+                let [list_area, legend_area, buttons_area] = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([Constraint::Min(6), Constraint::Length(3)])
+                    .constraints([
+                        Constraint::Min(6),
+                        Constraint::Length(2),
+                        Constraint::Length(3),
+                    ])
                     .areas(body_area);
 
                 let search_key = self.bindings.label_for(Action::SearchToggle);
@@ -2096,6 +2100,33 @@ impl App {
                         visible_button: Rect::default(),
                     };
                 }
+
+                let legend = Line::from(vec![
+                    Span::styled("Legend: ", Style::default().fg(self.theme.hint_desc_fg)),
+                    Span::styled(
+                        "AGENT",
+                        Style::default()
+                            .fg(self.theme.session_active)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        " = running agent CLI  |  ",
+                        Style::default().fg(self.theme.hint_dim_desc_fg),
+                    ),
+                    Span::styled(
+                        "TERM",
+                        Style::default()
+                            .fg(self.theme.session_detached)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        " = companion terminal  |  dim text = source context",
+                        Style::default().fg(self.theme.hint_dim_desc_fg),
+                    ),
+                ]);
+                Paragraph::new(legend)
+                    .wrap(Wrap { trim: false })
+                    .render(legend_area, frame.buffer_mut());
 
                 let buttons = [
                     KillRunningFooterAction::Cancel,
