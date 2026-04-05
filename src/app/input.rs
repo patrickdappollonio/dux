@@ -225,6 +225,9 @@ impl App {
                         }
                     } else {
                         self.focus = self.focus.next();
+                        if self.focus == FocusPane::Files && self.right_hidden {
+                            self.focus = self.focus.next();
+                        }
                         if self.focus == FocusPane::Files {
                             self.right_section = RightSection::first();
                             self.clamp_files_cursor();
@@ -244,6 +247,9 @@ impl App {
                         && self.left_section == LeftSection::Projects
                     {
                         self.focus = self.focus.previous();
+                        if self.focus == FocusPane::Files && self.right_hidden {
+                            self.focus = self.focus.previous();
+                        }
                         if self.focus == FocusPane::Files {
                             self.right_section = RightSection::last(has_staged);
                             self.clamp_files_cursor();
@@ -260,6 +266,9 @@ impl App {
                         }
                     } else {
                         self.focus = self.focus.previous();
+                        if self.focus == FocusPane::Files && self.right_hidden {
+                            self.focus = self.focus.previous();
+                        }
                         if self.focus == FocusPane::Files {
                             self.right_section = RightSection::last(has_staged);
                             self.clamp_files_cursor();
@@ -277,6 +286,18 @@ impl App {
                 }
                 Action::ToggleSidebar => {
                     self.left_collapsed = !self.left_collapsed;
+                }
+                Action::ToggleGitPane => {
+                    self.right_collapsed = !self.right_collapsed;
+                    if self.right_collapsed && self.focus == FocusPane::Files {
+                        self.focus = FocusPane::Center;
+                    }
+                }
+                Action::RemoveGitPane => {
+                    self.right_hidden = !self.right_hidden;
+                    if self.right_hidden && self.focus == FocusPane::Files {
+                        self.focus = FocusPane::Center;
+                    }
                 }
                 Action::ToggleResizeMode => {
                     self.resize_mode = !self.resize_mode;
@@ -1754,7 +1775,7 @@ impl App {
             return Some(ResizeDragState::LeftDivider);
         }
 
-        if column == center_right || column == right_left {
+        if !self.right_hidden && (column == center_right || column == right_left) {
             return Some(ResizeDragState::RightDivider);
         }
 
@@ -2969,6 +2990,8 @@ mod tests {
             focus: FocusPane::Left,
             center_mode: CenterMode::Agent,
             left_collapsed: false,
+            right_collapsed: false,
+            right_hidden: false,
             resize_mode: false,
             help_scroll: None,
             last_help_height: 0,
@@ -4372,7 +4395,9 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .unwrap();
         match &app.prompt {
-            PromptState::Command { input, selected, .. } => {
+            PromptState::Command {
+                input, selected, ..
+            } => {
                 assert_eq!(input.text, "j");
                 assert_eq!(*selected, 0, "selection should stay at 0, not move down");
             }
@@ -5068,5 +5093,80 @@ mod tests {
 
         assert_eq!(app.focus, FocusPane::Left);
         assert!(matches!(app.prompt, PromptState::Command { .. }));
+    }
+
+    #[test]
+    fn toggle_git_pane_collapses_right() {
+        let mut app = test_app(default_bindings());
+        assert!(!app.right_collapsed);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.right_collapsed);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(!app.right_collapsed);
+    }
+
+    #[test]
+    fn collapse_git_pane_moves_focus_from_files() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Files;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(app.right_collapsed);
+        assert_eq!(app.focus, FocusPane::Center);
+    }
+
+    #[test]
+    fn remove_git_pane_hides_right() {
+        let mut app = test_app(default_bindings());
+        assert!(!app.right_hidden);
+
+        app.execute_command("remove-git-pane".to_string()).unwrap();
+        assert!(app.right_hidden);
+
+        app.execute_command("remove-git-pane".to_string()).unwrap();
+        assert!(!app.right_hidden);
+    }
+
+    #[test]
+    fn remove_git_pane_moves_focus_from_files() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Files;
+
+        app.execute_command("remove-git-pane".to_string()).unwrap();
+
+        assert!(app.right_hidden);
+        assert_eq!(app.focus, FocusPane::Center);
+    }
+
+    #[test]
+    fn focus_skips_removed_git_pane_forward() {
+        let mut app = test_app(default_bindings());
+        app.right_hidden = true;
+        app.focus = FocusPane::Center;
+
+        // Tab from Center should skip Files and go to Left
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(app.focus, FocusPane::Left);
+    }
+
+    #[test]
+    fn focus_skips_removed_git_pane_backward() {
+        let mut app = test_app(default_bindings());
+        app.right_hidden = true;
+        app.focus = FocusPane::Left;
+
+        // Shift-Tab from Left should skip Files and go to Center
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .unwrap();
+
+        assert_eq!(app.focus, FocusPane::Center);
     }
 }

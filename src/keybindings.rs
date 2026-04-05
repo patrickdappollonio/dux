@@ -49,6 +49,7 @@ pub enum Action {
     OpenPalette,
     ToggleResizeMode,
     ToggleSidebar,
+    ToggleGitPane,
     ToggleHelp,
     Quit,
     CloseOverlay,
@@ -71,6 +72,7 @@ pub enum Action {
     SortAgentsByUpdated,
     SortAgentsByCreated,
     SortAgentsByName,
+    RemoveGitPane,
 }
 
 /// Where a binding's key combo is matched.
@@ -186,6 +188,7 @@ impl Action {
             Action::OpenPalette => "open_palette",
             Action::ToggleResizeMode => "toggle_resize_mode",
             Action::ToggleSidebar => "toggle_sidebar",
+            Action::ToggleGitPane => "toggle_git_pane",
             Action::ToggleHelp => "toggle_help",
             Action::Quit => "quit",
             Action::CloseOverlay => "close_overlay",
@@ -205,6 +208,7 @@ impl Action {
             Action::SortAgentsByUpdated => "sort_agents_by_updated",
             Action::SortAgentsByCreated => "sort_agents_by_created",
             Action::SortAgentsByName => "sort_agents_by_name",
+            Action::RemoveGitPane => "remove_git_pane",
         }
     }
 
@@ -256,6 +260,7 @@ impl Action {
             Action::OpenPalette => "Open the command palette.",
             Action::ToggleResizeMode => "Enter resize mode to resize side panes.",
             Action::ToggleSidebar => "Toggle the projects sidebar.",
+            Action::ToggleGitPane => "Toggle the git pane.",
             Action::ToggleHelp => "Toggle the help overlay.",
             Action::Quit => "Quit the application.",
             Action::CloseOverlay => "Close the current overlay or dialog.",
@@ -277,6 +282,7 @@ impl Action {
             Action::SortAgentsByUpdated => "Sort agents by most recently updated.",
             Action::SortAgentsByCreated => "Sort agents by creation date (newest first).",
             Action::SortAgentsByName => "Sort agents alphabetically by name.",
+            Action::RemoveGitPane => "Remove or restore the git pane.",
         }
     }
 
@@ -322,6 +328,7 @@ impl Action {
             | Action::OpenPalette
             | Action::ToggleResizeMode
             | Action::ToggleSidebar
+            | Action::ToggleGitPane
             | Action::ToggleHelp
             | Action::Quit
             | Action::CloseOverlay => Some("Global"),
@@ -339,7 +346,8 @@ impl Action {
             | Action::RemoveProject
             | Action::SortAgentsByUpdated
             | Action::SortAgentsByCreated
-            | Action::SortAgentsByName => None,
+            | Action::SortAgentsByName
+            | Action::RemoveGitPane => None,
         }
     }
 }
@@ -897,6 +905,23 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         }),
     },
     BindingDef {
+        action: Action::ToggleGitPane,
+        default_keys: &[KeyCombination::one_key(
+            KeyCode::Char(']'),
+            KeyModifiers::NONE,
+        )],
+        scopes: &[BindingScope::Global],
+        help: Some(HelpEntry {
+            section: "Global",
+            description: "Toggle git pane",
+        }),
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "toggle-git-pane",
+            description: "Collapse or expand the git pane",
+        }),
+    },
+    BindingDef {
         action: Action::ToggleHelp,
         default_keys: &[KeyCombination::one_key(
             KeyCode::Char('?'),
@@ -1133,6 +1158,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "sort-agents-by-name",
             description: "Sort agents alphabetically by name",
+        }),
+    },
+    BindingDef {
+        action: Action::RemoveGitPane,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "remove-git-pane",
+            description: "Remove or restore the git pane entirely",
         }),
     },
 ];
