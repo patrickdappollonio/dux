@@ -664,10 +664,18 @@ impl App {
                 // Check SIGWINCH — needed when bypassing crossterm's event
                 // reader (which would otherwise deliver Resize events).
                 if self.sigwinch_flag.swap(false, Ordering::Relaxed) {
-                    terminal.autoresize()?;
+                    if let Err(err) =
+                        crate::io_retry::retry_on_interrupt(|| terminal.autoresize())
+                    {
+                        self.report_runtime_error("terminal resize failed", &err);
+                    }
                 }
 
-                terminal.draw(|frame| self.render(frame))?;
+                if let Err(err) = terminal.draw(|frame| self.render(frame)) {
+                    self.report_runtime_error("terminal draw failed", &err);
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
 
                 if matches!(
                     self.input_target,
@@ -677,15 +685,58 @@ impl App {
                     // crossterm's event reader is not called — all bytes
                     // (keyboard, mouse, paste) go to the child process
                     // except intercepted bindings.
-                    if self.poll_and_forward_raw_input()? {
+                    let should_exit = match self.poll_and_forward_raw_input() {
+                        Ok(should_exit) => should_exit,
+                        Err(err) => {
+                            self.report_runtime_error(
+                                "interactive input failed; staying in the current session",
+                                err.as_ref(),
+                            );
+                            false
+                        }
+                    };
+                    if should_exit {
                         break;
                     }
                 } else {
                     // Normal UI mode: use crossterm's structured event reader.
-                    if event::poll(Duration::from_millis(100))? {
-                        match event::read()? {
+                    let ready =
+                        match crate::io_retry::retry_on_interrupt(|| {
+                            event::poll(Duration::from_millis(100))
+                        }) {
+                            Ok(ready) => ready,
+                            Err(err) => {
+                                self.report_runtime_error(
+                                    "event polling failed; input handling was skipped",
+                                    &err,
+                                );
+                                false
+                            }
+                        };
+                    if ready {
+                        let event = match crate::io_retry::retry_on_interrupt(event::read) {
+                            Ok(event) => event,
+                            Err(err) => {
+                                self.report_runtime_error(
+                                    "event read failed; input handling was skipped",
+                                    &err,
+                                );
+                                continue;
+                            }
+                        };
+                        match event {
                             Event::Key(key) => {
-                                if self.handle_key(key)? {
+                                let should_exit = match self.handle_key(key) {
+                                    Ok(should_exit) => should_exit,
+                                    Err(err) => {
+                                        self.report_runtime_error(
+                                            "key handling failed",
+                                            err.as_ref(),
+                                        );
+                                        false
+                                    }
+                                };
+                                if should_exit {
                                     break;
                                 }
                             }
@@ -772,6 +823,11 @@ impl App {
 
     pub(crate) fn set_error(&mut self, message: impl Into<String>) {
         self.status.error(message);
+    }
+
+    fn report_runtime_error(&mut self, context: &str, err: &dyn std::error::Error) {
+        logger::error(&format!("{context}: {err}"));
+        self.set_error(format!("{context}: {err}"));
     }
 
     pub(crate) fn execute_command(&mut self, command: String) -> Result<()> {

@@ -133,7 +133,7 @@ impl PtyClient {
     ) {
         let mut buf = [0u8; 4096];
         loop {
-            match reader.read(&mut buf) {
+            match crate::io_retry::retry_on_interrupt(|| reader.read(&mut buf)) {
                 Ok(0) => {
                     exited.store(true, Ordering::Release);
                     break;

@@ -799,15 +799,18 @@ impl App {
             tv_nsec: 100_000_000, // 100ms
         };
         let stdin_borrow = stdin_handle.as_fd();
-        let mut pollfd = [PollFd::new(&stdin_borrow, PollFlags::IN)];
-        let ready = poll(&mut pollfd, Some(&timeout))?;
+        let ready = crate::io_retry::retry_on_interrupt_errno(|| {
+            let mut pollfd = [PollFd::new(&stdin_borrow, PollFlags::IN)];
+            poll(&mut pollfd, Some(&timeout))
+        })?;
         if ready == 0 {
             return Ok(false);
         }
 
         // Read available bytes from the same handle used for polling.
         let mut buf = [0u8; 4096];
-        let n = stdin_handle.lock().read(&mut buf)?;
+        let mut stdin_lock = stdin_handle.lock();
+        let n = crate::io_retry::retry_on_interrupt(|| stdin_lock.read(&mut buf))?;
         if n == 0 {
             return Ok(false);
         }

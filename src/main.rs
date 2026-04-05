@@ -3,6 +3,7 @@ mod config;
 mod diff;
 mod editor;
 mod git;
+mod io_retry;
 mod keybindings;
 mod logger;
 mod model;
