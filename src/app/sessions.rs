@@ -566,12 +566,10 @@ impl App {
         };
         match path {
             Some(p) => {
-                let mut clipboard = arboard::Clipboard::new()
-                    .map_err(|e| anyhow::anyhow!("Failed to access clipboard: {e}"))?;
-                clipboard
-                    .set_text(&p)
-                    .map_err(|e| anyhow::anyhow!("Failed to copy to clipboard: {e}"))?;
-                self.set_info(format!("Copied path to clipboard: \"{p}\""));
+                match self.clipboard.copy_text(&p) {
+                    Ok(()) => self.set_info(format!("Copied path to clipboard: \"{p}\"")),
+                    Err(err) => self.set_error(format!("Copy path failed: {err}")),
+                }
                 Ok(())
             }
             None => {

@@ -2135,8 +2135,6 @@ impl App {
                         } else {
                             self.theme.button_confirm_border
                         }
-                    } else if !enabled {
-                        self.theme.border_normal
                     } else {
                         self.theme.border_normal
                     };
