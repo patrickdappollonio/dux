@@ -4,14 +4,14 @@
 
 ## How It Works
 
-`dux` spawns AI CLI tools (`claude`, `codex`, or any terminal command) directly in a pseudo-terminal (PTY) and renders their output in real time. There is no protocol layer, no adapter binaries, and no JSON-RPC — just the official CLI running exactly as it would in your terminal.
+`dux` spawns AI CLI tools (`claude`, `codex`, `opencode`, `gemini`, or any terminal command) directly in a pseudo-terminal (PTY) and renders their output in real time. There is no protocol layer, no adapter binaries, and no JSON-RPC — just the official CLI running exactly as it would in your terminal.
 
 This means:
 
 - **Bring any CLI.** Any AI coding tool that runs in a terminal works with dux. Configure the command and args in `config.toml` and you're set.
 - **No banning risks.** You're running the official CLI the way it was designed to be used — the same binary, the same auth, the same API calls.
 - **Full CLI feature support.** Hooks, MCP servers, skills, slash commands, permission dialogs, thinking indicators — everything the CLI supports works out of the box because dux is just hosting the real terminal session.
-- **Crash recovery.** If dux crashes, the agent process dies, but dux can reconnect in the same worktree. Providers with configured `resume_args` (like the built-in Claude and Codex defaults) can resume the CLI conversation for that folder/worktree.
+- **Crash recovery.** If dux crashes, the agent process dies, but dux can reconnect in the same worktree. Providers with configured `resume_args` (like the built-in Claude, Codex, OpenCode, and Gemini defaults) can resume the CLI conversation for that folder/worktree.
 
 ## Features
 
@@ -40,7 +40,7 @@ If you want a full wipe, run `dux reset --delete-agent-data` to also remove `ses
 
 ## Provider Setup
 
-The provider commands in `config.toml` point to the CLI tools you want dux to run. By default, `claude` and `codex` are configured, and new sessions start with `claude` unless you override it per project or in `[defaults]`. dux launches the configured command in a PTY inside the session's worktree directory, so the CLI tool sees the worktree as its working directory.
+The provider commands in `config.toml` point to the CLI tools you want dux to run. By default, `claude`, `codex`, `opencode`, and `gemini` are configured, and new sessions start with `claude` unless you override it per project or in `[defaults]`. dux launches the configured command in a PTY inside the session's worktree directory, so the CLI tool sees the worktree as its working directory.
 
 To use a different CLI tool, set the `command` field in the `[providers.<name>]` section of your config.
 

@@ -772,7 +772,7 @@ fn default_terminal_args() -> Vec<String> {
     vec!["-l".to_string()]
 }
 
-fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 2] {
+fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4] {
     [
         (
             "claude",
@@ -811,6 +811,28 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 2] {
                 ],
                 oneshot_output: OneshotOutput::Tempfile,
                 install_hint: Some("npm install -g @openai/codex".to_string()),
+            },
+        ),
+        (
+            "opencode",
+            ProviderCommandConfig {
+                command: "opencode".to_string(),
+                args: Vec::new(),
+                resume_args: Some(vec!["--continue".to_string()]),
+                oneshot_args: vec!["run".to_string(), "{prompt}".to_string()],
+                oneshot_output: OneshotOutput::Stdout,
+                install_hint: Some("npm install -g opencode-ai".to_string()),
+            },
+        ),
+        (
+            "gemini",
+            ProviderCommandConfig {
+                command: "gemini".to_string(),
+                args: Vec::new(),
+                resume_args: Some(vec!["--resume".to_string()]),
+                oneshot_args: vec!["-p".to_string(), "{prompt}".to_string()],
+                oneshot_output: OneshotOutput::Stdout,
+                install_hint: Some("npm install -g @google/gemini-cli".to_string()),
             },
         ),
     ]
@@ -1503,6 +1525,56 @@ oneshot_output = "stdout"
             claude.oneshot_args.contains(&"--max-turns".to_string()),
             "claude oneshot_args should include --max-turns"
         );
+    }
+
+    #[test]
+    fn default_opencode_oneshot_uses_run_subcommand() {
+        let providers = default_provider_commands();
+        let opencode = providers.iter().find(|(n, _)| *n == "opencode").unwrap();
+        let cfg = &opencode.1;
+        assert_eq!(cfg.command, "opencode");
+        assert_eq!(cfg.oneshot_args, vec!["run", "{prompt}"]);
+        assert!(matches!(cfg.oneshot_output, OneshotOutput::Stdout));
+        assert!(cfg.resume_args.is_some());
+    }
+
+    #[test]
+    fn default_gemini_oneshot_uses_prompt_flag() {
+        let providers = default_provider_commands();
+        let gemini = providers.iter().find(|(n, _)| *n == "gemini").unwrap();
+        let cfg = &gemini.1;
+        assert_eq!(cfg.command, "gemini");
+        assert_eq!(cfg.oneshot_args, vec!["-p", "{prompt}"]);
+        assert!(matches!(cfg.oneshot_output, OneshotOutput::Stdout));
+        assert!(cfg.resume_args.is_some());
+    }
+
+    #[test]
+    fn ensure_defaults_adds_opencode_and_gemini() {
+        let mut providers = ProvidersConfig {
+            commands: indexmap::IndexMap::from([(
+                "claude".to_string(),
+                ProviderCommandConfig {
+                    command: "claude".to_string(),
+                    args: Vec::new(),
+                    resume_args: Some(vec!["--continue".to_string()]),
+                    oneshot_args: vec!["-p".to_string(), "{prompt}".to_string()],
+                    oneshot_output: OneshotOutput::Stdout,
+                    install_hint: None,
+                },
+            )]),
+        };
+
+        providers.ensure_defaults();
+
+        assert!(
+            providers.get("opencode").is_some(),
+            "opencode should be added"
+        );
+        assert!(providers.get("gemini").is_some(), "gemini should be added");
+        assert!(providers.get("codex").is_some(), "codex should be added");
+        assert_eq!(providers.get("opencode").unwrap().command, "opencode");
+        assert_eq!(providers.get("gemini").unwrap().command, "gemini");
     }
 
     #[test]
