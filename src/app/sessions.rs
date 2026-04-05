@@ -727,6 +727,14 @@ impl App {
             let foreground = terminal
                 .foreground_cmd
                 .clone()
+                .map(|cmd| {
+                    let trimmed = cmd.trim();
+                    trimmed
+                        .strip_prefix("TERM ")
+                        .or_else(|| trimmed.strip_prefix("term "))
+                        .unwrap_or(trimmed)
+                        .to_string()
+                })
                 .filter(|cmd| !cmd.trim().is_empty())
                 .unwrap_or_else(|| "shell".to_string());
             let label = format!("TERM {foreground}");

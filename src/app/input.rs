@@ -3249,6 +3249,31 @@ mod tests {
     }
 
     #[test]
+    fn kill_running_terminal_label_deduplicates_term_prefix() {
+        let mut app = test_app(default_bindings());
+        let worktree_path = app.sessions[0].worktree_path.clone();
+        let worktree = std::path::Path::new(&worktree_path);
+        let args = vec!["-c".to_string(), "sleep 5".to_string()];
+        app.companion_terminals.insert(
+            "term-1".to_string(),
+            crate::app::CompanionTerminal {
+                session_id: app.sessions[0].id.clone(),
+                label: "shell".to_string(),
+                foreground_cmd: Some("TERM sleep".to_string()),
+                client: PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
+                    .expect("spawn terminal"),
+            },
+        );
+
+        let runtimes = app.running_runtime_snapshot();
+        let terminal = runtimes
+            .iter()
+            .find(|runtime| matches!(runtime.id, RuntimeTargetId::Terminal(_)))
+            .expect("terminal runtime");
+        assert_eq!(terminal.label, "TERM sleep");
+    }
+
+    #[test]
     fn kill_running_search_keeps_hidden_selection() {
         let mut app = test_app(default_bindings());
         let selected_id = RuntimeTargetId::Agent("session-1".to_string());
