@@ -656,6 +656,261 @@ impl App {
         Ok(())
     }
 
+    pub(crate) fn open_kill_running(&mut self) -> Result<()> {
+        let runtimes = self.running_runtime_snapshot();
+        if runtimes.is_empty() {
+            self.set_error(
+                "No running agents or companion terminals are available to kill. Start one first, then reopen the command palette.",
+            );
+            return Ok(());
+        }
+
+        self.prompt = PromptState::KillRunning(KillRunningPrompt {
+            runtimes,
+            filter: TextInput::new(),
+            searching: false,
+            hovered_visible_index: 0,
+            selected_ids: HashSet::new(),
+            focus: KillRunningFocus::List,
+        });
+        let select = self.bindings.label_for(Action::ToggleMarked);
+        let search = self.bindings.label_for(Action::SearchToggle);
+        let next = self.bindings.label_for(Action::FocusNext);
+        let prev = self.bindings.label_for(Action::FocusPrev);
+        self.set_info(format!(
+            "Kill Running opened. Press {select} to toggle runtimes, {search} to search, and {next}/{prev} to move between the list and actions.",
+        ));
+        Ok(())
+    }
+
+    pub(crate) fn running_runtime_snapshot(&self) -> Vec<KillableRuntime> {
+        let mut runtimes = Vec::new();
+
+        for session in &self.sessions {
+            if !self.providers.contains_key(&session.id) {
+                continue;
+            }
+            let project_name = self.project_name_for_session(session);
+            let agent_name = self.session_label(session);
+            let provider_name = session.provider.as_str();
+            let label = Self::title_case_word(provider_name);
+            let context = format!("on agent \"{agent_name}\" under project \"{project_name}\"");
+            let search_text = format!(
+                "{} {} {} {} {}",
+                label,
+                context,
+                provider_name,
+                agent_name,
+                KillableRuntimeKind::Agent.noun()
+            );
+            runtimes.push(KillableRuntime {
+                id: RuntimeTargetId::Agent(session.id.clone()),
+                kind: KillableRuntimeKind::Agent,
+                label,
+                context,
+                search_text,
+            });
+        }
+
+        for (terminal_id, terminal) in self.terminal_items() {
+            let (project_name, session_label) = self
+                .sessions
+                .iter()
+                .find(|session| session.id == terminal.session_id)
+                .map(|session| {
+                    (
+                        self.project_name_for_session(session),
+                        self.session_label(session),
+                    )
+                })
+                .unwrap_or_else(|| ("unknown".to_string(), terminal.session_id.clone()));
+            let foreground = terminal
+                .foreground_cmd
+                .clone()
+                .map(|cmd| {
+                    let trimmed = cmd.trim();
+                    trimmed
+                        .strip_prefix("TERM ")
+                        .or_else(|| trimmed.strip_prefix("term "))
+                        .unwrap_or(trimmed)
+                        .to_string()
+                })
+                .filter(|cmd| !cmd.trim().is_empty())
+                .unwrap_or_else(|| "shell".to_string());
+            let label = foreground;
+            let context = format!("on agent \"{session_label}\" under project \"{project_name}\"");
+            let search_text = format!(
+                "{} {} {} {}",
+                label,
+                context,
+                terminal.label,
+                KillableRuntimeKind::Terminal.noun()
+            );
+            runtimes.push(KillableRuntime {
+                id: RuntimeTargetId::Terminal(terminal_id.clone()),
+                kind: KillableRuntimeKind::Terminal,
+                label,
+                context,
+                search_text,
+            });
+        }
+
+        runtimes.sort_by(|a, b| {
+            (
+                a.context.to_lowercase(),
+                a.kind.noun(),
+                a.label.to_lowercase(),
+            )
+                .cmp(&(
+                    b.context.to_lowercase(),
+                    b.kind.noun(),
+                    b.label.to_lowercase(),
+                ))
+        });
+        runtimes
+    }
+
+    pub(crate) fn visible_kill_running_indices(prompt: &KillRunningPrompt) -> Vec<usize> {
+        if prompt.filter.is_empty() {
+            return (0..prompt.runtimes.len()).collect();
+        }
+        let needle = prompt.filter.text.to_lowercase();
+        prompt
+            .runtimes
+            .iter()
+            .enumerate()
+            .filter(|(_, runtime)| runtime.search_text.to_lowercase().contains(&needle))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn title_case_word(word: &str) -> String {
+        let mut chars = word.chars();
+        match chars.next() {
+            Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+            None => String::new(),
+        }
+    }
+
+    pub(crate) fn clamp_kill_running_prompt(prompt: &mut KillRunningPrompt) {
+        let visible_len = Self::visible_kill_running_indices(prompt).len();
+        if visible_len == 0 {
+            prompt.hovered_visible_index = 0;
+        } else if prompt.hovered_visible_index >= visible_len {
+            prompt.hovered_visible_index = visible_len.saturating_sub(1);
+        }
+    }
+
+    pub(crate) fn open_confirm_kill_running_action(
+        &mut self,
+        action: KillRunningAction,
+    ) -> Result<()> {
+        let PromptState::KillRunning(prompt) = &self.prompt else {
+            return Ok(());
+        };
+        let prompt = prompt.clone();
+        let visible_indices = Self::visible_kill_running_indices(&prompt);
+        let target_ids = match action {
+            KillRunningAction::Hovered => visible_indices
+                .get(prompt.hovered_visible_index)
+                .map(|&index| vec![prompt.runtimes[index].id.clone()])
+                .unwrap_or_default(),
+            KillRunningAction::Selected => prompt
+                .runtimes
+                .iter()
+                .filter(|runtime| prompt.selected_ids.contains(&runtime.id))
+                .map(|runtime| runtime.id.clone())
+                .collect(),
+            KillRunningAction::Visible => visible_indices
+                .iter()
+                .map(|&index| prompt.runtimes[index].id.clone())
+                .collect(),
+        };
+
+        if target_ids.is_empty() {
+            let message = match action {
+                KillRunningAction::Hovered => {
+                    "No running agent or terminal is highlighted. Move to a visible row first."
+                }
+                KillRunningAction::Selected => {
+                    "No running agents or terminals are selected. Press Space to select one or more runtimes first."
+                }
+                KillRunningAction::Visible => {
+                    "No running agents or terminals are visible for the current filter. Clear or change the search first."
+                }
+            };
+            self.set_error(message);
+            return Ok(());
+        }
+
+        self.prompt = PromptState::ConfirmKillRunning(ConfirmKillRunningPrompt {
+            previous: prompt,
+            action,
+            target_ids,
+            confirm_selected: false,
+        });
+        self.set_info(format!(
+            "{} is ready. Review the warning and press Enter to confirm, or Esc to keep your running sessions alive.",
+            action.button_label()
+        ));
+        Ok(())
+    }
+
+    pub(crate) fn kill_runtime_targets(
+        &mut self,
+        target_ids: &[RuntimeTargetId],
+    ) -> (usize, usize) {
+        let selected_session_id = self.selected_session().map(|session| session.id.clone());
+        let active_terminal_id = self.active_terminal_id.clone();
+        let mut killed_agents = 0;
+        let mut killed_terminals = 0;
+        let mut selected_agent_killed = false;
+        let mut active_terminal_killed = false;
+
+        for target_id in target_ids {
+            match target_id {
+                RuntimeTargetId::Agent(session_id) => {
+                    if self.providers.remove(session_id).is_some() {
+                        self.mark_session_status(session_id, SessionStatus::Detached);
+                        killed_agents += 1;
+                        if selected_session_id.as_deref() == Some(session_id.as_str()) {
+                            selected_agent_killed = true;
+                        }
+                    }
+                }
+                RuntimeTargetId::Terminal(terminal_id) => {
+                    if self.companion_terminals.remove(terminal_id).is_some() {
+                        killed_terminals += 1;
+                        if active_terminal_id.as_deref() == Some(terminal_id.as_str()) {
+                            active_terminal_killed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if active_terminal_killed {
+            self.active_terminal_id = None;
+            if self.session_surface == SessionSurface::Terminal {
+                self.input_target = InputTarget::None;
+                self.fullscreen_overlay = FullscreenOverlay::None;
+                self.session_surface = SessionSurface::Agent;
+            }
+        }
+
+        if selected_agent_killed && self.session_surface == SessionSurface::Agent {
+            self.input_target = InputTarget::None;
+            self.fullscreen_overlay = FullscreenOverlay::None;
+            self.focus = FocusPane::Left;
+        }
+
+        self.clamp_terminal_cursor();
+        self.has_active_processes
+            .store(self.running_process_count() > 0, Ordering::Relaxed);
+
+        (killed_agents, killed_terminals)
+    }
+
     fn session_label(&self, session: &AgentSession) -> String {
         session
             .title

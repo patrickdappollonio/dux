@@ -29,6 +29,14 @@ enum PromptMouseTarget {
     BrowseProjectInput,
     BrowseProjectItem(usize),
     PickEditorItem(usize),
+    RuntimeKillInput,
+    RuntimeKillItem(usize),
+    RuntimeKillCancel,
+    RuntimeKillHovered,
+    RuntimeKillSelected,
+    RuntimeKillVisible,
+    ConfirmKillCancel,
+    ConfirmKillConfirm,
     ConfirmDeleteCancel,
     ConfirmDeleteConfirm,
     ConfirmQuitCancel,
@@ -1025,6 +1033,122 @@ impl App {
             return Ok(false);
         }
 
+        if matches!(self.prompt, PromptState::KillRunning(..)) {
+            let is_searching = matches!(
+                self.prompt,
+                PromptState::KillRunning(KillRunningPrompt {
+                    searching: true,
+                    ..
+                })
+            );
+            let is_plain_char = matches!(key.code, KeyCode::Char(_))
+                && !key.modifiers.contains(KeyModifiers::CONTROL);
+            let action = if is_searching && is_plain_char {
+                None
+            } else {
+                self.bindings.lookup(&key, BindingScope::RuntimeKill)
+            };
+
+            match action {
+                Some(Action::CloseOverlay) => {
+                    let mut closed = false;
+                    if let PromptState::KillRunning(prompt) = &mut self.prompt {
+                        if prompt.searching {
+                            prompt.searching = false;
+                        } else if !prompt.filter.is_empty() {
+                            prompt.filter.clear();
+                            Self::clamp_kill_running_prompt(prompt);
+                        } else {
+                            closed = true;
+                        }
+                    }
+                    if closed {
+                        self.prompt = PromptState::None;
+                        self.set_info("Closed Kill Running. No agents or terminals were killed.");
+                    }
+                }
+                Some(Action::SearchToggle) if !is_searching => {
+                    if let PromptState::KillRunning(prompt) = &mut self.prompt {
+                        prompt.filter.move_end();
+                        prompt.searching = true;
+                        prompt.focus = KillRunningFocus::List;
+                    }
+                }
+                Some(Action::MoveDown) => {
+                    if let PromptState::KillRunning(prompt) = &mut self.prompt
+                        && matches!(prompt.focus, KillRunningFocus::List)
+                    {
+                        let count = Self::visible_kill_running_indices(prompt).len();
+                        if prompt.hovered_visible_index + 1 < count {
+                            prompt.hovered_visible_index += 1;
+                        }
+                    }
+                }
+                Some(Action::MoveUp) => {
+                    if let PromptState::KillRunning(prompt) = &mut self.prompt
+                        && matches!(prompt.focus, KillRunningFocus::List)
+                        && prompt.hovered_visible_index > 0
+                    {
+                        prompt.hovered_visible_index -= 1;
+                    }
+                }
+                Some(Action::FocusNext) => {
+                    if let PromptState::KillRunning(prompt) = &mut self.prompt {
+                        prompt.focus = match prompt.focus {
+                            KillRunningFocus::List => {
+                                Self::next_kill_running_footer_action(prompt, None, true)
+                            }
+                            KillRunningFocus::Footer(action) => {
+                                Self::next_kill_running_footer_action(prompt, Some(action), true)
+                            }
+                        };
+                    }
+                }
+                Some(Action::FocusPrev) => {
+                    if let PromptState::KillRunning(prompt) = &mut self.prompt {
+                        prompt.focus = match prompt.focus {
+                            KillRunningFocus::List => {
+                                Self::next_kill_running_footer_action(prompt, None, false)
+                            }
+                            KillRunningFocus::Footer(action) => {
+                                Self::next_kill_running_footer_action(prompt, Some(action), false)
+                            }
+                        };
+                    }
+                }
+                Some(Action::ToggleMarked) => {
+                    self.toggle_hovered_kill_running_selection();
+                }
+                Some(Action::Confirm) => {
+                    if is_searching {
+                        if let PromptState::KillRunning(prompt) = &mut self.prompt {
+                            prompt.searching = false;
+                        }
+                    } else {
+                        let focus = match &self.prompt {
+                            PromptState::KillRunning(prompt) => prompt.focus,
+                            _ => KillRunningFocus::List,
+                        };
+                        match focus {
+                            KillRunningFocus::List => self.toggle_hovered_kill_running_selection(),
+                            KillRunningFocus::Footer(action) => {
+                                self.execute_kill_running_footer_action(action)?;
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    if is_searching && let PromptState::KillRunning(prompt) = &mut self.prompt {
+                        if prompt.filter.handle_key(key) {
+                            prompt.hovered_visible_index = 0;
+                        }
+                        Self::clamp_kill_running_prompt(prompt);
+                    }
+                }
+            }
+            return Ok(false);
+        }
+
         if matches!(self.prompt, PromptState::BrowseProjects { .. }) {
             // Check sub-mode states and do binding lookup before mutable borrow.
             let is_editing_path = matches!(
@@ -1298,6 +1422,27 @@ impl App {
             return Ok(false);
         }
 
+        if let PromptState::ConfirmKillRunning(confirm_prompt) = &mut self.prompt {
+            match self.bindings.lookup(&key, BindingScope::Dialog) {
+                Some(Action::CloseOverlay) => {
+                    let previous = confirm_prompt.previous.clone();
+                    self.prompt = PromptState::KillRunning(previous);
+                    self.set_info(
+                        "Kill cancelled. Your running agents and companion terminals are unchanged.",
+                    );
+                }
+                Some(Action::ToggleSelection) => {
+                    confirm_prompt.confirm_selected = !confirm_prompt.confirm_selected;
+                }
+                Some(Action::Confirm) => {
+                    let confirm = confirm_prompt.confirm_selected;
+                    return Ok(self.resolve_confirm_kill_running(confirm));
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+
         if let PromptState::ConfirmDeleteAgent {
             confirm_selected, ..
         } = &mut self.prompt
@@ -1467,6 +1612,44 @@ impl App {
                 ..
             } => Self::overlay_row_at(list, offset, items, column, row)
                 .map(PromptMouseTarget::PickEditorItem),
+            OverlayMouseLayout::KillRunning {
+                input,
+                list,
+                items,
+                offset,
+                cancel_button,
+                hovered_button,
+                selected_button,
+                visible_button,
+            } => {
+                if input.is_some_and(|rect| contains_point(rect, column, row)) {
+                    Some(PromptMouseTarget::RuntimeKillInput)
+                } else if let Some(index) = Self::overlay_row_at(list, offset, items, column, row) {
+                    Some(PromptMouseTarget::RuntimeKillItem(index))
+                } else if contains_point(cancel_button, column, row) {
+                    Some(PromptMouseTarget::RuntimeKillCancel)
+                } else if contains_point(hovered_button, column, row) {
+                    Some(PromptMouseTarget::RuntimeKillHovered)
+                } else if contains_point(selected_button, column, row) {
+                    Some(PromptMouseTarget::RuntimeKillSelected)
+                } else if contains_point(visible_button, column, row) {
+                    Some(PromptMouseTarget::RuntimeKillVisible)
+                } else {
+                    None
+                }
+            }
+            OverlayMouseLayout::ConfirmKillRunning {
+                cancel_button,
+                kill_button,
+            } => {
+                if contains_point(cancel_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmKillCancel)
+                } else if contains_point(kill_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmKillConfirm)
+                } else {
+                    None
+                }
+            }
             OverlayMouseLayout::ConfirmDeleteAgent {
                 cancel_button,
                 delete_button,
@@ -1790,6 +1973,154 @@ impl App {
         }
     }
 
+    fn set_kill_running_hovered(&mut self, visible_index: usize) {
+        if let PromptState::KillRunning(prompt) = &mut self.prompt {
+            let count = Self::visible_kill_running_indices(prompt).len();
+            if count == 0 {
+                prompt.hovered_visible_index = 0;
+                return;
+            }
+            prompt.hovered_visible_index = visible_index.min(count.saturating_sub(1));
+            prompt.focus = KillRunningFocus::List;
+        }
+    }
+
+    fn set_kill_running_search_cursor_from_mouse(&mut self, column: u16) {
+        let input_area = match self.overlay_layout.active {
+            OverlayMouseLayout::KillRunning {
+                input: Some(input), ..
+            } => input,
+            _ => return,
+        };
+        if let PromptState::KillRunning(prompt) = &mut self.prompt {
+            prompt.filter.cursor =
+                cursor_from_single_line_position(&prompt.filter.text, input_area, 2, column);
+            prompt.searching = true;
+            prompt.focus = KillRunningFocus::List;
+        }
+    }
+
+    fn toggle_hovered_kill_running_selection(&mut self) {
+        let target_id = match &self.prompt {
+            PromptState::KillRunning(prompt) => {
+                let visible = Self::visible_kill_running_indices(prompt);
+                visible
+                    .get(prompt.hovered_visible_index)
+                    .and_then(|&index| prompt.runtimes.get(index))
+                    .map(|runtime| runtime.id.clone())
+            }
+            _ => None,
+        };
+
+        let Some(target_id) = target_id else {
+            self.set_error(
+                "No running agent or terminal is highlighted. Move to a visible row first.",
+            );
+            return;
+        };
+
+        if let PromptState::KillRunning(prompt) = &mut self.prompt
+            && !prompt.selected_ids.insert(target_id.clone())
+        {
+            prompt.selected_ids.remove(&target_id);
+        }
+    }
+
+    fn execute_kill_running_footer_action(
+        &mut self,
+        action: KillRunningFooterAction,
+    ) -> Result<()> {
+        let enabled = match &self.prompt {
+            PromptState::KillRunning(prompt) => Self::kill_running_footer_enabled(prompt, action),
+            _ => true,
+        };
+        if !enabled {
+            if matches!(action, KillRunningFooterAction::Selected) {
+                self.set_info(
+                    "Select one or more runtimes before using Kill Selected. Press Space to mark the highlighted row.",
+                );
+            }
+            return Ok(());
+        }
+        match action {
+            KillRunningFooterAction::Cancel => {
+                self.prompt = PromptState::None;
+                self.set_info("Closed Kill Running. No agents or terminals were killed.");
+            }
+            _ => {
+                if let Some(action) = action.action() {
+                    self.open_confirm_kill_running_action(action)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn kill_running_footer_enabled(
+        prompt: &KillRunningPrompt,
+        action: KillRunningFooterAction,
+    ) -> bool {
+        match action {
+            KillRunningFooterAction::Cancel => true,
+            KillRunningFooterAction::Selected => !prompt.selected_ids.is_empty(),
+            KillRunningFooterAction::Hovered | KillRunningFooterAction::Visible => {
+                !Self::visible_kill_running_indices(prompt).is_empty()
+            }
+        }
+    }
+
+    fn next_kill_running_footer_action(
+        prompt: &KillRunningPrompt,
+        current: Option<KillRunningFooterAction>,
+        forward: bool,
+    ) -> KillRunningFocus {
+        const ACTIONS: [KillRunningFooterAction; 4] = [
+            KillRunningFooterAction::Cancel,
+            KillRunningFooterAction::Hovered,
+            KillRunningFooterAction::Selected,
+            KillRunningFooterAction::Visible,
+        ];
+
+        let enabled: Vec<KillRunningFooterAction> = ACTIONS
+            .into_iter()
+            .filter(|action| Self::kill_running_footer_enabled(prompt, *action))
+            .collect();
+
+        if enabled.is_empty() {
+            return KillRunningFocus::List;
+        }
+
+        match current {
+            None => {
+                if forward {
+                    KillRunningFocus::Footer(enabled[0])
+                } else {
+                    KillRunningFocus::Footer(*enabled.last().unwrap())
+                }
+            }
+            Some(current) => {
+                let Some(index) = enabled.iter().position(|action| *action == current) else {
+                    return if forward {
+                        KillRunningFocus::Footer(enabled[0])
+                    } else {
+                        KillRunningFocus::Footer(*enabled.last().unwrap())
+                    };
+                };
+                if forward {
+                    if index + 1 < enabled.len() {
+                        KillRunningFocus::Footer(enabled[index + 1])
+                    } else {
+                        KillRunningFocus::List
+                    }
+                } else if index > 0 {
+                    KillRunningFocus::Footer(enabled[index - 1])
+                } else {
+                    KillRunningFocus::List
+                }
+            }
+        }
+    }
+
     fn open_selected_browser_entry(&mut self) {
         let visible = self.visible_browser_entries();
         let mut browse_to: Option<PathBuf> = None;
@@ -1861,6 +2192,60 @@ impl App {
         self.prompt = PromptState::None;
         if confirm && let Err(e) = self.do_delete_session(&session_id) {
             self.set_error(format!("{e:#}"));
+        }
+        false
+    }
+
+    fn resolve_confirm_kill_running(&mut self, confirm: bool) -> bool {
+        let confirm_prompt = match &self.prompt {
+            PromptState::ConfirmKillRunning(confirm_prompt) => confirm_prompt.clone(),
+            _ => return false,
+        };
+        if !confirm {
+            self.prompt = PromptState::KillRunning(confirm_prompt.previous);
+            self.set_info(
+                "Kill cancelled. Your running agents and companion terminals are unchanged.",
+            );
+            return false;
+        }
+
+        self.prompt = PromptState::None;
+        let requested = confirm_prompt.target_ids.len();
+        let (agents, terminals) = self.kill_runtime_targets(&confirm_prompt.target_ids);
+        let killed = agents + terminals;
+        let already_gone = requested.saturating_sub(killed);
+        if killed == 0 {
+            self.set_warning(
+                "The selected agents or terminals were already gone, so there was nothing left to kill. Refresh Kill Running if you want to review the current runtime list.",
+            );
+            return false;
+        }
+
+        let mut pieces = Vec::new();
+        if agents > 0 {
+            pieces.push(format!(
+                "{agents} agent{}",
+                if agents == 1 { "" } else { "s" }
+            ));
+        }
+        if terminals > 0 {
+            pieces.push(format!(
+                "{terminals} terminal{}",
+                if terminals == 1 { "" } else { "s" }
+            ));
+        }
+        if already_gone > 0 {
+            self.set_warning(format!(
+                "Killed {}. {} selected runtime{} were already gone. In-progress CLI work was stopped, but the worktree files are still available for review or relaunch.",
+                pieces.join(" and "),
+                already_gone,
+                if already_gone == 1 { "" } else { "s" }
+            ));
+        } else {
+            self.set_info(format!(
+                "Killed {}. In-progress CLI work was stopped, but the worktree files are still available for review or relaunch.",
+                pieces.join(" and ")
+            ));
         }
         false
     }
@@ -1945,6 +2330,47 @@ impl App {
                 if double_click {
                     self.open_selected_pick_editor();
                 }
+            }
+            PromptMouseTarget::RuntimeKillInput => {
+                self.set_kill_running_search_cursor_from_mouse(mouse.column);
+            }
+            PromptMouseTarget::RuntimeKillItem(index) => {
+                self.set_kill_running_hovered(index);
+                self.toggle_hovered_kill_running_selection();
+            }
+            PromptMouseTarget::RuntimeKillCancel => {
+                if let Err(e) =
+                    self.execute_kill_running_footer_action(KillRunningFooterAction::Cancel)
+                {
+                    self.set_error(format!("{e:#}"));
+                }
+            }
+            PromptMouseTarget::RuntimeKillHovered => {
+                if let Err(e) =
+                    self.execute_kill_running_footer_action(KillRunningFooterAction::Hovered)
+                {
+                    self.set_error(format!("{e:#}"));
+                }
+            }
+            PromptMouseTarget::RuntimeKillSelected => {
+                if let Err(e) =
+                    self.execute_kill_running_footer_action(KillRunningFooterAction::Selected)
+                {
+                    self.set_error(format!("{e:#}"));
+                }
+            }
+            PromptMouseTarget::RuntimeKillVisible => {
+                if let Err(e) =
+                    self.execute_kill_running_footer_action(KillRunningFooterAction::Visible)
+                {
+                    self.set_error(format!("{e:#}"));
+                }
+            }
+            PromptMouseTarget::ConfirmKillCancel => {
+                return self.resolve_confirm_kill_running(false);
+            }
+            PromptMouseTarget::ConfirmKillConfirm => {
+                return self.resolve_confirm_kill_running(true);
             }
             PromptMouseTarget::ConfirmDeleteCancel => {
                 return self.resolve_confirm_delete_agent(false);
@@ -2453,8 +2879,10 @@ mod tests {
     use std::sync::{Arc, Mutex, mpsc};
 
     use crate::app::{
-        App, CenterMode, FocusPane, FullscreenOverlay, InputTarget, LeftSection, MouseLayoutState,
-        OverlayMouseLayout, OverlayMouseLayoutState, PromptState, RightSection, TextInput,
+        App, CenterMode, ConfirmKillRunningPrompt, FocusPane, FullscreenOverlay, InputTarget,
+        KillRunningAction, KillRunningFocus, KillRunningFooterAction, KillRunningPrompt,
+        KillableRuntime, KillableRuntimeKind, LeftSection, MouseLayoutState, OverlayMouseLayout,
+        OverlayMouseLayoutState, PromptState, RightSection, RuntimeTargetId, TextInput,
     };
     use crate::config::{Config, DuxPaths, ProjectConfig};
     use crate::editor::{DetectedEditor, EditorKind};
@@ -2663,6 +3091,19 @@ mod tests {
         };
     }
 
+    fn install_kill_running_overlay(app: &mut App, items: usize) {
+        app.overlay_layout.active = OverlayMouseLayout::KillRunning {
+            input: Some(Rect::new(12, 4, 70, 1)),
+            list: Rect::new(12, 6, 70, 8),
+            items,
+            offset: 0,
+            cancel_button: Rect::new(12, 16, 14, 3),
+            hovered_button: Rect::new(28, 16, 16, 3),
+            selected_button: Rect::new(46, 16, 17, 3),
+            visible_button: Rect::new(65, 16, 15, 3),
+        };
+    }
+
     fn install_confirm_delete_overlay(app: &mut App) {
         app.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
             cancel_button: Rect::new(34, 10, 16, 3),
@@ -2688,6 +3129,21 @@ mod tests {
         app.overlay_layout.active = OverlayMouseLayout::RenameSession {
             input: Rect::new(24, 10, 30, 1),
         };
+    }
+
+    fn sample_runtime(
+        id: RuntimeTargetId,
+        kind: KillableRuntimeKind,
+        label: &str,
+        context: &str,
+    ) -> KillableRuntime {
+        KillableRuntime {
+            id,
+            kind,
+            label: label.to_string(),
+            context: context.to_string(),
+            search_text: format!("{label} {context}"),
+        }
     }
 
     fn init_git_repo_with_modified_file(
@@ -2805,6 +3261,368 @@ mod tests {
         assert!(matches!(app.prompt, PromptState::RenameSession { .. }));
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    #[test]
+    fn open_kill_running_requires_live_runtimes() {
+        let mut app = test_app(default_bindings());
+
+        app.open_kill_running().unwrap();
+
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(app.status.text().contains("No running agents"));
+    }
+
+    #[test]
+    fn open_kill_running_snapshots_agents_and_terminals() {
+        let mut app = test_app(default_bindings());
+        let worktree_path = app.sessions[0].worktree_path.clone();
+        let worktree = std::path::Path::new(&worktree_path);
+        let args = vec!["-c".to_string(), "sleep 5".to_string()];
+        app.providers.insert(
+            app.sessions[0].id.clone(),
+            PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn agent"),
+        );
+        app.companion_terminals.insert(
+            "term-1".to_string(),
+            crate::app::CompanionTerminal {
+                session_id: app.sessions[0].id.clone(),
+                label: "shell".to_string(),
+                foreground_cmd: Some("python".to_string()),
+                client: PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
+                    .expect("spawn terminal"),
+            },
+        );
+
+        app.open_kill_running().unwrap();
+
+        match &app.prompt {
+            PromptState::KillRunning(prompt) => {
+                assert_eq!(prompt.runtimes.len(), 2);
+                let agent = prompt
+                    .runtimes
+                    .iter()
+                    .find(|runtime| matches!(runtime.id, RuntimeTargetId::Agent(_)))
+                    .expect("agent runtime");
+                assert_eq!(agent.label, "Codex");
+                assert_eq!(
+                    agent.context,
+                    "on agent \"agent-branch\" under project \"demo\""
+                );
+
+                let terminal = prompt
+                    .runtimes
+                    .iter()
+                    .find(|runtime| matches!(runtime.id, RuntimeTargetId::Terminal(_)))
+                    .expect("terminal runtime");
+                assert_eq!(terminal.label, "python");
+                assert_eq!(
+                    terminal.context,
+                    "on agent \"agent-branch\" under project \"demo\""
+                );
+            }
+            other => panic!("expected kill-running prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kill_running_terminal_label_deduplicates_term_prefix() {
+        let mut app = test_app(default_bindings());
+        let worktree_path = app.sessions[0].worktree_path.clone();
+        let worktree = std::path::Path::new(&worktree_path);
+        let args = vec!["-c".to_string(), "sleep 5".to_string()];
+        app.companion_terminals.insert(
+            "term-1".to_string(),
+            crate::app::CompanionTerminal {
+                session_id: app.sessions[0].id.clone(),
+                label: "shell".to_string(),
+                foreground_cmd: Some("TERM sleep".to_string()),
+                client: PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
+                    .expect("spawn terminal"),
+            },
+        );
+
+        let runtimes = app.running_runtime_snapshot();
+        let terminal = runtimes
+            .iter()
+            .find(|runtime| matches!(runtime.id, RuntimeTargetId::Terminal(_)))
+            .expect("terminal runtime");
+        assert_eq!(terminal.label, "sleep");
+    }
+
+    #[test]
+    fn kill_running_tab_focus_reaches_cancel_button() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::KillRunning(KillRunningPrompt {
+            runtimes: vec![sample_runtime(
+                RuntimeTargetId::Agent("session-1".to_string()),
+                KillableRuntimeKind::Agent,
+                "Codex",
+                "on agent \"agent-branch\" under project \"demo\"",
+            )],
+            filter: TextInput::new(),
+            searching: false,
+            hovered_visible_index: 0,
+            selected_ids: std::collections::HashSet::new(),
+            focus: KillRunningFocus::List,
+        });
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::KillRunning(prompt) => {
+                assert_eq!(
+                    prompt.focus,
+                    KillRunningFocus::Footer(KillRunningFooterAction::Cancel)
+                )
+            }
+            other => panic!("expected kill-running prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kill_running_footer_skips_kill_selected_when_nothing_is_marked() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::KillRunning(KillRunningPrompt {
+            runtimes: vec![sample_runtime(
+                RuntimeTargetId::Agent("session-1".to_string()),
+                KillableRuntimeKind::Agent,
+                "Codex",
+                "on agent \"agent-branch\" under project \"demo\"",
+            )],
+            filter: TextInput::new(),
+            searching: false,
+            hovered_visible_index: 0,
+            selected_ids: std::collections::HashSet::new(),
+            focus: KillRunningFocus::Footer(KillRunningFooterAction::Hovered),
+        });
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::KillRunning(prompt) => {
+                assert_eq!(
+                    prompt.focus,
+                    KillRunningFocus::Footer(KillRunningFooterAction::Visible)
+                )
+            }
+            other => panic!("expected kill-running prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kill_running_search_keeps_hidden_selection() {
+        let mut app = test_app(default_bindings());
+        let selected_id = RuntimeTargetId::Agent("session-1".to_string());
+        app.prompt = PromptState::KillRunning(KillRunningPrompt {
+            runtimes: vec![
+                sample_runtime(
+                    selected_id.clone(),
+                    KillableRuntimeKind::Agent,
+                    "alpha-agent",
+                    "demo / codex / alpha-agent",
+                ),
+                sample_runtime(
+                    RuntimeTargetId::Terminal("term-1".to_string()),
+                    KillableRuntimeKind::Terminal,
+                    "beta-shell",
+                    "demo / alpha-agent",
+                ),
+            ],
+            filter: TextInput::new(),
+            searching: false,
+            hovered_visible_index: 0,
+            selected_ids: std::iter::once(selected_id.clone()).collect(),
+            focus: KillRunningFocus::List,
+        });
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        for ch in ['b', 'e', 't', 'a'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        let PromptState::KillRunning(prompt) = &app.prompt else {
+            panic!("expected kill-running prompt");
+        };
+        let visible = App::visible_kill_running_indices(prompt);
+        assert_eq!(visible.len(), 1);
+        assert!(prompt.selected_ids.contains(&selected_id));
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        let PromptState::KillRunning(prompt) = &app.prompt else {
+            panic!("expected kill-running prompt");
+        };
+        assert!(prompt.selected_ids.contains(&selected_id));
+    }
+
+    #[test]
+    fn confirm_kill_cancel_restores_selection_modal_state() {
+        let mut app = test_app(default_bindings());
+        let selected_id = RuntimeTargetId::Agent("session-1".to_string());
+        let previous = KillRunningPrompt {
+            runtimes: vec![sample_runtime(
+                selected_id.clone(),
+                KillableRuntimeKind::Agent,
+                "agent-branch",
+                "demo / codex / agent-branch",
+            )],
+            filter: TextInput::with_text("agent".to_string()),
+            searching: false,
+            hovered_visible_index: 0,
+            selected_ids: std::iter::once(selected_id).collect(),
+            focus: KillRunningFocus::Footer(KillRunningFooterAction::Selected),
+        };
+        app.prompt = PromptState::ConfirmKillRunning(ConfirmKillRunningPrompt {
+            previous: previous.clone(),
+            action: KillRunningAction::Selected,
+            target_ids: vec![RuntimeTargetId::Agent("session-1".to_string())],
+            confirm_selected: false,
+        });
+
+        app.resolve_confirm_kill_running(false);
+
+        match &app.prompt {
+            PromptState::KillRunning(prompt) => {
+                assert_eq!(prompt.filter.text, previous.filter.text);
+                assert_eq!(prompt.selected_ids, previous.selected_ids);
+                assert_eq!(prompt.focus, previous.focus);
+            }
+            other => panic!("expected restored kill-running prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kill_visible_only_kills_filtered_rows() {
+        let mut app = test_app(default_bindings());
+        let worktree_path = app.sessions[0].worktree_path.clone();
+        let worktree = std::path::Path::new(&worktree_path);
+        std::fs::create_dir_all(app.paths.worktrees_root.join("other")).expect("other worktree");
+        let now = Utc::now();
+        app.sessions.push(AgentSession {
+            id: "session-2".to_string(),
+            project_id: app.projects[0].id.clone(),
+            project_path: Some(app.projects[0].path.clone()),
+            provider: ProviderKind::from_str("claude"),
+            source_branch: "main".to_string(),
+            branch_name: "beta-agent".to_string(),
+            worktree_path: app.paths.worktrees_root.join("other").display().to_string(),
+            title: None,
+            status: SessionStatus::Detached,
+            created_at: now,
+            updated_at: now,
+        });
+        let args = vec!["-c".to_string(), "sleep 5".to_string()];
+        app.providers.insert(
+            "session-1".to_string(),
+            PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn first"),
+        );
+        app.providers.insert(
+            "session-2".to_string(),
+            PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn second"),
+        );
+
+        app.prompt = PromptState::KillRunning(KillRunningPrompt {
+            runtimes: app.running_runtime_snapshot(),
+            filter: TextInput::with_text("beta".to_string()),
+            searching: false,
+            hovered_visible_index: 0,
+            selected_ids: std::iter::once(RuntimeTargetId::Agent("session-1".to_string()))
+                .collect(),
+            focus: KillRunningFocus::Footer(KillRunningFooterAction::Visible),
+        });
+
+        app.open_confirm_kill_running_action(KillRunningAction::Visible)
+            .unwrap();
+        app.resolve_confirm_kill_running(true);
+
+        assert!(app.providers.contains_key("session-1"));
+        assert!(!app.providers.contains_key("session-2"));
+    }
+
+    #[test]
+    fn kill_selected_removes_running_targets_and_resets_terminal_surface() {
+        let mut app = test_app(default_bindings());
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let args = vec!["-c".to_string(), "sleep 5".to_string()];
+        app.providers.insert(
+            "session-1".to_string(),
+            PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn agent"),
+        );
+        app.companion_terminals.insert(
+            "term-1".to_string(),
+            crate::app::CompanionTerminal {
+                session_id: app.sessions[0].id.clone(),
+                label: "shell".to_string(),
+                foreground_cmd: None,
+                client: PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
+                    .expect("spawn terminal"),
+            },
+        );
+        app.active_terminal_id = Some("term-1".to_string());
+        app.session_surface = SessionSurface::Terminal;
+        app.input_target = InputTarget::None;
+        app.fullscreen_overlay = FullscreenOverlay::Terminal;
+
+        app.prompt = PromptState::KillRunning(KillRunningPrompt {
+            runtimes: app.running_runtime_snapshot(),
+            filter: TextInput::new(),
+            searching: false,
+            hovered_visible_index: 0,
+            selected_ids: [
+                RuntimeTargetId::Agent("session-1".to_string()),
+                RuntimeTargetId::Terminal("term-1".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            focus: KillRunningFocus::Footer(KillRunningFooterAction::Selected),
+        });
+
+        app.open_confirm_kill_running_action(KillRunningAction::Selected)
+            .unwrap();
+        app.resolve_confirm_kill_running(true);
+
+        assert!(app.providers.is_empty());
+        assert!(app.companion_terminals.is_empty());
+        assert_eq!(app.session_surface, SessionSurface::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    #[test]
+    fn kill_selected_warns_when_targets_are_already_gone() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmKillRunning(ConfirmKillRunningPrompt {
+            previous: KillRunningPrompt {
+                runtimes: vec![sample_runtime(
+                    RuntimeTargetId::Agent("session-1".to_string()),
+                    KillableRuntimeKind::Agent,
+                    "agent-branch",
+                    "demo / codex / agent-branch",
+                )],
+                filter: TextInput::new(),
+                searching: false,
+                hovered_visible_index: 0,
+                selected_ids: std::iter::once(RuntimeTargetId::Agent("session-1".to_string()))
+                    .collect(),
+                focus: KillRunningFocus::Footer(KillRunningFooterAction::Selected),
+            },
+            action: KillRunningAction::Selected,
+            target_ids: vec![RuntimeTargetId::Agent("session-1".to_string())],
+            confirm_selected: true,
+        });
+
+        app.resolve_confirm_kill_running(true);
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
+        assert!(app.status.text().contains("already gone"));
     }
 
     #[test]
@@ -3751,6 +4569,65 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, 8));
         assert!(matches!(app.prompt, PromptState::None));
         assert!(app.status.text().contains("Opened agent"));
+    }
+
+    #[test]
+    fn mouse_click_kill_running_row_toggles_selection() {
+        let mut app = test_app(default_bindings());
+        let runtime_id = RuntimeTargetId::Agent("session-1".to_string());
+        app.prompt = PromptState::KillRunning(KillRunningPrompt {
+            runtimes: vec![sample_runtime(
+                runtime_id.clone(),
+                KillableRuntimeKind::Agent,
+                "agent-branch",
+                "demo / codex / agent-branch",
+            )],
+            filter: TextInput::new(),
+            searching: false,
+            hovered_visible_index: 0,
+            selected_ids: std::collections::HashSet::new(),
+            focus: KillRunningFocus::List,
+        });
+        install_kill_running_overlay(&mut app, 1);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 12, 6));
+
+        match &app.prompt {
+            PromptState::KillRunning(prompt) => {
+                assert!(prompt.selected_ids.contains(&runtime_id));
+            }
+            other => panic!("expected kill-running prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mouse_click_kill_selected_button_opens_confirmation() {
+        let mut app = test_app(default_bindings());
+        let runtime_id = RuntimeTargetId::Agent("session-1".to_string());
+        app.prompt = PromptState::KillRunning(KillRunningPrompt {
+            runtimes: vec![sample_runtime(
+                runtime_id.clone(),
+                KillableRuntimeKind::Agent,
+                "agent-branch",
+                "demo / codex / agent-branch",
+            )],
+            filter: TextInput::new(),
+            searching: false,
+            hovered_visible_index: 0,
+            selected_ids: std::iter::once(runtime_id).collect(),
+            focus: KillRunningFocus::Footer(KillRunningFooterAction::Selected),
+        });
+        install_kill_running_overlay(&mut app, 1);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 47, 16));
+
+        match &app.prompt {
+            PromptState::ConfirmKillRunning(confirm_prompt) => {
+                assert_eq!(confirm_prompt.action, KillRunningAction::Selected);
+                assert_eq!(confirm_prompt.target_ids.len(), 1);
+            }
+            other => panic!("expected confirm kill prompt, got {other:?}"),
+        }
     }
 
     #[test]

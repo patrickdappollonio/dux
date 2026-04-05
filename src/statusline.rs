@@ -4,6 +4,7 @@ use std::time::Instant;
 pub enum StatusTone {
     Info,
     Busy,
+    Warning,
     Error,
 }
 
@@ -34,6 +35,12 @@ impl StatusLine {
         self.since = Instant::now();
     }
 
+    pub fn warning(&mut self, message: impl Into<String>) {
+        self.message = message.into();
+        self.tone = StatusTone::Warning;
+        self.since = Instant::now();
+    }
+
     pub fn error(&mut self, message: impl Into<String>) {
         self.message = message.into();
         self.tone = StatusTone::Error;
@@ -43,6 +50,7 @@ impl StatusLine {
     pub fn text(&self) -> String {
         match self.tone {
             StatusTone::Busy => format!("{} {}", self.spinner_frame(), self.message),
+            StatusTone::Warning => format!("[warning] {}", self.message),
             StatusTone::Error => format!("[error] {}", self.message),
             StatusTone::Info => self.message.clone(),
         }
@@ -56,5 +64,18 @@ impl StatusLine {
         const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let index = ((self.since.elapsed().as_millis() / 100) as usize) % FRAMES.len();
         FRAMES[index]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StatusLine, StatusTone};
+
+    #[test]
+    fn warning_tone_formats_with_warning_prefix() {
+        let mut status = StatusLine::new("ready");
+        status.warning("something changed");
+        assert_eq!(status.tone(), StatusTone::Warning);
+        assert_eq!(status.text(), "[warning] something changed");
     }
 }

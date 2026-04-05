@@ -62,7 +62,9 @@ pub enum Action {
     AddCurrentDir,
     Confirm,
     ToggleSelection,
+    ToggleMarked,
     // Palette-only (no direct keybinding)
+    KillRunning,
     RenameSession,
     DeleteProject,
     RemoveProject,
@@ -82,6 +84,7 @@ pub enum BindingScope {
     Resize,
     Palette,
     Browser,
+    RuntimeKill,
     Dialog,
     CommitInput,
     Help,
@@ -99,6 +102,7 @@ impl BindingScope {
             Self::Resize => "Resize mode",
             Self::Palette => "Command palette",
             Self::Browser => "Project browser",
+            Self::RuntimeKill => "Kill running modal",
             Self::Dialog => "Dialog",
             Self::CommitInput => "Commit input",
             Self::Help => "Help overlay",
@@ -193,6 +197,8 @@ impl Action {
             Action::AddCurrentDir => "add_current_dir",
             Action::Confirm => "confirm",
             Action::ToggleSelection => "toggle_selection",
+            Action::ToggleMarked => "toggle_marked",
+            Action::KillRunning => "kill_running",
             Action::RenameSession => "rename_session",
             Action::DeleteProject => "delete_project",
             Action::RemoveProject => "remove_project",
@@ -261,6 +267,10 @@ impl Action {
             Action::AddCurrentDir => "Add the current directory as a project.",
             Action::Confirm => "Confirm the selected action in a dialog.",
             Action::ToggleSelection => "Toggle between options in a confirmation dialog.",
+            Action::ToggleMarked => "Toggle the hovered runtime in the kill-running modal.",
+            Action::KillRunning => {
+                "Open the kill-running modal for agents and companion terminals."
+            }
             Action::RenameSession => "Rename the selected agent session.",
             Action::DeleteProject => "Remove the selected project and its sessions.",
             Action::RemoveProject => "Remove project from app (keeps files on disk).",
@@ -321,8 +331,10 @@ impl Action {
             | Action::OpenEntry
             | Action::AddCurrentDir
             | Action::Confirm
-            | Action::ToggleSelection => Some("Overlays"),
-            Action::RenameSession
+            | Action::ToggleSelection
+            | Action::ToggleMarked => Some("Overlays"),
+            Action::KillRunning
+            | Action::RenameSession
             | Action::DeleteProject
             | Action::RemoveProject
             | Action::SortAgentsByUpdated
@@ -372,6 +384,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             BindingScope::Files,
             BindingScope::Palette,
             BindingScope::Browser,
+            BindingScope::RuntimeKill,
             BindingScope::Help,
         ],
         help: Some(HelpEntry {
@@ -393,6 +406,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             BindingScope::Files,
             BindingScope::Palette,
             BindingScope::Browser,
+            BindingScope::RuntimeKill,
             BindingScope::Help,
         ],
         help: None, // covered by MoveDown's combined label
@@ -819,7 +833,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     BindingDef {
         action: Action::FocusNext,
         default_keys: &[key!(tab)],
-        scopes: &[BindingScope::Global],
+        scopes: &[BindingScope::Global, BindingScope::RuntimeKill],
         help: Some(HelpEntry {
             section: "Global",
             description: "Focus next pane",
@@ -830,7 +844,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     BindingDef {
         action: Action::FocusPrev,
         default_keys: &[key!(shift - tab)],
-        scopes: &[BindingScope::Global],
+        scopes: &[BindingScope::Global, BindingScope::RuntimeKill],
         help: Some(HelpEntry {
             section: "Global",
             description: "Focus previous pane",
@@ -922,6 +936,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             BindingScope::Global,
             BindingScope::Palette,
             BindingScope::Browser,
+            BindingScope::RuntimeKill,
             BindingScope::Dialog,
         ],
         help: Some(HelpEntry {
@@ -961,7 +976,11 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             KeyCode::Char('/'),
             KeyModifiers::NONE,
         )],
-        scopes: &[BindingScope::Palette, BindingScope::Browser],
+        scopes: &[
+            BindingScope::Palette,
+            BindingScope::Browser,
+            BindingScope::RuntimeKill,
+        ],
         help: Some(HelpEntry {
             section: "Overlays",
             description: "Toggle search mode",
@@ -1005,7 +1024,11 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     BindingDef {
         action: Action::Confirm,
         default_keys: &[key!(enter)],
-        scopes: &[BindingScope::Dialog, BindingScope::Palette],
+        scopes: &[
+            BindingScope::Dialog,
+            BindingScope::Palette,
+            BindingScope::RuntimeKill,
+        ],
         help: Some(HelpEntry {
             section: "Overlays",
             description: "Confirm the selected action",
@@ -1024,7 +1047,29 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
         palette: None,
     },
+    BindingDef {
+        action: Action::ToggleMarked,
+        default_keys: &[key!(space)],
+        scopes: &[BindingScope::RuntimeKill],
+        help: Some(HelpEntry {
+            section: "Overlays",
+            description: "Toggle the hovered runtime selection",
+        }),
+        hint_contexts: &[],
+        palette: None,
+    },
     // ── Palette-only (no direct keybinding) ────────────────────────
+    BindingDef {
+        action: Action::KillRunning,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "kill-running",
+            description: "Open a modal to kill running agents and companion terminals",
+        }),
+    },
     BindingDef {
         action: Action::RenameSession,
         default_keys: &[key!(e)],
@@ -1730,6 +1775,17 @@ mod tests {
             .filter_map(|binding| binding.palette_name)
             .collect::<Vec<_>>();
         assert!(names.contains(&"fork-agent"));
+    }
+
+    #[test]
+    fn filtered_palette_includes_kill_running_command() {
+        let bindings = default_bindings();
+        let results = bindings.filtered_palette("kill");
+        let names = results
+            .iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"kill-running"));
     }
 
     #[test]

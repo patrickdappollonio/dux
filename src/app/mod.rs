@@ -191,6 +191,112 @@ pub(crate) enum CenterMode {
     },
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum KillableRuntimeKind {
+    Agent,
+    Terminal,
+}
+
+impl KillableRuntimeKind {
+    pub(crate) fn noun(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Terminal => "terminal",
+        }
+    }
+
+    pub(crate) fn badge(self) -> &'static str {
+        match self {
+            Self::Agent => "AGENT",
+            Self::Terminal => "TERM",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum RuntimeTargetId {
+    Agent(String),
+    Terminal(String),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct KillableRuntime {
+    pub(crate) id: RuntimeTargetId,
+    pub(crate) kind: KillableRuntimeKind,
+    pub(crate) label: String,
+    pub(crate) context: String,
+    pub(crate) search_text: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KillRunningAction {
+    Hovered,
+    Selected,
+    Visible,
+}
+
+impl KillRunningAction {
+    pub(crate) fn button_label(self) -> &'static str {
+        match self {
+            Self::Hovered => "Kill Hovered",
+            Self::Selected => "Kill Selected",
+            Self::Visible => "Kill Visible",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KillRunningFooterAction {
+    Cancel,
+    Hovered,
+    Selected,
+    Visible,
+}
+
+impl KillRunningFooterAction {
+    pub(crate) fn button_label(self) -> &'static str {
+        match self {
+            Self::Cancel => "Cancel",
+            Self::Hovered => KillRunningAction::Hovered.button_label(),
+            Self::Selected => KillRunningAction::Selected.button_label(),
+            Self::Visible => KillRunningAction::Visible.button_label(),
+        }
+    }
+
+    pub(crate) fn action(self) -> Option<KillRunningAction> {
+        match self {
+            Self::Cancel => None,
+            Self::Hovered => Some(KillRunningAction::Hovered),
+            Self::Selected => Some(KillRunningAction::Selected),
+            Self::Visible => Some(KillRunningAction::Visible),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KillRunningFocus {
+    List,
+    Footer(KillRunningFooterAction),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct KillRunningPrompt {
+    pub(crate) runtimes: Vec<KillableRuntime>,
+    pub(crate) filter: TextInput,
+    pub(crate) searching: bool,
+    pub(crate) hovered_visible_index: usize,
+    pub(crate) selected_ids: HashSet<RuntimeTargetId>,
+    pub(crate) focus: KillRunningFocus,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ConfirmKillRunningPrompt {
+    pub(crate) previous: KillRunningPrompt,
+    pub(crate) action: KillRunningAction,
+    pub(crate) target_ids: Vec<RuntimeTargetId>,
+    pub(crate) confirm_selected: bool,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PromptState {
     None,
@@ -211,6 +317,8 @@ pub(crate) enum PromptState {
         tab_completions: Vec<String>,
         tab_index: usize,
     },
+    KillRunning(KillRunningPrompt),
+    ConfirmKillRunning(ConfirmKillRunningPrompt),
     ConfirmDeleteAgent {
         session_id: String,
         branch_name: String,
@@ -322,6 +430,20 @@ pub(crate) enum OverlayMouseLayout {
         list: Rect,
         items: usize,
         offset: usize,
+    },
+    KillRunning {
+        input: Option<Rect>,
+        list: Rect,
+        items: usize,
+        offset: usize,
+        cancel_button: Rect,
+        hovered_button: Rect,
+        selected_button: Rect,
+        visible_button: Rect,
+    },
+    ConfirmKillRunning {
+        cancel_button: Rect,
+        kill_button: Rect,
     },
     ConfirmDeleteAgent {
         cancel_button: Rect,
@@ -645,6 +767,10 @@ impl App {
         self.status.busy(message);
     }
 
+    pub(crate) fn set_warning(&mut self, message: impl Into<String>) {
+        self.status.warning(message);
+    }
+
     pub(crate) fn set_error(&mut self, message: impl Into<String>) {
         self.status.error(message);
     }
@@ -660,6 +786,7 @@ impl App {
             "remove-project" => self.remove_selected_project(),
             "delete-agent" => self.confirm_delete_selected_session(),
             "rename-agent" => self.open_rename_session(),
+            "kill-running" => self.open_kill_running(),
             "reconnect-agent" => self.reconnect_selected_session(),
             "show-agent" => self.activate_center_agent(),
             "show-terminal" => self.show_companion_terminal(),

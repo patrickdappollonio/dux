@@ -60,6 +60,7 @@ pub struct Theme {
     pub diff_binary_fg: Color,
     pub diff_stat_add_fg: Color,
     pub diff_stat_remove_fg: Color,
+    pub runtime_context_value_fg: Color,
 }
 
 impl Theme {
@@ -121,6 +122,7 @@ impl Theme {
             diff_binary_fg: Color::Yellow,
             diff_stat_add_fg: Color::Green,
             diff_stat_remove_fg: Color::Red,
+            runtime_context_value_fg: Color::Rgb(125, 150, 160),
         }
     }
 
@@ -161,6 +163,9 @@ impl Theme {
             crate::statusline::StatusTone::Busy => Style::default()
                 .fg(self.status_busy_fg)
                 .bg(self.status_busy_bg),
+            crate::statusline::StatusTone::Warning => {
+                Style::default().fg(self.warning_fg).bg(self.status_info_bg)
+            }
             crate::statusline::StatusTone::Error => Style::default()
                 .fg(self.status_error_fg)
                 .bg(self.status_error_bg),
@@ -171,6 +176,7 @@ impl Theme {
         match tone {
             crate::statusline::StatusTone::Info => ("●", self.session_active),
             crate::statusline::StatusTone::Busy => ("●", self.session_detached),
+            crate::statusline::StatusTone::Warning => ("●", self.warning_fg),
             crate::statusline::StatusTone::Error => ("●", self.status_error_fg),
         }
     }
