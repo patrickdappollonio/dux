@@ -1,7 +1,5 @@
 use super::render::{cursor_from_wrapped_position, wrap_text_at_width};
 use super::*;
-use alacritty_terminal::term::TermMode;
-
 const MOUSE_WHEEL_LINES: usize = 3;
 const MIN_LEFT_WIDTH_PCT: u16 = 14;
 const MAX_LEFT_WIDTH_PCT: u16 = 38;
@@ -9,13 +7,6 @@ const MIN_RIGHT_WIDTH_PCT: u16 = 14;
 const MAX_RIGHT_WIDTH_PCT: u16 = 50;
 const MIN_CENTER_WIDTH_PCT: u16 = 20;
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AgentWheelRoute {
-    HostScrollback,
-    ForwardMouse,
-    ForwardAlternateScroll,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MouseTarget {
@@ -97,86 +88,6 @@ fn pct_from_columns(columns: u16, total_width: u16) -> u16 {
     }
 
     (((u32::from(columns) * 100) + (u32::from(total_width) / 2)) / u32::from(total_width)) as u16
-}
-
-fn encode_cursor_key(code: KeyCode, term_mode: TermMode) -> &'static [u8] {
-    let application_cursor = term_mode.contains(TermMode::APP_CURSOR);
-    match (code, application_cursor) {
-        (KeyCode::Up, true) => b"\x1bOA",
-        (KeyCode::Down, true) => b"\x1bOB",
-        (KeyCode::Right, true) => b"\x1bOC",
-        (KeyCode::Left, true) => b"\x1bOD",
-        (KeyCode::Up, false) => b"\x1b[A",
-        (KeyCode::Down, false) => b"\x1b[B",
-        (KeyCode::Right, false) => b"\x1b[C",
-        (KeyCode::Left, false) => b"\x1b[D",
-        _ => b"",
-    }
-}
-
-fn agent_wheel_route(term_mode: TermMode) -> AgentWheelRoute {
-    let mouse_reporting = term_mode
-        .intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION);
-    let modern_mouse_encoding =
-        term_mode.contains(TermMode::SGR_MOUSE) || term_mode.contains(TermMode::UTF8_MOUSE);
-
-    if mouse_reporting && modern_mouse_encoding {
-        AgentWheelRoute::ForwardMouse
-    } else if term_mode.contains(TermMode::ALT_SCREEN)
-        && term_mode.contains(TermMode::ALTERNATE_SCROLL)
-    {
-        AgentWheelRoute::ForwardAlternateScroll
-    } else {
-        AgentWheelRoute::HostScrollback
-    }
-}
-
-fn push_mouse_codepoint(bytes: &mut Vec<u8>, value: u32) -> Option<()> {
-    let ch = char::from_u32(value)?;
-    let mut buf = [0u8; 4];
-    bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-    Some(())
-}
-
-fn encode_mouse_scroll(mouse: MouseEvent, area: Rect, term_mode: TermMode) -> Option<Vec<u8>> {
-    let mut cb = match mouse.kind {
-        MouseEventKind::ScrollUp => 64u16,
-        MouseEventKind::ScrollDown => 65u16,
-        MouseEventKind::ScrollLeft => 66u16,
-        MouseEventKind::ScrollRight => 67u16,
-        _ => return None,
-    };
-
-    if mouse.modifiers.contains(KeyModifiers::SHIFT) {
-        cb += 4;
-    }
-    if mouse.modifiers.contains(KeyModifiers::ALT) {
-        cb += 8;
-    }
-    if mouse.modifiers.contains(KeyModifiers::CONTROL) {
-        cb += 16;
-    }
-
-    let column = u32::from(mouse.column.saturating_sub(area.x).saturating_add(1));
-    let row = u32::from(mouse.row.saturating_sub(area.y).saturating_add(1));
-
-    if term_mode.contains(TermMode::SGR_MOUSE) {
-        return Some(format!("\x1b[<{cb};{column};{row}M").into_bytes());
-    }
-
-    if term_mode.contains(TermMode::UTF8_MOUSE) {
-        let mut bytes = Vec::with_capacity(16);
-        bytes.extend_from_slice(b"\x1b[M");
-        push_mouse_codepoint(&mut bytes, u32::from(cb) + 32)?;
-        push_mouse_codepoint(&mut bytes, column + 32)?;
-        push_mouse_codepoint(&mut bytes, row + 32)?;
-        return Some(bytes);
-    }
-
-    let cb = u8::try_from(cb + 32).ok()?;
-    let column = u8::try_from(column + 32).ok()?;
-    let row = u8::try_from(row + 32).ok()?;
-    Some(vec![0x1b, b'[', b'M', cb, column, row])
 }
 
 impl App {
@@ -896,6 +807,16 @@ impl App {
             return Ok(false);
         }
 
+        // Don't forward input until the agent has produced visible output.
+        // Keystrokes during the loading phase would reach a process that
+        // isn't ready for them. We still drain stdin above to prevent
+        // buffer accumulation.
+        if let Some(provider) = self.selected_terminal_surface_client()
+            && !provider.has_output()
+        {
+            return Ok(false);
+        }
+
         self.raw_input_buf.extend_from_slice(&buf[..n]);
 
         // Split into complete sequences and collect actions to avoid borrow
@@ -907,7 +828,7 @@ impl App {
         // mouse event to handle in the UI, or raw bytes to forward.
         enum SeqAction {
             Intercept(Action, bool, Vec<u8>),
-            Mouse(MouseEvent),
+            Mouse(MouseEvent, Vec<u8>),
             Forward(Vec<u8>),
         }
 
@@ -918,7 +839,7 @@ impl App {
                 // PTY. crossterm's EnableMouseCapture uses SGR (1006) encoding,
                 // so terminal mouse events arrive as CSI `<…M` / `<…m`.
                 if let Some(mouse_ev) = crate::raw_input::parse_sgr_mouse(seq) {
-                    return SeqAction::Mouse(mouse_ev);
+                    return SeqAction::Mouse(mouse_ev, seq.to_vec());
                 }
                 if let Some((action, conditional)) = self.interactive_patterns.match_sequence(seq) {
                     SeqAction::Intercept(action, conditional, seq.to_vec())
@@ -984,11 +905,26 @@ impl App {
                         let _ = provider.write_bytes(&raw);
                     }
                 }
-                SeqAction::Mouse(mouse_ev) => {
-                    // Route mouse events to the UI so clicks, double-clicks,
-                    // scroll, and drag work even during interactive mode.
-                    if self.handle_mouse(mouse_ev) {
-                        return Ok(true);
+                SeqAction::Mouse(mouse_ev, raw) => {
+                    let is_scroll = matches!(
+                        mouse_ev.kind,
+                        MouseEventKind::ScrollUp
+                            | MouseEventKind::ScrollDown
+                            | MouseEventKind::ScrollLeft
+                            | MouseEventKind::ScrollRight
+                    );
+                    if is_scroll {
+                        // Scroll is always handled as host scrollback.
+                        if self.handle_mouse(mouse_ev) {
+                            return Ok(true);
+                        }
+                    } else {
+                        // Positional events (clicks, drags, releases) are
+                        // forwarded to the PTY so the agent can use them
+                        // (e.g. cursor repositioning in an input field).
+                        if let Some(provider) = self.selected_terminal_surface_client() {
+                            let _ = provider.write_bytes(&raw);
+                        }
                     }
                 }
                 SeqAction::Intercept(_, _, raw) | SeqAction::Forward(raw) => {
@@ -2247,39 +2183,17 @@ impl App {
             return;
         }
 
-        let Some(area) = self.mouse_layout.agent_term else {
-            return;
-        };
-        let Some(_session_id) = self.selected_session().map(|session| session.id.clone()) else {
-            return;
-        };
         let Some(provider) = self.selected_terminal_surface_client() else {
             return;
         };
 
-        match agent_wheel_route(provider.term_mode()) {
-            AgentWheelRoute::HostScrollback => {
-                provider.scroll(
-                    matches!(mouse.kind, MouseEventKind::ScrollUp),
-                    MOUSE_WHEEL_LINES,
-                );
-            }
-            AgentWheelRoute::ForwardMouse => {
-                provider.set_scrollback(0);
-                if let Some(bytes) = encode_mouse_scroll(mouse, area, provider.term_mode()) {
-                    let _ = provider.write_bytes(&bytes);
-                }
-            }
-            AgentWheelRoute::ForwardAlternateScroll => {
-                provider.set_scrollback(0);
-                let code = match mouse.kind {
-                    MouseEventKind::ScrollUp => KeyCode::Up,
-                    MouseEventKind::ScrollDown => KeyCode::Down,
-                    _ => return,
-                };
-                let _ = provider.write_bytes(encode_cursor_key(code, provider.term_mode()));
-            }
-        }
+        // Always handle scroll as host scrollback — never forward to the child
+        // process. The outer terminal's EnableMouseCapture means dux owns the
+        // mouse; forwarding scroll events causes confusion.
+        provider.scroll(
+            matches!(mouse.kind, MouseEventKind::ScrollUp),
+            MOUSE_WHEEL_LINES,
+        );
     }
 
     fn update_dragged_panes(&mut self, column: u16, row: u16) {
@@ -2553,7 +2467,6 @@ mod tests {
     use crate::statusline::StatusLine;
     use crate::storage::SessionStore;
     use crate::theme::Theme;
-    use alacritty_terminal::term::TermMode;
     use chrono::Utc;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -4281,32 +4194,5 @@ mod tests {
 
         assert_eq!(app.focus, FocusPane::Left);
         assert!(matches!(app.prompt, PromptState::Command { .. }));
-    }
-
-    #[test]
-    fn agent_wheel_route_prefers_mouse_reporting_with_modern_encoding() {
-        let mode = TermMode::ALT_SCREEN | TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
-        assert_eq!(
-            super::agent_wheel_route(mode),
-            super::AgentWheelRoute::ForwardMouse
-        );
-    }
-
-    #[test]
-    fn agent_wheel_route_uses_alternate_scroll_without_modern_encoding() {
-        let mode = TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL | TermMode::MOUSE_REPORT_CLICK;
-        assert_eq!(
-            super::agent_wheel_route(mode),
-            super::AgentWheelRoute::ForwardAlternateScroll
-        );
-    }
-
-    #[test]
-    fn agent_wheel_route_falls_back_to_host_scrollback_without_modern_encoding() {
-        let mode = TermMode::MOUSE_REPORT_CLICK;
-        assert_eq!(
-            super::agent_wheel_route(mode),
-            super::AgentWheelRoute::HostScrollback
-        );
     }
 }
