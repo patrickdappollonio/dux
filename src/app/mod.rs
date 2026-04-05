@@ -109,6 +109,7 @@ pub struct App {
     pub(crate) mouse_drag: Option<ResizeDragState>,
     pub(crate) last_mouse_click: Option<RecentMouseClick>,
     pub(crate) interactive_patterns: InteractiveBytePatterns,
+    pub(crate) macro_patterns: crate::keybindings::MacroBytePatterns,
     pub(crate) raw_input_buf: Vec<u8>,
     pub(crate) sigwinch_flag: Arc<AtomicBool>,
 }
@@ -348,6 +349,27 @@ pub(crate) enum PromptState {
         editors: Vec<DetectedEditor>,
         selected: usize,
     },
+    EditMacros {
+        entries: Vec<(char, crate::config::MacroEntry)>,
+        selected: usize,
+        editing: Option<MacroEditState>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MacroEditState {
+    pub(crate) letter: Option<char>,
+    pub(crate) letter_input: TextInput,
+    pub(crate) name_input: TextInput,
+    pub(crate) text_input: TextInput,
+    pub(crate) stage: MacroEditStage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MacroEditStage {
+    PickLetter,
+    EditName,
+    EditText,
 }
 
 #[derive(Clone, Debug)]
@@ -573,6 +595,7 @@ impl App {
         }
         let bindings = RuntimeBindings::from_keys_config(&config.keys);
         let interactive_patterns = bindings.interactive_byte_patterns();
+        let macro_patterns = crate::keybindings::MacroBytePatterns::build(&config.macros);
 
         // Register SIGWINCH handler so we can detect terminal resizes even when
         // bypassing crossterm's event reader during interactive mode.
@@ -651,6 +674,7 @@ impl App {
             mouse_drag: None,
             last_mouse_click: None,
             interactive_patterns,
+            macro_patterns,
             raw_input_buf: Vec::new(),
             sigwinch_flag,
         };
@@ -673,8 +697,7 @@ impl App {
                 // Check SIGWINCH — needed when bypassing crossterm's event
                 // reader (which would otherwise deliver Resize events).
                 if self.sigwinch_flag.swap(false, Ordering::Relaxed) {
-                    if let Err(err) =
-                        crate::io_retry::retry_on_interrupt(|| terminal.autoresize())
+                    if let Err(err) = crate::io_retry::retry_on_interrupt(|| terminal.autoresize())
                     {
                         self.report_runtime_error("terminal resize failed", &err);
                     }
@@ -709,19 +732,18 @@ impl App {
                     }
                 } else {
                     // Normal UI mode: use crossterm's structured event reader.
-                    let ready =
-                        match crate::io_retry::retry_on_interrupt(|| {
-                            event::poll(Duration::from_millis(100))
-                        }) {
-                            Ok(ready) => ready,
-                            Err(err) => {
-                                self.report_runtime_error(
-                                    "event polling failed; input handling was skipped",
-                                    &err,
-                                );
-                                false
-                            }
-                        };
+                    let ready = match crate::io_retry::retry_on_interrupt(|| {
+                        event::poll(Duration::from_millis(100))
+                    }) {
+                        Ok(ready) => ready,
+                        Err(err) => {
+                            self.report_runtime_error(
+                                "event polling failed; input handling was skipped",
+                                &err,
+                            );
+                            false
+                        }
+                    };
                     if ready {
                         let event = match crate::io_retry::retry_on_interrupt(event::read) {
                             Ok(event) => event,
@@ -902,12 +924,44 @@ impl App {
                 self.sort_sessions_by_name();
                 Ok(())
             }
+            "edit-macros" => {
+                self.open_edit_macros();
+                Ok(())
+            }
             "" => Ok(()),
             other => {
                 self.set_error(format!("Unknown command: \"{other}\""));
                 Ok(())
             }
         }
+    }
+
+    pub(crate) fn rebuild_macro_patterns(&mut self) {
+        self.macro_patterns = crate::keybindings::MacroBytePatterns::build(&self.config.macros);
+    }
+
+    pub(crate) fn open_edit_macros(&mut self) {
+        let mut entries: Vec<(char, crate::config::MacroEntry)> = self
+            .config
+            .macros
+            .entries
+            .iter()
+            .filter_map(|(k, v)| {
+                if k.len() == 1 {
+                    let ch = k.chars().next().unwrap();
+                    if ch.is_ascii_lowercase() {
+                        return Some((ch, v.clone()));
+                    }
+                }
+                None
+            })
+            .collect();
+        entries.sort_by_key(|(ch, _)| *ch);
+        self.prompt = PromptState::EditMacros {
+            entries,
+            selected: 0,
+            editing: None,
+        };
     }
 
     pub(crate) fn left_items(&self) -> &[LeftItem] {

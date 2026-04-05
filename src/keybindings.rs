@@ -73,6 +73,7 @@ pub enum Action {
     SortAgentsByCreated,
     SortAgentsByName,
     RemoveGitPane,
+    EditMacros,
 }
 
 /// Where a binding's key combo is matched.
@@ -209,6 +210,7 @@ impl Action {
             Action::SortAgentsByCreated => "sort_agents_by_created",
             Action::SortAgentsByName => "sort_agents_by_name",
             Action::RemoveGitPane => "remove_git_pane",
+            Action::EditMacros => "edit_macros",
         }
     }
 
@@ -283,6 +285,7 @@ impl Action {
             Action::SortAgentsByCreated => "Sort agents by creation date (newest first).",
             Action::SortAgentsByName => "Sort agents alphabetically by name.",
             Action::RemoveGitPane => "Remove or restore the git pane.",
+            Action::EditMacros => "Open the text macros editor.",
         }
     }
 
@@ -347,7 +350,8 @@ impl Action {
             | Action::SortAgentsByUpdated
             | Action::SortAgentsByCreated
             | Action::SortAgentsByName
-            | Action::RemoveGitPane => None,
+            | Action::RemoveGitPane
+            | Action::EditMacros => None,
         }
     }
 }
@@ -1175,6 +1179,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Remove or restore the git pane entirely",
         }),
     },
+    BindingDef {
+        action: Action::EditMacros,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "edit-macros",
+            description: "Edit text macros for interactive mode",
+        }),
+    },
 ];
 
 const HELP_SECTION_ORDER: &[&str] = &[
@@ -1582,6 +1597,76 @@ impl InteractiveBytePatterns {
             .iter()
             .find(|b| b.pattern == seq)
             .map(|b| (b.action, b.conditional))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Text macro byte patterns — separate from interactive bindings because
+// macros are user-configured in [macros] rather than [keys].
+// ---------------------------------------------------------------------------
+
+/// A single macro byte pattern: the raw bytes that trigger it and the letter ID.
+#[derive(Debug, Clone)]
+pub struct MacroByteBinding {
+    pub pattern: Vec<u8>,
+    pub letter: char,
+}
+
+/// Precomputed byte patterns for all configured text macros.
+/// Built at startup and rebuilt when macros are edited.
+#[derive(Debug, Clone)]
+pub struct MacroBytePatterns {
+    pub bindings: Vec<MacroByteBinding>,
+}
+
+impl MacroBytePatterns {
+    /// Build byte patterns from the macros config.
+    /// Skips entries whose key is not a single lowercase ASCII letter
+    /// or whose text is empty.
+    pub fn build(macros: &crate::config::MacrosConfig) -> Self {
+        let mut bindings = Vec::new();
+        for (key, entry) in &macros.entries {
+            if key.len() != 1 {
+                continue;
+            }
+            let letter = key.chars().next().unwrap();
+            if !letter.is_ascii_lowercase() {
+                continue;
+            }
+            if entry.text().is_empty() {
+                continue;
+            }
+            if let Some(pattern) = macro_prefix_bytes(&macros.prefix, letter) {
+                bindings.push(MacroByteBinding { pattern, letter });
+            }
+        }
+        Self { bindings }
+    }
+
+    /// Match a raw byte sequence against macro patterns.
+    /// Returns the letter ID of the matched macro.
+    pub fn match_sequence(&self, seq: &[u8]) -> Option<char> {
+        self.bindings
+            .iter()
+            .find(|b| b.pattern == seq)
+            .map(|b| b.letter)
+    }
+}
+
+/// Convert a macro prefix string and letter to the raw byte pattern
+/// that a terminal would send for that key combination.
+fn macro_prefix_bytes(prefix: &str, letter: char) -> Option<Vec<u8>> {
+    match prefix.to_lowercase().as_str() {
+        "shift-alt" | "alt-shift" => {
+            // Shift+Alt+letter = ESC + uppercase letter
+            Some(vec![0x1b, letter.to_ascii_uppercase() as u8])
+        }
+        "ctrl-alt" | "alt-ctrl" => {
+            // Ctrl+Alt+letter = ESC + control character (0x01..0x1a)
+            let ctrl = letter as u8 - b'a' + 1;
+            Some(vec![0x1b, ctrl])
+        }
+        _ => None,
     }
 }
 
@@ -2284,5 +2369,83 @@ mod tests {
         let patterns = bindings.interactive_byte_patterns();
         // Random byte sequence should not match
         assert!(patterns.match_sequence(&[0x01]).is_none());
+    }
+
+    // ── Macro byte patterns ──────────────────────────────────────
+
+    #[test]
+    fn macro_prefix_bytes_shift_alt() {
+        assert_eq!(macro_prefix_bytes("shift-alt", 'a'), Some(vec![0x1b, 0x41]));
+        assert_eq!(macro_prefix_bytes("shift-alt", 'z'), Some(vec![0x1b, 0x5a]));
+        assert_eq!(macro_prefix_bytes("alt-shift", 'a'), Some(vec![0x1b, 0x41]));
+    }
+
+    #[test]
+    fn macro_prefix_bytes_ctrl_alt() {
+        assert_eq!(macro_prefix_bytes("ctrl-alt", 'a'), Some(vec![0x1b, 0x01]));
+        assert_eq!(macro_prefix_bytes("ctrl-alt", 'z'), Some(vec![0x1b, 0x1a]));
+        assert_eq!(macro_prefix_bytes("alt-ctrl", 'a'), Some(vec![0x1b, 0x01]));
+    }
+
+    #[test]
+    fn macro_prefix_bytes_unknown_returns_none() {
+        assert_eq!(macro_prefix_bytes("super", 'a'), None);
+        assert_eq!(macro_prefix_bytes("", 'a'), None);
+    }
+
+    #[test]
+    fn macro_byte_patterns_build_and_match() {
+        use crate::config::{MacroEntry, MacrosConfig};
+        use std::collections::BTreeMap;
+
+        let mut entries = BTreeMap::new();
+        entries.insert("a".to_string(), MacroEntry::Plain("hello".to_string()));
+        entries.insert(
+            "b".to_string(),
+            MacroEntry::Named {
+                name: "Test".to_string(),
+                text: "world".to_string(),
+            },
+        );
+        let config = MacrosConfig {
+            prefix: "shift-alt".to_string(),
+            entries,
+        };
+
+        let patterns = MacroBytePatterns::build(&config);
+        assert_eq!(patterns.bindings.len(), 2);
+
+        // Shift+Alt+A = ESC + 'A'
+        assert_eq!(patterns.match_sequence(&[0x1b, 0x41]), Some('a'));
+        // Shift+Alt+B = ESC + 'B'
+        assert_eq!(patterns.match_sequence(&[0x1b, 0x42]), Some('b'));
+        // Shift+Alt+C — not configured
+        assert_eq!(patterns.match_sequence(&[0x1b, 0x43]), None);
+        // Plain Alt+a (lowercase) — should NOT match
+        assert_eq!(patterns.match_sequence(&[0x1b, 0x61]), None);
+    }
+
+    #[test]
+    fn macro_byte_patterns_skips_invalid_keys() {
+        use crate::config::{MacroEntry, MacrosConfig};
+        use std::collections::BTreeMap;
+
+        let mut entries = BTreeMap::new();
+        // Valid
+        entries.insert("a".to_string(), MacroEntry::Plain("ok".to_string()));
+        // Invalid: uppercase
+        entries.insert("B".to_string(), MacroEntry::Plain("skip".to_string()));
+        // Invalid: multi-char
+        entries.insert("ab".to_string(), MacroEntry::Plain("skip".to_string()));
+        // Invalid: empty text
+        entries.insert("c".to_string(), MacroEntry::Plain(String::new()));
+        let config = MacrosConfig {
+            prefix: "shift-alt".to_string(),
+            entries,
+        };
+
+        let patterns = MacroBytePatterns::build(&config);
+        assert_eq!(patterns.bindings.len(), 1);
+        assert_eq!(patterns.bindings[0].letter, 'a');
     }
 }

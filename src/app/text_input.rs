@@ -1,14 +1,27 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-/// Reusable single-field text input with cursor tracking.
+/// Reusable text input with cursor tracking and optional multiline support.
 ///
 /// Handles character-level and word-level editing, cursor movement, and
 /// common key dispatch. All cursor positions are byte indices into the
 /// underlying UTF-8 string.
+///
+/// By default operates in single-line mode. Call [`TextInput::with_multiline`]
+/// to enable multiline editing where Enter inserts newlines and Up/Down
+/// navigate between lines.
 #[derive(Clone, Debug)]
 pub struct TextInput {
     pub text: String,
     pub cursor: usize,
+    multiline: Option<MultilineState>,
+}
+
+#[derive(Clone, Debug)]
+struct MultilineState {
+    /// Maximum number of lines visible at once for rendering.
+    visible_lines: usize,
+    /// Index of the first visible line (0-based scroll position).
+    scroll_offset: usize,
 }
 
 impl Default for TextInput {
@@ -22,12 +35,30 @@ impl TextInput {
         Self {
             text: String::new(),
             cursor: 0,
+            multiline: None,
         }
     }
 
     pub fn with_text(text: String) -> Self {
         let cursor = text.len();
-        Self { text, cursor }
+        Self {
+            text,
+            cursor,
+            multiline: None,
+        }
+    }
+
+    /// Enable multiline editing with a visible line limit for rendering.
+    pub fn with_multiline(mut self, visible_lines: usize) -> Self {
+        self.multiline = Some(MultilineState {
+            visible_lines,
+            scroll_offset: 0,
+        });
+        self
+    }
+
+    pub fn is_multiline(&self) -> bool {
+        self.multiline.is_some()
     }
 
     // ── Character-level operations ──────────────────────────────────
@@ -118,6 +149,131 @@ impl TextInput {
         self.text.is_empty()
     }
 
+    // ── Multiline operations ───────────────────────────────────────
+
+    /// Move cursor to the same column on the previous line.
+    /// If the previous line is shorter, the cursor lands at its end.
+    /// No-op when already on the first line or in single-line mode.
+    pub fn move_up(&mut self) {
+        if self.multiline.is_none() {
+            return;
+        }
+        let (line, col) = self.cursor_line_col();
+        if line == 0 {
+            return;
+        }
+        self.cursor = byte_offset_at(&self.text, line - 1, col);
+        self.ensure_cursor_visible();
+    }
+
+    /// Move cursor to the same column on the next line.
+    /// If the next line is shorter, the cursor lands at its end.
+    /// No-op when already on the last line or in single-line mode.
+    pub fn move_down(&mut self) {
+        if self.multiline.is_none() {
+            return;
+        }
+        let (line, col) = self.cursor_line_col();
+        let total = self.total_lines();
+        if line + 1 >= total {
+            return;
+        }
+        self.cursor = byte_offset_at(&self.text, line + 1, col);
+        self.ensure_cursor_visible();
+    }
+
+    /// Move cursor to the start of the current line (multiline) or
+    /// to the start of the entire text (single-line).
+    pub fn move_line_home(&mut self) {
+        if self.multiline.is_none() {
+            self.cursor = 0;
+            return;
+        }
+        let idx = clamp_cursor(&self.text, self.cursor);
+        self.cursor = self.text[..idx].rfind('\n').map(|p| p + 1).unwrap_or(0);
+    }
+
+    /// Move cursor to the end of the current line (multiline) or
+    /// to the end of the entire text (single-line).
+    pub fn move_line_end(&mut self) {
+        if self.multiline.is_none() {
+            self.cursor = self.text.len();
+            return;
+        }
+        let idx = clamp_cursor(&self.text, self.cursor);
+        self.cursor = self.text[idx..]
+            .find('\n')
+            .map(|p| idx + p)
+            .unwrap_or(self.text.len());
+    }
+
+    /// Total number of lines in the text (count of `\n` + 1).
+    pub fn total_lines(&self) -> usize {
+        self.text.chars().filter(|&c| c == '\n').count() + 1
+    }
+
+    /// Current scroll offset (first visible line index). Returns 0 in single-line mode.
+    pub fn scroll_offset(&self) -> usize {
+        self.multiline
+            .as_ref()
+            .map(|m| m.scroll_offset)
+            .unwrap_or(0)
+    }
+
+    /// Maximum number of visible lines, if multiline is enabled.
+    pub fn visible_line_count(&self) -> Option<usize> {
+        self.multiline.as_ref().map(|m| m.visible_lines)
+    }
+
+    /// Returns the lines currently visible for rendering (accounting for scroll offset).
+    pub fn visible_lines(&self) -> Vec<&str> {
+        let lines: Vec<&str> = self.text.split('\n').collect();
+        match &self.multiline {
+            Some(m) => {
+                let start = m.scroll_offset.min(lines.len());
+                let end = (start + m.visible_lines).min(lines.len());
+                lines[start..end].to_vec()
+            }
+            None => lines,
+        }
+    }
+
+    /// Returns `(row, col)` of the cursor relative to the scroll offset, for rendering.
+    /// In single-line mode, returns `(0, cursor_position)`.
+    pub fn cursor_display_position(&self) -> (usize, usize) {
+        let (line, col) = self.cursor_line_col();
+        let offset = self.scroll_offset();
+        (line.saturating_sub(offset), col)
+    }
+
+    /// Compute the (line, column) of the cursor in character units.
+    fn cursor_line_col(&self) -> (usize, usize) {
+        let idx = clamp_cursor(&self.text, self.cursor);
+        let before = &self.text[..idx];
+        let line = before.chars().filter(|&c| c == '\n').count();
+        let line_start = before.rfind('\n').map(|p| p + 1).unwrap_or(0);
+        let col = before[line_start..].chars().count();
+        (line, col)
+    }
+
+    /// Adjust scroll offset so the cursor line is within the visible window.
+    fn ensure_cursor_visible(&mut self) {
+        let Some(m) = &mut self.multiline else {
+            return;
+        };
+        let (cursor_line, _) = {
+            let idx = clamp_cursor(&self.text, self.cursor);
+            let before = &self.text[..idx];
+            let line = before.chars().filter(|&c| c == '\n').count();
+            (line, 0)
+        };
+        if cursor_line < m.scroll_offset {
+            m.scroll_offset = cursor_line;
+        } else if cursor_line >= m.scroll_offset + m.visible_lines {
+            m.scroll_offset = cursor_line + 1 - m.visible_lines;
+        }
+    }
+
     // ── Key dispatch ────────────────────────────────────────────────
 
     /// Handle common text-editing keys. Returns `true` if the key was consumed.
@@ -127,14 +283,35 @@ impl TextInput {
     /// - `Backspace` → delete char backward; `Alt+Backspace` / `Ctrl+W` → delete word backward
     /// - `Delete` → delete char forward; `Alt+Delete` / `Ctrl+Delete` → delete word forward
     /// - `Left` / `Right` → move char; `Alt+Left/Right` / `Ctrl+Left/Right` → move word
-    /// - `Home` / `End` → jump to start/end
+    /// - `Home` / `End` → jump to start/end of line (multiline) or text (single-line)
     ///
-    /// Everything else (Enter, Esc, Tab, …) returns `false` for the caller to handle.
+    /// In multiline mode, additionally:
+    /// - `Enter` → insert newline
+    /// - `Up` / `Down` → move between lines
+    ///
+    /// Everything else (Esc, Tab, and Enter/Up/Down in single-line mode)
+    /// returns `false` for the caller to handle.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         let has_alt = key.modifiers.contains(KeyModifiers::ALT);
         let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let is_multiline = self.multiline.is_some();
 
         match key.code {
+            // Multiline-only: Enter inserts newline
+            KeyCode::Enter if is_multiline => {
+                self.insert_char('\n');
+                self.ensure_cursor_visible();
+                true
+            }
+            // Multiline-only: Up/Down navigate lines
+            KeyCode::Up if is_multiline && !has_alt && !has_ctrl => {
+                self.move_up();
+                true
+            }
+            KeyCode::Down if is_multiline && !has_alt && !has_ctrl => {
+                self.move_down();
+                true
+            }
             KeyCode::Backspace if has_alt => {
                 self.backspace_word();
                 true
@@ -167,6 +344,15 @@ impl TextInput {
                 self.move_right();
                 true
             }
+            // Home/End: line-level in multiline, text-level in single-line
+            KeyCode::Home if is_multiline => {
+                self.move_line_home();
+                true
+            }
+            KeyCode::End if is_multiline => {
+                self.move_line_end();
+                true
+            }
             KeyCode::Home => {
                 self.move_home();
                 true
@@ -181,6 +367,9 @@ impl TextInput {
             }
             KeyCode::Char(c) if !has_ctrl => {
                 self.insert_char(c);
+                if is_multiline {
+                    self.ensure_cursor_visible();
+                }
                 true
             }
             _ => false,
@@ -217,6 +406,32 @@ pub(crate) fn clamp_cursor(text: &str, cursor: usize) -> usize {
     } else {
         prev_char_boundary(text, cursor)
     }
+}
+
+/// Compute the byte offset of a given (line, column) position in character units.
+/// If the target line is shorter than `col`, the offset lands at the line's end.
+fn byte_offset_at(text: &str, target_line: usize, target_col: usize) -> usize {
+    let mut line = 0;
+    let mut byte = 0;
+    for (i, ch) in text.char_indices() {
+        if line == target_line {
+            // We're on the target line — count columns.
+            let line_start = byte;
+            for (col, (j, c)) in text[line_start..].char_indices().enumerate() {
+                if c == '\n' || col == target_col {
+                    return line_start + j;
+                }
+            }
+            // Reached end of text on this line.
+            return text.len();
+        }
+        if ch == '\n' {
+            line += 1;
+        }
+        byte = i + ch.len_utf8();
+    }
+    // target_line beyond total lines — return end of text.
+    text.len()
 }
 
 fn is_word_char(c: char) -> bool {
@@ -386,10 +601,8 @@ mod tests {
 
     #[test]
     fn delete_word_deletes_forward() {
-        let mut ti = TextInput {
-            text: "hello world".into(),
-            cursor: 0,
-        };
+        let mut ti = TextInput::with_text("hello world".into());
+        ti.cursor = 0;
         ti.delete_word();
         assert_eq!(ti.text, "world");
         assert_eq!(ti.cursor, 0);
@@ -408,10 +621,8 @@ mod tests {
 
     #[test]
     fn backspace_word_at_start_is_noop() {
-        let mut ti = TextInput {
-            text: "hello".into(),
-            cursor: 0,
-        };
+        let mut ti = TextInput::with_text("hello".into());
+        ti.cursor = 0;
         ti.backspace_word();
         assert_eq!(ti.text, "hello");
         assert_eq!(ti.cursor, 0);
@@ -476,20 +687,16 @@ mod tests {
 
     #[test]
     fn handle_key_alt_delete() {
-        let mut ti = TextInput {
-            text: "hello world".into(),
-            cursor: 0,
-        };
+        let mut ti = TextInput::with_text("hello world".into());
+        ti.cursor = 0;
         assert!(ti.handle_key(key_alt(KeyCode::Delete)));
         assert_eq!(ti.text, "world");
     }
 
     #[test]
     fn handle_key_ctrl_delete() {
-        let mut ti = TextInput {
-            text: "hello world".into(),
-            cursor: 0,
-        };
+        let mut ti = TextInput::with_text("hello world".into());
+        ti.cursor = 0;
         assert!(ti.handle_key(key_ctrl(KeyCode::Delete)));
         assert_eq!(ti.text, "world");
     }
@@ -543,5 +750,216 @@ mod tests {
         ti.insert_char('X');
         assert_eq!(ti.text, "helXlo");
         assert_eq!(ti.cursor, 4);
+    }
+
+    // ── Multiline tests ───────────────────────────────────────────
+
+    fn multiline_input(text: &str, visible: usize) -> TextInput {
+        TextInput::with_text(text.to_string()).with_multiline(visible)
+    }
+
+    #[test]
+    fn multiline_enter_inserts_newline() {
+        let mut ti = TextInput::new().with_multiline(5);
+        assert!(ti.handle_key(key(KeyCode::Char('a'))));
+        assert!(ti.handle_key(key(KeyCode::Enter)));
+        assert!(ti.handle_key(key(KeyCode::Char('b'))));
+        assert_eq!(ti.text, "a\nb");
+        assert_eq!(ti.total_lines(), 2);
+    }
+
+    #[test]
+    fn singleline_enter_not_consumed() {
+        let mut ti = TextInput::new();
+        assert!(!ti.handle_key(key(KeyCode::Enter)));
+        assert!(ti.text.is_empty());
+    }
+
+    #[test]
+    fn multiline_up_down_navigation() {
+        // "hello\nworld\nfoo"
+        let mut ti = multiline_input("hello\nworld\nfoo", 10);
+        // Cursor at end (byte 15), line 2, col 3
+        assert_eq!(ti.cursor_line_col(), (2, 3));
+
+        ti.move_up();
+        // Line 1, col 3 → byte 6 + 3 = 9 ("worl|d")
+        assert_eq!(ti.cursor_line_col(), (1, 3));
+        assert_eq!(ti.cursor, 9);
+
+        ti.move_up();
+        // Line 0, col 3 → byte 3 ("hel|lo")
+        assert_eq!(ti.cursor_line_col(), (0, 3));
+        assert_eq!(ti.cursor, 3);
+
+        // Already at line 0, move_up is a no-op
+        ti.move_up();
+        assert_eq!(ti.cursor_line_col(), (0, 3));
+
+        ti.move_down();
+        assert_eq!(ti.cursor_line_col(), (1, 3));
+
+        ti.move_down();
+        assert_eq!(ti.cursor_line_col(), (2, 3));
+
+        // Already at last line, move_down is a no-op
+        ti.move_down();
+        assert_eq!(ti.cursor_line_col(), (2, 3));
+    }
+
+    #[test]
+    fn multiline_up_clamps_to_shorter_line() {
+        // "hi\nworld" — line 0 has 2 chars, line 1 has 5
+        let mut ti = multiline_input("hi\nworld", 10);
+        // Cursor at end of "world", col 5
+        assert_eq!(ti.cursor_line_col(), (1, 5));
+
+        ti.move_up();
+        // Line 0 only has 2 chars, so clamp to col 2 → end of "hi"
+        assert_eq!(ti.cursor_line_col(), (0, 2));
+        assert_eq!(ti.cursor, 2);
+    }
+
+    #[test]
+    fn multiline_down_clamps_to_shorter_line() {
+        // "world\nhi" — line 0 has 5 chars, line 1 has 2
+        let mut ti = multiline_input("world\nhi", 10);
+        ti.cursor = 5; // end of "world", col 5
+
+        ti.move_down();
+        // Line 1 only has 2 chars, so clamp to col 2 → end of "hi"
+        assert_eq!(ti.cursor_line_col(), (1, 2));
+        assert_eq!(ti.cursor, 8); // "world\nhi".len()
+    }
+
+    #[test]
+    fn singleline_up_down_not_consumed() {
+        let mut ti = TextInput::with_text("hello".into());
+        assert!(!ti.handle_key(key(KeyCode::Up)));
+        assert!(!ti.handle_key(key(KeyCode::Down)));
+    }
+
+    #[test]
+    fn multiline_up_down_consumed() {
+        let mut ti = multiline_input("a\nb", 5);
+        assert!(ti.handle_key(key(KeyCode::Up)));
+        assert!(ti.handle_key(key(KeyCode::Down)));
+    }
+
+    #[test]
+    fn multiline_home_end_line_level() {
+        let mut ti = multiline_input("hello\nworld", 10);
+        ti.cursor = 9; // "world" col 3 → "wor|ld"
+
+        ti.handle_key(key(KeyCode::Home));
+        assert_eq!(ti.cursor, 6); // start of "world"
+
+        ti.handle_key(key(KeyCode::End));
+        assert_eq!(ti.cursor, 11); // end of "world"
+    }
+
+    #[test]
+    fn singleline_home_end_text_level() {
+        let mut ti = TextInput::with_text("hello".into());
+        ti.handle_key(key(KeyCode::Home));
+        assert_eq!(ti.cursor, 0);
+        ti.handle_key(key(KeyCode::End));
+        assert_eq!(ti.cursor, 5);
+    }
+
+    #[test]
+    fn scroll_offset_adjusts_on_move_down() {
+        // 5 lines, visible_lines = 3
+        let mut ti = multiline_input("a\nb\nc\nd\ne", 3);
+        ti.cursor = 0; // line 0
+        assert_eq!(ti.scroll_offset(), 0);
+
+        ti.move_down(); // line 1
+        ti.move_down(); // line 2
+        assert_eq!(ti.scroll_offset(), 0); // still visible
+
+        ti.move_down(); // line 3 — scrolls
+        assert_eq!(ti.scroll_offset(), 1);
+        assert_eq!(ti.cursor_line_col(), (3, 0));
+
+        ti.move_down(); // line 4 — scrolls more
+        assert_eq!(ti.scroll_offset(), 2);
+    }
+
+    #[test]
+    fn scroll_offset_adjusts_on_move_up() {
+        let mut ti = multiline_input("a\nb\nc\nd\ne", 3);
+        // Start at line 4
+        assert_eq!(ti.cursor_line_col(), (4, 1));
+        ti.ensure_cursor_visible();
+        assert_eq!(ti.scroll_offset(), 2); // lines 2,3,4 visible
+
+        ti.move_up(); // line 3
+        assert_eq!(ti.scroll_offset(), 2); // still in window
+
+        ti.move_up(); // line 2
+        assert_eq!(ti.scroll_offset(), 2); // still in window
+
+        ti.move_up(); // line 1 — scrolls up
+        assert_eq!(ti.scroll_offset(), 1);
+
+        ti.move_up(); // line 0 — scrolls up
+        assert_eq!(ti.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn visible_lines_returns_correct_slice() {
+        let mut ti = multiline_input("a\nb\nc\nd\ne", 3);
+        ti.cursor = 0;
+        assert_eq!(ti.visible_lines(), vec!["a", "b", "c"]);
+
+        // Scroll to show lines 1,2,3
+        ti.move_down();
+        ti.move_down();
+        ti.move_down(); // line 3, scroll_offset = 1
+        assert_eq!(ti.visible_lines(), vec!["b", "c", "d"]);
+    }
+
+    #[test]
+    fn cursor_display_position_accounts_for_scroll() {
+        let mut ti = multiline_input("a\nb\nc\nd\ne", 3);
+        ti.cursor = 0; // line 0, col 0
+        assert_eq!(ti.cursor_display_position(), (0, 0));
+
+        // Move to line 3, col 0 — scroll_offset becomes 1
+        ti.move_down();
+        ti.move_down();
+        ti.move_down();
+        assert_eq!(ti.cursor_line_col(), (3, 0));
+        assert_eq!(ti.scroll_offset(), 1);
+        assert_eq!(ti.cursor_display_position(), (2, 0)); // line 3 - offset 1 = display row 2
+    }
+
+    #[test]
+    fn total_lines_count() {
+        assert_eq!(TextInput::new().total_lines(), 1);
+        assert_eq!(TextInput::with_text("a".into()).total_lines(), 1);
+        assert_eq!(TextInput::with_text("a\nb".into()).total_lines(), 2);
+        assert_eq!(TextInput::with_text("a\nb\nc".into()).total_lines(), 3);
+        assert_eq!(TextInput::with_text("\n".into()).total_lines(), 2);
+    }
+
+    #[test]
+    fn byte_offset_at_various() {
+        let text = "hello\nworld\nfoo";
+        assert_eq!(byte_offset_at(text, 0, 0), 0);
+        assert_eq!(byte_offset_at(text, 0, 3), 3);
+        assert_eq!(byte_offset_at(text, 0, 5), 5); // end of "hello" (before \n)
+        assert_eq!(byte_offset_at(text, 1, 0), 6);
+        assert_eq!(byte_offset_at(text, 1, 3), 9);
+        assert_eq!(byte_offset_at(text, 2, 0), 12);
+        assert_eq!(byte_offset_at(text, 2, 3), 15); // end of text
+    }
+
+    #[test]
+    fn byte_offset_at_clamps_col() {
+        // Line "hi" has only 2 chars; requesting col 5 gives end of line
+        let text = "hi\nworld";
+        assert_eq!(byte_offset_at(text, 0, 5), 2); // clamped to end of "hi"
     }
 }
