@@ -24,6 +24,7 @@ pub enum Action {
     InteractAgent,
     ShowTerminal,
     ExitInteractive,
+    OpenMacroBar,
     ToggleFullscreen,
     ScrollPageUp,
     ScrollPageDown,
@@ -167,6 +168,7 @@ impl Action {
             Action::InteractAgent => "interact_agent",
             Action::ShowTerminal => "show_terminal",
             Action::ExitInteractive => "exit_interactive",
+            Action::OpenMacroBar => "open_macro_bar",
             Action::ToggleFullscreen => "toggle_fullscreen",
             Action::ScrollPageUp => "scroll_page_up",
             Action::ScrollPageDown => "scroll_page_down",
@@ -240,6 +242,7 @@ impl Action {
                 "Launch, show, or relaunch the selected agent's companion terminal."
             }
             Action::ExitInteractive => "Exit interactive mode (stop forwarding keys to agent).",
+            Action::OpenMacroBar => "Open the macro command bar to paste text macros.",
             Action::ToggleFullscreen => "Toggle fullscreen overlay for the agent terminal.",
             Action::ScrollPageUp => "Scroll up one page in the agent output.",
             Action::ScrollPageDown => "Scroll down one page in the agent output.",
@@ -308,6 +311,7 @@ impl Action {
             | Action::ReconnectAgent
             | Action::DeleteSession => Some("Projects pane"),
             Action::ExitInteractive
+            | Action::OpenMacroBar
             | Action::ToggleFullscreen
             | Action::ScrollPageUp
             | Action::ScrollPageDown
@@ -643,6 +647,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         help: Some(HelpEntry {
             section: "Agent pane",
             description: "Exit interactive mode",
+        }),
+        hint_contexts: &[],
+        palette: None,
+    },
+    BindingDef {
+        action: Action::OpenMacroBar,
+        default_keys: &[key!(ctrl - '\\')],
+        scopes: &[BindingScope::Interactive],
+        help: Some(HelpEntry {
+            section: "Agent pane",
+            description: "Open the macro command bar to paste text macros",
         }),
         hint_contexts: &[],
         palette: None,
@@ -1600,76 +1615,6 @@ impl InteractiveBytePatterns {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Text macro byte patterns — separate from interactive bindings because
-// macros are user-configured in [macros] rather than [keys].
-// ---------------------------------------------------------------------------
-
-/// A single macro byte pattern: the raw bytes that trigger it and the letter ID.
-#[derive(Debug, Clone)]
-pub struct MacroByteBinding {
-    pub pattern: Vec<u8>,
-    pub letter: char,
-}
-
-/// Precomputed byte patterns for all configured text macros.
-/// Built at startup and rebuilt when macros are edited.
-#[derive(Debug, Clone)]
-pub struct MacroBytePatterns {
-    pub bindings: Vec<MacroByteBinding>,
-}
-
-impl MacroBytePatterns {
-    /// Build byte patterns from the macros config.
-    /// Skips entries whose key is not a single lowercase ASCII letter
-    /// or whose text is empty.
-    pub fn build(macros: &crate::config::MacrosConfig) -> Self {
-        let mut bindings = Vec::new();
-        for (key, entry) in &macros.entries {
-            if key.len() != 1 {
-                continue;
-            }
-            let letter = key.chars().next().unwrap();
-            if !letter.is_ascii_lowercase() {
-                continue;
-            }
-            if entry.text().is_empty() {
-                continue;
-            }
-            if let Some(pattern) = macro_prefix_bytes(&macros.prefix, letter) {
-                bindings.push(MacroByteBinding { pattern, letter });
-            }
-        }
-        Self { bindings }
-    }
-
-    /// Match a raw byte sequence against macro patterns.
-    /// Returns the letter ID of the matched macro.
-    pub fn match_sequence(&self, seq: &[u8]) -> Option<char> {
-        self.bindings
-            .iter()
-            .find(|b| b.pattern == seq)
-            .map(|b| b.letter)
-    }
-}
-
-/// Convert a macro prefix string and letter to the raw byte pattern
-/// that a terminal would send for that key combination.
-fn macro_prefix_bytes(prefix: &str, letter: char) -> Option<Vec<u8>> {
-    match prefix.to_lowercase().as_str() {
-        "shift-alt" | "alt-shift" => {
-            // Shift+Alt+letter = ESC + uppercase letter
-            Some(vec![0x1b, letter.to_ascii_uppercase() as u8])
-        }
-        "ctrl-alt" | "alt-ctrl" => {
-            // Ctrl+Alt+letter = ESC + control character (0x01..0x1a)
-            let ctrl = letter as u8 - b'a' + 1;
-            Some(vec![0x1b, ctrl])
-        }
-        _ => None,
-    }
-}
-
 impl RuntimeBindings {
     /// Build byte patterns for all `Interactive`-scoped bindings.
     /// Each key combination is converted to its raw terminal byte
@@ -1716,11 +1661,22 @@ fn key_combination_to_bytes(kc: &KeyCombination) -> Option<Vec<u8>> {
     match norm.codes {
         One(KeyCode::Char(c)) if has_ctrl && !has_alt && !has_shift => {
             // Ctrl+letter → control character 0x01..0x1a
+            // Also handle some non-letter Ctrl combos:
+            //   Ctrl+\  → 0x1c  (FS)
+            //   Ctrl+]  → 0x1d  (GS)
+            //   Ctrl+^  → 0x1e  (RS)
+            //   Ctrl+_  → 0x1f  (US)
             let lower = c.to_ascii_lowercase();
             if lower.is_ascii_lowercase() {
                 Some(vec![lower as u8 - b'a' + 1])
             } else {
-                None
+                match c {
+                    '\\' => Some(vec![0x1c]),
+                    ']' => Some(vec![0x1d]),
+                    '^' => Some(vec![0x1e]),
+                    '_' => Some(vec![0x1f]),
+                    _ => None,
+                }
             }
         }
         One(KeyCode::Char(c)) if !has_ctrl && !has_alt && !has_shift => {
@@ -2369,83 +2325,5 @@ mod tests {
         let patterns = bindings.interactive_byte_patterns();
         // Random byte sequence should not match
         assert!(patterns.match_sequence(&[0x01]).is_none());
-    }
-
-    // ── Macro byte patterns ──────────────────────────────────────
-
-    #[test]
-    fn macro_prefix_bytes_shift_alt() {
-        assert_eq!(macro_prefix_bytes("shift-alt", 'a'), Some(vec![0x1b, 0x41]));
-        assert_eq!(macro_prefix_bytes("shift-alt", 'z'), Some(vec![0x1b, 0x5a]));
-        assert_eq!(macro_prefix_bytes("alt-shift", 'a'), Some(vec![0x1b, 0x41]));
-    }
-
-    #[test]
-    fn macro_prefix_bytes_ctrl_alt() {
-        assert_eq!(macro_prefix_bytes("ctrl-alt", 'a'), Some(vec![0x1b, 0x01]));
-        assert_eq!(macro_prefix_bytes("ctrl-alt", 'z'), Some(vec![0x1b, 0x1a]));
-        assert_eq!(macro_prefix_bytes("alt-ctrl", 'a'), Some(vec![0x1b, 0x01]));
-    }
-
-    #[test]
-    fn macro_prefix_bytes_unknown_returns_none() {
-        assert_eq!(macro_prefix_bytes("super", 'a'), None);
-        assert_eq!(macro_prefix_bytes("", 'a'), None);
-    }
-
-    #[test]
-    fn macro_byte_patterns_build_and_match() {
-        use crate::config::{MacroEntry, MacrosConfig};
-        use std::collections::BTreeMap;
-
-        let mut entries = BTreeMap::new();
-        entries.insert("a".to_string(), MacroEntry::Plain("hello".to_string()));
-        entries.insert(
-            "b".to_string(),
-            MacroEntry::Named {
-                name: "Test".to_string(),
-                text: "world".to_string(),
-            },
-        );
-        let config = MacrosConfig {
-            prefix: "shift-alt".to_string(),
-            entries,
-        };
-
-        let patterns = MacroBytePatterns::build(&config);
-        assert_eq!(patterns.bindings.len(), 2);
-
-        // Shift+Alt+A = ESC + 'A'
-        assert_eq!(patterns.match_sequence(&[0x1b, 0x41]), Some('a'));
-        // Shift+Alt+B = ESC + 'B'
-        assert_eq!(patterns.match_sequence(&[0x1b, 0x42]), Some('b'));
-        // Shift+Alt+C — not configured
-        assert_eq!(patterns.match_sequence(&[0x1b, 0x43]), None);
-        // Plain Alt+a (lowercase) — should NOT match
-        assert_eq!(patterns.match_sequence(&[0x1b, 0x61]), None);
-    }
-
-    #[test]
-    fn macro_byte_patterns_skips_invalid_keys() {
-        use crate::config::{MacroEntry, MacrosConfig};
-        use std::collections::BTreeMap;
-
-        let mut entries = BTreeMap::new();
-        // Valid
-        entries.insert("a".to_string(), MacroEntry::Plain("ok".to_string()));
-        // Invalid: uppercase
-        entries.insert("B".to_string(), MacroEntry::Plain("skip".to_string()));
-        // Invalid: multi-char
-        entries.insert("ab".to_string(), MacroEntry::Plain("skip".to_string()));
-        // Invalid: empty text
-        entries.insert("c".to_string(), MacroEntry::Plain(String::new()));
-        let config = MacrosConfig {
-            prefix: "shift-alt".to_string(),
-            entries,
-        };
-
-        let patterns = MacroBytePatterns::build(&config);
-        assert_eq!(patterns.bindings.len(), 1);
-        assert_eq!(patterns.bindings[0].letter, 'a');
     }
 }

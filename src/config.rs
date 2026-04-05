@@ -46,54 +46,13 @@ pub struct KeysConfig {
     pub bindings: BTreeMap<String, Vec<String>>,
 }
 
-/// A single text macro entry — either a plain text string or a named entry.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum MacroEntry {
-    /// Plain string: `a = "some text"`
-    Plain(String),
-    /// Named: `b = { name = "Review", text = "review this code" }`
-    Named { name: String, text: String },
-}
-
-impl MacroEntry {
-    pub fn text(&self) -> &str {
-        match self {
-            Self::Plain(s) => s,
-            Self::Named { text, .. } => text,
-        }
-    }
-
-    pub fn display_name(&self, letter: &str) -> String {
-        match self {
-            Self::Named { name, .. } if !name.is_empty() => name.clone(),
-            _ => letter.to_string(),
-        }
-    }
-
-    pub fn name(&self) -> Option<&str> {
-        match self {
-            Self::Named { name, .. } if !name.is_empty() => Some(name),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Text macros: a map from name to text.
+/// Each entry is triggered from the macro bar (Ctrl+\).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MacrosConfig {
-    pub prefix: String,
     #[serde(flatten)]
-    pub entries: BTreeMap<String, MacroEntry>,
-}
-
-impl Default for MacrosConfig {
-    fn default() -> Self {
-        Self {
-            prefix: "shift-alt".to_string(),
-            entries: BTreeMap::new(),
-        }
-    }
+    pub entries: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -705,37 +664,24 @@ fn render_keys_config(
 fn render_macros_config(out: &mut String, macros: &MacrosConfig) {
     out.push_str("[macros]\n");
     out.push_str(
-        "# Prefix modifier for triggering macros in interactive mode.\n\
-         # Press this modifier combo + a letter (a-z) to paste the macro text.\n\
-         # Supported: \"shift-alt\" (default), \"ctrl-alt\".\n\
-         # If your terminal multiplexer swallows Shift-Alt, try \"ctrl-alt\".\n",
+        "# Text macros: press Ctrl+\\ to open the macro bar and select one to paste.\n\
+         # Each entry is a name mapped to the text that will be pasted via bracketed paste.\n\
+         # Newlines in text values are safe — they are sent atomically and not interpreted as Enter.\n",
     );
-    let _ = writeln!(out, "prefix = \"{}\"", escape_toml_string(&macros.prefix));
-    out.push('\n');
     if macros.entries.is_empty() {
         out.push_str(
-            "# Define macros as single lowercase letters mapped to text.\n\
-             # The text is pasted via bracketed paste so newlines are safe.\n\
-             # Use a plain string for simple macros:\n\
-             # a = \"review this code for bugs and security issues\"\n\
-             # Or use an inline table to add a human-readable name:\n\
-             # b = { name = \"Explain function\", text = \"explain what this function does\" }\n",
+            "# \"Review\" = \"review this code for bugs and security issues\"\n\
+             # \"Explain\" = \"explain what this function does\"\n",
         );
     } else {
-        for (letter, entry) in &macros.entries {
-            match entry {
-                MacroEntry::Plain(text) => {
-                    let _ = writeln!(out, "{letter} = \"{}\"", escape_toml_string(text));
-                }
-                MacroEntry::Named { name, text } => {
-                    let _ = writeln!(
-                        out,
-                        "{letter} = {{ name = \"{}\", text = \"{}\" }}",
-                        escape_toml_string(name),
-                        escape_toml_string(text),
-                    );
-                }
-            }
+        out.push('\n');
+        for (name, text) in &macros.entries {
+            let _ = writeln!(
+                out,
+                "\"{}\" = \"{}\"",
+                escape_toml_string(name),
+                escape_toml_string(text)
+            );
         }
     }
 }
@@ -1595,60 +1541,29 @@ oneshot_output = "stdout"
     #[test]
     fn macros_config_default_is_empty() {
         let config = MacrosConfig::default();
-        assert_eq!(config.prefix, "shift-alt");
         assert!(config.entries.is_empty());
     }
 
     #[test]
-    fn macros_config_plain_entry_round_trip() {
+    fn macros_config_string_entry_round_trip() {
         let toml_str = r#"
-prefix = "shift-alt"
-a = "review this code"
+"Review" = "review this code"
 "#;
         let config: MacrosConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.prefix, "shift-alt");
         assert_eq!(config.entries.len(), 1);
-        assert_eq!(config.entries["a"].text(), "review this code");
+        assert_eq!(config.entries["Review"], "review this code");
     }
 
     #[test]
-    fn macros_config_named_entry_round_trip() {
+    fn macros_config_multiple_entries() {
         let toml_str = r#"
-prefix = "ctrl-alt"
-b = { name = "Explain", text = "explain this function" }
-"#;
-        let config: MacrosConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.prefix, "ctrl-alt");
-        let entry = &config.entries["b"];
-        assert_eq!(entry.text(), "explain this function");
-        assert_eq!(entry.display_name("b"), "Explain");
-    }
-
-    #[test]
-    fn macros_config_mixed_entries() {
-        let toml_str = r#"
-prefix = "shift-alt"
-a = "simple"
-b = { name = "Named", text = "complex" }
+"Explain" = "explain what this function does"
+"Review" = "review this code for bugs"
 "#;
         let config: MacrosConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.entries.len(), 2);
-        assert_eq!(config.entries["a"].text(), "simple");
-        assert_eq!(config.entries["a"].display_name("a"), "a");
-        assert_eq!(config.entries["b"].text(), "complex");
-        assert_eq!(config.entries["b"].display_name("b"), "Named");
-    }
-
-    #[test]
-    fn macros_config_display_name_falls_back_to_letter() {
-        let entry = MacroEntry::Plain("text".to_string());
-        assert_eq!(entry.display_name("x"), "x");
-
-        let entry_empty_name = MacroEntry::Named {
-            name: String::new(),
-            text: "text".to_string(),
-        };
-        assert_eq!(entry_empty_name.display_name("x"), "x");
+        assert_eq!(config.entries["Explain"], "explain what this function does");
+        assert_eq!(config.entries["Review"], "review this code for bugs");
     }
 
     #[test]
@@ -1656,38 +1571,34 @@ b = { name = "Named", text = "complex" }
         let config = Config::default();
         let rendered = render_config_default(&config);
         assert!(rendered.contains("[macros]"));
-        assert!(rendered.contains("prefix = \"shift-alt\""));
-        assert!(rendered.contains("# a = \"review this code"));
+        assert!(rendered.contains("# \"Review\" = \"review this code"));
     }
 
     #[test]
     fn render_macros_config_with_entries() {
         let mut config = Config::default();
-        config.macros.entries.insert(
-            "a".to_string(),
-            MacroEntry::Plain("hello world".to_string()),
-        );
-        config.macros.entries.insert(
-            "b".to_string(),
-            MacroEntry::Named {
-                name: "Test".to_string(),
-                text: "foo bar".to_string(),
-            },
-        );
+        config
+            .macros
+            .entries
+            .insert("Review".to_string(), "hello world".to_string());
+        config
+            .macros
+            .entries
+            .insert("Test".to_string(), "foo bar".to_string());
         let rendered = render_config_default(&config);
-        assert!(rendered.contains("a = \"hello world\""));
-        assert!(rendered.contains("b = { name = \"Test\", text = \"foo bar\" }"));
+        assert!(rendered.contains("\"Review\" = \"hello world\""));
+        assert!(rendered.contains("\"Test\" = \"foo bar\""));
     }
 
     #[test]
     fn render_macros_config_escapes_special_chars() {
         let mut config = Config::default();
-        config.macros.entries.insert(
-            "a".to_string(),
-            MacroEntry::Plain("line1\nline2".to_string()),
-        );
+        config
+            .macros
+            .entries
+            .insert("Multi".to_string(), "line1\nline2".to_string());
         let rendered = render_config_default(&config);
         // Newlines must be escaped in the TOML output
-        assert!(rendered.contains("a = \"line1\\nline2\""));
+        assert!(rendered.contains("\"Multi\" = \"line1\\nline2\""));
     }
 }

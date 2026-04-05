@@ -103,6 +103,10 @@ impl App {
         if !matches!(self.prompt, PromptState::None) {
             return self.handle_prompt_key(key);
         }
+        // Macro bar consumes all keys when open.
+        if self.macro_bar.is_some() {
+            return self.handle_macro_bar_key(key);
+        }
         // Interactive mode is handled at the event-loop level via raw stdin
         // passthrough (poll_and_forward_raw_input). When the input target is
         // Agent or Terminal, crossterm's event reader is not called, so
@@ -626,6 +630,79 @@ impl App {
         Ok(())
     }
 
+    fn handle_macro_bar_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc => {
+                self.close_macro_bar();
+            }
+            KeyCode::Enter => {
+                let (query, selected) = if let Some(bar) = &self.macro_bar {
+                    (bar.input.text.clone(), bar.selected)
+                } else {
+                    return Ok(false);
+                };
+                let filtered = self.filtered_macros(&query);
+                if let Some(&(name, text)) = filtered.get(selected) {
+                    if let Some(provider) = self.selected_terminal_surface_client() {
+                        let mut payload = Vec::with_capacity(text.len() + 12);
+                        payload.extend_from_slice(b"\x1b[200~");
+                        payload.extend_from_slice(text.as_bytes());
+                        payload.extend_from_slice(b"\x1b[201~");
+                        let _ = provider.write_bytes(&payload);
+                    }
+                    let name = name.to_string();
+                    self.set_info(format!("Pasted macro \"{name}\"."));
+                }
+                self.close_macro_bar();
+            }
+            KeyCode::Up => {
+                if let Some(bar) = &mut self.macro_bar {
+                    bar.selected = bar.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                let count = if let Some(bar) = &self.macro_bar {
+                    let query = bar.input.text.clone();
+                    self.filtered_macros(&query).len()
+                } else {
+                    0
+                };
+                if let Some(bar) = &mut self.macro_bar {
+                    bar.selected = (bar.selected + 1).min(count.saturating_sub(1));
+                }
+            }
+            KeyCode::Tab => {
+                if let Some(bar) = &self.macro_bar {
+                    let query = bar.input.text.clone();
+                    let selected = bar.selected;
+                    let filtered = self.filtered_macros(&query);
+                    if let Some(&(name, _)) = filtered.get(selected) {
+                        let name = name.to_string();
+                        if let Some(bar) = &mut self.macro_bar {
+                            bar.input.set_text(name);
+                            bar.selected = 0;
+                        }
+                    }
+                }
+            }
+            _ => {
+                if let Some(bar) = &mut self.macro_bar {
+                    let changed = bar.input.handle_key(key);
+                    if changed {
+                        bar.selected = 0;
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn close_macro_bar(&mut self) {
+        if let Some(bar) = self.macro_bar.take() {
+            self.input_target = bar.previous_input_target;
+        }
+    }
+
     fn toggle_stage_selected_file(&mut self) -> Result<()> {
         let Some(session) = self.selected_session() else {
             self.set_error("Select a session first.");
@@ -857,7 +934,6 @@ impl App {
         // mouse event to handle in the UI, or raw bytes to forward.
         enum SeqAction {
             Intercept(Action, bool, Vec<u8>),
-            Macro(char),
             Mouse(MouseEvent, Vec<u8>),
             Forward(Vec<u8>),
         }
@@ -870,10 +946,6 @@ impl App {
                 // so terminal mouse events arrive as CSI `<…M` / `<…m`.
                 if let Some(mouse_ev) = crate::raw_input::parse_sgr_mouse(seq) {
                     return SeqAction::Mouse(mouse_ev, seq.to_vec());
-                }
-                // Text macros take priority over regular interactive bindings.
-                if let Some(letter) = self.macro_patterns.match_sequence(seq) {
-                    return SeqAction::Macro(letter);
                 }
                 if let Some((action, conditional)) = self.interactive_patterns.match_sequence(seq) {
                     SeqAction::Intercept(action, conditional, seq.to_vec())
@@ -891,6 +963,19 @@ impl App {
         // Process collected actions.
         for action in actions {
             match action {
+                SeqAction::Intercept(Action::OpenMacroBar, _, _) => {
+                    if !self.config.macros.entries.is_empty() {
+                        let prev = self.input_target;
+                        self.macro_bar = Some(MacroBarState {
+                            input: TextInput::new(),
+                            selected: 0,
+                            previous_input_target: prev,
+                        });
+                        self.input_target = InputTarget::None;
+                        self.raw_input_buf.clear();
+                        return Ok(false);
+                    }
+                }
                 SeqAction::Intercept(Action::ExitInteractive, _, _) => {
                     let return_to_terminal_list =
                         matches!(self.input_target, InputTarget::Terminal)
@@ -967,23 +1052,6 @@ impl App {
                         if let Some(provider) = self.selected_terminal_surface_client() {
                             let _ = provider.write_bytes(&raw);
                         }
-                    }
-                }
-                SeqAction::Macro(letter) => {
-                    let key = letter.to_string();
-                    if let Some(entry) = self.config.macros.entries.get(&key) {
-                        if let Some(provider) = self.selected_terminal_surface_client() {
-                            let text = entry.text();
-                            let mut payload = Vec::with_capacity(text.len() + 12);
-                            // Bracketed paste: text arrives atomically, newlines
-                            // are not interpreted as Enter.
-                            payload.extend_from_slice(b"\x1b[200~");
-                            payload.extend_from_slice(text.as_bytes());
-                            payload.extend_from_slice(b"\x1b[201~");
-                            let _ = provider.write_bytes(&payload);
-                        }
-                        let label = entry.display_name(&key);
-                        self.set_info(format!("Pasted macro \"{label}\""));
                     }
                 }
                 SeqAction::Intercept(_, _, raw) | SeqAction::Forward(raw) => {
@@ -1557,8 +1625,6 @@ impl App {
     }
 
     fn handle_edit_macros_key(&mut self, key: KeyEvent) -> Result<bool> {
-        use crate::config::MacroEntry;
-
         let PromptState::EditMacros {
             entries,
             selected,
@@ -1570,42 +1636,20 @@ impl App {
 
         if let Some(edit_state) = editing {
             match edit_state.stage {
-                MacroEditStage::PickLetter => {
-                    if key.code == KeyCode::Esc {
-                        *editing = None;
-                        return Ok(false);
-                    }
-                    if key.code == KeyCode::Enter && !edit_state.letter_input.is_empty() {
-                        let ch = edit_state.letter_input.text.chars().next().unwrap();
-                        if !ch.is_ascii_lowercase() {
-                            return Ok(false);
-                        }
-                        if entries.iter().any(|(l, _)| *l == ch) {
-                            self.set_warning(format!(
-                                "Letter \"{ch}\" is already in use. Choose another."
-                            ));
-                            return Ok(false);
-                        }
-                        edit_state.letter = Some(ch);
-                        edit_state.stage = MacroEditStage::EditName;
-                        return Ok(false);
-                    }
-                    // Only accept a single lowercase letter
-                    if let KeyCode::Char(c) = key.code
-                        && c.is_ascii_lowercase()
-                        && !key.modifiers.contains(KeyModifiers::CONTROL)
-                    {
-                        edit_state.letter_input.set_text(c.to_string());
-                        return Ok(false);
-                    }
-                    edit_state.letter_input.handle_key(key);
-                }
                 MacroEditStage::EditName => {
                     if key.code == KeyCode::Esc {
                         *editing = None;
                         return Ok(false);
                     }
-                    if key.code == KeyCode::Enter {
+                    if key.code == KeyCode::Enter && !edit_state.name_input.is_empty() {
+                        let name = edit_state.name_input.text.clone();
+                        // For new macros, check for duplicate names
+                        if edit_state.id.is_none() && entries.iter().any(|(n, _)| *n == name) {
+                            self.set_warning(format!(
+                                "Name \"{name}\" is already in use. Choose another."
+                            ));
+                            return Ok(false);
+                        }
                         edit_state.stage = MacroEditStage::EditText;
                         return Ok(false);
                     }
@@ -1614,9 +1658,9 @@ impl App {
                 MacroEditStage::EditText => {
                     if key.code == KeyCode::Esc {
                         // Save the macro
-                        let letter = edit_state.letter.unwrap();
                         let name = edit_state.name_input.text.clone();
                         let text = edit_state.text_input.text.clone();
+                        let old_id = edit_state.id.clone();
 
                         if text.is_empty() {
                             // Empty text — don't save
@@ -1624,18 +1668,18 @@ impl App {
                             return Ok(false);
                         }
 
-                        let entry = if name.is_empty() {
-                            MacroEntry::Plain(text)
-                        } else {
-                            MacroEntry::Named { name, text }
-                        };
-                        let label = entry.display_name(&letter.to_string());
+                        // If renaming, remove the old entry
+                        if let Some(ref old_name) = old_id
+                            && *old_name != name
+                        {
+                            self.config.macros.entries.remove(old_name);
+                        }
 
                         // Update config
                         self.config
                             .macros
                             .entries
-                            .insert(letter.to_string(), entry.clone());
+                            .insert(name.clone(), text.clone());
 
                         // Update the entries snapshot in PromptState
                         let PromptState::EditMacros {
@@ -1647,21 +1691,26 @@ impl App {
                         *editing = None;
 
                         // Update entries list
-                        if let Some(existing) = entries.iter_mut().find(|(l, _)| *l == letter) {
-                            existing.1 = entry;
+                        if let Some(old_name) = old_id {
+                            if let Some(existing) = entries.iter_mut().find(|(n, _)| *n == old_name)
+                            {
+                                existing.0 = name.clone();
+                                existing.1 = text;
+                            } else {
+                                entries.push((name.clone(), text));
+                            }
                         } else {
-                            entries.push((letter, entry));
-                            entries.sort_by_key(|(ch, _)| *ch);
+                            entries.push((name.clone(), text));
                         }
+                        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
 
-                        // Persist and rebuild
+                        // Persist
                         let _ = crate::config::save_config(
                             &self.paths.config_path,
                             &self.config,
                             &self.bindings,
                         );
-                        self.rebuild_macro_patterns();
-                        self.set_info(format!("Macro \"{label}\" saved."));
+                        self.set_info(format!("Macro \"{name}\" saved."));
                         return Ok(false);
                     }
                     // In multiline mode, TextInput handles Enter/Up/Down
@@ -1688,13 +1737,11 @@ impl App {
             }
             KeyCode::Enter => {
                 // Edit selected macro
-                if let Some((letter, entry)) = entries.get(*selected) {
-                    let letter = *letter;
-                    let name = entry.name().map(|s| s.to_string()).unwrap_or_default();
-                    let text = entry.text().to_string();
+                if let Some((name, text)) = entries.get(*selected) {
+                    let name = name.clone();
+                    let text = text.clone();
                     *editing = Some(MacroEditState {
-                        letter: Some(letter),
-                        letter_input: TextInput::with_text(letter.to_string()),
+                        id: Some(name.clone()),
                         name_input: TextInput::with_text(name),
                         text_input: TextInput::with_text(text).with_multiline(8),
                         stage: MacroEditStage::EditName,
@@ -1704,19 +1751,17 @@ impl App {
             KeyCode::Char('n') => {
                 // New macro
                 *editing = Some(MacroEditState {
-                    letter: None,
-                    letter_input: TextInput::new(),
+                    id: None,
                     name_input: TextInput::new(),
                     text_input: TextInput::new().with_multiline(8),
-                    stage: MacroEditStage::PickLetter,
+                    stage: MacroEditStage::EditName,
                 });
             }
             KeyCode::Char('d') | KeyCode::Delete => {
                 // Delete selected macro
-                if let Some((letter, entry)) = entries.get(*selected) {
-                    let label = entry.display_name(&letter.to_string());
-                    let letter_str = letter.to_string();
-                    self.config.macros.entries.remove(&letter_str);
+                if let Some((name, _)) = entries.get(*selected) {
+                    let name = name.clone();
+                    self.config.macros.entries.remove(&name);
 
                     let PromptState::EditMacros {
                         entries, selected, ..
@@ -1724,7 +1769,7 @@ impl App {
                     else {
                         return Ok(false);
                     };
-                    entries.retain(|(l, _)| l.to_string() != letter_str);
+                    entries.retain(|(n, _)| *n != name);
                     if *selected > 0 && *selected >= entries.len() {
                         *selected = entries.len().saturating_sub(1);
                     }
@@ -1734,8 +1779,7 @@ impl App {
                         &self.config,
                         &self.bindings,
                     );
-                    self.rebuild_macro_patterns();
-                    self.set_info(format!("Macro \"{label}\" deleted."));
+                    self.set_info(format!("Macro \"{name}\" deleted."));
                 }
             }
             _ => {}
@@ -3226,10 +3270,8 @@ mod tests {
             interactive_patterns: crate::keybindings::InteractiveBytePatterns {
                 bindings: Vec::new(),
             },
-            macro_patterns: crate::keybindings::MacroBytePatterns {
-                bindings: Vec::new(),
-            },
             raw_input_buf: Vec::new(),
+            macro_bar: None,
             sigwinch_flag: Arc::new(AtomicBool::new(false)),
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();

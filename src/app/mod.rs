@@ -107,8 +107,8 @@ pub struct App {
     pub(crate) mouse_drag: Option<ResizeDragState>,
     pub(crate) last_mouse_click: Option<RecentMouseClick>,
     pub(crate) interactive_patterns: InteractiveBytePatterns,
-    pub(crate) macro_patterns: crate::keybindings::MacroBytePatterns,
     pub(crate) raw_input_buf: Vec<u8>,
+    pub(crate) macro_bar: Option<MacroBarState>,
     pub(crate) sigwinch_flag: Arc<AtomicBool>,
 }
 
@@ -348,16 +348,22 @@ pub(crate) enum PromptState {
         selected: usize,
     },
     EditMacros {
-        entries: Vec<(char, crate::config::MacroEntry)>,
+        entries: Vec<(String, String)>,
         selected: usize,
         editing: Option<MacroEditState>,
     },
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct MacroBarState {
+    pub(crate) input: TextInput,
+    pub(crate) selected: usize,
+    pub(crate) previous_input_target: InputTarget,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct MacroEditState {
-    pub(crate) letter: Option<char>,
-    pub(crate) letter_input: TextInput,
+    pub(crate) id: Option<String>,
     pub(crate) name_input: TextInput,
     pub(crate) text_input: TextInput,
     pub(crate) stage: MacroEditStage,
@@ -365,7 +371,6 @@ pub(crate) struct MacroEditState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MacroEditStage {
-    PickLetter,
     EditName,
     EditText,
 }
@@ -593,7 +598,6 @@ impl App {
         }
         let bindings = RuntimeBindings::from_keys_config(&config.keys);
         let interactive_patterns = bindings.interactive_byte_patterns();
-        let macro_patterns = crate::keybindings::MacroBytePatterns::build(&config.macros);
 
         // Register SIGWINCH handler so we can detect terminal resizes even when
         // bypassing crossterm's event reader during interactive mode.
@@ -672,8 +676,8 @@ impl App {
             mouse_drag: None,
             last_mouse_click: None,
             interactive_patterns,
-            macro_patterns,
             raw_input_buf: Vec::new(),
+            macro_bar: None,
             sigwinch_flag,
         };
         app.restore_sessions();
@@ -933,32 +937,46 @@ impl App {
         }
     }
 
-    pub(crate) fn rebuild_macro_patterns(&mut self) {
-        self.macro_patterns = crate::keybindings::MacroBytePatterns::build(&self.config.macros);
-    }
-
     pub(crate) fn open_edit_macros(&mut self) {
-        let mut entries: Vec<(char, crate::config::MacroEntry)> = self
+        let mut entries: Vec<(String, String)> = self
             .config
             .macros
             .entries
             .iter()
-            .filter_map(|(k, v)| {
-                if k.len() == 1 {
-                    let ch = k.chars().next().unwrap();
-                    if ch.is_ascii_lowercase() {
-                        return Some((ch, v.clone()));
-                    }
-                }
-                None
-            })
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        entries.sort_by_key(|(ch, _)| *ch);
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
         self.prompt = PromptState::EditMacros {
             entries,
             selected: 0,
             editing: None,
         };
+    }
+
+    /// Return macros matching `query`, searching name first then text content.
+    /// If `query` is empty, returns all macros in their config order.
+    pub(crate) fn filtered_macros(&self, query: &str) -> Vec<(&str, &str)> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return self
+                .config
+                .macros
+                .entries
+                .iter()
+                .map(|(name, text)| (name.as_str(), text.as_str()))
+                .collect();
+        }
+        let mut name_matches = Vec::new();
+        let mut text_matches = Vec::new();
+        for (name, text) in &self.config.macros.entries {
+            if name.to_lowercase().contains(&needle) {
+                name_matches.push((name.as_str(), text.as_str()));
+            } else if text.to_lowercase().contains(&needle) {
+                text_matches.push((name.as_str(), text.as_str()));
+            }
+        }
+        name_matches.extend(text_matches);
+        name_matches
     }
 
     pub(crate) fn left_items(&self) -> &[LeftItem] {

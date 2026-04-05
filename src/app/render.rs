@@ -746,6 +746,12 @@ impl App {
             }
         }
 
+        // Macro bar overlays the hint area when active.
+        if self.macro_bar.is_some() {
+            self.render_macro_bar(frame, inner);
+            return;
+        }
+
         // Hint bar with top border.
         if hint_area.height > 0 {
             // Pre-compute all key labels so they outlive the Span borrows.
@@ -756,6 +762,7 @@ impl App {
             let focus_agent = self.bindings.labels_for(Action::FocusAgent);
             let reconnect = self.bindings.labels_for(Action::ReconnectAgent);
 
+            let macro_key = self.bindings.label_for(Action::OpenMacroBar);
             let hint_line = if is_input {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
@@ -770,6 +777,11 @@ impl App {
                     spans.push(Span::styled(" down one line", desc_style));
                 } else {
                     spans.push(Span::styled(" down", desc_style));
+                }
+                if !self.config.macros.entries.is_empty() && !macro_key.is_empty() {
+                    spans.push(Span::styled(" ", desc_style));
+                    spans.extend(self.theme.dim_key_badge_default(&macro_key));
+                    spans.push(Span::styled(" macros.", desc_style));
                 }
                 Line::from(spans)
             } else if scrollback_offset > 0 {
@@ -2798,8 +2810,8 @@ impl App {
 
         if let Some(edit_state) = editing {
             // ── Edit view ──
-            let title = match edit_state.letter {
-                Some(ch) => format!("Edit Macro [{ch}]"),
+            let title = match &edit_state.id {
+                Some(name) => format!("Edit Macro — {name}"),
                 None => "New Macro".to_string(),
             };
             let outer = self.themed_overlay_block(&title);
@@ -2807,28 +2819,6 @@ impl App {
             outer.render(popup, frame.buffer_mut());
 
             match edit_state.stage {
-                MacroEditStage::PickLetter => {
-                    let [label_area, input_area, _, hint_area] = Layout::default()
-                        .direction(Direction::Vertical)
-                        .constraints([
-                            Constraint::Length(1),
-                            Constraint::Length(3),
-                            Constraint::Min(1),
-                            Constraint::Length(1),
-                        ])
-                        .areas(inner);
-
-                    Paragraph::new(Line::from(Span::styled(
-                        " Letter (a-z):",
-                        Style::default().fg(self.theme.input_label_fg),
-                    )))
-                    .render(label_area, frame.buffer_mut());
-
-                    self.render_single_line_input(&edit_state.letter_input, input_area, frame);
-
-                    let hints = self.edit_macro_hints(&[("Enter", "next"), ("Esc", "cancel")]);
-                    Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
-                }
                 MacroEditStage::EditName => {
                     let [label_area, input_area, _, hint_area] = Layout::default()
                         .direction(Direction::Vertical)
@@ -2841,7 +2831,7 @@ impl App {
                         .areas(inner);
 
                     Paragraph::new(Line::from(Span::styled(
-                        " Name (optional, shown in status bar):",
+                        " Name (identifies this macro):",
                         Style::default().fg(self.theme.input_label_fg),
                     )))
                     .render(label_area, frame.buffer_mut());
@@ -2917,23 +2907,14 @@ impl App {
 
                 let items: Vec<ListItem> = entries
                     .iter()
-                    .map(|(letter, entry)| {
-                        let prefix = format!(" [{letter}] ");
+                    .map(|(name, text)| {
                         let mut spans = vec![Span::styled(
-                            prefix,
-                            Style::default()
-                                .fg(self.theme.overlay_border)
-                                .add_modifier(ratatui::style::Modifier::BOLD),
+                            format!(" {name} — "),
+                            Style::default().fg(self.theme.input_label_fg),
                         )];
-                        if let Some(name) = entry.name() {
-                            spans.push(Span::styled(
-                                format!("{name}: "),
-                                Style::default().fg(self.theme.input_label_fg),
-                            ));
-                        }
-                        let text_preview = entry.text().replace('\n', "↵");
-                        let max_len =
-                            list_area.width as usize - 8 - entry.name().map_or(0, |n| n.len() + 2);
+                        let text_preview = text.replace('\n', "↵");
+                        let prefix_len = name.len() + 4; // " " + name + " — "
+                        let max_len = (list_area.width as usize).saturating_sub(prefix_len + 2);
                         let truncated = if text_preview.len() > max_len {
                             format!("{}…", &text_preview[..max_len.saturating_sub(1)])
                         } else {
@@ -3086,6 +3067,90 @@ impl App {
         self.session_surface = SessionSurface::Terminal;
         self.render_agent_terminal(frame, area, " Terminal ", true);
         self.session_surface = saved;
+    }
+
+    fn render_macro_bar(&mut self, frame: &mut Frame, area: Rect) {
+        let (query, selected, cursor_byte) = {
+            let Some(bar) = &self.macro_bar else { return };
+            (
+                bar.input.text.clone(),
+                bar.selected,
+                bar.input.cursor.min(bar.input.text.len()),
+            )
+        };
+
+        let filtered = self.filtered_macros(&query);
+        let list_height = (filtered.len() as u16).min(6);
+        let bar_height = list_height + 1; // list rows + input line
+        if area.height < 2 {
+            return;
+        }
+        let actual_height = bar_height.min(area.height);
+        let bar_area = Rect::new(
+            area.x,
+            area.y + area.height.saturating_sub(actual_height),
+            area.width,
+            actual_height,
+        );
+        Clear.render(bar_area, frame.buffer_mut());
+
+        let [list_area, input_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .areas(bar_area);
+
+        // Render filtered macro list.
+        let items: Vec<ListItem> = filtered
+            .iter()
+            .map(|&(name, text)| {
+                let text_preview = text.replace('\n', "↵");
+                let name_len = name.chars().count();
+                let max_text = (list_area.width as usize).saturating_sub(name_len + 5);
+                let truncated = if text_preview.chars().count() > max_text {
+                    let end = text_preview
+                        .char_indices()
+                        .nth(max_text.saturating_sub(1).max(0))
+                        .map(|(i, _)| i)
+                        .unwrap_or(text_preview.len());
+                    format!("{}…", &text_preview[..end])
+                } else {
+                    text_preview
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!(" {name}"),
+                        Style::default()
+                            .fg(self.theme.overlay_border)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  {truncated}"),
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ),
+                ]))
+            })
+            .collect();
+
+        let list = List::new(items).highlight_style(self.theme.selection_style());
+        let mut list_state = ListState::default();
+        list_state.select(Some(selected));
+        StatefulWidget::render(list, list_area, frame.buffer_mut(), &mut list_state);
+
+        // Render the input line.
+        let cursor_col = query[..cursor_byte].chars().count();
+        let input_text = format!("> {query}");
+        Paragraph::new(Line::from(Span::styled(
+            input_text,
+            Style::default().fg(self.theme.input_label_fg),
+        )))
+        .render(input_area, frame.buffer_mut());
+
+        // Position the hardware cursor on the input line.
+        let cx = input_area.x + 2 + cursor_col as u16;
+        let cy = input_area.y;
+        if cx < input_area.x + input_area.width {
+            frame.set_cursor_position((cx, cy));
+        }
     }
 
     fn themed_block<'a>(&self, title: &'a str, focused: bool) -> Block<'a> {
