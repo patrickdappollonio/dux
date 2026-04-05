@@ -15,6 +15,15 @@ const ASCII_LOGO_WIDTH: u16 = 33;
 /// Number of lines in `ASCII_LOGO`.
 const ASCII_LOGO_HEIGHT: u16 = 7;
 
+/// Capitalize the first character of a string.
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(first) => format!("{}{}", first.to_uppercase(), c.as_str()),
+        None => String::new(),
+    }
+}
+
 impl App {
     pub(crate) fn render(&mut self, frame: &mut Frame) {
         let term_w = frame.area().width as usize;
@@ -750,34 +759,17 @@ impl App {
             let hint_line = if is_input {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
-                let cli_name = session_provider_name
-                    .as_deref()
-                    .unwrap_or(match active_surface {
-                        SessionSurface::Agent => "agent",
-                        SessionSurface::Terminal => "terminal",
-                    });
-                let capitalized = {
-                    let mut c = cli_name.chars();
-                    match c.next() {
-                        Some(first) => format!("{}{}", first.to_uppercase(), c.as_str()),
-                        None => String::new(),
-                    }
-                };
-                spans.push(Span::styled(
-                    format!("{capitalized} is holding focus. Press "),
-                    desc_style,
-                ));
                 spans.extend(self.theme.dim_key_badge_default(&exit_key));
-                spans.push(Span::styled(" to return to the app. ", desc_style));
+                spans.push(Span::styled(" return  ", desc_style));
                 spans.extend(self.theme.dim_key_badge_default(&scroll_up));
-                spans.push(Span::styled(" up, ", desc_style));
+                spans.push(Span::styled(" up  ", desc_style));
                 spans.extend(self.theme.dim_key_badge_default(&scroll_down));
                 if scrollback_offset > 0 {
-                    spans.push(Span::styled(" page down, or ", desc_style));
+                    spans.push(Span::styled(" down  ", desc_style));
                     spans.extend(self.theme.dim_key_badge_default(&scroll_line));
-                    spans.push(Span::styled(" down one line.", desc_style));
+                    spans.push(Span::styled(" down one line", desc_style));
                 } else {
-                    spans.push(Span::styled(" page down.", desc_style));
+                    spans.push(Span::styled(" down", desc_style));
                 }
                 Line::from(spans)
             } else if scrollback_offset > 0 {
@@ -2780,9 +2772,13 @@ impl App {
         self.render_dim_overlay(frame);
         let area = centered_rect(96, 94, frame.area());
         Clear.render(area, frame.buffer_mut());
+        let title = match self.selected_session() {
+            Some(session) => format!(" {} agent ", capitalize(session.provider.as_str())),
+            None => " Agent ".to_string(),
+        };
         let saved = self.session_surface;
         self.session_surface = SessionSurface::Agent;
-        self.render_agent_terminal(frame, area, " Agent (fullscreen) ", true);
+        self.render_agent_terminal(frame, area, &title, true);
         self.session_surface = saved;
     }
 
@@ -2822,12 +2818,15 @@ impl App {
 
     fn center_pane_agent_title(&self) -> String {
         if let Some(session) = self.selected_session() {
+            let provider = capitalize(session.provider.as_str());
+            let base = format!("{provider} agent");
             let count = self.session_terminal_count(&session.id);
             if count == 1 {
-                return "Agent (+ 1 terminal)".to_string();
+                return format!("{base} (+ 1 terminal)");
             } else if count > 1 {
-                return format!("Agent (+ {count} terminals)");
+                return format!("{base} (+ {count} terminals)");
             }
+            return base;
         }
         "Agent".to_string()
     }
@@ -3466,5 +3465,32 @@ mod tests {
             "After deletion: cursor at ({crow},{ccol}) should show {expected_char:?}, got {:?}",
             cell.symbol()
         );
+    }
+
+    // ── Unit tests for capitalize ─────────────────────────────────
+
+    #[test]
+    fn capitalize_normal_string() {
+        assert_eq!(capitalize("claude"), "Claude");
+    }
+
+    #[test]
+    fn capitalize_already_capitalized() {
+        assert_eq!(capitalize("Claude"), "Claude");
+    }
+
+    #[test]
+    fn capitalize_single_char() {
+        assert_eq!(capitalize("c"), "C");
+    }
+
+    #[test]
+    fn capitalize_empty_string() {
+        assert_eq!(capitalize(""), "");
+    }
+
+    #[test]
+    fn capitalize_all_uppercase() {
+        assert_eq!(capitalize("CODEX"), "CODEX");
     }
 }
