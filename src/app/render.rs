@@ -947,7 +947,7 @@ impl App {
         };
 
         if let Some(search_area) = search_area {
-            let query = format!("/ {}", self.files_search_query);
+            let query = format!("/ {}", self.files_search.text);
             Paragraph::new(query)
                 .block(
                     Block::default()
@@ -1092,7 +1092,7 @@ impl App {
             let display_text = if self.commit_input.is_empty() {
                 "Type your commit message…"
             } else {
-                &self.commit_input
+                &self.commit_input.text
             };
             let style = if self.commit_input.is_empty() {
                 Style::default().fg(self.theme.hint_desc_fg)
@@ -1103,8 +1103,11 @@ impl App {
             let visible_h = text_area.height;
             let text_w = text_area.width as usize;
             if text_w > 0 && !self.commit_input.is_empty() {
-                let (row, _) =
-                    cursor_pos_in_wrapped(&self.commit_input, self.commit_input_cursor, text_w);
+                let (row, _) = cursor_pos_in_wrapped(
+                    &self.commit_input.text,
+                    self.commit_input.cursor,
+                    text_w,
+                );
                 if row < self.commit_scroll {
                     self.commit_scroll = row;
                 } else if row >= self.commit_scroll + visible_h {
@@ -1121,8 +1124,11 @@ impl App {
                 .render(text_area, frame.buffer_mut());
 
             if focused {
-                let (cursor_row, cursor_col) =
-                    cursor_pos_in_wrapped(&self.commit_input, self.commit_input_cursor, text_w);
+                let (cursor_row, cursor_col) = cursor_pos_in_wrapped(
+                    &self.commit_input.text,
+                    self.commit_input.cursor,
+                    text_w,
+                );
                 let screen_row = cursor_row.saturating_sub(self.commit_scroll);
                 let cx = text_area.x + cursor_col as u16;
                 let cy = text_area.y + screen_row;
@@ -1444,14 +1450,13 @@ impl App {
         match &self.prompt {
             PromptState::Command {
                 input,
-                cursor,
                 selected,
                 searching,
             } => {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(72, 40, frame.area());
                 Clear.render(popup, frame.buffer_mut());
-                let commands = self.bindings.filtered_palette(input);
+                let commands = self.bindings.filtered_palette(&input.text);
                 let items = if commands.is_empty() {
                     vec![ListItem::new("No matching commands.")]
                 } else {
@@ -1544,8 +1549,8 @@ impl App {
                 let input_inner = input_block.inner(input_area);
                 Paragraph::new(render_single_line_cursor_input(
                     prompt_prefix,
-                    input,
-                    *cursor,
+                    &input.text,
+                    input.cursor,
                     self.theme.input_cursor_fg,
                     self.theme.input_cursor_bg,
                 ))
@@ -1577,11 +1582,9 @@ impl App {
                 loading,
                 selected,
                 filter,
-                filter_cursor,
                 searching,
                 editing_path,
                 path_input,
-                path_cursor,
                 ..
             } => {
                 self.render_dim_overlay(frame);
@@ -1590,7 +1593,7 @@ impl App {
                 let visible: Vec<_> = if filter.is_empty() {
                     entries.iter().collect()
                 } else {
-                    let needle = filter.to_lowercase();
+                    let needle = filter.text.to_lowercase();
                     entries
                         .iter()
                         .filter(|e| e.label.to_lowercase().contains(&needle))
@@ -1655,9 +1658,9 @@ impl App {
                 if let Some(filter_area) = top_areas {
                     let title = format!("Add Project: {}", current_dir.display());
                     let (prefix, text, cursor) = if *editing_path {
-                        ("go: ", path_input.as_str(), *path_cursor)
+                        ("go: ", path_input.text.as_str(), path_input.cursor)
                     } else {
-                        ("/ ", filter.as_str(), *filter_cursor)
+                        ("/ ", filter.text.as_str(), filter.cursor)
                     };
                     let input_block = self.themed_overlay_block(&title);
                     let input_inner = input_block.inner(filter_area);
@@ -2225,7 +2228,7 @@ impl App {
                     discard_button: discard_area,
                 };
             }
-            PromptState::RenameSession { input, cursor, .. } => {
+            PromptState::RenameSession { input, .. } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect_exact(56, 9, frame.area());
                 Clear.render(area, frame.buffer_mut());
@@ -2250,8 +2253,8 @@ impl App {
                 .render(label_area, frame.buffer_mut());
 
                 // Show the input with a cursor indicator.
-                let display = if *cursor < input.len() {
-                    let (before, after) = input.split_at(*cursor);
+                let display = if input.cursor < input.text.len() {
+                    let (before, after) = input.text.split_at(input.cursor);
                     let (cursor_char, rest) = after.split_at(1);
                     Line::from(vec![
                         Span::raw(format!(" {before}")),
@@ -2265,7 +2268,7 @@ impl App {
                     ])
                 } else {
                     Line::from(vec![
-                        Span::raw(format!(" {input}")),
+                        Span::raw(format!(" {}", &input.text)),
                         Span::styled(
                             " ",
                             Style::default()

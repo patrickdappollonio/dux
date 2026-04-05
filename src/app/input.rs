@@ -56,68 +56,7 @@ fn contains_point(rect: Rect, column: u16, row: u16) -> bool {
         && row < rect.y + rect.height
 }
 
-fn prev_char_boundary(text: &str, index: usize) -> usize {
-    let index = index.min(text.len());
-    text[..index]
-        .char_indices()
-        .last()
-        .map(|(i, _)| i)
-        .unwrap_or(0)
-}
-
-fn next_char_boundary(text: &str, index: usize) -> usize {
-    let index = index.min(text.len());
-    text[index..]
-        .char_indices()
-        .nth(1)
-        .map(|(offset, _)| index + offset)
-        .unwrap_or(text.len())
-}
-
-fn clamp_cursor(text: &str, cursor: usize) -> usize {
-    if cursor >= text.len() {
-        return text.len();
-    }
-    if text.is_char_boundary(cursor) {
-        cursor
-    } else {
-        prev_char_boundary(text, cursor)
-    }
-}
-
-fn move_cursor_left(text: &str, cursor: &mut usize) {
-    *cursor = prev_char_boundary(text, *cursor);
-}
-
-fn move_cursor_right(text: &str, cursor: &mut usize) {
-    *cursor = next_char_boundary(text, *cursor);
-}
-
-fn insert_at_cursor(text: &mut String, cursor: &mut usize, ch: char) {
-    let index = clamp_cursor(text, *cursor);
-    text.insert(index, ch);
-    *cursor = index + ch.len_utf8();
-}
-
-fn backspace_at_cursor(text: &mut String, cursor: &mut usize) {
-    let index = clamp_cursor(text, *cursor);
-    if index == 0 {
-        return;
-    }
-    let prev = prev_char_boundary(text, index);
-    text.replace_range(prev..index, "");
-    *cursor = prev;
-}
-
-fn delete_at_cursor(text: &mut String, cursor: &mut usize) {
-    let index = clamp_cursor(text, *cursor);
-    if index >= text.len() {
-        return;
-    }
-    let next = next_char_boundary(text, index);
-    text.replace_range(index..next, "");
-    *cursor = index;
-}
+use super::text_input::clamp_cursor;
 
 fn cursor_from_single_line_position(
     text: &str,
@@ -338,8 +277,7 @@ impl App {
                 }
                 Action::OpenPalette => {
                     self.prompt = PromptState::Command {
-                        input: String::new(),
-                        cursor: 0,
+                        input: TextInput::new(),
                         selected: 0,
                         searching: false,
                     };
@@ -648,30 +586,19 @@ impl App {
     }
 
     fn handle_files_search_key(&mut self, key: KeyEvent) {
-        let is_plain_char =
-            matches!(key.code, KeyCode::Char(_)) && !key.modifiers.contains(KeyModifiers::CONTROL);
-
         match key.code {
             KeyCode::Esc | KeyCode::Enter => {
                 self.files_search_active = false;
-            }
-            KeyCode::Backspace => {
-                let mut query = self.files_search_query.clone();
-                query.pop();
-                let found_match = self.update_files_search(query);
-                if !found_match && self.has_files_search() {
-                    self.set_info("No file matches the current search.");
-                }
-            }
-            KeyCode::Char(c) if is_plain_char => {
-                let mut query = self.files_search_query.clone();
-                query.push(c);
-                let found_match = self.update_files_search(query);
-                if !found_match {
-                    self.set_info("No file matches the current search.");
-                }
+                return;
             }
             _ => {}
+        }
+        if self.files_search.handle_key(key) {
+            let query = self.files_search.text.clone();
+            let found_match = self.update_files_search(query);
+            if !found_match && self.has_files_search() {
+                self.set_info("No file matches the current search.");
+            }
         }
     }
 
@@ -753,46 +680,12 @@ impl App {
             self.input_target = InputTarget::None;
             return Ok(());
         }
-        match key.code {
-            KeyCode::Enter => {
-                self.commit_input.insert(self.commit_input_cursor, '\n');
-                self.commit_input_cursor += 1;
-            }
-            KeyCode::Char(ch) => {
-                self.commit_input.insert(self.commit_input_cursor, ch);
-                self.commit_input_cursor += ch.len_utf8();
-            }
-            KeyCode::Backspace => {
-                if self.commit_input_cursor > 0 {
-                    let prev = self.commit_input[..self.commit_input_cursor]
-                        .char_indices()
-                        .next_back()
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    self.commit_input.remove(prev);
-                    self.commit_input_cursor = prev;
-                }
-            }
-            KeyCode::Left => {
-                if self.commit_input_cursor > 0 {
-                    self.commit_input_cursor = self.commit_input[..self.commit_input_cursor]
-                        .char_indices()
-                        .next_back()
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                }
-            }
-            KeyCode::Right => {
-                if self.commit_input_cursor < self.commit_input.len() {
-                    self.commit_input_cursor = self.commit_input[self.commit_input_cursor..]
-                        .char_indices()
-                        .nth(1)
-                        .map(|(i, _)| self.commit_input_cursor + i)
-                        .unwrap_or(self.commit_input.len());
-                }
-            }
-            _ => {}
+        // Enter inserts a newline (multi-line commit messages).
+        if key.code == KeyCode::Enter {
+            self.commit_input.insert_char('\n');
+            return Ok(());
         }
+        self.commit_input.handle_key(key);
         Ok(())
     }
 
@@ -900,7 +793,7 @@ impl App {
             self.set_error("No staged changes to commit.");
             return Ok(());
         }
-        if self.commit_input.trim().is_empty() {
+        if self.commit_input.text.trim().is_empty() {
             self.set_error("Enter a commit message first.");
             return Ok(());
         }
@@ -909,10 +802,9 @@ impl App {
             return Ok(());
         };
         let worktree = PathBuf::from(&session.worktree_path);
-        match git::commit(&worktree, &self.commit_input) {
+        match git::commit(&worktree, &self.commit_input.text) {
             Ok(_) => {
                 self.commit_input.clear();
-                self.commit_input_cursor = 0;
                 self.commit_scroll = 0;
                 let push_key = self.bindings.label_for(Action::PushToRemote);
                 let ai_key = self.bindings.label_for(Action::GenerateCommitMessage);
@@ -1127,13 +1019,10 @@ impl App {
                 }
                 Some(Action::SearchToggle) if !is_searching => {
                     if let PromptState::Command {
-                        input,
-                        cursor,
-                        searching,
-                        ..
+                        input, searching, ..
                     } = &mut self.prompt
                     {
-                        *cursor = clamp_cursor(input, input.len());
+                        input.cursor = clamp_cursor(&input.text, input.text.len());
                         *searching = true;
                     }
                 }
@@ -1142,7 +1031,7 @@ impl App {
                         input, selected, ..
                     } = &mut self.prompt
                     {
-                        let count = self.bindings.filtered_palette(input).len();
+                        let count = self.bindings.filtered_palette(&input.text).len();
                         if *selected + 1 < count {
                             *selected += 1;
                         }
@@ -1165,49 +1054,20 @@ impl App {
                     }
                 }
                 _ => {
-                    // Text input fallback: Tab (autocomplete), Backspace, Char.
+                    // Text input fallback: Tab (autocomplete), then delegate to TextInput.
                     if let PromptState::Command {
-                        input,
-                        cursor,
-                        selected,
-                        ..
+                        input, selected, ..
                     } = &mut self.prompt
                     {
-                        match key.code {
-                            KeyCode::Tab => {
-                                if let Some(binding) =
-                                    self.bindings.filtered_palette(input).get(*selected)
-                                {
-                                    *input = binding.palette_name.unwrap().to_string();
-                                    *cursor = input.len();
-                                    *selected = 0;
-                                }
-                            }
-                            KeyCode::Backspace => {
-                                backspace_at_cursor(input, cursor);
+                        if key.code == KeyCode::Tab {
+                            if let Some(binding) =
+                                self.bindings.filtered_palette(&input.text).get(*selected)
+                            {
+                                input.set_text(binding.palette_name.unwrap().to_string());
                                 *selected = 0;
                             }
-                            KeyCode::Delete => {
-                                delete_at_cursor(input, cursor);
-                                *selected = 0;
-                            }
-                            KeyCode::Left => {
-                                move_cursor_left(input, cursor);
-                            }
-                            KeyCode::Right => {
-                                move_cursor_right(input, cursor);
-                            }
-                            KeyCode::Home => {
-                                *cursor = 0;
-                            }
-                            KeyCode::End => {
-                                *cursor = input.len();
-                            }
-                            KeyCode::Char(c) if is_plain_char => {
-                                insert_at_cursor(input, cursor, c);
-                                *selected = 0;
-                            }
-                            _ => {}
+                        } else if input.handle_key(key) {
+                            *selected = 0;
                         }
                     }
                 }
@@ -1244,7 +1104,6 @@ impl App {
                     filter,
                     editing_path,
                     path_input,
-                    path_cursor,
                     tab_completions,
                     tab_index,
                     ..
@@ -1256,21 +1115,14 @@ impl App {
                         KeyCode::Esc => {
                             *editing_path = false;
                             path_input.clear();
-                            *path_cursor = 0;
-                            tab_completions.clear();
-                            *tab_index = 0;
-                        }
-                        KeyCode::Backspace => {
-                            backspace_at_cursor(path_input, path_cursor);
-                            *path_cursor = clamp_cursor(path_input, *path_cursor);
                             tab_completions.clear();
                             *tab_index = 0;
                         }
                         KeyCode::Tab | KeyCode::BackTab => {
                             if tab_completions.is_empty() {
-                                let input_path = PathBuf::from(path_input.as_str());
+                                let input_path = PathBuf::from(path_input.text.as_str());
                                 let (search_dir, prefix) =
-                                    if input_path.is_dir() && path_input.ends_with('/') {
+                                    if input_path.is_dir() && path_input.text.ends_with('/') {
                                         (input_path.clone(), String::new())
                                     } else {
                                         let parent = input_path
@@ -1318,12 +1170,11 @@ impl App {
                                 *tab_index = (*tab_index + 1) % tab_completions.len();
                             }
                             if let Some(completion) = tab_completions.get(*tab_index) {
-                                *path_input = completion.clone();
-                                *path_cursor = path_input.len();
+                                path_input.set_text(completion.clone());
                             }
                         }
                         KeyCode::Enter => {
-                            let new_dir = PathBuf::from(path_input.trim());
+                            let new_dir = PathBuf::from(path_input.text.trim());
                             if new_dir.is_dir() {
                                 *current_dir = new_dir.clone();
                                 entries.clear();
@@ -1333,41 +1184,23 @@ impl App {
                                 browse_to = Some(new_dir);
                             } else {
                                 error_msg =
-                                    Some(format!("{} is not a directory.", path_input.trim()));
+                                    Some(format!("{} is not a directory.", path_input.text.trim()));
                             }
                             *editing_path = false;
                             path_input.clear();
-                            *path_cursor = 0;
                             tab_completions.clear();
                             *tab_index = 0;
-                        }
-                        KeyCode::Char(c) if is_plain_char => {
-                            insert_at_cursor(path_input, path_cursor, c);
-                            tab_completions.clear();
-                            *tab_index = 0;
-                        }
-                        KeyCode::Delete => {
-                            delete_at_cursor(path_input, path_cursor);
-                            tab_completions.clear();
-                            *tab_index = 0;
-                        }
-                        KeyCode::Left => {
-                            move_cursor_left(path_input, path_cursor);
-                        }
-                        KeyCode::Right => {
-                            move_cursor_right(path_input, path_cursor);
-                        }
-                        KeyCode::Home => {
-                            *path_cursor = 0;
-                        }
-                        KeyCode::End => {
-                            *path_cursor = path_input.len();
                         }
                         KeyCode::Up | KeyCode::Down => {
                             tab_completions.clear();
                             *tab_index = 0;
                         }
-                        _ => {}
+                        _ => {
+                            if path_input.handle_key(key) {
+                                tab_completions.clear();
+                                *tab_index = 0;
+                            }
+                        }
                     }
                     if let Some(msg) = error_msg {
                         self.set_error(msg);
@@ -1391,7 +1224,6 @@ impl App {
                     if let PromptState::BrowseProjects {
                         searching,
                         filter,
-                        filter_cursor,
                         selected,
                         ..
                     } = &mut self.prompt
@@ -1400,7 +1232,6 @@ impl App {
                             *searching = false;
                         } else if !filter.is_empty() {
                             filter.clear();
-                            *filter_cursor = 0;
                             *selected = 0;
                         } else {
                             self.prompt = PromptState::None;
@@ -1409,13 +1240,10 @@ impl App {
                 }
                 Some(Action::SearchToggle) if !is_searching => {
                     if let PromptState::BrowseProjects {
-                        filter,
-                        filter_cursor,
-                        searching,
-                        ..
+                        filter, searching, ..
                     } = &mut self.prompt
                     {
-                        *filter_cursor = filter.len();
+                        filter.move_end();
                         *searching = true;
                     }
                 }
@@ -1430,7 +1258,7 @@ impl App {
                         let filtered_len = if filter.is_empty() {
                             entries.len()
                         } else {
-                            let needle = filter.to_lowercase();
+                            let needle = filter.text.to_lowercase();
                             entries
                                 .iter()
                                 .filter(|e| e.label.to_lowercase().contains(&needle))
@@ -1453,7 +1281,6 @@ impl App {
                         current_dir,
                         editing_path,
                         path_input,
-                        path_cursor,
                         ..
                     } = &mut self.prompt
                     {
@@ -1462,8 +1289,7 @@ impl App {
                         if !p.ends_with('/') {
                             p.push('/');
                         }
-                        *path_input = p;
-                        *path_cursor = path_input.len();
+                        path_input.set_text(p);
                     }
                 }
                 Some(Action::Confirm) if is_searching => {
@@ -1487,39 +1313,11 @@ impl App {
                     // Text input fallback for search mode.
                     if is_searching
                         && let PromptState::BrowseProjects {
-                            filter,
-                            filter_cursor,
-                            selected,
-                            ..
+                            filter, selected, ..
                         } = &mut self.prompt
+                        && filter.handle_key(key)
                     {
-                        match key.code {
-                            KeyCode::Backspace => {
-                                backspace_at_cursor(filter, filter_cursor);
-                                *selected = 0;
-                            }
-                            KeyCode::Delete => {
-                                delete_at_cursor(filter, filter_cursor);
-                                *selected = 0;
-                            }
-                            KeyCode::Left => {
-                                move_cursor_left(filter, filter_cursor);
-                            }
-                            KeyCode::Right => {
-                                move_cursor_right(filter, filter_cursor);
-                            }
-                            KeyCode::Home => {
-                                *filter_cursor = 0;
-                            }
-                            KeyCode::End => {
-                                *filter_cursor = filter.len();
-                            }
-                            KeyCode::Char(c) if is_plain_char => {
-                                insert_at_cursor(filter, filter_cursor, c);
-                                *selected = 0;
-                            }
-                            _ => {}
-                        }
+                        *selected = 0;
                     }
                 }
             }
@@ -1603,9 +1401,7 @@ impl App {
         }
 
         if let PromptState::RenameSession {
-            session_id,
-            input,
-            cursor,
+            session_id, input, ..
         } = &mut self.prompt
         {
             let is_plain_char = matches!(key.code, KeyCode::Char(_))
@@ -1622,44 +1418,13 @@ impl App {
                 }
                 Some(Action::Confirm) => {
                     let id = session_id.clone();
-                    let new_name = input.clone();
+                    let new_name = input.text.clone();
                     self.prompt = PromptState::None;
                     self.apply_rename_session(&id, new_name);
                 }
-                _ => match key.code {
-                    KeyCode::Backspace => {
-                        if *cursor > 0 {
-                            input.remove(*cursor - 1);
-                            *cursor -= 1;
-                        }
-                    }
-                    KeyCode::Delete => {
-                        if *cursor < input.len() {
-                            input.remove(*cursor);
-                        }
-                    }
-                    KeyCode::Left => {
-                        if *cursor > 0 {
-                            *cursor -= 1;
-                        }
-                    }
-                    KeyCode::Right => {
-                        if *cursor < input.len() {
-                            *cursor += 1;
-                        }
-                    }
-                    KeyCode::Home => {
-                        *cursor = 0;
-                    }
-                    KeyCode::End => {
-                        *cursor = input.len();
-                    }
-                    KeyCode::Char(c) if is_plain_char => {
-                        input.insert(*cursor, c);
-                        *cursor += 1;
-                    }
-                    _ => {}
-                },
+                _ => {
+                    input.handle_key(key);
+                }
             }
             return Ok(false);
         }
@@ -1977,7 +1742,7 @@ impl App {
 
     fn set_command_palette_selection(&mut self, index: usize) {
         let count = match &self.prompt {
-            PromptState::Command { input, .. } => self.bindings.filtered_palette(input).len(),
+            PromptState::Command { input, .. } => self.bindings.filtered_palette(&input.text).len(),
             _ => 0,
         };
         if count == 0 {
@@ -1993,9 +1758,10 @@ impl App {
             OverlayMouseLayout::Command { input, .. } => input,
             _ => return,
         };
-        if let PromptState::Command { input, cursor, .. } = &mut self.prompt {
+        if let PromptState::Command { input, .. } = &mut self.prompt {
             let prefix_width = 2; // "> " or "/ "
-            *cursor = cursor_from_single_line_position(input, input_area, prefix_width, column);
+            input.cursor =
+                cursor_from_single_line_position(&input.text, input_area, prefix_width, column);
         }
     }
 
@@ -2004,10 +1770,10 @@ impl App {
             input, selected, ..
         } = &self.prompt
         {
-            if let Some(binding) = self.bindings.filtered_palette(input).get(*selected) {
+            if let Some(binding) = self.bindings.filtered_palette(&input.text).get(*selected) {
                 binding.palette_name.unwrap().to_string()
             } else {
-                input.trim().to_string()
+                input.text.trim().to_string()
             }
         } else {
             String::new()
@@ -2026,7 +1792,7 @@ impl App {
             if filter.is_empty() {
                 entries.clone()
             } else {
-                let needle = filter.to_lowercase();
+                let needle = filter.text.to_lowercase();
                 entries
                     .iter()
                     .filter(|entry| entry.label.to_lowercase().contains(&needle))
@@ -2057,18 +1823,18 @@ impl App {
         };
         if let PromptState::BrowseProjects {
             filter,
-            filter_cursor,
             searching,
             editing_path,
             path_input,
-            path_cursor,
             ..
         } = &mut self.prompt
         {
             if *editing_path {
-                *path_cursor = cursor_from_single_line_position(path_input, input_area, 4, column);
+                path_input.cursor =
+                    cursor_from_single_line_position(&path_input.text, input_area, 4, column);
             } else {
-                *filter_cursor = cursor_from_single_line_position(filter, input_area, 2, column);
+                filter.cursor =
+                    cursor_from_single_line_position(&filter.text, input_area, 2, column);
                 *searching = true;
             }
         }
@@ -2083,7 +1849,6 @@ impl App {
             loading,
             selected,
             filter,
-            filter_cursor,
             ..
         } = &mut self.prompt
             && let Some(entry) = visible.get(*selected)
@@ -2094,7 +1859,6 @@ impl App {
             *loading = true;
             *selected = 0;
             filter.clear();
-            *filter_cursor = 0;
             browse_to = Some(new_dir);
         }
         if let Some(dir) = browse_to {
@@ -2188,8 +1952,8 @@ impl App {
             OverlayMouseLayout::RenameSession { input } => input,
             _ => return,
         };
-        if let PromptState::RenameSession { input, cursor, .. } = &mut self.prompt {
-            *cursor = cursor_from_single_line_position(input, input_area, 0, column);
+        if let PromptState::RenameSession { input, .. } = &mut self.prompt {
+            input.cursor = cursor_from_single_line_position(&input.text, input_area, 0, column);
         }
     }
 
@@ -2379,19 +2143,19 @@ impl App {
             return 0;
         }
 
-        let wrapped = wrap_text_at_width(&self.commit_input, width);
+        let wrapped = wrap_text_at_width(&self.commit_input.text, width);
         let total_lines = wrapped.split('\n').count() as u16;
         total_lines.saturating_sub(text_area.height)
     }
 
     fn set_commit_cursor_from_mouse(&mut self, column: u16, row: u16) {
         let Some(text_area) = self.mouse_layout.commit_text_area else {
-            self.commit_input_cursor = self.commit_input.len();
+            self.commit_input.move_end();
             return;
         };
         let width = text_area.width as usize;
         if width == 0 {
-            self.commit_input_cursor = self.commit_input.len();
+            self.commit_input.move_end();
             return;
         }
 
@@ -2399,8 +2163,12 @@ impl App {
             .saturating_sub(text_area.y)
             .saturating_add(self.commit_scroll);
         let relative_col = usize::from(column.saturating_sub(text_area.x));
-        self.commit_input_cursor =
-            cursor_from_wrapped_position(&self.commit_input, width, relative_row, relative_col);
+        self.commit_input.cursor = cursor_from_wrapped_position(
+            &self.commit_input.text,
+            width,
+            relative_row,
+            relative_col,
+        );
     }
 
     fn scroll_commit_input(&mut self, down: bool) {
@@ -2758,7 +2526,7 @@ mod tests {
 
     use crate::app::{
         App, CenterMode, FocusPane, FullscreenOverlay, InputTarget, LeftSection, MouseLayoutState,
-        OverlayMouseLayout, OverlayMouseLayoutState, PromptState, RightSection,
+        OverlayMouseLayout, OverlayMouseLayoutState, PromptState, RightSection, TextInput,
     };
     use crate::config::{Config, DuxPaths, ProjectConfig};
     use crate::editor::{DetectedEditor, EditorKind};
@@ -2863,10 +2631,9 @@ mod tests {
             selected_terminal_index: 0,
             right_section: RightSection::Unstaged,
             files_index: 0,
-            files_search_query: String::new(),
+            files_search: TextInput::new(),
             files_search_active: false,
-            commit_input: String::new(),
-            commit_input_cursor: 0,
+            commit_input: TextInput::new(),
             commit_scroll: 0,
             commit_generating: false,
             left_width_pct: 20,
@@ -3045,8 +2812,7 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::RenameSession {
             session_id: "session-1".to_string(),
-            input: "agent".to_string(),
-            cursor: 5,
+            input: TextInput::with_text("agent".to_string()),
         };
         app.input_target = InputTarget::Agent;
 
@@ -3054,9 +2820,9 @@ mod tests {
             .unwrap();
 
         match &app.prompt {
-            PromptState::RenameSession { input, cursor, .. } => {
-                assert_eq!(input, "agentx");
-                assert_eq!(*cursor, 6);
+            PromptState::RenameSession { input, .. } => {
+                assert_eq!(input.text, "agentx");
+                assert_eq!(input.cursor, 6);
             }
             other => panic!("expected rename prompt, got {other:?}"),
         }
@@ -3067,17 +2833,16 @@ mod tests {
         let mut app = test_app(bindings_with_overrides(&[(Action::CloseOverlay, &["x"])]));
         app.prompt = PromptState::RenameSession {
             session_id: "session-1".to_string(),
-            input: "agent".to_string(),
-            cursor: 5,
+            input: TextInput::with_text("agent".to_string()),
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
             .unwrap();
 
         match &app.prompt {
-            PromptState::RenameSession { input, cursor, .. } => {
-                assert_eq!(input, "agentx");
-                assert_eq!(*cursor, 6);
+            PromptState::RenameSession { input, .. } => {
+                assert_eq!(input.text, "agentx");
+                assert_eq!(input.cursor, 6);
             }
             other => panic!("expected rename prompt, got {other:?}"),
         }
@@ -3088,8 +2853,7 @@ mod tests {
         let mut app = test_app(bindings_with_overrides(&[(Action::Confirm, &["tab"])]));
         app.prompt = PromptState::RenameSession {
             session_id: "session-1".to_string(),
-            input: "agent-branch".to_string(),
-            cursor: "agent-branch".len(),
+            input: TextInput::with_text("agent-branch".to_string()),
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
@@ -3280,7 +3044,7 @@ mod tests {
         }
 
         assert!(app.files_search_active);
-        assert_eq!(app.files_search_query, "main");
+        assert_eq!(app.files_search.text, "main");
         assert_eq!(app.right_section, RightSection::Unstaged);
         assert_eq!(app.files_index, 1);
 
@@ -3651,7 +3415,7 @@ mod tests {
     fn mouse_click_commit_text_first_click_only_focuses_commit_input() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
-        app.commit_input = "hello world".to_string();
+        app.commit_input = TextInput::with_text("hello world".to_string());
         app.focus = FocusPane::Center;
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 80, 15));
@@ -3665,22 +3429,22 @@ mod tests {
     fn mouse_click_commit_text_second_click_enters_edit_mode_and_moves_cursor() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
-        app.commit_input = "abc\ndef".to_string();
-        app.commit_input_cursor = 0;
+        app.commit_input = TextInput::with_text("abc\ndef".to_string());
+        app.commit_input.cursor = 0;
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 80, 16));
         assert_eq!(app.input_target, InputTarget::None);
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 80, 16));
 
         assert_eq!(app.input_target, InputTarget::CommitMessage);
-        assert!(app.commit_input_cursor > 0);
+        assert!(app.commit_input.cursor > 0);
     }
 
     #[test]
     fn mouse_journey_commit_chrome_then_text_enters_editing() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
-        app.commit_input = "hello".to_string();
+        app.commit_input = TextInput::with_text("hello".to_string());
         app.focus = FocusPane::Center;
 
         // Click inside the commit block (below the border row that the divider
@@ -3698,7 +3462,8 @@ mod tests {
     fn mouse_wheel_commit_text_scrolls_commit_viewport() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
-        app.commit_input = (0..20).map(|i| format!("line {i}\n")).collect::<String>();
+        app.commit_input =
+            TextInput::with_text((0..20).map(|i| format!("line {i}\n")).collect::<String>());
         app.commit_scroll = 0;
 
         app.handle_mouse(mouse(MouseEventKind::ScrollDown, 80, 15));
@@ -3884,8 +3649,7 @@ mod tests {
     fn mouse_click_command_palette_row_selects_then_double_click_executes() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::Command {
-            input: "help".to_string(),
-            cursor: 4,
+            input: TextInput::with_text("help".to_string()),
             selected: 0,
             searching: false,
         };
@@ -3906,8 +3670,7 @@ mod tests {
     fn mouse_click_command_palette_input_moves_cursor_and_keyboard_inserts_there() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::Command {
-            input: "help".to_string(),
-            cursor: 4,
+            input: TextInput::with_text("help".to_string()),
             selected: 0,
             searching: false,
         };
@@ -3918,9 +3681,9 @@ mod tests {
             .unwrap();
 
         match &app.prompt {
-            PromptState::Command { input, cursor, .. } => {
-                assert_eq!(input, "heXlp");
-                assert_eq!(*cursor, 3);
+            PromptState::Command { input, .. } => {
+                assert_eq!(input.text, "heXlp");
+                assert_eq!(input.cursor, 3);
             }
             other => panic!("expected command prompt, got {other:?}"),
         }
@@ -3941,12 +3704,10 @@ mod tests {
             }],
             loading: false,
             selected: 0,
-            filter: String::new(),
-            filter_cursor: 0,
+            filter: TextInput::new(),
             searching: false,
             editing_path: false,
-            path_input: String::new(),
-            path_cursor: 0,
+            path_input: TextInput::new(),
             tab_completions: Vec::new(),
             tab_index: 0,
         };
@@ -3982,12 +3743,10 @@ mod tests {
             entries: Vec::new(),
             loading: false,
             selected: 0,
-            filter: "child".to_string(),
-            filter_cursor: 5,
+            filter: TextInput::with_text("child".to_string()),
             searching: false,
             editing_path: false,
-            path_input: String::new(),
-            path_cursor: 0,
+            path_input: TextInput::new(),
             tab_completions: Vec::new(),
             tab_index: 0,
         };
@@ -3999,13 +3758,10 @@ mod tests {
 
         match &app.prompt {
             PromptState::BrowseProjects {
-                filter,
-                filter_cursor,
-                searching,
-                ..
+                filter, searching, ..
             } => {
-                assert_eq!(filter, "chXild");
-                assert_eq!(*filter_cursor, 3);
+                assert_eq!(filter.text, "chXild");
+                assert_eq!(filter.cursor, 3);
                 assert!(*searching);
             }
             other => panic!("expected browse projects prompt, got {other:?}"),
@@ -4020,12 +3776,10 @@ mod tests {
             entries: Vec::new(),
             loading: false,
             selected: 0,
-            filter: String::new(),
-            filter_cursor: 0,
+            filter: TextInput::new(),
             searching: false,
             editing_path: true,
-            path_input: "abcd".to_string(),
-            path_cursor: 4,
+            path_input: TextInput::with_text("abcd".to_string()),
             tab_completions: Vec::new(),
             tab_index: 0,
         };
@@ -4036,13 +3790,9 @@ mod tests {
             .unwrap();
 
         match &app.prompt {
-            PromptState::BrowseProjects {
-                path_input,
-                path_cursor,
-                ..
-            } => {
-                assert_eq!(path_input, "aXbcd");
-                assert_eq!(*path_cursor, 2);
+            PromptState::BrowseProjects { path_input, .. } => {
+                assert_eq!(path_input.text, "aXbcd");
+                assert_eq!(path_input.cursor, 2);
             }
             other => panic!("expected browse projects prompt, got {other:?}"),
         }
@@ -4484,17 +4234,20 @@ mod tests {
     #[test]
     fn mouse_click_rename_input_moves_cursor() {
         let mut app = test_app(default_bindings());
+        let sid = app.sessions[0].id.clone();
         app.prompt = PromptState::RenameSession {
-            session_id: app.sessions[0].id.clone(),
-            input: "rename me".to_string(),
-            cursor: 0,
+            session_id: sid,
+            input: TextInput {
+                text: "rename me".to_string(),
+                cursor: 0,
+            },
         };
         install_rename_overlay(&mut app);
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 29, 10));
 
-        match app.prompt {
-            PromptState::RenameSession { cursor, .. } => assert_eq!(cursor, 5),
+        match &app.prompt {
+            PromptState::RenameSession { input, .. } => assert_eq!(input.cursor, 5),
             _ => panic!("expected rename prompt"),
         }
     }
@@ -4504,8 +4257,7 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.focus = FocusPane::Left;
         app.prompt = PromptState::Command {
-            input: "help".to_string(),
-            cursor: 4,
+            input: TextInput::with_text("help".to_string()),
             selected: 0,
             searching: false,
         };

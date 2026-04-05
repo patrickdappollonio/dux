@@ -45,6 +45,8 @@ use crate::statusline::{StatusLine, StatusTone};
 use crate::storage::SessionStore;
 use crate::theme::Theme;
 
+use text_input::TextInput;
+
 pub struct App {
     pub(crate) config: Config,
     pub(crate) paths: DuxPaths,
@@ -59,10 +61,9 @@ pub struct App {
     pub(crate) selected_terminal_index: usize,
     pub(crate) right_section: RightSection,
     pub(crate) files_index: usize,
-    pub(crate) files_search_query: String,
+    pub(crate) files_search: TextInput,
     pub(crate) files_search_active: bool,
-    pub(crate) commit_input: String,
-    pub(crate) commit_input_cursor: usize,
+    pub(crate) commit_input: TextInput,
     pub(crate) commit_scroll: u16,
     pub(crate) commit_generating: bool,
     pub(crate) left_width_pct: u16,
@@ -194,8 +195,7 @@ pub(crate) enum CenterMode {
 pub(crate) enum PromptState {
     None,
     Command {
-        input: String,
-        cursor: usize,
+        input: TextInput,
         selected: usize,
         searching: bool,
     },
@@ -204,12 +204,10 @@ pub(crate) enum PromptState {
         entries: Vec<BrowserEntry>,
         loading: bool,
         selected: usize,
-        filter: String,
-        filter_cursor: usize,
+        filter: TextInput,
         searching: bool,
         editing_path: bool,
-        path_input: String,
-        path_cursor: usize,
+        path_input: TextInput,
         tab_completions: Vec<String>,
         tab_index: usize,
     },
@@ -230,8 +228,7 @@ pub(crate) enum PromptState {
     },
     RenameSession {
         session_id: String,
-        input: String,
-        cursor: usize,
+        input: TextInput,
     },
     PickEditor {
         session_label: String,
@@ -430,6 +427,7 @@ pub(crate) enum WorkerEvent {
 mod input;
 mod render;
 mod sessions;
+pub(crate) mod text_input;
 mod workers;
 
 impl App {
@@ -485,10 +483,9 @@ impl App {
             selected_terminal_index: 0,
             right_section: RightSection::Unstaged,
             files_index: 0,
-            files_search_query: String::new(),
+            files_search: TextInput::new(),
             files_search_active: false,
-            commit_input: String::new(),
-            commit_input_cursor: 0,
+            commit_input: TextInput::new(),
             commit_scroll: 0,
             commit_generating: false,
             left_collapsed: false,
@@ -838,17 +835,17 @@ impl App {
     }
 
     pub(crate) fn has_files_search(&self) -> bool {
-        !self.files_search_query.is_empty()
+        !self.files_search.is_empty()
     }
 
     pub(crate) fn clear_files_search(&mut self) {
-        self.files_search_query.clear();
+        self.files_search.clear();
         self.files_search_active = false;
     }
 
     pub(crate) fn update_files_search(&mut self, query: String) -> bool {
-        self.files_search_query = query;
-        if self.files_search_query.is_empty() {
+        self.files_search.set_text(query);
+        if self.files_search.is_empty() {
             return false;
         }
         self.select_files_search_match(0)
@@ -889,11 +886,11 @@ impl App {
     }
 
     fn files_search_matches(&self) -> Vec<(RightSection, usize)> {
-        if self.files_search_query.is_empty() {
+        if self.files_search.is_empty() {
             return Vec::new();
         }
 
-        let needle = self.files_search_query.to_lowercase();
+        let needle = self.files_search.text.to_lowercase();
         let mut matches = Vec::new();
         matches.extend(
             self.unstaged_files
@@ -915,13 +912,11 @@ impl App {
     pub(crate) fn open_rename_session(&mut self) -> Result<()> {
         if let Some(session) = self.selected_session().cloned() {
             let current_name = session.title.unwrap_or_else(|| session.branch_name.clone());
-            let cursor = current_name.len();
             self.input_target = InputTarget::None;
             self.fullscreen_overlay = FullscreenOverlay::None;
             self.prompt = PromptState::RenameSession {
                 session_id: session.id,
-                input: current_name,
-                cursor,
+                input: TextInput::with_text(current_name),
             };
         } else {
             self.set_error("No agent session selected.");
