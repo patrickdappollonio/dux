@@ -1096,12 +1096,11 @@ impl App {
                     if let PromptState::KillRunning(prompt) = &mut self.prompt {
                         prompt.focus = match prompt.focus {
                             KillRunningFocus::List => {
-                                KillRunningFocus::Footer(KillRunningFooterAction::Hovered)
+                                Self::next_kill_running_footer_action(prompt, None, true)
                             }
-                            KillRunningFocus::Footer(action) => action
-                                .next()
-                                .map(KillRunningFocus::Footer)
-                                .unwrap_or(KillRunningFocus::List),
+                            KillRunningFocus::Footer(action) => {
+                                Self::next_kill_running_footer_action(prompt, Some(action), true)
+                            }
                         };
                     }
                 }
@@ -1109,12 +1108,11 @@ impl App {
                     if let PromptState::KillRunning(prompt) = &mut self.prompt {
                         prompt.focus = match prompt.focus {
                             KillRunningFocus::List => {
-                                KillRunningFocus::Footer(KillRunningFooterAction::Visible)
+                                Self::next_kill_running_footer_action(prompt, None, false)
                             }
-                            KillRunningFocus::Footer(action) => action
-                                .previous()
-                                .map(KillRunningFocus::Footer)
-                                .unwrap_or(KillRunningFocus::List),
+                            KillRunningFocus::Footer(action) => {
+                                Self::next_kill_running_footer_action(prompt, Some(action), false)
+                            }
                         };
                     }
                 }
@@ -2032,6 +2030,18 @@ impl App {
         &mut self,
         action: KillRunningFooterAction,
     ) -> Result<()> {
+        let enabled = match &self.prompt {
+            PromptState::KillRunning(prompt) => Self::kill_running_footer_enabled(prompt, action),
+            _ => true,
+        };
+        if !enabled {
+            if matches!(action, KillRunningFooterAction::Selected) {
+                self.set_info(
+                    "Select one or more runtimes before using Kill Selected. Press Space to mark the highlighted row.",
+                );
+            }
+            return Ok(());
+        }
         match action {
             KillRunningFooterAction::Cancel => {
                 self.prompt = PromptState::None;
@@ -2044,6 +2054,71 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn kill_running_footer_enabled(
+        prompt: &KillRunningPrompt,
+        action: KillRunningFooterAction,
+    ) -> bool {
+        match action {
+            KillRunningFooterAction::Cancel => true,
+            KillRunningFooterAction::Selected => !prompt.selected_ids.is_empty(),
+            KillRunningFooterAction::Hovered | KillRunningFooterAction::Visible => {
+                !Self::visible_kill_running_indices(prompt).is_empty()
+            }
+        }
+    }
+
+    fn next_kill_running_footer_action(
+        prompt: &KillRunningPrompt,
+        current: Option<KillRunningFooterAction>,
+        forward: bool,
+    ) -> KillRunningFocus {
+        const ACTIONS: [KillRunningFooterAction; 4] = [
+            KillRunningFooterAction::Cancel,
+            KillRunningFooterAction::Hovered,
+            KillRunningFooterAction::Selected,
+            KillRunningFooterAction::Visible,
+        ];
+
+        let enabled: Vec<KillRunningFooterAction> = ACTIONS
+            .into_iter()
+            .filter(|action| Self::kill_running_footer_enabled(prompt, *action))
+            .collect();
+
+        if enabled.is_empty() {
+            return KillRunningFocus::List;
+        }
+
+        match current {
+            None => {
+                if forward {
+                    KillRunningFocus::Footer(enabled[0])
+                } else {
+                    KillRunningFocus::Footer(*enabled.last().unwrap())
+                }
+            }
+            Some(current) => {
+                let Some(index) = enabled.iter().position(|action| *action == current) else {
+                    return if forward {
+                        KillRunningFocus::Footer(enabled[0])
+                    } else {
+                        KillRunningFocus::Footer(*enabled.last().unwrap())
+                    };
+                };
+                if forward {
+                    if index + 1 < enabled.len() {
+                        KillRunningFocus::Footer(enabled[index + 1])
+                    } else {
+                        KillRunningFocus::List
+                    }
+                } else if index > 0 {
+                    KillRunningFocus::Footer(enabled[index - 1])
+                } else {
+                    KillRunningFocus::List
+                }
+            }
+        }
     }
 
     fn open_selected_browser_entry(&mut self) {
@@ -3274,6 +3349,68 @@ mod tests {
             .find(|runtime| matches!(runtime.id, RuntimeTargetId::Terminal(_)))
             .expect("terminal runtime");
         assert_eq!(terminal.label, "sleep");
+    }
+
+    #[test]
+    fn kill_running_tab_focus_reaches_cancel_button() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::KillRunning(KillRunningPrompt {
+            runtimes: vec![sample_runtime(
+                RuntimeTargetId::Agent("session-1".to_string()),
+                KillableRuntimeKind::Agent,
+                "Codex",
+                "on agent \"agent-branch\" under project \"demo\"",
+            )],
+            filter: TextInput::new(),
+            searching: false,
+            hovered_visible_index: 0,
+            selected_ids: std::collections::HashSet::new(),
+            focus: KillRunningFocus::List,
+        });
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::KillRunning(prompt) => {
+                assert_eq!(
+                    prompt.focus,
+                    KillRunningFocus::Footer(KillRunningFooterAction::Cancel)
+                )
+            }
+            other => panic!("expected kill-running prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kill_running_footer_skips_kill_selected_when_nothing_is_marked() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::KillRunning(KillRunningPrompt {
+            runtimes: vec![sample_runtime(
+                RuntimeTargetId::Agent("session-1".to_string()),
+                KillableRuntimeKind::Agent,
+                "Codex",
+                "on agent \"agent-branch\" under project \"demo\"",
+            )],
+            filter: TextInput::new(),
+            searching: false,
+            hovered_visible_index: 0,
+            selected_ids: std::collections::HashSet::new(),
+            focus: KillRunningFocus::Footer(KillRunningFooterAction::Hovered),
+        });
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::KillRunning(prompt) => {
+                assert_eq!(
+                    prompt.focus,
+                    KillRunningFocus::Footer(KillRunningFooterAction::Visible)
+                )
+            }
+            other => panic!("expected kill-running prompt, got {other:?}"),
+        }
     }
 
     #[test]

@@ -263,24 +263,6 @@ impl KillRunningFooterAction {
         }
     }
 
-    pub(crate) fn next(self) -> Option<Self> {
-        match self {
-            Self::Cancel => Some(Self::Hovered),
-            Self::Hovered => Some(Self::Selected),
-            Self::Selected => Some(Self::Visible),
-            Self::Visible => None,
-        }
-    }
-
-    pub(crate) fn previous(self) -> Option<Self> {
-        match self {
-            Self::Cancel => None,
-            Self::Hovered => Some(Self::Cancel),
-            Self::Selected => Some(Self::Hovered),
-            Self::Visible => Some(Self::Selected),
-        }
-    }
-
     pub(crate) fn action(self) -> Option<KillRunningAction> {
         match self {
             Self::Cancel => None,

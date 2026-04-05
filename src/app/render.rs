@@ -2152,25 +2152,35 @@ impl App {
                         height: 3,
                     };
                     button_rects[index] = rect;
-                    let selected = matches!(prompt.focus, KillRunningFocus::Footer(current) if current == *action);
-                    let is_danger = !matches!(action, KillRunningFooterAction::Cancel);
+                    let enabled = Self::kill_running_footer_enabled(prompt, *action);
+                    let selected = enabled
+                        && matches!(prompt.focus, KillRunningFocus::Footer(current) if current == *action);
+                    let is_danger = enabled && !matches!(action, KillRunningFooterAction::Cancel);
                     let border = if selected {
                         if is_danger {
                             self.theme.button_danger_border
                         } else {
                             self.theme.button_confirm_border
                         }
+                    } else if !enabled {
+                        self.theme.border_normal
                     } else {
                         self.theme.border_normal
                     };
                     let fg = if selected {
                         self.theme.button_active_fg
+                    } else if !enabled {
+                        self.theme.hint_dim_desc_fg
                     } else {
                         self.theme.hint_desc_fg
                     };
                     Paragraph::new(Line::from(Span::styled(
                         action.button_label(),
-                        Style::default().fg(fg).add_modifier(Modifier::BOLD),
+                        if enabled {
+                            Style::default().fg(fg).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(fg)
+                        },
                     )))
                     .alignment(ratatui::layout::Alignment::Center)
                     .block(
