@@ -1,4 +1,3 @@
-use super::render::{cursor_from_wrapped_position, wrap_text_at_width};
 use super::*;
 const MOUSE_WHEEL_LINES: usize = 3;
 const MIN_LEFT_WIDTH_PCT: u16 = 14;
@@ -621,11 +620,8 @@ impl App {
             self.input_target = InputTarget::None;
             return Ok(());
         }
-        // Enter inserts a newline (multi-line commit messages).
-        if key.code == KeyCode::Enter {
-            self.commit_input.insert_char('\n');
-            return Ok(());
-        }
+        // TextInput handles Enter (newline), Up/Down (line nav), and all
+        // editing keys in multiline mode.
         self.commit_input.handle_key(key);
         Ok(())
     }
@@ -687,7 +683,7 @@ impl App {
             self.set_error("Stage files first.");
             return Ok(());
         }
-        if self.commit_generating {
+        if self.commit_input.overlay().is_some() {
             return Ok(());
         }
         let Some(session) = self.selected_session() else {
@@ -716,8 +712,9 @@ impl App {
         let cfg = provider_config(&self.config, &session.provider);
         let prov = provider::create_provider(session.provider.as_str(), cfg);
         let tx = self.worker_tx.clone();
-        self.commit_generating = true;
-        self.set_busy("Generating AI commit message from staged diff…");
+        self.commit_input
+            .set_overlay("Generating commit message\u{2026}");
+        self.set_busy("Generating AI commit message from staged diff\u{2026}");
         thread::spawn(move || match prov.run_oneshot(&prompt, &worktree) {
             Ok(msg) => {
                 let _ = tx.send(WorkerEvent::CommitMessageGenerated(msg));
@@ -746,7 +743,6 @@ impl App {
         match git::commit(&worktree, &self.commit_input.text) {
             Ok(_) => {
                 self.commit_input.clear();
-                self.commit_scroll = 0;
                 let push_key = self.bindings.label_for(Action::PushToRemote);
                 let ai_key = self.bindings.label_for(Action::GenerateCommitMessage);
                 self.set_info(format!("Changes committed successfully. Press {push_key} to push to remote, or {ai_key} to generate an AI message."));
@@ -2730,50 +2726,24 @@ impl App {
         self.fullscreen_overlay = FullscreenOverlay::None;
     }
 
-    fn commit_scroll_max(&self) -> u16 {
-        let Some(text_area) = self.mouse_layout.commit_text_area else {
-            return 0;
-        };
-        let width = text_area.width as usize;
-        if width == 0 {
-            return 0;
-        }
-
-        let wrapped = wrap_text_at_width(&self.commit_input.text, width);
-        let total_lines = wrapped.split('\n').count() as u16;
-        total_lines.saturating_sub(text_area.height)
-    }
-
     fn set_commit_cursor_from_mouse(&mut self, column: u16, row: u16) {
         let Some(text_area) = self.mouse_layout.commit_text_area else {
             self.commit_input.move_end();
             return;
         };
-        let width = text_area.width as usize;
-        if width == 0 {
-            self.commit_input.move_end();
-            return;
-        }
-
-        let relative_row = row
-            .saturating_sub(text_area.y)
-            .saturating_add(self.commit_scroll);
-        let relative_col = usize::from(column.saturating_sub(text_area.x));
-        self.commit_input.cursor = cursor_from_wrapped_position(
-            &self.commit_input.text,
-            width,
-            relative_row,
-            relative_col,
-        );
+        let display_row = usize::from(row.saturating_sub(text_area.y));
+        let display_col = usize::from(column.saturating_sub(text_area.x));
+        self.commit_input
+            .set_cursor_from_display_pos(display_row, display_col);
     }
 
     fn scroll_commit_input(&mut self, down: bool) {
-        let max_scroll = self.commit_scroll_max();
-        if down {
-            self.commit_scroll = (self.commit_scroll + MOUSE_WHEEL_LINES as u16).min(max_scroll);
+        let delta = if down {
+            MOUSE_WHEEL_LINES as isize
         } else {
-            self.commit_scroll = self.commit_scroll.saturating_sub(MOUSE_WHEEL_LINES as u16);
-        }
+            -(MOUSE_WHEEL_LINES as isize)
+        };
+        self.commit_input.scroll_by(delta);
     }
 
     fn scroll_file_selection(&mut self, section: RightSection, down: bool) {
@@ -3209,9 +3179,9 @@ mod tests {
             files_index: 0,
             files_search: TextInput::new(),
             files_search_active: false,
-            commit_input: TextInput::new(),
-            commit_scroll: 0,
-            commit_generating: false,
+            commit_input: TextInput::new()
+                .with_multiline(4)
+                .with_placeholder("Type your commit message\u{2026}"),
             left_width_pct: 20,
             right_width_pct: 23,
             terminal_pane_height_pct: 35,
@@ -4497,12 +4467,12 @@ mod tests {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
         app.commit_input =
-            TextInput::with_text((0..20).map(|i| format!("line {i}\n")).collect::<String>());
-        app.commit_scroll = 0;
+            TextInput::with_text((0..20).map(|i| format!("line {i}\n")).collect::<String>())
+                .with_multiline(4);
 
         app.handle_mouse(mouse(MouseEventKind::ScrollDown, 80, 15));
 
-        assert!(app.commit_scroll > 0);
+        assert!(app.commit_input.scroll_offset() > 0);
         assert_eq!(app.right_section, RightSection::CommitInput);
     }
 

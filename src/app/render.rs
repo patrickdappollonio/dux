@@ -1114,58 +1114,51 @@ impl App {
             .areas(inner);
         self.mouse_layout.commit_text_area = Some(text_area);
 
-        if self.commit_generating {
+        // Update TextInput's display dimensions to match the available area.
+        let text_w = text_area.width as usize;
+        self.commit_input
+            .set_display_width(if text_w > 0 { Some(text_w) } else { None });
+        self.commit_input
+            .set_visible_lines(text_area.height as usize);
+
+        if let Some(overlay) = self.commit_input.overlay() {
+            // Overlay (e.g. "Generating commit message…") with animated dots.
             let dots = ".".repeat((self.tick_count as usize / 5) % 4);
-            let text = format!("Generating commit message{dots}");
+            let text = format!("{overlay}{dots}");
             Paragraph::new(text)
                 .style(Style::default().fg(self.theme.hint_desc_fg))
                 .render(text_area, frame.buffer_mut());
         } else if self.commit_input.is_empty() && !focused {
-            // Placeholder text when not engaged.
+            // Show placeholder when unfocused and empty — nothing to render
+            // (the placeholder is shown only when focused, below).
         } else {
-            let display_text = if self.commit_input.is_empty() {
-                "Type your commit message…"
-            } else {
-                &self.commit_input.text
-            };
-            let style = if self.commit_input.is_empty() {
-                Style::default().fg(self.theme.hint_desc_fg)
-            } else {
-                Style::default()
-            };
+            // Render visible lines from TextInput (handles wrapping + scroll).
+            let visible = self.commit_input.visible_lines();
+            let (cursor_row, cursor_col) = self.commit_input.cursor_display_position();
+            let is_empty = self.commit_input.is_empty();
 
-            let visible_h = text_area.height;
-            let text_w = text_area.width as usize;
-            if text_w > 0 && !self.commit_input.is_empty() {
-                let (row, _) = cursor_pos_in_wrapped(
-                    &self.commit_input.text,
-                    self.commit_input.cursor,
-                    text_w,
-                );
-                if row < self.commit_scroll {
-                    self.commit_scroll = row;
-                } else if row >= self.commit_scroll + visible_h {
-                    self.commit_scroll = row - visible_h + 1;
+            // When empty and focused, show the placeholder.
+            if is_empty {
+                if let Some(ph) = self.commit_input.placeholder() {
+                    Paragraph::new(ph.to_string())
+                        .style(Style::default().fg(self.theme.hint_desc_fg))
+                        .render(text_area, frame.buffer_mut());
                 }
             } else {
-                self.commit_scroll = 0;
+                for (i, line_text) in visible.iter().enumerate() {
+                    if i >= text_area.height as usize {
+                        break;
+                    }
+                    let y = text_area.y + i as u16;
+                    let line_area = Rect::new(text_area.x, y, text_area.width, 1);
+                    Paragraph::new(line_text.as_str()).render(line_area, frame.buffer_mut());
+                }
             }
 
-            let wrapped_text = wrap_text_at_width(display_text, text_w);
-            Paragraph::new(wrapped_text)
-                .style(style)
-                .scroll((self.commit_scroll, 0))
-                .render(text_area, frame.buffer_mut());
-
-            if focused {
-                let (cursor_row, cursor_col) = cursor_pos_in_wrapped(
-                    &self.commit_input.text,
-                    self.commit_input.cursor,
-                    text_w,
-                );
-                let screen_row = cursor_row.saturating_sub(self.commit_scroll);
+            // Position the hardware cursor when focused.
+            if focused && !is_empty {
                 let cx = text_area.x + cursor_col as u16;
-                let cy = text_area.y + screen_row;
+                let cy = text_area.y + cursor_row as u16;
                 if cx < text_area.x + text_area.width && cy < text_area.y + text_area.height {
                     frame.set_cursor_position((cx, cy));
                 }
@@ -2766,10 +2759,25 @@ impl App {
             } = &mut self.prompt
                 && edit_state.stage == MacroEditStage::EditText
             {
-                // popup(64) - outer border(2) - inner border(2) - leading space(1) = 59
-                let inner_w = popup.width.saturating_sub(5) as usize;
-                edit_state.text_input.set_display_width(if inner_w > 0 {
-                    Some(inner_w)
+                // Replicate the layout chain to compute actual text width:
+                // popup → outer border inner → layout (label + text + hints)
+                // → text border inner → minus leading space(1).
+                let outer_block = Block::bordered();
+                let outer_inner = outer_block.inner(popup);
+                let text_bordered = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(1),
+                        Constraint::Min(3),
+                        Constraint::Length(1),
+                    ])
+                    .split(outer_inner)[1];
+                let inner_block = Block::bordered();
+                let text_inner = inner_block.inner(text_bordered);
+                // Subtract 1 for the leading space prefix on each rendered line.
+                let wrap_w = text_inner.width.saturating_sub(1) as usize;
+                edit_state.text_input.set_display_width(if wrap_w > 0 {
+                    Some(wrap_w)
                 } else {
                     None
                 });
@@ -2844,7 +2852,7 @@ impl App {
                     Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
                 }
                 MacroEditStage::EditText => {
-                    let [label_area, text_area, hint_area] = Layout::default()
+                    let [label_area, bordered_area, hint_area] = Layout::default()
                         .direction(Direction::Vertical)
                         .constraints([
                             Constraint::Length(1),
@@ -2859,7 +2867,15 @@ impl App {
                     )))
                     .render(label_area, frame.buffer_mut());
 
-                    self.render_multiline_input(&edit_state.text_input, text_area, frame);
+                    // Draw border around the text area; pass inner rect to renderer.
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED)
+                        .border_style(Style::default().fg(self.theme.overlay_border));
+                    let text_inner = block.inner(bordered_area);
+                    block.render(bordered_area, frame.buffer_mut());
+
+                    self.render_multiline_input(&edit_state.text_input, text_inner, frame);
 
                     let hints =
                         self.edit_macro_hints(&[("Enter", "newline"), ("Esc", "save & close")]);
@@ -2991,27 +3007,24 @@ impl App {
             .render(area, frame.buffer_mut());
     }
 
-    /// Render a multiline TextInput with cursor in a bordered box.
+    /// Render a multiline TextInput into the given area.
+    ///
+    /// The caller is responsible for drawing any border — this method renders
+    /// text directly into `area`. It sets the display width on the input to
+    /// match the available width (minus 1 for the leading space padding on
+    /// each line).
     fn render_multiline_input(&self, input: &TextInput, area: Rect, frame: &mut Frame) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_set(border::ROUNDED)
-            .border_style(Style::default().fg(self.theme.overlay_border));
-        let inner = block.inner(area);
-        block.render(area, frame.buffer_mut());
-
         let visible = input.visible_lines();
         let (cursor_row, cursor_col) = input.cursor_display_position();
 
         for (i, line_text) in visible.iter().enumerate() {
-            if i >= inner.height as usize {
+            if i >= area.height as usize {
                 break;
             }
-            let y = inner.y + i as u16;
-            let line_area = Rect::new(inner.x, y, inner.width, 1);
+            let y = area.y + i as u16;
+            let line_area = Rect::new(area.x, y, area.width, 1);
 
             if i == cursor_row {
-                // Render line with cursor highlight
                 let col_byte = char_col_to_byte(line_text, cursor_col);
                 if col_byte < line_text.len() {
                     let before = &line_text[..col_byte];
@@ -3369,9 +3382,10 @@ fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {
     Some(format!(" {scrolled}/{total} {noun} "))
 }
 
-/// Pre-wrap text at exact character boundaries to match the manual cursor
-/// position calculation used in the commit input box.
-pub(crate) fn wrap_text_at_width(text: &str, width: usize) -> String {
+/// Pre-wrap text at exact character boundaries.
+/// Retained for unit tests that verify the wrapping algorithm.
+#[cfg(test)]
+fn wrap_text_at_width(text: &str, width: usize) -> String {
     if width == 0 {
         return text.to_string();
     }
@@ -3394,8 +3408,8 @@ pub(crate) fn wrap_text_at_width(text: &str, width: usize) -> String {
 }
 
 /// Compute the (row, col) position of a cursor in text that wraps at `width`.
-/// This mirrors the inline cursor calculation used in `render_commit_input_inner`.
-pub(crate) fn cursor_pos_in_wrapped(text: &str, cursor: usize, width: usize) -> (u16, usize) {
+#[cfg(test)]
+fn cursor_pos_in_wrapped(text: &str, cursor: usize, width: usize) -> (u16, usize) {
     let mut row: u16 = 0;
     let mut col: usize = 0;
     for (i, ch) in text.char_indices() {
@@ -3416,12 +3430,8 @@ pub(crate) fn cursor_pos_in_wrapped(text: &str, cursor: usize, width: usize) -> 
     (row, col)
 }
 
-pub(crate) fn cursor_from_wrapped_position(
-    text: &str,
-    width: usize,
-    row: u16,
-    col: usize,
-) -> usize {
+#[cfg(test)]
+fn cursor_from_wrapped_position(text: &str, width: usize, row: u16, col: usize) -> usize {
     if width == 0 || text.is_empty() {
         return 0;
     }

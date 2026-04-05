@@ -14,6 +14,13 @@ pub struct TextInput {
     pub text: String,
     pub cursor: usize,
     multiline: Option<MultilineState>,
+    /// Optional placeholder text shown when the input is empty.
+    placeholder: Option<String>,
+    /// Temporary overlay message that replaces the display (e.g. a loading
+    /// indicator). While set, the underlying text is preserved and any edits
+    /// are applied normally — when the overlay is dismissed the current text
+    /// is shown.
+    overlay: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -38,6 +45,8 @@ impl TextInput {
             text: String::new(),
             cursor: 0,
             multiline: None,
+            placeholder: None,
+            overlay: None,
         }
     }
 
@@ -47,7 +56,37 @@ impl TextInput {
             text,
             cursor,
             multiline: None,
+            placeholder: None,
+            overlay: None,
         }
+    }
+
+    /// Set placeholder text shown when the input is empty.
+    pub fn with_placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.placeholder = Some(placeholder.into());
+        self
+    }
+
+    /// Returns the placeholder text, if set, for rendering when the input is empty.
+    pub fn placeholder(&self) -> Option<&str> {
+        self.placeholder.as_deref()
+    }
+
+    /// Set a temporary overlay message that replaces the display.
+    /// The underlying text is preserved; edits applied while the overlay
+    /// is active take effect normally and are visible once dismissed.
+    pub fn set_overlay(&mut self, message: impl Into<String>) {
+        self.overlay = Some(message.into());
+    }
+
+    /// Dismiss the overlay, restoring the normal text display.
+    pub fn clear_overlay(&mut self) {
+        self.overlay = None;
+    }
+
+    /// Returns the overlay message if one is active.
+    pub fn overlay(&self) -> Option<&str> {
+        self.overlay.as_deref()
     }
 
     /// Enable multiline editing with a visible line limit for rendering.
@@ -252,6 +291,38 @@ impl TextInput {
         let (vrow, vcol) = cursor_visual_pos(&self.text, self.cursor, width);
         let offset = self.scroll_offset();
         (vrow.saturating_sub(offset), vcol)
+    }
+
+    /// Set the cursor position from a visual (row, col) relative to the scroll
+    /// offset, as produced by a mouse click. The row is relative to the visible
+    /// area (0 = first visible line), not the absolute visual row.
+    pub fn set_cursor_from_display_pos(&mut self, display_row: usize, display_col: usize) {
+        let offset = self.scroll_offset();
+        let abs_row = offset + display_row;
+        let width = self.wrap_width();
+        self.cursor = byte_offset_at_visual(&self.text, abs_row, display_col, width);
+    }
+
+    /// Scroll by a signed number of lines (positive = down, negative = up).
+    /// Clamps to valid range. No-op in single-line mode.
+    pub fn scroll_by(&mut self, delta: isize) {
+        let Some(m) = &mut self.multiline else {
+            return;
+        };
+        let total = visual_line_count(&self.text, m.display_width);
+        let max_scroll = total.saturating_sub(m.visible_lines);
+        if delta >= 0 {
+            m.scroll_offset = (m.scroll_offset + delta as usize).min(max_scroll);
+        } else {
+            m.scroll_offset = m.scroll_offset.saturating_sub(delta.unsigned_abs());
+        }
+    }
+
+    /// Update the visible line count (e.g. when the render area height changes).
+    pub fn set_visible_lines(&mut self, visible: usize) {
+        if let Some(m) = &mut self.multiline {
+            m.visible_lines = visible;
+        }
     }
 
     /// Get the effective wrap width. `None` means no wrapping (use usize::MAX).

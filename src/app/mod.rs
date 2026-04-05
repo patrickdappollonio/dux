@@ -65,8 +65,6 @@ pub struct App {
     pub(crate) files_search: TextInput,
     pub(crate) files_search_active: bool,
     pub(crate) commit_input: TextInput,
-    pub(crate) commit_scroll: u16,
-    pub(crate) commit_generating: bool,
     pub(crate) left_width_pct: u16,
     pub(crate) right_width_pct: u16,
     pub(crate) terminal_pane_height_pct: u16,
@@ -634,9 +632,9 @@ impl App {
             files_index: 0,
             files_search: TextInput::new(),
             files_search_active: false,
-            commit_input: TextInput::new(),
-            commit_scroll: 0,
-            commit_generating: false,
+            commit_input: TextInput::new()
+                .with_multiline(4)
+                .with_placeholder("Type your commit message\u{2026}"),
             left_collapsed: false,
             right_collapsed: false,
             right_hidden: false,
