@@ -55,8 +55,6 @@ fn contains_point(rect: Rect, column: u16, row: u16) -> bool {
         && row < rect.y + rect.height
 }
 
-use super::text_input::clamp_cursor;
-
 fn cursor_from_single_line_position(
     text: &str,
     text_area: Rect,
@@ -198,7 +196,6 @@ impl App {
                     self.prompt = PromptState::Command {
                         input: TextInput::new(),
                         selected: 0,
-                        searching: false,
                     };
                     self.set_info("Command palette opened.");
                 }
@@ -949,17 +946,11 @@ impl App {
 
     fn handle_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
         if matches!(self.prompt, PromptState::Command { .. }) {
-            // Determine search state and do binding lookup before taking a mutable borrow.
-            let is_searching = matches!(
-                self.prompt,
-                PromptState::Command {
-                    searching: true,
-                    ..
-                }
-            );
+            // Plain character keys always go to TextInput so j/k etc. can be
+            // typed without conflicting with navigation bindings.
             let is_plain_char = matches!(key.code, KeyCode::Char(_))
                 && !key.modifiers.contains(KeyModifiers::CONTROL);
-            let action = if is_searching && is_plain_char {
+            let action = if is_plain_char {
                 None
             } else {
                 self.bindings.lookup(&key, BindingScope::Palette)
@@ -967,22 +958,7 @@ impl App {
 
             match action {
                 Some(Action::CloseOverlay) => {
-                    if is_searching {
-                        if let PromptState::Command { searching, .. } = &mut self.prompt {
-                            *searching = false;
-                        }
-                    } else {
-                        self.prompt = PromptState::None;
-                    }
-                }
-                Some(Action::SearchToggle) if !is_searching => {
-                    if let PromptState::Command {
-                        input, searching, ..
-                    } = &mut self.prompt
-                    {
-                        input.cursor = clamp_cursor(&input.text, input.text.len());
-                        *searching = true;
-                    }
+                    self.prompt = PromptState::None;
                 }
                 Some(Action::MoveDown) => {
                     if let PromptState::Command {
@@ -1003,13 +979,7 @@ impl App {
                     }
                 }
                 Some(Action::Confirm) => {
-                    if is_searching {
-                        if let PromptState::Command { searching, .. } = &mut self.prompt {
-                            *searching = false;
-                        }
-                    } else {
-                        self.execute_selected_command_palette();
-                    }
+                    self.execute_selected_command_palette();
                 }
                 _ => {
                     // Text input fallback: Tab (autocomplete), then delegate to TextInput.
@@ -1892,7 +1862,7 @@ impl App {
             _ => return,
         };
         if let PromptState::Command { input, .. } = &mut self.prompt {
-            let prefix_width = 2; // "> " or "/ "
+            let prefix_width = 2; // "> "
             input.cursor =
                 cursor_from_single_line_position(&input.text, input_area, prefix_width, column);
         }
@@ -4391,12 +4361,41 @@ mod tests {
     }
 
     #[test]
+    fn command_palette_jk_keys_insert_text_instead_of_navigating() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::Command {
+            input: TextInput::new(),
+            selected: 0,
+        };
+
+        // Press 'j' — should insert into text, not move selection down.
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::Command { input, selected, .. } => {
+                assert_eq!(input.text, "j");
+                assert_eq!(*selected, 0, "selection should stay at 0, not move down");
+            }
+            other => panic!("expected command prompt, got {other:?}"),
+        }
+
+        // Press 'k' — should also insert, not move selection up.
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::Command { input, .. } => {
+                assert_eq!(input.text, "jk");
+            }
+            other => panic!("expected command prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn mouse_click_command_palette_row_selects_then_double_click_executes() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::Command {
             input: TextInput::with_text("help".to_string()),
             selected: 0,
-            searching: false,
         };
         install_command_overlay(&mut app, 1);
 
@@ -4417,7 +4416,6 @@ mod tests {
         app.prompt = PromptState::Command {
             input: TextInput::with_text("help".to_string()),
             selected: 0,
-            searching: false,
         };
         install_command_overlay(&mut app, 1);
 
@@ -5063,7 +5061,6 @@ mod tests {
         app.prompt = PromptState::Command {
             input: TextInput::with_text("help".to_string()),
             selected: 0,
-            searching: false,
         };
         install_command_overlay(&mut app, 1);
 

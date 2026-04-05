@@ -303,7 +303,6 @@ pub(crate) enum PromptState {
     Command {
         input: TextInput,
         selected: usize,
-        searching: bool,
     },
     BrowseProjects {
         current_dir: PathBuf,
