@@ -2764,16 +2764,15 @@ impl App {
                 editing: Some(edit_state),
                 ..
             } = &mut self.prompt
+                && edit_state.stage == MacroEditStage::EditText
             {
-                if edit_state.stage == MacroEditStage::EditText {
-                    // Inner width = popup - border(2) - padding(1 leading space)
-                    let inner_w = popup.width.saturating_sub(4) as usize;
-                    edit_state.text_input.set_display_width(if inner_w > 0 {
-                        Some(inner_w)
-                    } else {
-                        None
-                    });
-                }
+                // Inner width = popup - border(2) - padding(1 leading space)
+                let inner_w = popup.width.saturating_sub(4) as usize;
+                edit_state.text_input.set_display_width(if inner_w > 0 {
+                    Some(inner_w)
+                } else {
+                    None
+                });
             }
         }
 

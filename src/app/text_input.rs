@@ -60,10 +60,6 @@ impl TextInput {
         self
     }
 
-    pub fn is_multiline(&self) -> bool {
-        self.multiline.is_some()
-    }
-
     /// Set the display width for soft-wrapping in multiline mode.
     /// Lines longer than this width are wrapped visually. Pass `None` to disable.
     pub fn set_display_width(&mut self, width: Option<usize>) {
@@ -221,6 +217,7 @@ impl TextInput {
     }
 
     /// Total number of visual lines (accounting for soft-wrap).
+    #[allow(dead_code)] // public API for callers; exercised by tests
     pub fn total_lines(&self) -> usize {
         visual_line_count(&self.text, self.wrap_width())
     }
@@ -231,11 +228,6 @@ impl TextInput {
             .as_ref()
             .map(|m| m.scroll_offset)
             .unwrap_or(0)
-    }
-
-    /// Maximum number of visible lines, if multiline is enabled.
-    pub fn visible_line_count(&self) -> Option<usize> {
-        self.multiline.as_ref().map(|m| m.visible_lines)
     }
 
     /// Returns the visual lines currently visible for rendering
