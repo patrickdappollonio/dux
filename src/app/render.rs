@@ -1905,6 +1905,390 @@ impl App {
                     offset: state.offset(),
                 };
             }
+            PromptState::KillRunning(prompt) => {
+                self.render_dim_overlay(frame);
+                let popup = centered_rect(78, 72, frame.area());
+                Clear.render(popup, frame.buffer_mut());
+
+                let visible_indices = Self::visible_kill_running_indices(prompt);
+                let items = if visible_indices.is_empty() {
+                    vec![ListItem::new("No matching running agents or terminals.")]
+                } else {
+                    let label_col = visible_indices
+                        .iter()
+                        .filter_map(|index| prompt.runtimes.get(*index))
+                        .map(|runtime| runtime.label.len())
+                        .max()
+                        .unwrap_or(0)
+                        .min(28);
+                    visible_indices
+                        .iter()
+                        .filter_map(|index| prompt.runtimes.get(*index))
+                        .map(|runtime| {
+                            let checked = if prompt.selected_ids.contains(&runtime.id) {
+                                "[x]"
+                            } else {
+                                "[ ]"
+                            };
+                            let label = if runtime.label.chars().count() > label_col {
+                                runtime.label.chars().take(label_col).collect::<String>()
+                            } else {
+                                runtime.label.clone()
+                            };
+                            let label_padded = format!("{label:label_col$}");
+                            ListItem::new(Line::from(vec![
+                                Span::styled(
+                                    format!("{checked} "),
+                                    Style::default().fg(self.theme.hint_key_fg),
+                                ),
+                                Span::styled(
+                                    format!("{:>5} ", runtime.kind.badge()),
+                                    Style::default()
+                                        .fg(self.theme.help_section_header_fg)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(
+                                    label_padded,
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(
+                                    format!("  {}", runtime.context),
+                                    Style::default().fg(self.theme.hint_desc_fg),
+                                ),
+                            ]))
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let mut state = ListState::default().with_selected(Some(
+                    prompt
+                        .hovered_visible_index
+                        .min(visible_indices.len().saturating_sub(1)),
+                ));
+                let show_top_input = prompt.searching || !prompt.filter.is_empty();
+                let (top_area, body_area) = if show_top_input {
+                    let [input_area, rest] = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([Constraint::Length(3), Constraint::Min(6)])
+                        .areas(popup);
+                    (Some(input_area), rest)
+                } else {
+                    (None, popup)
+                };
+                let [list_area, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(6), Constraint::Length(3)])
+                    .areas(body_area);
+
+                let search_key = self.bindings.label_for(Action::SearchToggle);
+                let toggle_key = self.bindings.label_for(Action::ToggleMarked);
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let next_key = self.bindings.label_for(Action::FocusNext);
+                let prev_key = self.bindings.label_for(Action::FocusPrev);
+                let mut hint_spans = vec![Span::raw(" ")];
+                if prompt.searching {
+                    hint_spans.extend(self.theme.key_badge_default(&confirm_key));
+                    hint_spans.push(Span::styled(
+                        " done  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                    hint_spans.extend(self.theme.key_badge_default(&close_key));
+                    hint_spans.push(Span::styled(
+                        " clear",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                } else {
+                    hint_spans.extend(self.theme.key_badge_default(&toggle_key));
+                    hint_spans.push(Span::styled(
+                        " select  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                    hint_spans.extend(self.theme.key_badge_default(&search_key));
+                    hint_spans.push(Span::styled(
+                        " search  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                    hint_spans.extend(self.theme.key_badge_default(&next_key));
+                    hint_spans.push(Span::styled(
+                        "/",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                    hint_spans.extend(self.theme.key_badge_default(&prev_key));
+                    hint_spans.push(Span::styled(
+                        " actions  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                    hint_spans.extend(self.theme.key_badge_default(&confirm_key));
+                    hint_spans.push(Span::styled(
+                        " use",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                }
+
+                let title = if prompt.searching {
+                    "Kill Running (searching)"
+                } else {
+                    "Kill Running"
+                };
+                if let Some(input_area) = top_area {
+                    let input_block = self.themed_overlay_block(title);
+                    let input_inner = input_block.inner(input_area);
+                    Paragraph::new(render_single_line_cursor_input(
+                        "/ ",
+                        &prompt.filter.text,
+                        prompt.filter.cursor,
+                        self.theme.input_cursor_fg,
+                        self.theme.input_cursor_bg,
+                    ))
+                    .block(input_block)
+                    .render(input_area, frame.buffer_mut());
+                    let list_block = Block::default()
+                        .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                        .border_type(ratatui::widgets::BorderType::Rounded)
+                        .border_style(Style::default().fg(self.theme.overlay_border))
+                        .title_bottom(Line::from(hint_spans));
+                    let list_inner = list_block.inner(list_area);
+                    StatefulWidget::render(
+                        List::new(items)
+                            .block(list_block)
+                            .highlight_style(self.theme.selection_style()),
+                        list_area,
+                        frame.buffer_mut(),
+                        &mut state,
+                    );
+                    self.overlay_layout.active = OverlayMouseLayout::KillRunning {
+                        input: Some(input_inner),
+                        list: list_inner,
+                        items: visible_indices.len(),
+                        offset: state.offset(),
+                        cancel_button: Rect::default(),
+                        hovered_button: Rect::default(),
+                        selected_button: Rect::default(),
+                        visible_button: Rect::default(),
+                    };
+                } else {
+                    let list_block = self
+                        .themed_overlay_block(title)
+                        .title_bottom(Line::from(hint_spans));
+                    let list_inner = list_block.inner(list_area);
+                    StatefulWidget::render(
+                        List::new(items)
+                            .block(list_block)
+                            .highlight_style(self.theme.selection_style()),
+                        list_area,
+                        frame.buffer_mut(),
+                        &mut state,
+                    );
+                    self.overlay_layout.active = OverlayMouseLayout::KillRunning {
+                        input: None,
+                        list: list_inner,
+                        items: visible_indices.len(),
+                        offset: state.offset(),
+                        cancel_button: Rect::default(),
+                        hovered_button: Rect::default(),
+                        selected_button: Rect::default(),
+                        visible_button: Rect::default(),
+                    };
+                }
+
+                let buttons = [
+                    KillRunningFooterAction::Cancel,
+                    KillRunningFooterAction::Hovered,
+                    KillRunningFooterAction::Selected,
+                    KillRunningFooterAction::Visible,
+                ];
+                let gap = 2u16;
+                let button_widths = buttons.map(|action| action.button_label().len() as u16 + 6);
+                let total_width = button_widths.iter().sum::<u16>() + gap * 3;
+                let start_x = buttons_area.x + buttons_area.width.saturating_sub(total_width) / 2;
+                let mut cursor_x = start_x;
+                let mut button_rects = [Rect::default(); 4];
+                for (index, action) in buttons.iter().enumerate() {
+                    let rect = Rect {
+                        x: cursor_x,
+                        y: buttons_area.y,
+                        width: button_widths[index],
+                        height: 3,
+                    };
+                    button_rects[index] = rect;
+                    let selected = matches!(prompt.focus, KillRunningFocus::Footer(current) if current == *action);
+                    let is_danger = !matches!(action, KillRunningFooterAction::Cancel);
+                    let border = if selected {
+                        if is_danger {
+                            self.theme.button_danger_border
+                        } else {
+                            self.theme.button_confirm_border
+                        }
+                    } else {
+                        self.theme.border_normal
+                    };
+                    let fg = if selected {
+                        self.theme.button_active_fg
+                    } else {
+                        self.theme.hint_desc_fg
+                    };
+                    Paragraph::new(Line::from(Span::styled(
+                        action.button_label(),
+                        Style::default().fg(fg).add_modifier(Modifier::BOLD),
+                    )))
+                    .alignment(ratatui::layout::Alignment::Center)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_set(border::ROUNDED)
+                            .border_style(Style::default().fg(border)),
+                    )
+                    .render(rect, frame.buffer_mut());
+                    cursor_x += button_widths[index] + gap;
+                }
+                self.overlay_layout.active = OverlayMouseLayout::KillRunning {
+                    input: match self.overlay_layout.active {
+                        OverlayMouseLayout::KillRunning { input, .. } => input,
+                        _ => None,
+                    },
+                    list: match self.overlay_layout.active {
+                        OverlayMouseLayout::KillRunning { list, .. } => list,
+                        _ => Rect::default(),
+                    },
+                    items: visible_indices.len(),
+                    offset: state.offset(),
+                    cancel_button: button_rects[0],
+                    hovered_button: button_rects[1],
+                    selected_button: button_rects[2],
+                    visible_button: button_rects[3],
+                };
+            }
+            PromptState::ConfirmKillRunning(confirm_prompt) => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(56, 32, frame.area());
+                Clear.render(area, frame.buffer_mut());
+                let outer = self.themed_overlay_block("Confirm Kill");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                let targets = confirm_prompt.target_ids.len();
+                let (agent_count, terminal_count) = confirm_prompt.target_ids.iter().fold(
+                    (0usize, 0usize),
+                    |(agents, terminals), target_id| match target_id {
+                        RuntimeTargetId::Agent(_) => (agents + 1, terminals),
+                        RuntimeTargetId::Terminal(_) => (agents, terminals + 1),
+                    },
+                );
+                let mut summary = Vec::new();
+                if agent_count > 0 {
+                    summary.push(format!(
+                        "{agent_count} agent{}",
+                        if agent_count == 1 { "" } else { "s" }
+                    ));
+                }
+                if terminal_count > 0 {
+                    summary.push(format!(
+                        "{terminal_count} terminal{}",
+                        if terminal_count == 1 { "" } else { "s" }
+                    ));
+                }
+                let lines = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw(format!(
+                            " {} will stop ",
+                            confirm_prompt.action.button_label()
+                        )),
+                        Span::styled(
+                            format!(
+                                "{targets} running process{}",
+                                if targets == 1 { "" } else { "es" }
+                            ),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("."),
+                    ]),
+                    Line::from(format!(" Affected: {}", summary.join(" and "))),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " In-progress CLI work will be lost immediately.",
+                        Style::default().fg(self.theme.warning_fg),
+                    )),
+                    Line::from(Span::styled(
+                        " Worktree files remain on disk for review or relaunch.",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )),
+                ];
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let btn_width = 16u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let kill_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                let (cancel_border, cancel_fg) = if !confirm_prompt.confirm_selected {
+                    (
+                        self.theme.button_confirm_border,
+                        self.theme.button_active_fg,
+                    )
+                } else {
+                    (self.theme.border_normal, self.theme.hint_desc_fg)
+                };
+                let (kill_border, kill_fg) = if confirm_prompt.confirm_selected {
+                    (self.theme.button_danger_border, self.theme.button_active_fg)
+                } else {
+                    (self.theme.border_normal, self.theme.hint_desc_fg)
+                };
+
+                Paragraph::new(Line::from(Span::styled(
+                    "Cancel",
+                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED)
+                        .border_style(Style::default().fg(cancel_border)),
+                )
+                .render(cancel_area, frame.buffer_mut());
+
+                Paragraph::new(Line::from(Span::styled(
+                    "Kill",
+                    Style::default().fg(kill_fg).add_modifier(Modifier::BOLD),
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED)
+                        .border_style(Style::default().fg(kill_border)),
+                )
+                .render(kill_area, frame.buffer_mut());
+                self.overlay_layout.active = OverlayMouseLayout::ConfirmKillRunning {
+                    cancel_button: cancel_area,
+                    kill_button: kill_area,
+                };
+            }
             PromptState::ConfirmDeleteAgent {
                 branch_name,
                 confirm_selected,
