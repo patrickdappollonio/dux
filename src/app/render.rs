@@ -1919,7 +1919,7 @@ impl App {
                     let label_col = visible_indices
                         .iter()
                         .filter_map(|index| prompt.runtimes.get(*index))
-                        .map(|runtime| runtime.label.len())
+                        .map(|runtime| runtime.label.chars().count())
                         .max()
                         .unwrap_or(0)
                         .min(28);
@@ -1938,16 +1938,18 @@ impl App {
                                 runtime.label.clone()
                             };
                             let label_padded = format!("{label:label_col$}");
+                            let kind_color = match runtime.kind {
+                                KillableRuntimeKind::Agent => self.theme.session_active,
+                                KillableRuntimeKind::Terminal => self.theme.session_detached,
+                            };
                             ListItem::new(Line::from(vec![
                                 Span::styled(
                                     format!("{checked} "),
                                     Style::default().fg(self.theme.hint_key_fg),
                                 ),
                                 Span::styled(
-                                    format!("{:>5} ", runtime.kind.badge()),
-                                    Style::default()
-                                        .fg(self.theme.help_section_header_fg)
-                                        .add_modifier(Modifier::BOLD),
+                                    format!("{:>6} ", runtime.kind.badge()),
+                                    Style::default().fg(kind_color).add_modifier(Modifier::BOLD),
                                 ),
                                 Span::styled(
                                     label_padded,
@@ -1955,7 +1957,9 @@ impl App {
                                 ),
                                 Span::styled(
                                     format!("  {}", runtime.context),
-                                    Style::default().fg(self.theme.hint_desc_fg),
+                                    Style::default()
+                                        .fg(self.theme.hint_dim_desc_fg)
+                                        .add_modifier(Modifier::DIM),
                                 ),
                             ]))
                         })

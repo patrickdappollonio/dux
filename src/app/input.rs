@@ -2804,7 +2804,6 @@ mod tests {
     use std::sync::{Arc, Mutex, mpsc};
 
     use crate::app::{
-        App, CenterMode, FocusPane, FullscreenOverlay, InputTarget, LeftSection, MouseLayoutState,
         App, CenterMode, ConfirmKillRunningPrompt, FocusPane, FullscreenOverlay, InputTarget,
         KillRunningAction, KillRunningFocus, KillRunningFooterAction, KillRunningPrompt,
         KillableRuntime, KillableRuntimeKind, LeftSection, MouseLayoutState, OverlayMouseLayout,
@@ -3226,18 +3225,24 @@ mod tests {
         match &app.prompt {
             PromptState::KillRunning(prompt) => {
                 assert_eq!(prompt.runtimes.len(), 2);
-                assert!(
-                    prompt
-                        .runtimes
-                        .iter()
-                        .any(|runtime| matches!(runtime.id, RuntimeTargetId::Agent(_)))
-                );
-                assert!(
-                    prompt
-                        .runtimes
-                        .iter()
-                        .any(|runtime| matches!(runtime.id, RuntimeTargetId::Terminal(_)))
-                );
+                let agent = prompt
+                    .runtimes
+                    .iter()
+                    .find(|runtime| matches!(runtime.id, RuntimeTargetId::Agent(_)))
+                    .expect("agent runtime");
+                assert_eq!(agent.label, "agent-branch");
+                assert!(agent.context.contains("project: demo"));
+                assert!(agent.context.contains("provider: codex"));
+                assert!(agent.context.contains("agent: agent-branch"));
+
+                let terminal = prompt
+                    .runtimes
+                    .iter()
+                    .find(|runtime| matches!(runtime.id, RuntimeTargetId::Terminal(_)))
+                    .expect("terminal runtime");
+                assert_eq!(terminal.label, "shell");
+                assert!(terminal.context.contains("project: demo"));
+                assert!(terminal.context.contains("agent: agent-branch"));
             }
             other => panic!("expected kill-running prompt, got {other:?}"),
         }
@@ -3437,8 +3442,7 @@ mod tests {
                     "agent-branch",
                     "demo / codex / agent-branch",
                 )],
-                filter: String::new(),
-                filter_cursor: 0,
+                filter: TextInput::new(),
                 searching: false,
                 hovered_visible_index: 0,
                 selected_ids: std::iter::once(RuntimeTargetId::Agent("session-1".to_string()))

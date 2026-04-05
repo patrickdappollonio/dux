@@ -207,8 +207,8 @@ impl KillableRuntimeKind {
 
     pub(crate) fn badge(self) -> &'static str {
         match self {
-            Self::Agent => "Agent",
-            Self::Terminal => "Term",
+            Self::Agent => "AGENT",
+            Self::Terminal => "TERM",
         }
     }
 }
