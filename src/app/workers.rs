@@ -46,8 +46,7 @@ impl App {
                     self.clamp_files_cursor();
                 }
                 WorkerEvent::CommitMessageGenerated(msg) => {
-                    self.commit_input = msg;
-                    self.commit_input_cursor = self.commit_input.len();
+                    self.commit_input.set_text(msg);
                     self.commit_generating = false;
                     self.input_target = InputTarget::CommitMessage;
                     {
