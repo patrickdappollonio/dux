@@ -2854,6 +2854,7 @@ mod tests {
         KillableRuntime, KillableRuntimeKind, LeftSection, MouseLayoutState, OverlayMouseLayout,
         OverlayMouseLayoutState, PromptState, RightSection, RuntimeTargetId, TextInput,
     };
+    use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
     use crate::editor::{DetectedEditor, EditorKind};
     use crate::keybindings::{Action, BINDING_DEFS, BindingScope, RuntimeBindings};
@@ -2978,6 +2979,7 @@ mod tests {
             prompt: PromptState::None,
             input_target: InputTarget::None,
             session_surface: crate::model::SessionSurface::Agent,
+            clipboard: Clipboard::new(),
             worker_tx,
             worker_rx,
             providers: std::collections::HashMap::new(),
@@ -3099,6 +3101,14 @@ mod tests {
         app.overlay_layout.active = OverlayMouseLayout::RenameSession {
             input: Rect::new(24, 10, 30, 1),
         };
+    }
+
+    fn clipboard_ok(_: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn clipboard_fail(_: &str) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!("linux clipboard unavailable"))
     }
 
     fn sample_runtime(
@@ -3620,6 +3630,59 @@ mod tests {
                 .text()
                 .contains("Select an agent session first to fork.")
         );
+    }
+
+    #[test]
+    fn copy_path_copies_selected_session_worktree() {
+        let mut app = test_app(default_bindings());
+        let worktree_path = app.sessions[0].worktree_path.clone();
+        app.clipboard = Clipboard::from_fn(clipboard_ok);
+
+        app.copy_selected_path().unwrap();
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
+        assert!(app.status.text().contains(&worktree_path));
+    }
+
+    #[test]
+    fn copy_path_copies_selected_project_path() {
+        let mut app = test_app(default_bindings());
+        let project_path = app.projects[0].path.clone();
+        app.selected_left = 0;
+        app.clipboard = Clipboard::from_fn(clipboard_ok);
+
+        app.copy_selected_path().unwrap();
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
+        assert!(app.status.text().contains(&project_path));
+    }
+
+    #[test]
+    fn copy_path_requires_project_or_session_selection() {
+        let mut app = test_app(default_bindings());
+        app.left_items_cache.clear();
+        app.selected_left = 0;
+
+        app.copy_selected_path().unwrap();
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            app.status
+                .text()
+                .contains("No project or agent selected. Select one from the sidebar first.")
+        );
+    }
+
+    #[test]
+    fn copy_path_failure_sets_error_status() {
+        let mut app = test_app(default_bindings());
+        app.clipboard = Clipboard::from_fn(clipboard_fail);
+
+        app.copy_selected_path().unwrap();
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(app.status.text().contains("Copy path failed"));
+        assert!(app.status.text().contains("linux clipboard unavailable"));
     }
 
     #[test]
@@ -4372,7 +4435,9 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .unwrap();
         match &app.prompt {
-            PromptState::Command { input, selected, .. } => {
+            PromptState::Command {
+                input, selected, ..
+            } => {
                 assert_eq!(input.text, "j");
                 assert_eq!(*selected, 0, "selection should stay at 0, not move down");
             }

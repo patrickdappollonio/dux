@@ -25,6 +25,7 @@ use ratatui::widgets::{
 };
 use uuid::Uuid;
 
+use crate::clipboard::Clipboard;
 use crate::config::{
     Config, DuxPaths, ProjectConfig, ProviderCommandConfig, check_provider_available,
     ensure_config, save_config, validate_keys,
@@ -83,6 +84,7 @@ pub struct App {
     pub(crate) prompt: PromptState,
     pub(crate) input_target: InputTarget,
     pub(crate) session_surface: SessionSurface,
+    pub(crate) clipboard: Clipboard,
     pub(crate) worker_tx: Sender<WorkerEvent>,
     pub(crate) worker_rx: Receiver<WorkerEvent>,
     pub(crate) providers: HashMap<String, PtyClient>,
@@ -621,6 +623,7 @@ impl App {
             prompt: PromptState::None,
             input_target: InputTarget::None,
             session_surface: SessionSurface::Agent,
+            clipboard: Clipboard::new(),
             worker_tx,
             worker_rx,
             providers: HashMap::new(),
