@@ -694,7 +694,7 @@ impl App {
             let agent_name = self.session_label(session);
             let provider_name = session.provider.as_str();
             let label = format!("{} {agent_name}", Self::title_case_word(provider_name));
-            let context = format!("under project {project_name}");
+            let context = format!("under project \"{project_name}\"");
             let search_text = format!(
                 "{} {} {} {} {}",
                 label,
@@ -730,7 +730,7 @@ impl App {
                 .filter(|cmd| !cmd.trim().is_empty())
                 .unwrap_or_else(|| "shell".to_string());
             let label = format!("TERM {foreground}");
-            let context = format!("on agent {session_label} under project {project_name}");
+            let context = format!("on agent \"{session_label}\" under project \"{project_name}\"");
             let search_text = format!(
                 "{} {} {} {}",
                 label,

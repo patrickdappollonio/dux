@@ -3231,7 +3231,7 @@ mod tests {
                     .find(|runtime| matches!(runtime.id, RuntimeTargetId::Agent(_)))
                     .expect("agent runtime");
                 assert_eq!(agent.label, "Codex agent-branch");
-                assert_eq!(agent.context, "under project demo");
+                assert_eq!(agent.context, "under project \"demo\"");
 
                 let terminal = prompt
                     .runtimes
@@ -3239,7 +3239,10 @@ mod tests {
                     .find(|runtime| matches!(runtime.id, RuntimeTargetId::Terminal(_)))
                     .expect("terminal runtime");
                 assert_eq!(terminal.label, "TERM python");
-                assert_eq!(terminal.context, "on agent agent-branch under project demo");
+                assert_eq!(
+                    terminal.context,
+                    "on agent \"agent-branch\" under project \"demo\""
+                );
             }
             other => panic!("expected kill-running prompt, got {other:?}"),
         }
