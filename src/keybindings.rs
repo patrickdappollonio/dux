@@ -1167,7 +1167,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         help: None,
         hint_contexts: &[],
         palette: Some(PaletteEntry {
-            name: "remove-git-pane",
+            name: "toggle-remove-git-pane",
             description: "Remove or restore the git pane entirely",
         }),
     },

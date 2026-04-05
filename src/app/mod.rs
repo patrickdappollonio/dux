@@ -812,7 +812,7 @@ impl App {
                 }
                 Ok(())
             }
-            "remove-git-pane" => {
+            "toggle-remove-git-pane" => {
                 self.right_hidden = !self.right_hidden;
                 if self.right_hidden && self.focus == FocusPane::Files {
                     self.focus = FocusPane::Center;
