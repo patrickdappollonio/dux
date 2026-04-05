@@ -161,6 +161,9 @@ impl Theme {
             crate::statusline::StatusTone::Busy => Style::default()
                 .fg(self.status_busy_fg)
                 .bg(self.status_busy_bg),
+            crate::statusline::StatusTone::Warning => {
+                Style::default().fg(self.warning_fg).bg(self.status_info_bg)
+            }
             crate::statusline::StatusTone::Error => Style::default()
                 .fg(self.status_error_fg)
                 .bg(self.status_error_bg),
@@ -171,6 +174,7 @@ impl Theme {
         match tone {
             crate::statusline::StatusTone::Info => ("●", self.session_active),
             crate::statusline::StatusTone::Busy => ("●", self.session_detached),
+            crate::statusline::StatusTone::Warning => ("●", self.warning_fg),
             crate::statusline::StatusTone::Error => ("●", self.status_error_fg),
         }
     }

@@ -2135,10 +2135,13 @@ impl App {
         }
 
         self.prompt = PromptState::None;
+        let requested = confirm_prompt.target_ids.len();
         let (agents, terminals) = self.kill_runtime_targets(&confirm_prompt.target_ids);
-        if agents + terminals == 0 {
-            self.set_error(
-                "None of the selected runtimes were still running. Reopen Kill Running to refresh the list and try again.",
+        let killed = agents + terminals;
+        let already_gone = requested.saturating_sub(killed);
+        if killed == 0 {
+            self.set_warning(
+                "The selected agents or terminals were already gone, so there was nothing left to kill. Refresh Kill Running if you want to review the current runtime list.",
             );
             return false;
         }
@@ -2156,10 +2159,19 @@ impl App {
                 if terminals == 1 { "" } else { "s" }
             ));
         }
-        self.set_info(format!(
-            "Killed {}. In-progress CLI work was stopped, but the worktree files are still available for review or relaunch.",
-            pieces.join(" and ")
-        ));
+        if already_gone > 0 {
+            self.set_warning(format!(
+                "Killed {}. {} selected runtime{} were already gone. In-progress CLI work was stopped, but the worktree files are still available for review or relaunch.",
+                pieces.join(" and "),
+                already_gone,
+                if already_gone == 1 { "" } else { "s" }
+            ));
+        } else {
+            self.set_info(format!(
+                "Killed {}. In-progress CLI work was stopped, but the worktree files are still available for review or relaunch.",
+                pieces.join(" and ")
+            ));
+        }
         false
     }
 
@@ -3412,6 +3424,36 @@ mod tests {
         assert_eq!(app.session_surface, SessionSurface::Agent);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
         assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    #[test]
+    fn kill_selected_warns_when_targets_are_already_gone() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmKillRunning(ConfirmKillRunningPrompt {
+            previous: KillRunningPrompt {
+                runtimes: vec![sample_runtime(
+                    RuntimeTargetId::Agent("session-1".to_string()),
+                    KillableRuntimeKind::Agent,
+                    "agent-branch",
+                    "demo / codex / agent-branch",
+                )],
+                filter: String::new(),
+                filter_cursor: 0,
+                searching: false,
+                hovered_visible_index: 0,
+                selected_ids: std::iter::once(RuntimeTargetId::Agent("session-1".to_string()))
+                    .collect(),
+                focus: KillRunningFocus::Footer(KillRunningFooterAction::Selected),
+            },
+            action: KillRunningAction::Selected,
+            target_ids: vec![RuntimeTargetId::Agent("session-1".to_string())],
+            confirm_selected: true,
+        });
+
+        app.resolve_confirm_kill_running(true);
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
+        assert!(app.status.text().contains("already gone"));
     }
 
     #[test]

@@ -1218,11 +1218,13 @@ impl App {
         let msg_color = match tone {
             StatusTone::Info => self.theme.status_info_fg,
             StatusTone::Busy => self.theme.status_busy_fg,
+            StatusTone::Warning => self.theme.warning_fg,
             StatusTone::Error => self.theme.status_error_fg,
         };
         let status_bg = match tone {
             StatusTone::Info => self.theme.status_info_bg,
             StatusTone::Busy => self.theme.status_busy_bg,
+            StatusTone::Warning => self.theme.status_info_bg,
             StatusTone::Error => self.theme.status_error_bg,
         };
         let prefix = format!(" {dot} ");

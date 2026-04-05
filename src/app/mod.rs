@@ -785,6 +785,10 @@ impl App {
         self.status.busy(message);
     }
 
+    pub(crate) fn set_warning(&mut self, message: impl Into<String>) {
+        self.status.warning(message);
+    }
+
     pub(crate) fn set_error(&mut self, message: impl Into<String>) {
         self.status.error(message);
     }
