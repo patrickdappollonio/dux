@@ -2766,8 +2766,8 @@ impl App {
             } = &mut self.prompt
                 && edit_state.stage == MacroEditStage::EditText
             {
-                // Inner width = popup - border(2) - padding(1 leading space)
-                let inner_w = popup.width.saturating_sub(4) as usize;
+                // Inner width = popup - border(1+1) - leading space(1)
+                let inner_w = popup.width.saturating_sub(3) as usize;
                 edit_state.text_input.set_display_width(if inner_w > 0 {
                     Some(inner_w)
                 } else {
