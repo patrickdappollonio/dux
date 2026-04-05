@@ -29,6 +29,7 @@ pub enum Action {
     ScrollPageDown,
     ScrollLineUp,
     ScrollLineDown,
+    ScrollToBottom,
     // Files pane (git staging)
     OpenDiff,
     StageUnstage,
@@ -164,6 +165,7 @@ impl Action {
             Action::ScrollPageDown => "scroll_page_down",
             Action::ScrollLineUp => "scroll_line_up",
             Action::ScrollLineDown => "scroll_line_down",
+            Action::ScrollToBottom => "scroll_to_bottom",
             Action::OpenDiff => "open_diff",
             Action::StageUnstage => "stage_unstage",
             Action::CommitChanges => "commit_changes",
@@ -231,6 +233,7 @@ impl Action {
             Action::ScrollPageDown => "Scroll down one page in the agent output.",
             Action::ScrollLineUp => "Scroll up one line in any scrollable view.",
             Action::ScrollLineDown => "Scroll down one line in any scrollable view.",
+            Action::ScrollToBottom => "Exit scroll mode and jump to the latest output.",
             Action::OpenDiff => "Open the selected file's diff.",
             Action::StageUnstage => "Stage or unstage the selected file.",
             Action::CommitChanges => "Commit staged changes.",
@@ -290,7 +293,9 @@ impl Action {
             | Action::ScrollPageUp
             | Action::ScrollPageDown
             | Action::ShowTerminal => Some("Agent pane"),
-            Action::ScrollLineUp | Action::ScrollLineDown => Some("Scrolling"),
+            Action::ScrollLineUp | Action::ScrollLineDown | Action::ScrollToBottom => {
+                Some("Scrolling")
+            }
             Action::OpenDiff
             | Action::StageUnstage
             | Action::CommitChanges
@@ -668,6 +673,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         help: Some(HelpEntry {
             section: "Scrolling",
             description: "Scroll down one line",
+        }),
+        hint_contexts: &[],
+        palette: None,
+    },
+    BindingDef {
+        action: Action::ScrollToBottom,
+        default_keys: &[key!(q)],
+        scopes: &[BindingScope::Interactive, BindingScope::Center],
+        help: Some(HelpEntry {
+            section: "Scrolling",
+            description: "Exit scroll mode and jump to latest output",
         }),
         hint_contexts: &[],
         palette: None,
@@ -1456,6 +1472,137 @@ pub fn detect_conflicts(keys: &crate::config::KeysConfig) -> Vec<KeyConflict> {
     conflicts
 }
 
+// ---------------------------------------------------------------------------
+// Byte-level binding matching for raw stdin passthrough in interactive mode.
+// ---------------------------------------------------------------------------
+
+/// A single intercepted binding: the raw byte pattern and the action it maps
+/// to. `conditional` is true for bindings that only fire when scrollback is
+/// active (ScrollLineUp/Down).
+#[derive(Debug, Clone)]
+pub struct InteractiveByteBinding {
+    pub pattern: Vec<u8>,
+    pub action: Action,
+    pub conditional: bool,
+}
+
+/// Precomputed byte patterns for all `Interactive`-scoped bindings.
+/// Built once at startup and stored on `App`.
+#[derive(Debug, Clone)]
+pub struct InteractiveBytePatterns {
+    pub bindings: Vec<InteractiveByteBinding>,
+}
+
+impl InteractiveBytePatterns {
+    /// Match a raw byte sequence against the intercepted bindings.
+    /// Returns the action and whether it's conditional on scrollback.
+    pub fn match_sequence(&self, seq: &[u8]) -> Option<(Action, bool)> {
+        self.bindings
+            .iter()
+            .find(|b| b.pattern == seq)
+            .map(|b| (b.action, b.conditional))
+    }
+}
+
+impl RuntimeBindings {
+    /// Build byte patterns for all `Interactive`-scoped bindings.
+    /// Each key combination is converted to its raw terminal byte
+    /// representation. Bindings that cannot be byte-encoded are skipped.
+    pub fn interactive_byte_patterns(&self) -> InteractiveBytePatterns {
+        let conditional_actions = [
+            Action::ScrollLineUp,
+            Action::ScrollLineDown,
+            Action::ScrollToBottom,
+        ];
+        let mut bindings = Vec::new();
+        for rb in &self.bindings {
+            if !rb.scopes.contains(&BindingScope::Interactive) {
+                continue;
+            }
+            for kc in &rb.keys {
+                if let Some(bytes) = key_combination_to_bytes(kc) {
+                    bindings.push(InteractiveByteBinding {
+                        pattern: bytes,
+                        action: rb.action,
+                        conditional: conditional_actions.contains(&rb.action),
+                    });
+                }
+            }
+        }
+        InteractiveBytePatterns { bindings }
+    }
+}
+
+/// Convert a `KeyCombination` to the raw byte sequence a terminal would send.
+/// Returns `None` for key types that can't be represented as bytes (e.g. mouse
+/// buttons or function keys beyond F4 in SS3 mode).
+fn key_combination_to_bytes(kc: &KeyCombination) -> Option<Vec<u8>> {
+    let norm = kc.normalized();
+    let has_ctrl = norm.modifiers.contains(KeyModifiers::CONTROL);
+    let has_alt = norm.modifiers.contains(KeyModifiers::ALT);
+    let has_shift = norm.modifiers.contains(KeyModifiers::SHIFT);
+
+    // We only encode simple cases: no combined Ctrl+Alt+Shift, etc.
+    // Interactive-mode intercepted bindings are typically plain keys or Ctrl+key.
+
+    use crokey::OneToThree::One;
+
+    match norm.codes {
+        One(KeyCode::Char(c)) if has_ctrl && !has_alt && !has_shift => {
+            // Ctrl+letter → control character 0x01..0x1a
+            let lower = c.to_ascii_lowercase();
+            if lower.is_ascii_lowercase() {
+                Some(vec![lower as u8 - b'a' + 1])
+            } else {
+                None
+            }
+        }
+        One(KeyCode::Char(c)) if !has_ctrl && !has_alt && !has_shift => {
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf);
+            Some(s.as_bytes().to_vec())
+        }
+        One(KeyCode::Char(c)) if has_alt && !has_ctrl && !has_shift => {
+            // Alt+key → ESC + key
+            let mut buf = vec![0x1b];
+            let mut char_buf = [0u8; 4];
+            let s = c.encode_utf8(&mut char_buf);
+            buf.extend_from_slice(s.as_bytes());
+            Some(buf)
+        }
+        One(KeyCode::Esc) => Some(vec![0x1b]),
+        One(KeyCode::Enter) => Some(vec![0x0d]),
+        One(KeyCode::Tab) if !has_shift => Some(vec![0x09]),
+        One(KeyCode::BackTab) => {
+            // Shift+Tab → ESC [ Z
+            Some(vec![0x1b, b'[', b'Z'])
+        }
+        One(KeyCode::Backspace) => Some(vec![0x7f]),
+        One(KeyCode::Delete) => Some(vec![0x1b, b'[', b'3', b'~']),
+        One(KeyCode::Up) if !has_ctrl && !has_alt && !has_shift => Some(vec![0x1b, b'[', b'A']),
+        One(KeyCode::Down) if !has_ctrl && !has_alt && !has_shift => Some(vec![0x1b, b'[', b'B']),
+        One(KeyCode::Right) if !has_ctrl && !has_alt && !has_shift => Some(vec![0x1b, b'[', b'C']),
+        One(KeyCode::Left) if !has_ctrl && !has_alt && !has_shift => Some(vec![0x1b, b'[', b'D']),
+        One(KeyCode::Home) => Some(vec![0x1b, b'[', b'H']),
+        One(KeyCode::End) => Some(vec![0x1b, b'[', b'F']),
+        One(KeyCode::PageUp) => Some(vec![0x1b, b'[', b'5', b'~']),
+        One(KeyCode::PageDown) => Some(vec![0x1b, b'[', b'6', b'~']),
+        One(KeyCode::F(1)) => Some(vec![0x1b, b'O', b'P']),
+        One(KeyCode::F(2)) => Some(vec![0x1b, b'O', b'Q']),
+        One(KeyCode::F(3)) => Some(vec![0x1b, b'O', b'R']),
+        One(KeyCode::F(4)) => Some(vec![0x1b, b'O', b'S']),
+        One(KeyCode::F(5)) => Some(vec![0x1b, b'[', b'1', b'5', b'~']),
+        One(KeyCode::F(6)) => Some(vec![0x1b, b'[', b'1', b'7', b'~']),
+        One(KeyCode::F(7)) => Some(vec![0x1b, b'[', b'1', b'8', b'~']),
+        One(KeyCode::F(8)) => Some(vec![0x1b, b'[', b'1', b'9', b'~']),
+        One(KeyCode::F(9)) => Some(vec![0x1b, b'[', b'2', b'0', b'~']),
+        One(KeyCode::F(10)) => Some(vec![0x1b, b'[', b'2', b'1', b'~']),
+        One(KeyCode::F(11)) => Some(vec![0x1b, b'[', b'2', b'3', b'~']),
+        One(KeyCode::F(12)) => Some(vec![0x1b, b'[', b'2', b'4', b'~']),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1967,5 +2114,83 @@ mod tests {
         // 'n' is NewAgent in Left scope, should not resolve in Help
         let n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
         assert_eq!(bindings.lookup(&n, BindingScope::Help), None);
+    }
+
+    // ── key_combination_to_bytes tests ─────────────────────────────────
+
+    #[test]
+    fn bytes_ctrl_letter() {
+        let kc = key!(ctrl - g);
+        assert_eq!(key_combination_to_bytes(&kc), Some(vec![0x07]));
+        let kc_a = key!(ctrl - a);
+        assert_eq!(key_combination_to_bytes(&kc_a), Some(vec![0x01]));
+    }
+
+    #[test]
+    fn bytes_plain_char() {
+        let kc = key!(space);
+        assert_eq!(key_combination_to_bytes(&kc), Some(vec![0x20]));
+    }
+
+    #[test]
+    fn bytes_page_up_down() {
+        let kc_up = key!(pageup);
+        assert_eq!(
+            key_combination_to_bytes(&kc_up),
+            Some(vec![0x1b, b'[', b'5', b'~'])
+        );
+        let kc_down = key!(pagedown);
+        assert_eq!(
+            key_combination_to_bytes(&kc_down),
+            Some(vec![0x1b, b'[', b'6', b'~'])
+        );
+    }
+
+    #[test]
+    fn bytes_arrow_keys() {
+        assert_eq!(
+            key_combination_to_bytes(&key!(up)),
+            Some(vec![0x1b, b'[', b'A'])
+        );
+        assert_eq!(
+            key_combination_to_bytes(&key!(down)),
+            Some(vec![0x1b, b'[', b'B'])
+        );
+    }
+
+    #[test]
+    fn bytes_enter_backspace() {
+        assert_eq!(key_combination_to_bytes(&key!(enter)), Some(vec![0x0d]));
+        assert_eq!(key_combination_to_bytes(&key!(backspace)), Some(vec![0x7f]));
+    }
+
+    #[test]
+    fn interactive_byte_patterns_matches_defaults() {
+        let bindings = default_bindings();
+        let patterns = bindings.interactive_byte_patterns();
+        // ExitInteractive default is Ctrl-G → 0x07
+        let result = patterns.match_sequence(&[0x07]);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().0, Action::ExitInteractive);
+        assert!(!result.unwrap().1); // not conditional
+    }
+
+    #[test]
+    fn interactive_byte_patterns_scroll_line_is_conditional() {
+        let bindings = default_bindings();
+        let patterns = bindings.interactive_byte_patterns();
+        // ScrollLineUp default is Up → ESC [ A
+        let result = patterns.match_sequence(&[0x1b, b'[', b'A']);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().0, Action::ScrollLineUp);
+        assert!(result.unwrap().1); // conditional
+    }
+
+    #[test]
+    fn interactive_byte_patterns_no_match() {
+        let bindings = default_bindings();
+        let patterns = bindings.interactive_byte_patterns();
+        // Random byte sequence should not match
+        assert!(patterns.match_sequence(&[0x01]).is_none());
     }
 }

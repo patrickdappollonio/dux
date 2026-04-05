@@ -8,6 +8,7 @@ mod logger;
 mod model;
 mod provider;
 mod pty;
+mod raw_input;
 mod reset;
 mod statusline;
 mod storage;

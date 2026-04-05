@@ -130,7 +130,7 @@ impl App {
         self.dispatch_create_agent_request(
             CreateAgentRequest::ForkSession {
                 project: project.clone(),
-                source_session,
+                source_session: Box::new(source_session),
                 source_label: source_label.clone(),
             },
             format!(

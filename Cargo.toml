@@ -17,7 +17,8 @@ serde_json = "1.0.140"
 toml = "0.8.20"
 uuid = { version = "1.17.0", features = ["v4"] }
 portable-pty = "0.9"
-rustix = { version = "1.1", features = ["termios", "process"] }
+rustix = { version = "1.1", features = ["termios", "process", "event", "stdio"] }
+signal-hook = "0.3"
 alacritty_terminal = "0.25.1"
 petname = { version = "2.0.2", default-features = false, features = ["default-rng", "default-words"] }
 similar = "2"
