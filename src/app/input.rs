@@ -5239,10 +5239,12 @@ mod tests {
         let mut app = test_app(default_bindings());
         assert!(!app.right_hidden);
 
-        app.execute_command("toggle-remove-git-pane".to_string()).unwrap();
+        app.execute_command("toggle-remove-git-pane".to_string())
+            .unwrap();
         assert!(app.right_hidden);
 
-        app.execute_command("toggle-remove-git-pane".to_string()).unwrap();
+        app.execute_command("toggle-remove-git-pane".to_string())
+            .unwrap();
         assert!(!app.right_hidden);
     }
 
@@ -5251,7 +5253,8 @@ mod tests {
         let mut app = test_app(default_bindings());
         app.focus = FocusPane::Files;
 
-        app.execute_command("toggle-remove-git-pane".to_string()).unwrap();
+        app.execute_command("toggle-remove-git-pane".to_string())
+            .unwrap();
 
         assert!(app.right_hidden);
         assert_eq!(app.focus, FocusPane::Center);

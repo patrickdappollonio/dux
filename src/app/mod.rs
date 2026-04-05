@@ -673,8 +673,7 @@ impl App {
                 // Check SIGWINCH — needed when bypassing crossterm's event
                 // reader (which would otherwise deliver Resize events).
                 if self.sigwinch_flag.swap(false, Ordering::Relaxed) {
-                    if let Err(err) =
-                        crate::io_retry::retry_on_interrupt(|| terminal.autoresize())
+                    if let Err(err) = crate::io_retry::retry_on_interrupt(|| terminal.autoresize())
                     {
                         self.report_runtime_error("terminal resize failed", &err);
                     }
@@ -709,19 +708,18 @@ impl App {
                     }
                 } else {
                     // Normal UI mode: use crossterm's structured event reader.
-                    let ready =
-                        match crate::io_retry::retry_on_interrupt(|| {
-                            event::poll(Duration::from_millis(100))
-                        }) {
-                            Ok(ready) => ready,
-                            Err(err) => {
-                                self.report_runtime_error(
-                                    "event polling failed; input handling was skipped",
-                                    &err,
-                                );
-                                false
-                            }
-                        };
+                    let ready = match crate::io_retry::retry_on_interrupt(|| {
+                        event::poll(Duration::from_millis(100))
+                    }) {
+                        Ok(ready) => ready,
+                        Err(err) => {
+                            self.report_runtime_error(
+                                "event polling failed; input handling was skipped",
+                                &err,
+                            );
+                            false
+                        }
+                    };
                     if ready {
                         let event = match crate::io_retry::retry_on_interrupt(event::read) {
                             Ok(event) => event,
