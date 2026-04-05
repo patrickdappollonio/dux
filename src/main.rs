@@ -43,6 +43,11 @@ fn print_help() {
           dux reset        Remove config and logs, keep saved agents and worktrees\n\
           dux reset --delete-agent-data\n\
                             Same as reset, and also remove sessions.sqlite3 and worktrees\n\n\
+         Environment variables:\n\
+           DUX_HOME    Override the config directory (must be an absolute path).\n\
+                       When unset, defaults to:\n\
+                         macOS: ~/.dux/\n\
+                         Linux: $XDG_CONFIG_HOME/dux/ or ~/.config/dux/\n\n\
          First run writes a full default config to:\n\
            macOS: ~/.dux/config.toml\n\
            Linux: $XDG_CONFIG_HOME/dux/config.toml or ~/.config/dux/config.toml\n\

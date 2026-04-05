@@ -4,7 +4,7 @@ use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -314,9 +314,11 @@ pub struct DuxPaths {
 
 impl DuxPaths {
     pub fn discover() -> Result<Self> {
-        let home =
-            home::home_dir().ok_or_else(|| anyhow!("failed to determine user home directory"))?;
-        let root = discover_root(&home, env::var_os("XDG_CONFIG_HOME"));
+        let root = resolve_root(
+            env::var_os("DUX_HOME"),
+            home::home_dir(),
+            env::var_os("XDG_CONFIG_HOME"),
+        )?;
         Ok(Self {
             config_path: root.join("config.toml"),
             sessions_db_path: root.join("sessions.sqlite3"),
@@ -901,6 +903,25 @@ pub fn check_provider_available(config: &ProviderCommandConfig) -> std::result::
     }
 }
 
+fn resolve_root(
+    dux_home: Option<std::ffi::OsString>,
+    home: Option<PathBuf>,
+    xdg_config_home: Option<std::ffi::OsString>,
+) -> Result<PathBuf> {
+    if let Some(dux_home) = dux_home.map(PathBuf::from) {
+        if dux_home.is_absolute() {
+            return Ok(dux_home);
+        }
+        bail!(
+            "DUX_HOME must be an absolute path, got: {}",
+            dux_home.display()
+        );
+    }
+
+    let home = home.ok_or_else(|| anyhow!("failed to determine user home directory"))?;
+    Ok(discover_root(&home, xdg_config_home))
+}
+
 fn discover_root(home: &Path, xdg_config_home: Option<std::ffi::OsString>) -> PathBuf {
     #[cfg(target_os = "macos")]
     {
@@ -1278,6 +1299,51 @@ oneshot_output = "stdout"
     #[test]
     fn config_root_ignores_relative_xdg_config_home() {
         let root = discover_root(Path::new("/example/home"), Some("relative/path".into()));
+        assert_eq!(root, PathBuf::from("/example/home/.config/dux"));
+    }
+
+    #[test]
+    fn resolve_root_uses_dux_home_when_absolute() {
+        let root = resolve_root(Some("/custom/dux".into()), None, None).unwrap();
+        assert_eq!(root, PathBuf::from("/custom/dux"));
+    }
+
+    #[test]
+    fn resolve_root_errors_on_relative_dux_home() {
+        let err = resolve_root(
+            Some("relative/path".into()),
+            Some(PathBuf::from("/home")),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("DUX_HOME must be an absolute path"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("relative/path"),
+            "error should contain the bad path: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_root_errors_on_empty_dux_home() {
+        let err = resolve_root(Some("".into()), Some(PathBuf::from("/home")), None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("DUX_HOME must be an absolute path"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_root_falls_through_when_dux_home_unset() {
+        let root = resolve_root(None, Some(PathBuf::from("/example/home")), None).unwrap();
+        // Should delegate to discover_root with platform defaults
+        #[cfg(target_os = "macos")]
+        assert_eq!(root, PathBuf::from("/example/home/.dux"));
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(root, PathBuf::from("/example/home/.config/dux"));
     }
 
