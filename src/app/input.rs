@@ -418,6 +418,7 @@ impl App {
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Center) {
             match action {
                 Action::FocusAgent if !in_diff => self.activate_center_agent()?,
+                Action::ExitInteractive if !in_diff => self.activate_center_agent()?,
                 Action::ShowTerminal if !in_diff => self.show_companion_terminal()?,
                 Action::ReconnectAgent if !in_diff => {
                     // Allow relaunching an exited agent from the center pane,
@@ -4372,7 +4373,9 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
             .unwrap();
         match &app.prompt {
-            PromptState::Command { input, selected, .. } => {
+            PromptState::Command {
+                input, selected, ..
+            } => {
                 assert_eq!(input.text, "j");
                 assert_eq!(*selected, 0, "selection should stay at 0, not move down");
             }
