@@ -1621,4 +1621,96 @@ mod tests {
             );
         }
     }
+
+    // ── Cursor boundary edge cases ────────────────────────────────
+
+    #[test]
+    fn cursor_at_end_of_exact_width_text() {
+        // Text fills width exactly — cursor at end should be on the same row
+        // at the column equal to the width, not overflow to a new row.
+        let mut ti = multiline_input("abcde", 10);
+        ti.set_display_width(Some(5));
+        // "abcde" at width 5 = ["abcde"], cursor at end = byte 5
+        let (row, col) = ti.cursor_display_position();
+        assert_eq!((row, col), (0, 5));
+        // The row must be within visible_lines
+        let visible = ti.visible_lines();
+        assert!(
+            row < visible.len(),
+            "cursor row {row} outside visible range ({})",
+            visible.len()
+        );
+    }
+
+    #[test]
+    fn cursor_at_end_of_wrapped_text() {
+        // "hello world" at width 8 → ["hello ", "world"]
+        // Cursor at end (byte 11) → row 1, col 5
+        let mut ti = multiline_input("hello world", 10);
+        ti.set_display_width(Some(8));
+        let (row, col) = ti.cursor_display_position();
+        assert_eq!((row, col), (1, 5));
+        let visible = ti.visible_lines();
+        assert!(row < visible.len());
+    }
+
+    #[test]
+    fn cursor_at_end_of_hard_wrapped_text() {
+        // "abcdefghij" at width 5 → ["abcde", "fghij"]
+        // Cursor at end (byte 10) → row 1, col 5
+        let mut ti = multiline_input("abcdefghij", 10);
+        ti.set_display_width(Some(5));
+        let (row, col) = ti.cursor_display_position();
+        assert_eq!((row, col), (1, 5));
+        let visible = ti.visible_lines();
+        assert!(row < visible.len());
+    }
+
+    #[test]
+    fn cursor_stays_in_visible_area_after_newline_at_width_boundary() {
+        // "abcde\n" at width 5 → ["abcde", ""]
+        // Cursor at end (byte 6) → row 1, col 0
+        let mut ti = multiline_input("abcde\n", 10);
+        ti.set_display_width(Some(5));
+        let (row, col) = ti.cursor_display_position();
+        assert_eq!((row, col), (1, 0));
+        let visible = ti.visible_lines();
+        assert!(
+            row < visible.len(),
+            "cursor row {row} >= visible lines ({})",
+            visible.len()
+        );
+    }
+
+    #[test]
+    fn cursor_display_never_exceeds_visible_lines() {
+        // Exhaustive check: for every cursor position in various texts,
+        // display row must be < visible_lines().len().
+        let cases = &[
+            ("hello world", 8usize),
+            ("abcdefghij", 5),
+            ("a b c d e f", 4),
+            ("test\n", 10),
+            ("line1\nline2\nline3", 6),
+            ("/usr/local/bin/dux", 7),
+        ];
+        for &(text, width) in cases {
+            let mut ti = multiline_input(text, 20);
+            ti.set_display_width(Some(width));
+            let visible = ti.visible_lines();
+            for cursor in 0..=text.len() {
+                if !text.is_char_boundary(cursor) {
+                    continue;
+                }
+                ti.cursor = cursor;
+                let (row, _col) = ti.cursor_display_position();
+                assert!(
+                    row < visible.len(),
+                    "text={text:?} width={width} cursor={cursor}: \
+                     display row {row} >= visible count {}",
+                    visible.len()
+                );
+            }
+        }
+    }
 }

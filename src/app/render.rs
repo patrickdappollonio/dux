@@ -2971,48 +2971,35 @@ impl App {
     }
 
     /// Render a single-line TextInput with cursor in a bordered box.
+    /// Uses the terminal's hardware cursor for a blinking caret.
     fn render_single_line_input(&self, input: &TextInput, area: Rect, frame: &mut Frame) {
-        let display = if input.cursor < input.text.len() {
-            let (before, after) = input.text.split_at(input.cursor);
-            let mut chars = after.chars();
-            let cursor_char = chars.next().unwrap_or(' ');
-            let rest: String = chars.collect();
-            Line::from(vec![
-                Span::raw(format!(" {before}")),
-                Span::styled(
-                    cursor_char.to_string(),
-                    Style::default()
-                        .fg(self.theme.input_cursor_fg)
-                        .bg(self.theme.input_cursor_bg),
-                ),
-                Span::raw(rest),
-            ])
-        } else {
-            Line::from(vec![
-                Span::raw(format!(" {}", &input.text)),
-                Span::styled(
-                    " ",
-                    Style::default()
-                        .fg(self.theme.input_cursor_fg)
-                        .bg(self.theme.input_cursor_bg),
-                ),
-            ])
-        };
+        let display = Line::from(Span::raw(format!(" {}", &input.text)));
         let block = Block::default()
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
             .border_style(Style::default().fg(self.theme.overlay_border));
+        let inner = block.inner(area);
         Paragraph::new(display)
             .block(block)
             .render(area, frame.buffer_mut());
+
+        // Position the hardware cursor (blinking caret).
+        // Cursor column in chars + 1 for the leading space padding.
+        let cursor_col = input.text[..input.cursor.min(input.text.len())]
+            .chars()
+            .count();
+        let cx = inner.x + cursor_col as u16 + 1;
+        let cy = inner.y;
+        if cx < inner.x + inner.width && cy < inner.y + inner.height {
+            frame.set_cursor_position((cx, cy));
+        }
     }
 
     /// Render a multiline TextInput into the given area.
     ///
     /// The caller is responsible for drawing any border — this method renders
-    /// text directly into `area`. It sets the display width on the input to
-    /// match the available width (minus 1 for the leading space padding on
-    /// each line).
+    /// text directly into `area`. Uses the terminal's hardware cursor for a
+    /// blinking caret.
     fn render_multiline_input(&self, input: &TextInput, area: Rect, frame: &mut Frame) {
         let visible = input.visible_lines();
         let (cursor_row, cursor_col) = input.cursor_display_position();
@@ -3023,41 +3010,16 @@ impl App {
             }
             let y = area.y + i as u16;
             let line_area = Rect::new(area.x, y, area.width, 1);
+            let line = Line::from(Span::raw(format!(" {line_text}")));
+            Paragraph::new(line).render(line_area, frame.buffer_mut());
+        }
 
-            if i == cursor_row {
-                let col_byte = char_col_to_byte(line_text, cursor_col);
-                if col_byte < line_text.len() {
-                    let before = &line_text[..col_byte];
-                    let mut chars = line_text[col_byte..].chars();
-                    let cursor_char = chars.next().unwrap_or(' ');
-                    let rest: String = chars.collect();
-                    let line = Line::from(vec![
-                        Span::raw(format!(" {before}")),
-                        Span::styled(
-                            cursor_char.to_string(),
-                            Style::default()
-                                .fg(self.theme.input_cursor_fg)
-                                .bg(self.theme.input_cursor_bg),
-                        ),
-                        Span::raw(rest),
-                    ]);
-                    Paragraph::new(line).render(line_area, frame.buffer_mut());
-                } else {
-                    let line = Line::from(vec![
-                        Span::raw(format!(" {line_text}")),
-                        Span::styled(
-                            " ",
-                            Style::default()
-                                .fg(self.theme.input_cursor_fg)
-                                .bg(self.theme.input_cursor_bg),
-                        ),
-                    ]);
-                    Paragraph::new(line).render(line_area, frame.buffer_mut());
-                }
-            } else {
-                let line = Line::from(Span::raw(format!(" {line_text}")));
-                Paragraph::new(line).render(line_area, frame.buffer_mut());
-            }
+        // Position the hardware cursor (blinking caret).
+        // +1 for the leading space padding on each line.
+        let cx = area.x + cursor_col as u16 + 1;
+        let cy = area.y + cursor_row as u16;
+        if cx < area.x + area.width && cy < area.y + area.height {
+            frame.set_cursor_position((cx, cy));
         }
     }
 
@@ -3297,14 +3259,6 @@ pub(crate) fn centered_rect_exact(width: u16, height: u16, area: Rect) -> Rect {
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     Rect::new(x, y, width, height)
-}
-
-/// Convert a character column index to a byte offset in a string.
-fn char_col_to_byte(text: &str, col: usize) -> usize {
-    text.char_indices()
-        .nth(col)
-        .map(|(i, _)| i)
-        .unwrap_or(text.len())
 }
 
 fn render_single_line_cursor_input(
