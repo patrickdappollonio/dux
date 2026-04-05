@@ -737,7 +737,7 @@ impl App {
                 })
                 .filter(|cmd| !cmd.trim().is_empty())
                 .unwrap_or_else(|| "shell".to_string());
-            let label = format!("TERM {foreground}");
+            let label = foreground;
             let context = format!("on agent \"{session_label}\" under project \"{project_name}\"");
             let search_text = format!(
                 "{} {} {} {}",

@@ -3238,7 +3238,7 @@ mod tests {
                     .iter()
                     .find(|runtime| matches!(runtime.id, RuntimeTargetId::Terminal(_)))
                     .expect("terminal runtime");
-                assert_eq!(terminal.label, "TERM python");
+                assert_eq!(terminal.label, "python");
                 assert_eq!(
                     terminal.context,
                     "on agent \"agent-branch\" under project \"demo\""
@@ -3270,7 +3270,7 @@ mod tests {
             .iter()
             .find(|runtime| matches!(runtime.id, RuntimeTargetId::Terminal(_)))
             .expect("terminal runtime");
-        assert_eq!(terminal.label, "TERM sleep");
+        assert_eq!(terminal.label, "sleep");
     }
 
     #[test]
