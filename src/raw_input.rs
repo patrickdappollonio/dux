@@ -1,3 +1,94 @@
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+/// Returns `true` if the byte sequence is an SGR mouse event (`\x1b[<…M` or
+/// `\x1b[<…m`).
+pub fn is_sgr_mouse(seq: &[u8]) -> bool {
+    seq.len() >= 6
+        && seq[0] == 0x1b
+        && seq[1] == b'['
+        && seq[2] == b'<'
+        && matches!(seq.last(), Some(b'M' | b'm'))
+}
+
+/// Parse an SGR mouse sequence into a crossterm `MouseEvent`.
+///
+/// SGR format: `ESC [ < Cb ; Cx ; Cy {M|m}`
+///   - Cb = button/modifier bits
+///   - Cx = column (1-based)
+///   - Cy = row (1-based)
+///   - M = press/motion, m = release
+pub fn parse_sgr_mouse(seq: &[u8]) -> Option<MouseEvent> {
+    if !is_sgr_mouse(seq) {
+        return None;
+    }
+
+    let final_byte = *seq.last()?;
+    // Extract the parameter string between '<' and the final byte.
+    let params = std::str::from_utf8(&seq[3..seq.len() - 1]).ok()?;
+    let mut parts = params.split(';');
+    let cb: u16 = parts.next()?.parse().ok()?;
+    let cx: u16 = parts.next()?.parse().ok()?;
+    let cy: u16 = parts.next()?.parse().ok()?;
+
+    // Convert 1-based to 0-based coordinates.
+    let column = cx.saturating_sub(1);
+    let row = cy.saturating_sub(1);
+
+    let is_release = final_byte == b'm';
+    let is_motion = cb & 32 != 0;
+    let button_bits = cb & 0b11000011; // mask out motion bit (bit 5) and modifier bits (4,3)
+
+    let kind = if cb & 64 != 0 {
+        // Scroll events.
+        match button_bits & 0x03 {
+            0 => MouseEventKind::ScrollUp,
+            1 => MouseEventKind::ScrollDown,
+            2 => MouseEventKind::ScrollLeft,
+            3 => MouseEventKind::ScrollRight,
+            _ => return None,
+        }
+    } else if is_release {
+        let button = match button_bits & 0x03 {
+            0 => MouseButton::Left,
+            1 => MouseButton::Middle,
+            2 => MouseButton::Right,
+            _ => return None,
+        };
+        MouseEventKind::Up(button)
+    } else if is_motion {
+        let button = match button_bits & 0x03 {
+            0 => MouseButton::Left,
+            1 => MouseButton::Middle,
+            2 => MouseButton::Right,
+            3 => {
+                return Some(MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    column,
+                    row,
+                    modifiers: crossterm::event::KeyModifiers::empty(),
+                });
+            }
+            _ => return None,
+        };
+        MouseEventKind::Drag(button)
+    } else {
+        let button = match button_bits & 0x03 {
+            0 => MouseButton::Left,
+            1 => MouseButton::Middle,
+            2 => MouseButton::Right,
+            _ => return None,
+        };
+        MouseEventKind::Down(button)
+    };
+
+    Some(MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: crossterm::event::KeyModifiers::empty(),
+    })
+}
+
 /// Splits a raw byte buffer into complete terminal input sequences.
 ///
 /// Returns `(complete, remainder)` where `complete` is a list of byte-slice
@@ -256,5 +347,80 @@ mod tests {
         let (seqs, rem) = split_sequences(b" ");
         assert_eq!(seqs, vec![b" ".as_slice()]);
         assert!(rem.is_empty());
+    }
+
+    #[test]
+    fn sgr_mouse_left_press() {
+        let seq = b"\x1b[<0;50;10M";
+        assert!(is_sgr_mouse(seq));
+        let ev = parse_sgr_mouse(seq).unwrap();
+        assert_eq!(ev.kind, MouseEventKind::Down(MouseButton::Left));
+        assert_eq!(ev.column, 49);
+        assert_eq!(ev.row, 9);
+    }
+
+    #[test]
+    fn sgr_mouse_left_release() {
+        let seq = b"\x1b[<0;50;10m";
+        assert!(is_sgr_mouse(seq));
+        let ev = parse_sgr_mouse(seq).unwrap();
+        assert_eq!(ev.kind, MouseEventKind::Up(MouseButton::Left));
+        assert_eq!(ev.column, 49);
+        assert_eq!(ev.row, 9);
+    }
+
+    #[test]
+    fn sgr_mouse_right_press() {
+        let seq = b"\x1b[<2;1;1M";
+        let ev = parse_sgr_mouse(seq).unwrap();
+        assert_eq!(ev.kind, MouseEventKind::Down(MouseButton::Right));
+        assert_eq!(ev.column, 0);
+        assert_eq!(ev.row, 0);
+    }
+
+    #[test]
+    fn sgr_mouse_scroll_up() {
+        let seq = b"\x1b[<64;10;20M";
+        let ev = parse_sgr_mouse(seq).unwrap();
+        assert_eq!(ev.kind, MouseEventKind::ScrollUp);
+    }
+
+    #[test]
+    fn sgr_mouse_scroll_down() {
+        let seq = b"\x1b[<65;10;20M";
+        let ev = parse_sgr_mouse(seq).unwrap();
+        assert_eq!(ev.kind, MouseEventKind::ScrollDown);
+    }
+
+    #[test]
+    fn sgr_mouse_left_drag() {
+        let seq = b"\x1b[<32;5;5M";
+        let ev = parse_sgr_mouse(seq).unwrap();
+        assert_eq!(ev.kind, MouseEventKind::Drag(MouseButton::Left));
+    }
+
+    #[test]
+    fn sgr_mouse_motion_no_button() {
+        let seq = b"\x1b[<35;5;5M";
+        let ev = parse_sgr_mouse(seq).unwrap();
+        assert_eq!(ev.kind, MouseEventKind::Moved);
+    }
+
+    #[test]
+    fn sgr_mouse_split_and_parse() {
+        // Verify mouse sequences are correctly split as complete CSI sequences.
+        let input = b"\x1b[<0;50;10M\x1b[<0;50;10m";
+        let (seqs, rem) = split_sequences(input);
+        assert_eq!(seqs.len(), 2);
+        assert!(rem.is_empty());
+        assert!(is_sgr_mouse(seqs[0]));
+        assert!(is_sgr_mouse(seqs[1]));
+    }
+
+    #[test]
+    fn non_mouse_csi_not_detected() {
+        assert!(!is_sgr_mouse(b"\x1b[A"));
+        assert!(!is_sgr_mouse(b"\x1b[5~"));
+        assert!(parse_sgr_mouse(b"\x1b[A").is_none());
     }
 }

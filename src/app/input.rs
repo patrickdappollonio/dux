@@ -1011,16 +1011,23 @@ impl App {
         let (sequences, remainder) = crate::raw_input::split_sequences(&self.raw_input_buf);
         let remainder_len = remainder.len();
 
-        // Collect what to do for each sequence: either an intercepted action
-        // or raw bytes to forward.
+        // Collect what to do for each sequence: an intercepted action, a
+        // mouse event to handle in the UI, or raw bytes to forward.
         enum SeqAction {
             Intercept(Action, bool, Vec<u8>),
+            Mouse(MouseEvent),
             Forward(Vec<u8>),
         }
 
         let actions: Vec<SeqAction> = sequences
             .iter()
             .map(|seq| {
+                // Mouse events must be handled by the UI, not forwarded to the
+                // PTY. crossterm's EnableMouseCapture uses SGR (1006) encoding,
+                // so terminal mouse events arrive as CSI `<…M` / `<…m`.
+                if let Some(mouse_ev) = crate::raw_input::parse_sgr_mouse(seq) {
+                    return SeqAction::Mouse(mouse_ev);
+                }
                 if let Some((action, conditional)) = self.interactive_patterns.match_sequence(seq) {
                     SeqAction::Intercept(action, conditional, seq.to_vec())
                 } else {
@@ -1083,6 +1090,13 @@ impl App {
                         self.reset_pty_scrollback();
                     } else if let Some(provider) = self.selected_terminal_surface_client() {
                         let _ = provider.write_bytes(&raw);
+                    }
+                }
+                SeqAction::Mouse(mouse_ev) => {
+                    // Route mouse events to the UI so clicks, double-clicks,
+                    // scroll, and drag work even during interactive mode.
+                    if self.handle_mouse(mouse_ev) {
+                        return Ok(true);
                     }
                 }
                 SeqAction::Intercept(_, _, raw) | SeqAction::Forward(raw) => {
