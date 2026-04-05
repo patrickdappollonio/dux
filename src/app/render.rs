@@ -3132,14 +3132,14 @@ impl App {
             .title_bottom(Line::from(bottom_spans));
         let input_inner = input_block.inner(input_area);
         Paragraph::new(render_single_line_cursor_input(
-            "> ", &query, cursor, cursor_fg, cursor_bg,
+            "", &query, cursor, cursor_fg, cursor_bg,
         ))
         .block(input_block)
         .render(input_area, frame.buffer_mut());
 
         // Place hardware cursor inside the input.
         let cursor_col = query[..cursor].chars().count();
-        let cx = input_inner.x + 2 + cursor_col as u16; // 2 for "> "
+        let cx = input_inner.x + cursor_col as u16;
         let cy = input_inner.y;
         if cx < input_inner.x + input_inner.width && cy < input_inner.y + input_inner.height {
             frame.set_cursor_position((cx, cy));
@@ -3533,6 +3533,17 @@ mod tests {
         assert_eq!(spans[0].style, prose);
         assert_eq!(spans[1].style, quoted);
         assert_eq!(spans[3].style, quoted);
+    }
+
+    #[test]
+    fn render_single_line_cursor_input_supports_empty_prefix() {
+        let line = render_single_line_cursor_input("", "macro", 2, Color::White, Color::Black);
+
+        assert_eq!(line.spans.len(), 4);
+        assert_eq!(line.spans[0].content.as_ref(), "");
+        assert_eq!(line.spans[1].content.as_ref(), "ma");
+        assert_eq!(line.spans[2].content.as_ref(), "c");
+        assert_eq!(line.spans[3].content.as_ref(), "ro");
     }
 
     #[test]
