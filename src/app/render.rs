@@ -1961,9 +1961,7 @@ impl App {
                                 Style::default()
                                     .fg(self.theme.hint_dim_desc_fg)
                                     .add_modifier(Modifier::DIM),
-                                Style::default()
-                                    .fg(self.theme.branch_fg)
-                                    .add_modifier(Modifier::BOLD),
+                                Style::default().fg(self.theme.runtime_context_value_fg),
                             ));
                             ListItem::new(Line::from(spans))
                         })

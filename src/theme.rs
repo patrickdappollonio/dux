@@ -60,6 +60,7 @@ pub struct Theme {
     pub diff_binary_fg: Color,
     pub diff_stat_add_fg: Color,
     pub diff_stat_remove_fg: Color,
+    pub runtime_context_value_fg: Color,
 }
 
 impl Theme {
@@ -121,6 +122,7 @@ impl Theme {
             diff_binary_fg: Color::Yellow,
             diff_stat_add_fg: Color::Green,
             diff_stat_remove_fg: Color::Red,
+            runtime_context_value_fg: Color::Rgb(125, 150, 160),
         }
     }
 
