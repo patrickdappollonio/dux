@@ -3070,87 +3070,149 @@ impl App {
     }
 
     fn render_macro_bar(&mut self, frame: &mut Frame, area: Rect) {
-        let (query, selected, cursor_byte) = {
-            let Some(bar) = &self.macro_bar else { return };
+        let (query, selected, cursor, cursor_fg, cursor_bg) = {
+            let Some(bar) = &self.macro_bar else {
+                return;
+            };
             (
                 bar.input.text.clone(),
                 bar.selected,
                 bar.input.cursor.min(bar.input.text.len()),
+                self.theme.input_cursor_fg,
+                self.theme.input_cursor_bg,
             )
         };
 
         let filtered = self.filtered_macros(&query);
-        let list_height = (filtered.len() as u16).min(6);
-        let bar_height = list_height + 1; // list rows + input line
-        if area.height < 2 {
+
+        // Compute total height: input block (3) + list block (variable).
+        // The list block shares borders with the input block (no top border).
+        let list_content_h = (filtered.len() as u16).clamp(1, 8);
+        // list block = content + bottom border (1). Left/right borders are sides.
+        let list_block_h = list_content_h + 1; // +1 for bottom border
+        let input_block_h: u16 = 3; // top border + input + bottom border (shared with list top)
+        let total_h = (input_block_h + list_block_h).min(area.height);
+
+        if area.height < 4 {
             return;
         }
-        let actual_height = bar_height.min(area.height);
+
+        // Bottom-anchor the bar.
         let bar_area = Rect::new(
             area.x,
-            area.y + area.height.saturating_sub(actual_height),
+            area.y + area.height.saturating_sub(total_h),
             area.width,
-            actual_height,
+            total_h,
         );
         Clear.render(bar_area, frame.buffer_mut());
 
-        let [list_area, input_area] = Layout::default()
+        // Split into input area (top) and list area (bottom).
+        let [input_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .constraints([Constraint::Length(input_block_h), Constraint::Min(1)])
             .areas(bar_area);
 
-        // Render filtered macro list.
-        let items: Vec<ListItem> = filtered
-            .iter()
-            .map(|&(name, text)| {
-                let text_preview = text.replace('\n', "↵");
-                let name_len = name.chars().count();
-                let max_text = (list_area.width as usize).saturating_sub(name_len + 5);
-                let truncated = if text_preview.chars().count() > max_text {
-                    let end = text_preview
-                        .char_indices()
-                        .nth(max_text.saturating_sub(1).max(0))
-                        .map(|(i, _)| i)
-                        .unwrap_or(text_preview.len());
-                    format!("{}…", &text_preview[..end])
-                } else {
-                    text_preview
-                };
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!(" {name}"),
-                        Style::default()
-                            .fg(self.theme.overlay_border)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("  {truncated}"),
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ),
-                ]))
-            })
-            .collect();
+        // ── Input block (top, with title and hint badges) ──
+        let mut bottom_spans = vec![Span::raw(" ")];
+        for (key, desc) in &[("Enter", "paste"), ("Tab", "complete"), ("Esc", "cancel")] {
+            let badge = self.theme.key_badge_default(key);
+            bottom_spans.extend(
+                badge
+                    .into_iter()
+                    .map(|s| Span::styled(s.content.to_string(), s.style)),
+            );
+            bottom_spans.push(Span::styled(
+                format!(" {desc}  "),
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+        }
 
-        let list = List::new(items).highlight_style(self.theme.selection_style());
-        let mut list_state = ListState::default();
-        list_state.select(Some(selected));
-        StatefulWidget::render(list, list_area, frame.buffer_mut(), &mut list_state);
-
-        // Render the input line.
-        let cursor_col = query[..cursor_byte].chars().count();
-        let input_text = format!("> {query}");
-        Paragraph::new(Line::from(Span::styled(
-            input_text,
-            Style::default().fg(self.theme.input_label_fg),
-        )))
+        let input_block = self
+            .themed_overlay_block("Macros")
+            .title_bottom(Line::from(bottom_spans));
+        let input_inner = input_block.inner(input_area);
+        Paragraph::new(render_single_line_cursor_input(
+            "> ", &query, cursor, cursor_fg, cursor_bg,
+        ))
+        .block(input_block)
         .render(input_area, frame.buffer_mut());
 
-        // Position the hardware cursor on the input line.
-        let cx = input_area.x + 2 + cursor_col as u16;
-        let cy = input_area.y;
-        if cx < input_area.x + input_area.width {
+        // Place hardware cursor inside the input.
+        let cursor_col = query[..cursor].chars().count();
+        let cx = input_inner.x + 2 + cursor_col as u16; // 2 for "> "
+        let cy = input_inner.y;
+        if cx < input_inner.x + input_inner.width && cy < input_inner.y + input_inner.height {
             frame.set_cursor_position((cx, cy));
         }
+
+        // ── List block (bottom, connected borders) ──
+        let name_col = filtered
+            .iter()
+            .map(|&(name, _)| name.chars().count())
+            .max()
+            .unwrap_or(0);
+        let inner_w = list_area.width.saturating_sub(3) as usize; // borders + padding
+        let gap = 2usize;
+
+        let items: Vec<ListItem> = if filtered.is_empty() {
+            let msg = if self.config.macros.entries.is_empty() {
+                "No macros configured. Use \"edit-macros\" in the command palette."
+            } else {
+                "No matching macros."
+            };
+            vec![ListItem::new(Span::styled(
+                msg,
+                Style::default().fg(self.theme.hint_desc_fg),
+            ))]
+        } else {
+            filtered
+                .iter()
+                .map(|&(name, text)| {
+                    let name_padded = format!("{name:name_col$}");
+                    let mut spans = vec![Span::styled(
+                        name_padded,
+                        Style::default()
+                            .fg(self.theme.help_section_header_fg)
+                            .add_modifier(Modifier::BOLD),
+                    )];
+                    let text_preview = text.replace('\n', "↵");
+                    let desc_avail = inner_w.saturating_sub(name_col + gap);
+                    let desc_display =
+                        if text_preview.chars().count() > desc_avail && desc_avail > 1 {
+                            let end = text_preview
+                                .char_indices()
+                                .nth(desc_avail - 1)
+                                .map(|(i, _)| i)
+                                .unwrap_or(text_preview.len());
+                            format!("  {}\u{2026}", &text_preview[..end])
+                        } else {
+                            format!("  {text_preview:desc_avail$}")
+                        };
+                    spans.push(Span::styled(
+                        desc_display,
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                    ListItem::new(Line::from(spans))
+                })
+                .collect()
+        };
+
+        let list_block = Block::default()
+            .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(self.theme.overlay_border));
+        let mut list_state = ListState::default();
+        if !filtered.is_empty() {
+            list_state.select(Some(selected));
+        }
+        StatefulWidget::render(
+            List::new(items)
+                .block(list_block)
+                .highlight_style(self.theme.selection_style()),
+            list_area,
+            frame.buffer_mut(),
+            &mut list_state,
+        );
     }
 
     fn themed_block<'a>(&self, title: &'a str, focused: bool) -> Block<'a> {

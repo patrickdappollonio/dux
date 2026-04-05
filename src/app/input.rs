@@ -964,17 +964,15 @@ impl App {
         for action in actions {
             match action {
                 SeqAction::Intercept(Action::OpenMacroBar, _, _) => {
-                    if !self.config.macros.entries.is_empty() {
-                        let prev = self.input_target;
-                        self.macro_bar = Some(MacroBarState {
-                            input: TextInput::new(),
-                            selected: 0,
-                            previous_input_target: prev,
-                        });
-                        self.input_target = InputTarget::None;
-                        self.raw_input_buf.clear();
-                        return Ok(false);
-                    }
+                    let prev = self.input_target;
+                    self.macro_bar = Some(MacroBarState {
+                        input: TextInput::new(),
+                        selected: 0,
+                        previous_input_target: prev,
+                    });
+                    self.input_target = InputTarget::None;
+                    self.raw_input_buf.clear();
+                    return Ok(false);
                 }
                 SeqAction::Intercept(Action::ExitInteractive, _, _) => {
                     let return_to_terminal_list =
