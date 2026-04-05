@@ -2102,6 +2102,7 @@ impl App {
                 }
 
                 let legend = Line::from(vec![
+                    Span::raw("  "),
                     Span::styled("Legend: ", Style::default().fg(self.theme.hint_desc_fg)),
                     Span::styled(
                         "AGENT",
@@ -2123,6 +2124,7 @@ impl App {
                         " = companion terminal  |  dim text = source context",
                         Style::default().fg(self.theme.hint_dim_desc_fg),
                     ),
+                    Span::raw("  "),
                 ]);
                 Paragraph::new(legend)
                     .wrap(Wrap { trim: false })
