@@ -46,8 +46,8 @@ impl App {
                     self.clamp_files_cursor();
                 }
                 WorkerEvent::CommitMessageGenerated(msg) => {
+                    self.commit_input.clear_overlay();
                     self.commit_input.set_text(msg);
-                    self.commit_generating = false;
                     self.input_target = InputTarget::CommitMessage;
                     {
                         let exit_key = self.bindings.label_for(Action::ExitCommitInput);
@@ -58,7 +58,7 @@ impl App {
                     }
                 }
                 WorkerEvent::CommitMessageFailed(err) => {
-                    self.commit_generating = false;
+                    self.commit_input.clear_overlay();
                     {
                         let gen_key = self.bindings.label_for(Action::GenerateCommitMessage);
                         self.set_error(format!(

@@ -24,6 +24,7 @@ pub enum Action {
     InteractAgent,
     ShowTerminal,
     ExitInteractive,
+    OpenMacroBar,
     ToggleFullscreen,
     ScrollPageUp,
     ScrollPageDown,
@@ -73,6 +74,7 @@ pub enum Action {
     SortAgentsByCreated,
     SortAgentsByName,
     RemoveGitPane,
+    EditMacros,
 }
 
 /// Where a binding's key combo is matched.
@@ -166,6 +168,7 @@ impl Action {
             Action::InteractAgent => "interact_agent",
             Action::ShowTerminal => "show_terminal",
             Action::ExitInteractive => "exit_interactive",
+            Action::OpenMacroBar => "open_macro_bar",
             Action::ToggleFullscreen => "toggle_fullscreen",
             Action::ScrollPageUp => "scroll_page_up",
             Action::ScrollPageDown => "scroll_page_down",
@@ -209,6 +212,7 @@ impl Action {
             Action::SortAgentsByCreated => "sort_agents_by_created",
             Action::SortAgentsByName => "sort_agents_by_name",
             Action::RemoveGitPane => "remove_git_pane",
+            Action::EditMacros => "edit_macros",
         }
     }
 
@@ -238,6 +242,7 @@ impl Action {
                 "Launch, show, or relaunch the selected agent's companion terminal."
             }
             Action::ExitInteractive => "Exit interactive mode (stop forwarding keys to agent).",
+            Action::OpenMacroBar => "Open the macro command bar to paste text macros.",
             Action::ToggleFullscreen => "Toggle fullscreen overlay for the agent terminal.",
             Action::ScrollPageUp => "Scroll up one page in the agent output.",
             Action::ScrollPageDown => "Scroll down one page in the agent output.",
@@ -283,6 +288,7 @@ impl Action {
             Action::SortAgentsByCreated => "Sort agents by creation date (newest first).",
             Action::SortAgentsByName => "Sort agents alphabetically by name.",
             Action::RemoveGitPane => "Remove or restore the git pane.",
+            Action::EditMacros => "Open the text macros editor.",
         }
     }
 
@@ -305,6 +311,7 @@ impl Action {
             | Action::ReconnectAgent
             | Action::DeleteSession => Some("Projects pane"),
             Action::ExitInteractive
+            | Action::OpenMacroBar
             | Action::ToggleFullscreen
             | Action::ScrollPageUp
             | Action::ScrollPageDown
@@ -347,7 +354,8 @@ impl Action {
             | Action::SortAgentsByUpdated
             | Action::SortAgentsByCreated
             | Action::SortAgentsByName
-            | Action::RemoveGitPane => None,
+            | Action::RemoveGitPane
+            | Action::EditMacros => None,
         }
     }
 }
@@ -639,6 +647,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         help: Some(HelpEntry {
             section: "Agent pane",
             description: "Exit interactive mode",
+        }),
+        hint_contexts: &[],
+        palette: None,
+    },
+    BindingDef {
+        action: Action::OpenMacroBar,
+        default_keys: &[key!(ctrl - '\\')],
+        scopes: &[BindingScope::Interactive],
+        help: Some(HelpEntry {
+            section: "Agent pane",
+            description: "Open the macro command bar to paste text macros",
         }),
         hint_contexts: &[],
         palette: None,
@@ -1175,6 +1194,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Remove or restore the git pane entirely",
         }),
     },
+    BindingDef {
+        action: Action::EditMacros,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "edit-macros",
+            description: "Edit text macros for interactive mode",
+        }),
+    },
 ];
 
 const HELP_SECTION_ORDER: &[&str] = &[
@@ -1631,11 +1661,22 @@ fn key_combination_to_bytes(kc: &KeyCombination) -> Option<Vec<u8>> {
     match norm.codes {
         One(KeyCode::Char(c)) if has_ctrl && !has_alt && !has_shift => {
             // Ctrl+letter → control character 0x01..0x1a
+            // Also handle some non-letter Ctrl combos:
+            //   Ctrl+\  → 0x1c  (FS)
+            //   Ctrl+]  → 0x1d  (GS)
+            //   Ctrl+^  → 0x1e  (RS)
+            //   Ctrl+_  → 0x1f  (US)
             let lower = c.to_ascii_lowercase();
             if lower.is_ascii_lowercase() {
                 Some(vec![lower as u8 - b'a' + 1])
             } else {
-                None
+                match c {
+                    '\\' => Some(vec![0x1c]),
+                    ']' => Some(vec![0x1d]),
+                    '^' => Some(vec![0x1e]),
+                    '_' => Some(vec![0x1f]),
+                    _ => None,
+                }
             }
         }
         One(KeyCode::Char(c)) if !has_ctrl && !has_alt && !has_shift => {

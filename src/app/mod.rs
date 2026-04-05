@@ -65,8 +65,6 @@ pub struct App {
     pub(crate) files_search: TextInput,
     pub(crate) files_search_active: bool,
     pub(crate) commit_input: TextInput,
-    pub(crate) commit_scroll: u16,
-    pub(crate) commit_generating: bool,
     pub(crate) left_width_pct: u16,
     pub(crate) right_width_pct: u16,
     pub(crate) terminal_pane_height_pct: u16,
@@ -110,6 +108,7 @@ pub struct App {
     pub(crate) last_mouse_click: Option<RecentMouseClick>,
     pub(crate) interactive_patterns: InteractiveBytePatterns,
     pub(crate) raw_input_buf: Vec<u8>,
+    pub(crate) macro_bar: Option<MacroBarState>,
     pub(crate) sigwinch_flag: Arc<AtomicBool>,
 }
 
@@ -348,6 +347,32 @@ pub(crate) enum PromptState {
         editors: Vec<DetectedEditor>,
         selected: usize,
     },
+    EditMacros {
+        entries: Vec<(String, String)>,
+        selected: usize,
+        editing: Option<MacroEditState>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MacroBarState {
+    pub(crate) input: TextInput,
+    pub(crate) selected: usize,
+    pub(crate) previous_input_target: InputTarget,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MacroEditState {
+    pub(crate) id: Option<String>,
+    pub(crate) name_input: TextInput,
+    pub(crate) text_input: TextInput,
+    pub(crate) stage: MacroEditStage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MacroEditStage {
+    EditName,
+    EditText,
 }
 
 #[derive(Clone, Debug)]
@@ -611,9 +636,9 @@ impl App {
             files_index: 0,
             files_search: TextInput::new(),
             files_search_active: false,
-            commit_input: TextInput::new(),
-            commit_scroll: 0,
-            commit_generating: false,
+            commit_input: TextInput::new()
+                .with_multiline(4)
+                .with_placeholder("Type your commit message\u{2026}"),
             left_collapsed: false,
             right_collapsed: false,
             right_hidden: false,
@@ -652,6 +677,7 @@ impl App {
             last_mouse_click: None,
             interactive_patterns,
             raw_input_buf: Vec::new(),
+            macro_bar: None,
             sigwinch_flag,
         };
         app.restore_sessions();
@@ -665,18 +691,17 @@ impl App {
         let mut terminal = ratatui::init();
         execute!(stdout(), EnableMouseCapture)?;
 
-        let result = (|| -> Result<()> {
+        let result: Result<()> = {
             loop {
                 self.drain_events();
                 self.tick_count = self.tick_count.wrapping_add(1);
 
                 // Check SIGWINCH — needed when bypassing crossterm's event
                 // reader (which would otherwise deliver Resize events).
-                if self.sigwinch_flag.swap(false, Ordering::Relaxed) {
-                    if let Err(err) = crate::io_retry::retry_on_interrupt(|| terminal.autoresize())
-                    {
-                        self.report_runtime_error("terminal resize failed", &err);
-                    }
+                if self.sigwinch_flag.swap(false, Ordering::Relaxed)
+                    && let Err(err) = crate::io_retry::retry_on_interrupt(|| terminal.autoresize())
+                {
+                    self.report_runtime_error("terminal resize failed", &err);
                 }
 
                 if let Err(err) = terminal.draw(|frame| self.render(frame)) {
@@ -759,7 +784,7 @@ impl App {
                 }
             }
             Ok(())
-        })();
+        };
 
         let _ = execute!(stdout(), DisableMouseCapture);
         ratatui::restore();
@@ -900,12 +925,58 @@ impl App {
                 self.sort_sessions_by_name();
                 Ok(())
             }
+            "edit-macros" => {
+                self.open_edit_macros();
+                Ok(())
+            }
             "" => Ok(()),
             other => {
                 self.set_error(format!("Unknown command: \"{other}\""));
                 Ok(())
             }
         }
+    }
+
+    pub(crate) fn open_edit_macros(&mut self) {
+        let mut entries: Vec<(String, String)> = self
+            .config
+            .macros
+            .entries
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+        self.prompt = PromptState::EditMacros {
+            entries,
+            selected: 0,
+            editing: None,
+        };
+    }
+
+    /// Return macros matching `query`, searching name first then text content.
+    /// If `query` is empty, returns all macros in their config order.
+    pub(crate) fn filtered_macros(&self, query: &str) -> Vec<(&str, &str)> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return self
+                .config
+                .macros
+                .entries
+                .iter()
+                .map(|(name, text)| (name.as_str(), text.as_str()))
+                .collect();
+        }
+        let mut name_matches = Vec::new();
+        let mut text_matches = Vec::new();
+        for (name, text) in &self.config.macros.entries {
+            if name.to_lowercase().contains(&needle) {
+                name_matches.push((name.as_str(), text.as_str()));
+            } else if text.to_lowercase().contains(&needle) {
+                text_matches.push((name.as_str(), text.as_str()));
+            }
+        }
+        name_matches.extend(text_matches);
+        name_matches
     }
 
     pub(crate) fn left_items(&self) -> &[LeftItem] {

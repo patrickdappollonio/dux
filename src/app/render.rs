@@ -746,6 +746,12 @@ impl App {
             }
         }
 
+        // Macro bar overlays the hint area when active.
+        if self.macro_bar.is_some() {
+            self.render_macro_bar(frame, inner);
+            return;
+        }
+
         // Hint bar with top border.
         if hint_area.height > 0 {
             // Pre-compute all key labels so they outlive the Span borrows.
@@ -756,6 +762,7 @@ impl App {
             let focus_agent = self.bindings.labels_for(Action::FocusAgent);
             let reconnect = self.bindings.labels_for(Action::ReconnectAgent);
 
+            let macro_key = self.bindings.label_for(Action::OpenMacroBar);
             let hint_line = if is_input {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
@@ -770,6 +777,11 @@ impl App {
                     spans.push(Span::styled(" down one line", desc_style));
                 } else {
                     spans.push(Span::styled(" down", desc_style));
+                }
+                if !self.config.macros.entries.is_empty() && !macro_key.is_empty() {
+                    spans.push(Span::styled(" ", desc_style));
+                    spans.extend(self.theme.dim_key_badge_default(&macro_key));
+                    spans.push(Span::styled(" macros.", desc_style));
                 }
                 Line::from(spans)
             } else if scrollback_offset > 0 {
@@ -1114,58 +1126,51 @@ impl App {
             .areas(inner);
         self.mouse_layout.commit_text_area = Some(text_area);
 
-        if self.commit_generating {
+        // Update TextInput's display dimensions to match the available area.
+        let text_w = text_area.width as usize;
+        self.commit_input
+            .set_display_width(if text_w > 0 { Some(text_w) } else { None });
+        self.commit_input
+            .set_visible_lines(text_area.height as usize);
+
+        if let Some(overlay) = self.commit_input.overlay() {
+            // Overlay (e.g. "Generating commit message…") with animated dots.
             let dots = ".".repeat((self.tick_count as usize / 5) % 4);
-            let text = format!("Generating commit message{dots}");
+            let text = format!("{overlay}{dots}");
             Paragraph::new(text)
                 .style(Style::default().fg(self.theme.hint_desc_fg))
                 .render(text_area, frame.buffer_mut());
         } else if self.commit_input.is_empty() && !focused {
-            // Placeholder text when not engaged.
+            // Show placeholder when unfocused and empty — nothing to render
+            // (the placeholder is shown only when focused, below).
         } else {
-            let display_text = if self.commit_input.is_empty() {
-                "Type your commit message…"
-            } else {
-                &self.commit_input.text
-            };
-            let style = if self.commit_input.is_empty() {
-                Style::default().fg(self.theme.hint_desc_fg)
-            } else {
-                Style::default()
-            };
+            // Render visible lines from TextInput (handles wrapping + scroll).
+            let visible = self.commit_input.visible_lines();
+            let (cursor_row, cursor_col) = self.commit_input.cursor_display_position();
+            let is_empty = self.commit_input.is_empty();
 
-            let visible_h = text_area.height;
-            let text_w = text_area.width as usize;
-            if text_w > 0 && !self.commit_input.is_empty() {
-                let (row, _) = cursor_pos_in_wrapped(
-                    &self.commit_input.text,
-                    self.commit_input.cursor,
-                    text_w,
-                );
-                if row < self.commit_scroll {
-                    self.commit_scroll = row;
-                } else if row >= self.commit_scroll + visible_h {
-                    self.commit_scroll = row - visible_h + 1;
+            // When empty and focused, show the placeholder.
+            if is_empty {
+                if let Some(ph) = self.commit_input.placeholder() {
+                    Paragraph::new(ph.to_string())
+                        .style(Style::default().fg(self.theme.hint_desc_fg))
+                        .render(text_area, frame.buffer_mut());
                 }
             } else {
-                self.commit_scroll = 0;
+                for (i, line_text) in visible.iter().enumerate() {
+                    if i >= text_area.height as usize {
+                        break;
+                    }
+                    let y = text_area.y + i as u16;
+                    let line_area = Rect::new(text_area.x, y, text_area.width, 1);
+                    Paragraph::new(line_text.as_str()).render(line_area, frame.buffer_mut());
+                }
             }
 
-            let wrapped_text = wrap_text_at_width(display_text, text_w);
-            Paragraph::new(wrapped_text)
-                .style(style)
-                .scroll((self.commit_scroll, 0))
-                .render(text_area, frame.buffer_mut());
-
-            if focused {
-                let (cursor_row, cursor_col) = cursor_pos_in_wrapped(
-                    &self.commit_input.text,
-                    self.commit_input.cursor,
-                    text_w,
-                );
-                let screen_row = cursor_row.saturating_sub(self.commit_scroll);
+            // Position the hardware cursor when focused.
+            if focused && !is_empty {
                 let cx = text_area.x + cursor_col as u16;
-                let cy = text_area.y + screen_row;
+                let cy = text_area.y + cursor_row as u16;
                 if cx < text_area.x + text_area.width && cy < text_area.y + text_area.height {
                     frame.set_cursor_position((cx, cy));
                 }
@@ -2743,8 +2748,280 @@ impl App {
                 self.overlay_layout.active =
                     OverlayMouseLayout::RenameSession { input: input_inner };
             }
+            PromptState::EditMacros { .. } => {
+                // Full rendering implemented in Task #5.
+                self.render_edit_macros(frame);
+            }
             PromptState::None => {}
         }
+    }
+
+    fn render_edit_macros(&mut self, frame: &mut Frame) {
+        use super::MacroEditStage;
+
+        // Pre-compute the popup layout so we can set the display width for
+        // soft-wrapping before taking the immutable borrow on self.prompt.
+        let popup = centered_rect_exact(64, 20, frame.area());
+        {
+            // Temporarily borrow prompt mutably to set the text input's
+            // display width to match the available inner area.
+            if let PromptState::EditMacros {
+                editing: Some(edit_state),
+                ..
+            } = &mut self.prompt
+                && edit_state.stage == MacroEditStage::EditText
+            {
+                // Replicate the layout chain to compute actual text width:
+                // popup → outer border inner → layout (label + text + hints)
+                // → text border inner → minus leading space(1).
+                let outer_block = Block::bordered();
+                let outer_inner = outer_block.inner(popup);
+                let text_bordered = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(1),
+                        Constraint::Min(3),
+                        Constraint::Length(1),
+                    ])
+                    .split(outer_inner)[1];
+                let inner_block = Block::bordered();
+                let text_inner = inner_block.inner(text_bordered);
+                // Subtract 1 for the leading space prefix on each rendered line.
+                let wrap_w = text_inner.width.saturating_sub(1) as usize;
+                edit_state.text_input.set_display_width(if wrap_w > 0 {
+                    Some(wrap_w)
+                } else {
+                    None
+                });
+            }
+        }
+
+        let PromptState::EditMacros {
+            entries,
+            selected,
+            editing,
+        } = &self.prompt
+        else {
+            return;
+        };
+
+        self.render_dim_overlay(frame);
+        Clear.render(popup, frame.buffer_mut());
+
+        if let Some(edit_state) = editing {
+            // ── Edit view ──
+            let title = match &edit_state.id {
+                Some(name) => format!("Edit Macro — {name}"),
+                None => "New Macro".to_string(),
+            };
+            let outer = self.themed_overlay_block(&title);
+            let inner = outer.inner(popup);
+            outer.render(popup, frame.buffer_mut());
+
+            match edit_state.stage {
+                MacroEditStage::EditName => {
+                    let [label_area, input_area, _, hint_area] = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Length(1),
+                            Constraint::Length(3),
+                            Constraint::Min(1),
+                            Constraint::Length(1),
+                        ])
+                        .areas(inner);
+
+                    Paragraph::new(Line::from(Span::styled(
+                        " Name (identifies this macro):",
+                        Style::default().fg(self.theme.input_label_fg),
+                    )))
+                    .render(label_area, frame.buffer_mut());
+
+                    self.render_single_line_input(&edit_state.name_input, input_area, frame);
+
+                    let hints = self.edit_macro_hints(&[("Enter", "next"), ("Esc", "cancel")]);
+                    Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
+                }
+                MacroEditStage::EditText => {
+                    let [label_area, bordered_area, hint_area] = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Length(1),
+                            Constraint::Min(3),
+                            Constraint::Length(1),
+                        ])
+                        .areas(inner);
+
+                    Paragraph::new(Line::from(Span::styled(
+                        " Text (pasted to agent via bracketed paste):",
+                        Style::default().fg(self.theme.input_label_fg),
+                    )))
+                    .render(label_area, frame.buffer_mut());
+
+                    // Draw border around the text area; pass inner rect to renderer.
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED)
+                        .border_style(Style::default().fg(self.theme.overlay_border));
+                    let text_inner = block.inner(bordered_area);
+                    block.render(bordered_area, frame.buffer_mut());
+
+                    self.render_multiline_input(&edit_state.text_input, text_inner, frame);
+
+                    let hints =
+                        self.edit_macro_hints(&[("Enter", "newline"), ("Esc", "save & close")]);
+                    Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
+                }
+            }
+        } else {
+            // ── List view ──
+            let outer = self.themed_overlay_block("Text Macros");
+            let inner = outer.inner(popup);
+            outer.render(popup, frame.buffer_mut());
+
+            if entries.is_empty() {
+                let [msg_area, _, hint_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(2),
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                    ])
+                    .areas(inner);
+
+                Paragraph::new(vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " No macros defined. Press n to create one.",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )),
+                ])
+                .render(msg_area, frame.buffer_mut());
+
+                let hints = self.edit_macro_hints(&[("n", "new"), ("Esc", "close")]);
+                Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
+            } else {
+                let [list_area, hint_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(1), Constraint::Length(1)])
+                    .areas(inner);
+
+                let items: Vec<ListItem> = entries
+                    .iter()
+                    .map(|(name, text)| {
+                        let mut spans = vec![Span::styled(
+                            format!(" {name} — "),
+                            Style::default().fg(self.theme.input_label_fg),
+                        )];
+                        let text_preview = text.replace('\n', "↵");
+                        let prefix_len = name.len() + 4; // " " + name + " — "
+                        let max_len = (list_area.width as usize).saturating_sub(prefix_len + 2);
+                        let truncated = if text_preview.len() > max_len {
+                            format!("{}…", &text_preview[..max_len.saturating_sub(1)])
+                        } else {
+                            text_preview
+                        };
+                        spans.push(Span::styled(
+                            truncated,
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ));
+                        ListItem::new(Line::from(spans))
+                    })
+                    .collect();
+
+                let list = List::new(items)
+                    .highlight_style(self.theme.selection_style())
+                    .highlight_symbol("");
+                let mut state = ratatui::widgets::ListState::default();
+                state.select(Some(*selected));
+                ratatui::prelude::StatefulWidget::render(
+                    list,
+                    list_area,
+                    frame.buffer_mut(),
+                    &mut state,
+                );
+
+                let hints = self.edit_macro_hints(&[
+                    ("Enter", "edit"),
+                    ("n", "new"),
+                    ("d", "delete"),
+                    ("Esc", "close"),
+                ]);
+                Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
+            }
+        }
+    }
+
+    /// Render a single-line TextInput with cursor in a bordered box.
+    /// Uses the terminal's hardware cursor for a blinking caret.
+    fn render_single_line_input(&self, input: &TextInput, area: Rect, frame: &mut Frame) {
+        let display = Line::from(Span::raw(format!(" {}", &input.text)));
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
+            .border_style(Style::default().fg(self.theme.overlay_border));
+        let inner = block.inner(area);
+        Paragraph::new(display)
+            .block(block)
+            .render(area, frame.buffer_mut());
+
+        // Position the hardware cursor (blinking caret).
+        // Cursor column in chars + 1 for the leading space padding.
+        let cursor_col = input.text[..input.cursor.min(input.text.len())]
+            .chars()
+            .count();
+        let cx = inner.x + cursor_col as u16 + 1;
+        let cy = inner.y;
+        if cx < inner.x + inner.width && cy < inner.y + inner.height {
+            frame.set_cursor_position((cx, cy));
+        }
+    }
+
+    /// Render a multiline TextInput into the given area.
+    ///
+    /// The caller is responsible for drawing any border — this method renders
+    /// text directly into `area`. Uses the terminal's hardware cursor for a
+    /// blinking caret.
+    fn render_multiline_input(&self, input: &TextInput, area: Rect, frame: &mut Frame) {
+        let visible = input.visible_lines();
+        let (cursor_row, cursor_col) = input.cursor_display_position();
+
+        for (i, line_text) in visible.iter().enumerate() {
+            if i >= area.height as usize {
+                break;
+            }
+            let y = area.y + i as u16;
+            let line_area = Rect::new(area.x, y, area.width, 1);
+            let line = Line::from(Span::raw(format!(" {line_text}")));
+            Paragraph::new(line).render(line_area, frame.buffer_mut());
+        }
+
+        // Position the hardware cursor (blinking caret).
+        // +1 for the leading space padding on each line.
+        let cx = area.x + cursor_col as u16 + 1;
+        let cy = area.y + cursor_row as u16;
+        if cx < area.x + area.width && cy < area.y + area.height {
+            frame.set_cursor_position((cx, cy));
+        }
+    }
+
+    /// Build hint spans from alternating key/description pairs.
+    /// Each pair is (key_label, description). Spans are fully owned.
+    fn edit_macro_hints(&self, pairs: &[(&str, &str)]) -> Vec<Span<'static>> {
+        let mut spans = vec![Span::raw(" ")];
+        for (key, desc) in pairs {
+            // key_badge ties lifetime to &str, so we convert to owned spans.
+            let badge = self.theme.key_badge_default(key);
+            spans.extend(
+                badge
+                    .into_iter()
+                    .map(|s| Span::styled(s.content.to_string(), s.style)),
+            );
+            spans.push(Span::styled(
+                format!(" {desc}  "),
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+        }
+        spans
     }
 
     fn render_overlay(&mut self, frame: &mut Frame) {
@@ -2790,6 +3067,152 @@ impl App {
         self.session_surface = SessionSurface::Terminal;
         self.render_agent_terminal(frame, area, " Terminal ", true);
         self.session_surface = saved;
+    }
+
+    fn render_macro_bar(&mut self, frame: &mut Frame, area: Rect) {
+        let (query, selected, cursor, cursor_fg, cursor_bg) = {
+            let Some(bar) = &self.macro_bar else {
+                return;
+            };
+            (
+                bar.input.text.clone(),
+                bar.selected,
+                bar.input.cursor.min(bar.input.text.len()),
+                self.theme.input_cursor_fg,
+                self.theme.input_cursor_bg,
+            )
+        };
+
+        let filtered = self.filtered_macros(&query);
+
+        // Compute total height: input block (3) + list block (variable).
+        // The list block shares borders with the input block (no top border).
+        let list_content_h = (filtered.len() as u16).clamp(1, 8);
+        // list block = content + bottom border (1). Left/right borders are sides.
+        let list_block_h = list_content_h + 1; // +1 for bottom border
+        let input_block_h: u16 = 3; // top border + input + bottom border (shared with list top)
+        let total_h = (input_block_h + list_block_h).min(area.height);
+
+        if area.height < 4 {
+            return;
+        }
+
+        // Bottom-anchor the bar.
+        let bar_area = Rect::new(
+            area.x,
+            area.y + area.height.saturating_sub(total_h),
+            area.width,
+            total_h,
+        );
+        Clear.render(bar_area, frame.buffer_mut());
+
+        // Split into input area (top) and list area (bottom).
+        let [input_area, list_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(input_block_h), Constraint::Min(1)])
+            .areas(bar_area);
+
+        // ── Input block (top, with title and hint badges) ──
+        let mut bottom_spans = vec![Span::raw(" ")];
+        for (key, desc) in &[("Enter", "paste"), ("Tab", "complete"), ("Esc", "cancel")] {
+            let badge = self.theme.key_badge_default(key);
+            bottom_spans.extend(
+                badge
+                    .into_iter()
+                    .map(|s| Span::styled(s.content.to_string(), s.style)),
+            );
+            bottom_spans.push(Span::styled(
+                format!(" {desc}  "),
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+        }
+
+        let input_block = self
+            .themed_overlay_block("Macros")
+            .title_bottom(Line::from(bottom_spans));
+        let input_inner = input_block.inner(input_area);
+        Paragraph::new(render_single_line_cursor_input(
+            "", &query, cursor, cursor_fg, cursor_bg,
+        ))
+        .block(input_block)
+        .render(input_area, frame.buffer_mut());
+
+        // Place hardware cursor inside the input.
+        let cursor_col = query[..cursor].chars().count();
+        let cx = input_inner.x + cursor_col as u16;
+        let cy = input_inner.y;
+        if cx < input_inner.x + input_inner.width && cy < input_inner.y + input_inner.height {
+            frame.set_cursor_position((cx, cy));
+        }
+
+        // ── List block (bottom, connected borders) ──
+        let name_col = filtered
+            .iter()
+            .map(|&(name, _)| name.chars().count())
+            .max()
+            .unwrap_or(0);
+        let inner_w = list_area.width.saturating_sub(3) as usize; // borders + padding
+        let gap = 2usize;
+
+        let items: Vec<ListItem> = if filtered.is_empty() {
+            let msg = if self.config.macros.entries.is_empty() {
+                "No macros configured. Use \"edit-macros\" in the command palette."
+            } else {
+                "No matching macros."
+            };
+            vec![ListItem::new(Span::styled(
+                msg,
+                Style::default().fg(self.theme.hint_desc_fg),
+            ))]
+        } else {
+            filtered
+                .iter()
+                .map(|&(name, text)| {
+                    let name_padded = format!("{name:name_col$}");
+                    let mut spans = vec![Span::styled(
+                        name_padded,
+                        Style::default()
+                            .fg(self.theme.help_section_header_fg)
+                            .add_modifier(Modifier::BOLD),
+                    )];
+                    let text_preview = text.replace('\n', "↵");
+                    let desc_avail = inner_w.saturating_sub(name_col + gap);
+                    let desc_display =
+                        if text_preview.chars().count() > desc_avail && desc_avail > 1 {
+                            let end = text_preview
+                                .char_indices()
+                                .nth(desc_avail - 1)
+                                .map(|(i, _)| i)
+                                .unwrap_or(text_preview.len());
+                            format!("  {}\u{2026}", &text_preview[..end])
+                        } else {
+                            format!("  {text_preview:desc_avail$}")
+                        };
+                    spans.push(Span::styled(
+                        desc_display,
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                    ListItem::new(Line::from(spans))
+                })
+                .collect()
+        };
+
+        let list_block = Block::default()
+            .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(self.theme.overlay_border));
+        let mut list_state = ListState::default();
+        if !filtered.is_empty() {
+            list_state.select(Some(selected));
+        }
+        StatefulWidget::render(
+            List::new(items)
+                .block(list_block)
+                .highlight_style(self.theme.selection_style()),
+            list_area,
+            frame.buffer_mut(),
+            &mut list_state,
+        );
     }
 
     fn themed_block<'a>(&self, title: &'a str, focused: bool) -> Block<'a> {
@@ -3040,107 +3463,9 @@ fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {
     Some(format!(" {scrolled}/{total} {noun} "))
 }
 
-/// Pre-wrap text at exact character boundaries to match the manual cursor
-/// position calculation used in the commit input box.
-pub(crate) fn wrap_text_at_width(text: &str, width: usize) -> String {
-    if width == 0 {
-        return text.to_string();
-    }
-    let mut result = String::with_capacity(text.len() + text.len() / width);
-    let mut col: usize = 0;
-    for ch in text.chars() {
-        if ch == '\n' {
-            result.push('\n');
-            col = 0;
-        } else {
-            col += 1;
-            result.push(ch);
-            if col >= width {
-                result.push('\n');
-                col = 0;
-            }
-        }
-    }
-    result
-}
-
-/// Compute the (row, col) position of a cursor in text that wraps at `width`.
-/// This mirrors the inline cursor calculation used in `render_commit_input_inner`.
-pub(crate) fn cursor_pos_in_wrapped(text: &str, cursor: usize, width: usize) -> (u16, usize) {
-    let mut row: u16 = 0;
-    let mut col: usize = 0;
-    for (i, ch) in text.char_indices() {
-        if i == cursor {
-            break;
-        }
-        if ch == '\n' {
-            row += 1;
-            col = 0;
-        } else {
-            col += 1;
-            if width > 0 && col >= width {
-                row += 1;
-                col = 0;
-            }
-        }
-    }
-    (row, col)
-}
-
-pub(crate) fn cursor_from_wrapped_position(
-    text: &str,
-    width: usize,
-    row: u16,
-    col: usize,
-) -> usize {
-    if width == 0 || text.is_empty() {
-        return 0;
-    }
-
-    let target_row = usize::from(row);
-    let target_col = col.min(width.saturating_sub(1));
-    let mut current_row = 0usize;
-    let mut current_col = 0usize;
-
-    for (index, ch) in text.char_indices() {
-        if current_row == target_row && current_col >= target_col {
-            return index;
-        }
-
-        if ch == '\n' {
-            if current_row == target_row {
-                return index;
-            }
-            current_row += 1;
-            current_col = 0;
-            continue;
-        }
-
-        current_col += 1;
-        if current_row == target_row && current_col > target_col {
-            return index + ch.len_utf8();
-        }
-
-        if current_col >= width {
-            current_row += 1;
-            current_col = 0;
-        }
-    }
-
-    text.len()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{Terminal, backend::TestBackend};
-
-    // ── Unit tests for wrap_text_at_width ──────────────────────────
-
-    #[test]
-    fn wrap_empty_string() {
-        assert_eq!(wrap_text_at_width("", 10), "");
-    }
 
     #[test]
     fn scrollback_indicator_uses_fractional_label() {
@@ -3211,45 +3536,14 @@ mod tests {
     }
 
     #[test]
-    fn wrap_shorter_than_width() {
-        assert_eq!(wrap_text_at_width("hello", 10), "hello");
-    }
+    fn render_single_line_cursor_input_supports_empty_prefix() {
+        let line = render_single_line_cursor_input("", "macro", 2, Color::White, Color::Black);
 
-    #[test]
-    fn wrap_exact_width() {
-        // Exactly 5 chars at width 5 → wraps after the last char.
-        assert_eq!(wrap_text_at_width("abcde", 5), "abcde\n");
-    }
-
-    #[test]
-    fn wrap_longer_than_width() {
-        assert_eq!(wrap_text_at_width("abcdefgh", 5), "abcde\nfgh");
-    }
-
-    #[test]
-    fn wrap_multiple_lines() {
-        assert_eq!(wrap_text_at_width("abcdefghij", 3), "abc\ndef\nghi\nj");
-    }
-
-    #[test]
-    fn wrap_preserves_existing_newlines() {
-        assert_eq!(wrap_text_at_width("ab\ncdefgh", 5), "ab\ncdefg\nh");
-    }
-
-    #[test]
-    fn wrap_newline_resets_column() {
-        // "abcde" fills width 5, then "\n" resets, then "fg" fits.
-        assert_eq!(wrap_text_at_width("abcde\nfg", 5), "abcde\n\nfg");
-    }
-
-    #[test]
-    fn wrap_width_one() {
-        assert_eq!(wrap_text_at_width("abc", 1), "a\nb\nc\n");
-    }
-
-    #[test]
-    fn wrap_width_zero_returns_unchanged() {
-        assert_eq!(wrap_text_at_width("abc", 0), "abc");
+        assert_eq!(line.spans.len(), 4);
+        assert_eq!(line.spans[0].content.as_ref(), "");
+        assert_eq!(line.spans[1].content.as_ref(), "ma");
+        assert_eq!(line.spans[2].content.as_ref(), "c");
+        assert_eq!(line.spans[3].content.as_ref(), "ro");
     }
 
     #[test]
@@ -3262,209 +3556,6 @@ mod tests {
     fn centered_rect_exact_clamps_to_available_area() {
         let area = Rect::new(0, 0, 40, 6);
         assert_eq!(centered_rect_exact(56, 9, area), area);
-    }
-
-    // ── Unit tests for cursor_pos_in_wrapped ───────────────────────
-
-    #[test]
-    fn cursor_at_start() {
-        assert_eq!(cursor_pos_in_wrapped("hello", 0, 10), (0, 0));
-    }
-
-    #[test]
-    fn cursor_mid_line() {
-        assert_eq!(cursor_pos_in_wrapped("hello", 3, 10), (0, 3));
-    }
-
-    #[test]
-    fn cursor_at_wrap_boundary() {
-        // "abcde" at width 5: after 'e' col hits 5, wraps → cursor at (1, 0).
-        assert_eq!(cursor_pos_in_wrapped("abcdefgh", 5, 5), (1, 0));
-    }
-
-    #[test]
-    fn cursor_after_wrap() {
-        assert_eq!(cursor_pos_in_wrapped("abcdefgh", 6, 5), (1, 1));
-    }
-
-    #[test]
-    fn cursor_after_newline() {
-        assert_eq!(cursor_pos_in_wrapped("ab\ncd", 3, 10), (1, 0));
-    }
-
-    #[test]
-    fn cursor_at_end() {
-        // Cursor past last char (len = 5), sits at (1, 0) after wrapping.
-        assert_eq!(cursor_pos_in_wrapped("abcde", 5, 5), (1, 0));
-    }
-
-    #[test]
-    fn wrapped_position_maps_back_to_cursor_index() {
-        assert_eq!(cursor_from_wrapped_position("hello world", 5, 1, 0), 5);
-    }
-
-    #[test]
-    fn wrapped_position_handles_newline_rows() {
-        assert_eq!(cursor_from_wrapped_position("ab\ncd", 10, 1, 1), 4);
-    }
-
-    // ── Consistency: cursor pos matches wrapped text layout ────────
-
-    /// For every possible cursor position in `text`, verify that the (row, col)
-    /// from `cursor_pos_in_wrapped` points to the correct character in the
-    /// output of `wrap_text_at_width`.
-    fn assert_cursor_wrap_consistency(text: &str, width: usize) {
-        let wrapped = wrap_text_at_width(text, width);
-        let wrapped_lines: Vec<&str> = wrapped.split('\n').collect();
-
-        for cursor in 0..=text.len() {
-            // Only test at char boundaries.
-            if !text.is_char_boundary(cursor) {
-                continue;
-            }
-            let (row, col) = cursor_pos_in_wrapped(text, cursor, width);
-            let row = row as usize;
-
-            // The cursor should be within the wrapped output's line count.
-            assert!(
-                row < wrapped_lines.len(),
-                "text={text:?} width={width} cursor={cursor}: row {row} >= line count {}",
-                wrapped_lines.len()
-            );
-
-            let line = wrapped_lines[row];
-
-            let at_char = text[cursor..].chars().next();
-            if at_char == Some('\n') || at_char.is_none() {
-                // Cursor at a newline or end of text: sits at end of current line.
-                assert!(
-                    col <= line.len(),
-                    "text={text:?} width={width} cursor={cursor}: \
-                     col {col} > line len {} at row {row}",
-                    line.len()
-                );
-            } else if let Some(expected_char) = at_char {
-                // Cursor points at a visible character; it should match.
-                let actual_char = line[col..].chars().next().unwrap_or('\0');
-                assert_eq!(
-                    actual_char, expected_char,
-                    "text={text:?} width={width} cursor={cursor}: \
-                     at ({row},{col}) expected {expected_char:?} got {actual_char:?}\n\
-                     wrapped={wrapped:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn consistency_short_text() {
-        assert_cursor_wrap_consistency("hello", 10);
-    }
-
-    #[test]
-    fn consistency_exact_width() {
-        assert_cursor_wrap_consistency("abcde", 5);
-    }
-
-    #[test]
-    fn consistency_wrapping_text() {
-        assert_cursor_wrap_consistency("abcdefghijklmno", 5);
-    }
-
-    #[test]
-    fn consistency_with_newlines() {
-        assert_cursor_wrap_consistency("abc\ndef\nghi", 5);
-    }
-
-    #[test]
-    fn consistency_mixed_wrap_and_newlines() {
-        assert_cursor_wrap_consistency("abcdefg\nhij", 4);
-    }
-
-    #[test]
-    fn consistency_width_one() {
-        assert_cursor_wrap_consistency("abc", 1);
-    }
-
-    #[test]
-    fn consistency_long_commit_message() {
-        let msg = "fix: align commit input text wrapping with cursor position calculation for correctness";
-        for w in 5..30 {
-            assert_cursor_wrap_consistency(msg, w);
-        }
-    }
-
-    // ── Ratatui TestBackend rendering test ──────────────────────────
-
-    /// Render wrapped text into a Ratatui TestBackend and verify the character
-    /// at the calculated cursor position matches the expected character.
-    #[test]
-    fn rendered_cursor_matches_buffer_content() {
-        let text = "abcdefghijklmno";
-        let width: u16 = 5;
-        let height: u16 = 4;
-
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        // Test cursor at several positions including wrap boundaries.
-        for cursor in [0usize, 4, 5, 7, 10, 14] {
-            let wrapped = wrap_text_at_width(text, width as usize);
-            let (crow, ccol) = cursor_pos_in_wrapped(text, cursor, width as usize);
-
-            terminal
-                .draw(|frame| {
-                    let area = frame.area();
-                    Paragraph::new(wrapped.as_str()).render(area, frame.buffer_mut());
-                })
-                .unwrap();
-
-            let buf = terminal.backend().buffer();
-            let cell = buf.cell((ccol as u16, crow)).unwrap();
-            let expected = &text[cursor..cursor + 1];
-            assert_eq!(
-                cell.symbol(),
-                expected,
-                "cursor={cursor} at ({crow},{ccol}): buffer has {:?}, expected {expected:?}",
-                cell.symbol()
-            );
-        }
-    }
-
-    /// Verify that after deleting a character near a wrap boundary, the cursor
-    /// still points to the correct cell in the rendered buffer.
-    #[test]
-    fn cursor_correct_after_deletion_near_wrap() {
-        let width: u16 = 5;
-        let height: u16 = 4;
-
-        // Simulate: text is "abcdefgh", cursor at 5 ('f'), delete → "abcdegh", cursor at 5 ('g').
-        let original = "abcdefgh";
-        let delete_at = 5; // byte index of 'f'
-        let after_delete = format!("{}{}", &original[..delete_at], &original[delete_at + 1..]);
-        let new_cursor = delete_at; // cursor stays at same byte pos, now pointing at 'g'
-
-        let wrapped = wrap_text_at_width(&after_delete, width as usize);
-        let (crow, ccol) = cursor_pos_in_wrapped(&after_delete, new_cursor, width as usize);
-
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                let area = frame.area();
-                Paragraph::new(wrapped.as_str()).render(area, frame.buffer_mut());
-            })
-            .unwrap();
-
-        let buf = terminal.backend().buffer();
-        let cell = buf.cell((ccol as u16, crow)).unwrap();
-        let expected_char = after_delete[new_cursor..].chars().next().unwrap();
-        assert_eq!(
-            cell.symbol(),
-            expected_char.to_string(),
-            "After deletion: cursor at ({crow},{ccol}) should show {expected_char:?}, got {:?}",
-            cell.symbol()
-        );
     }
 
     // ── Unit tests for capitalize ─────────────────────────────────

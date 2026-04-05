@@ -35,6 +35,7 @@ pub struct Config {
     pub ui: UiConfig,
     pub editor: EditorConfig,
     pub keys: KeysConfig,
+    pub macros: MacrosConfig,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -43,6 +44,15 @@ pub struct KeysConfig {
     pub show_terminal_keys: bool,
     #[serde(flatten)]
     pub bindings: BTreeMap<String, Vec<String>>,
+}
+
+/// Text macros: a map from name to text.
+/// Each entry is triggered from the macro bar (Ctrl+\).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MacrosConfig {
+    #[serde(flatten)]
+    pub entries: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -144,6 +154,7 @@ impl Default for Config {
             },
             editor: EditorConfig::default(),
             keys: KeysConfig::default(),
+            macros: MacrosConfig::default(),
         }
     }
 }
@@ -396,6 +407,8 @@ enum ConfigEntry {
     Projects,
     /// Renders the `[keys]` section with all keybindings.
     Keys,
+    /// Renders the `[macros]` section with text macros.
+    Macros,
 }
 
 fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
@@ -504,6 +517,8 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
         ConfigEntry::Blank,
         ConfigEntry::Keys,
         ConfigEntry::Blank,
+        ConfigEntry::Macros,
+        ConfigEntry::Blank,
         ConfigEntry::Projects,
     ]
 }
@@ -562,6 +577,7 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
             ConfigEntry::Terminal => render_terminal_config(&mut out, &config.terminal),
             ConfigEntry::Projects => render_projects(&mut out, &config.projects),
             ConfigEntry::Keys => render_keys_config(&mut out, &config.keys, bindings),
+            ConfigEntry::Macros => render_macros_config(&mut out, &config.macros, bindings),
         }
     }
     out
@@ -643,6 +659,37 @@ fn render_keys_config(
         let _ = writeln!(out, "{config_name} = {}", render_string_list(&key_strs));
     }
     out.push('\n');
+}
+
+fn render_macros_config(
+    out: &mut String,
+    macros: &MacrosConfig,
+    bindings: &crate::keybindings::RuntimeBindings,
+) {
+    let macro_key = bindings.label_for(crate::keybindings::Action::OpenMacroBar);
+    out.push_str("[macros]\n");
+    let _ = writeln!(
+        out,
+        "# Text macros: press {macro_key} to open the macro bar and select one to paste.\n\
+         # Each entry is a name mapped to the text that will be pasted via bracketed paste.\n\
+         # Newlines in text values are safe — they are sent atomically and not interpreted as Enter.",
+    );
+    if macros.entries.is_empty() {
+        out.push_str(
+            "# \"Review\" = \"review this code for bugs and security issues\"\n\
+             # \"Explain\" = \"explain what this function does\"\n",
+        );
+    } else {
+        out.push('\n');
+        for (name, text) in &macros.entries {
+            let _ = writeln!(
+                out,
+                "\"{}\" = \"{}\"",
+                escape_toml_string(name),
+                escape_toml_string(text)
+            );
+        }
+    }
 }
 
 fn render_projects(out: &mut String, projects: &[ProjectConfig]) {
@@ -1493,5 +1540,71 @@ oneshot_output = "stdout"
             msg.contains("new_agent"),
             "error should name second action: {msg}"
         );
+    }
+
+    // ── MacrosConfig tests ────────────────────────────────────────
+
+    #[test]
+    fn macros_config_default_is_empty() {
+        let config = MacrosConfig::default();
+        assert!(config.entries.is_empty());
+    }
+
+    #[test]
+    fn macros_config_string_entry_round_trip() {
+        let toml_str = r#"
+"Review" = "review this code"
+"#;
+        let config: MacrosConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.entries.len(), 1);
+        assert_eq!(config.entries["Review"], "review this code");
+    }
+
+    #[test]
+    fn macros_config_multiple_entries() {
+        let toml_str = r#"
+"Explain" = "explain what this function does"
+"Review" = "review this code for bugs"
+"#;
+        let config: MacrosConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.entries.len(), 2);
+        assert_eq!(config.entries["Explain"], "explain what this function does");
+        assert_eq!(config.entries["Review"], "review this code for bugs");
+    }
+
+    #[test]
+    fn render_macros_config_empty() {
+        let config = Config::default();
+        let rendered = render_config_default(&config);
+        assert!(rendered.contains("[macros]"));
+        assert!(rendered.contains("# \"Review\" = \"review this code"));
+    }
+
+    #[test]
+    fn render_macros_config_with_entries() {
+        let mut config = Config::default();
+        config
+            .macros
+            .entries
+            .insert("Review".to_string(), "hello world".to_string());
+        config
+            .macros
+            .entries
+            .insert("Test".to_string(), "foo bar".to_string());
+        let rendered = render_config_default(&config);
+        assert!(rendered.contains("\"Review\" = \"hello world\""));
+        assert!(rendered.contains("\"Test\" = \"foo bar\""));
+    }
+
+    #[test]
+    fn render_macros_config_escapes_special_chars() {
+        let mut config = Config::default();
+        config
+            .macros
+            .entries
+            .insert("Multi".to_string(), "line1\nline2".to_string());
+        let rendered = render_config_default(&config);
+        // Newlines must be escaped in the TOML output
+        assert!(rendered.contains("\"Multi\" = \"line1\\nline2\""));
     }
 }

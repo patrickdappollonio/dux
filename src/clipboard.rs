@@ -1,11 +1,20 @@
+use anyhow::{Result, anyhow};
+
+#[cfg(target_os = "linux")]
 use std::collections::HashSet;
+#[cfg(target_os = "linux")]
 use std::env;
+#[cfg(target_os = "linux")]
 use std::ffi::OsStr;
+#[cfg(target_os = "linux")]
 use std::io::Write;
+#[cfg(target_os = "linux")]
 use std::path::Path;
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, anyhow};
+#[cfg(target_os = "linux")]
+use anyhow::Context;
 
 pub(crate) struct Clipboard {
     copy_text_fn: fn(&str) -> Result<()>,
