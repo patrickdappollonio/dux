@@ -577,7 +577,7 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
             ConfigEntry::Terminal => render_terminal_config(&mut out, &config.terminal),
             ConfigEntry::Projects => render_projects(&mut out, &config.projects),
             ConfigEntry::Keys => render_keys_config(&mut out, &config.keys, bindings),
-            ConfigEntry::Macros => render_macros_config(&mut out, &config.macros),
+            ConfigEntry::Macros => render_macros_config(&mut out, &config.macros, bindings),
         }
     }
     out
@@ -661,12 +661,18 @@ fn render_keys_config(
     out.push('\n');
 }
 
-fn render_macros_config(out: &mut String, macros: &MacrosConfig) {
+fn render_macros_config(
+    out: &mut String,
+    macros: &MacrosConfig,
+    bindings: &crate::keybindings::RuntimeBindings,
+) {
+    let macro_key = bindings.label_for(crate::keybindings::Action::OpenMacroBar);
     out.push_str("[macros]\n");
-    out.push_str(
-        "# Text macros: press Ctrl+\\ to open the macro bar and select one to paste.\n\
+    let _ = writeln!(
+        out,
+        "# Text macros: press {macro_key} to open the macro bar and select one to paste.\n\
          # Each entry is a name mapped to the text that will be pasted via bracketed paste.\n\
-         # Newlines in text values are safe — they are sent atomically and not interpreted as Enter.\n",
+         # Newlines in text values are safe — they are sent atomically and not interpreted as Enter.",
     );
     if macros.entries.is_empty() {
         out.push_str(
