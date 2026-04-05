@@ -3905,6 +3905,9 @@ mod tests {
         app.clipboard = Clipboard::from_fn(clipboard_ok);
 
         app.copy_selected_path().unwrap();
+        // Result arrives via WorkerEvent; drain it.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        app.drain_events();
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
         assert!(app.status.text().contains(&worktree_path));
@@ -3918,6 +3921,8 @@ mod tests {
         app.clipboard = Clipboard::from_fn(clipboard_ok);
 
         app.copy_selected_path().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        app.drain_events();
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
         assert!(app.status.text().contains(&project_path));
@@ -3945,6 +3950,8 @@ mod tests {
         app.clipboard = Clipboard::from_fn(clipboard_fail);
 
         app.copy_selected_path().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        app.drain_events();
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
         assert!(app.status.text().contains("Copy path failed"));

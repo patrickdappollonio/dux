@@ -1,3 +1,6 @@
+use std::sync::mpsc;
+use std::time::Duration;
+
 use anyhow::{Result, anyhow};
 
 #[cfg(target_os = "linux")]
@@ -16,6 +19,9 @@ use std::process::{Command, Stdio};
 #[cfg(target_os = "linux")]
 use anyhow::Context;
 
+const CLIPBOARD_TIMEOUT: Duration = Duration::from_millis(500);
+
+#[derive(Clone, Copy)]
 pub(crate) struct Clipboard {
     copy_text_fn: fn(&str) -> Result<()>,
 }
@@ -50,6 +56,20 @@ fn copy_text_impl(text: &str) -> Result<()> {
 }
 
 fn copy_text_arboard(text: &str) -> Result<()> {
+    let text = text.to_string();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(copy_text_arboard_inner(&text));
+    });
+    rx.recv_timeout(CLIPBOARD_TIMEOUT).map_err(|_| {
+        anyhow!(
+            "Clipboard access timed out after {}ms",
+            CLIPBOARD_TIMEOUT.as_millis()
+        )
+    })?
+}
+
+fn copy_text_arboard_inner(text: &str) -> Result<()> {
     let mut clipboard =
         arboard::Clipboard::new().map_err(|e| anyhow!("Failed to access clipboard: {e}"))?;
     clipboard
@@ -217,10 +237,23 @@ fn run_linux_clipboard_command(command: LinuxClipboardCommand, text: &str) -> Re
             .write_all(text.as_bytes())
             .with_context(|| format!("Failed to write to {}", command.program))?;
     }
+    // stdin is dropped here, closing the pipe so the child can proceed.
 
-    let output = child
-        .wait_with_output()
-        .with_context(|| format!("Failed to wait for {}", command.program))?;
+    let program = command.program;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+
+    let output = rx
+        .recv_timeout(CLIPBOARD_TIMEOUT)
+        .map_err(|_| {
+            anyhow!(
+                "{program} timed out after {}ms",
+                CLIPBOARD_TIMEOUT.as_millis()
+            )
+        })?
+        .with_context(|| format!("Failed to wait for {program}"))?;
 
     if output.status.success() {
         return Ok(());
@@ -344,5 +377,34 @@ mod tests {
             })
         );
         assert_eq!(LinuxClipboardBackend::Arboard.command_spec(), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_linux_clipboard_command_times_out_for_slow_process() {
+        let cmd = LinuxClipboardCommand {
+            program: "sleep",
+            args: &["60"],
+        };
+        let start = std::time::Instant::now();
+        let result = run_linux_clipboard_command(cmd, "test");
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+        // Should complete well under the 60s sleep — within ~1s of the 500ms timeout.
+        assert!(elapsed < Duration::from_secs(2));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_linux_clipboard_command_succeeds_for_fast_command() {
+        // `cat` reads stdin to stdout (which is /dev/null here) and exits 0.
+        let cmd = LinuxClipboardCommand {
+            program: "cat",
+            args: &[],
+        };
+        let result = run_linux_clipboard_command(cmd, "hello");
+        assert!(result.is_ok());
     }
 }
