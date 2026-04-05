@@ -623,7 +623,11 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     BindingDef {
         action: Action::ExitInteractive,
         default_keys: &[key!(ctrl - g)],
-        scopes: &[BindingScope::Interactive, BindingScope::Center],
+        scopes: &[
+            BindingScope::Interactive,
+            BindingScope::Center,
+            BindingScope::Left,
+        ],
         help: Some(HelpEntry {
             section: "Agent pane",
             description: "Exit interactive mode",

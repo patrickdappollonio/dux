@@ -335,7 +335,9 @@ impl App {
                         self.reload_changed_files();
                     }
                 }
-                Action::FocusAgent => self.activate_selected_left_item()?,
+                Action::FocusAgent | Action::ExitInteractive => {
+                    self.activate_selected_left_item()?
+                }
                 Action::OpenProjectBrowser => {
                     self.open_project_browser()?;
                 }
@@ -400,7 +402,7 @@ impl App {
                         }
                     }
                 }
-                Action::FocusAgent => {
+                Action::FocusAgent | Action::ExitInteractive => {
                     // Open terminal overlay for the selected terminal item.
                     self.open_terminal_from_terminal_list()?;
                 }
@@ -864,10 +866,18 @@ impl App {
         for action in actions {
             match action {
                 SeqAction::Intercept(Action::ExitInteractive, _, _) => {
+                    let return_to_terminal_list =
+                        matches!(self.input_target, InputTarget::Terminal)
+                            && self.terminal_return_to_list;
                     self.input_target = InputTarget::None;
                     self.fullscreen_overlay = FullscreenOverlay::None;
                     self.session_surface = SessionSurface::Agent;
                     self.raw_input_buf.clear();
+                    if return_to_terminal_list {
+                        self.left_section = LeftSection::Terminals;
+                        self.clamp_terminal_cursor();
+                        self.focus = FocusPane::Left;
+                    }
                     self.set_info("Exited interactive mode.");
                     return Ok(false);
                 }
@@ -2984,6 +2994,7 @@ mod tests {
             providers: std::collections::HashMap::new(),
             companion_terminals: std::collections::HashMap::new(),
             active_terminal_id: None,
+            terminal_return_to_list: false,
             terminal_counter: 0,
             create_agent_in_flight: false,
             last_pty_size: (0, 0),
@@ -4882,14 +4893,23 @@ mod tests {
         assert_eq!(matched, Some((Action::ExitInteractive, false)));
 
         // Apply the same state change that poll_and_forward_raw_input does.
+        let return_to_list =
+            matches!(app.input_target, InputTarget::Terminal) && app.terminal_return_to_list;
         app.input_target = InputTarget::None;
         app.fullscreen_overlay = FullscreenOverlay::None;
         app.session_surface = SessionSurface::Agent;
         app.raw_input_buf.clear();
+        if return_to_list {
+            app.left_section = LeftSection::Terminals;
+            app.focus = FocusPane::Left;
+        }
 
+        // Launched via `t` → returns to terminals list on the left pane.
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
         assert_eq!(app.session_surface, SessionSurface::Agent);
         assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.left_section, LeftSection::Terminals);
+        assert_eq!(app.focus, FocusPane::Left);
     }
 
     #[test]
