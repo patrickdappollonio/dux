@@ -478,152 +478,29 @@ pub(crate) fn clamp_cursor(text: &str, cursor: usize) -> usize {
     }
 }
 
-/// Compute visual lines from text, soft-wrapping at `width` characters.
-/// Each entry is an owned string representing one visual row.
-/// If `width` is `None`, lines are only split at `\n`.
+/// Compute visual lines using word-aware soft-wrapping.
 fn compute_visual_lines(text: &str, width: Option<usize>) -> Vec<String> {
-    let mut result = Vec::new();
-    for logical in text.split('\n') {
-        match width {
-            Some(w) if w > 0 => {
-                if logical.is_empty() {
-                    result.push(String::new());
-                } else {
-                    let chars: Vec<char> = logical.chars().collect();
-                    for chunk in chars.chunks(w) {
-                        result.push(chunk.iter().collect());
-                    }
-                }
-            }
-            _ => result.push(logical.to_string()),
-        }
-    }
-    result
+    wordwrap_visual_lines(text, width)
 }
 
-/// Count the total number of visual lines (accounting for soft-wrap).
+/// Count total visual lines using word-aware wrapping.
 fn visual_line_count(text: &str, width: Option<usize>) -> usize {
-    let mut count = 0;
-    for logical in text.split('\n') {
-        match width {
-            Some(w) if w > 0 => {
-                let char_len = logical.chars().count();
-                if char_len == 0 {
-                    count += 1;
-                } else {
-                    count += char_len.div_ceil(w); // ceil division
-                }
-            }
-            _ => count += 1,
-        }
-    }
-    count
+    wordwrap_line_count(text, width)
 }
 
-/// Find the visual (row, col) of a cursor byte position, accounting for soft-wrap.
+/// Find the visual (row, col) of a cursor byte position using word-aware wrapping.
 fn cursor_visual_pos(text: &str, cursor: usize, width: Option<usize>) -> (usize, usize) {
-    let idx = clamp_cursor(text, cursor);
-    let before = &text[..idx];
-    let mut vrow = 0;
-
-    // Process each logical line in the text before the cursor
-    for (i, logical) in text.split('\n').enumerate() {
-        let logical_start = if i == 0 {
-            0
-        } else {
-            // Sum of all previous logical lines + their \n separators
-            text.split('\n').take(i).map(|l| l.len() + 1).sum::<usize>()
-        };
-        let logical_end = logical_start + logical.len();
-
-        if idx <= logical_end {
-            // Cursor is on this logical line
-            let col_in_logical = before[logical_start..].chars().count();
-            match width {
-                Some(w) if w > 0 => {
-                    let wrapped_row = col_in_logical / w;
-                    let wrapped_col = col_in_logical % w;
-                    return (vrow + wrapped_row, wrapped_col);
-                }
-                _ => return (vrow, col_in_logical),
-            }
-        }
-
-        // Count visual rows for this logical line
-        match width {
-            Some(w) if w > 0 => {
-                let char_len = logical.chars().count();
-                if char_len == 0 {
-                    vrow += 1;
-                } else {
-                    vrow += char_len.div_ceil(w);
-                }
-            }
-            _ => vrow += 1,
-        }
-    }
-
-    // Fallback: cursor at end
-    (vrow.saturating_sub(1), 0)
+    wordwrap_cursor_pos(text, cursor, width)
 }
 
-/// Compute the byte offset for a given visual (row, col), accounting for soft-wrap.
-/// If the target row's visual line is shorter than `col`, clamps to line end.
+/// Compute byte offset for a visual (row, col) using word-aware wrapping.
 fn byte_offset_at_visual(
     text: &str,
     target_vrow: usize,
     target_vcol: usize,
     width: Option<usize>,
 ) -> usize {
-    let mut vrow = 0;
-    let mut byte_pos = 0;
-
-    for (i, logical) in text.split('\n').enumerate() {
-        if i > 0 {
-            byte_pos += 1; // account for the \n
-        }
-        let logical_start = byte_pos;
-
-        match width {
-            Some(w) if w > 0 => {
-                let chars: Vec<char> = logical.chars().collect();
-                let visual_rows = if chars.is_empty() {
-                    1
-                } else {
-                    chars.len().div_ceil(w)
-                };
-
-                if target_vrow < vrow + visual_rows {
-                    // Target is within this logical line
-                    let row_within = target_vrow - vrow;
-                    let char_start = row_within * w;
-                    let line_char_len = chars.len();
-                    let row_end = ((row_within + 1) * w).min(line_char_len);
-                    let target_char = char_start.saturating_add(target_vcol).min(row_end);
-
-                    // Convert char offset to byte offset
-                    let byte_offset: usize =
-                        chars[..target_char].iter().map(|c| c.len_utf8()).sum();
-                    return logical_start + byte_offset;
-                }
-                vrow += visual_rows;
-            }
-            _ => {
-                if vrow == target_vrow {
-                    let chars: Vec<char> = logical.chars().collect();
-                    let target_char = target_vcol.min(chars.len());
-                    let byte_offset: usize =
-                        chars[..target_char].iter().map(|c| c.len_utf8()).sum();
-                    return logical_start + byte_offset;
-                }
-                vrow += 1;
-            }
-        }
-
-        byte_pos = logical_start + logical.len();
-    }
-
-    text.len()
+    wordwrap_byte_offset(text, target_vrow, target_vcol, width)
 }
 
 fn is_word_char(c: char) -> bool {
@@ -682,6 +559,184 @@ fn next_word_boundary(text: &str, index: usize) -> usize {
         Some(&(offset, _)) => index + offset,
         None => text.len(),
     }
+}
+
+// ── Word-aware wrapping ────────────────────────────────────────────
+//
+// These functions wrap text preferring to break at word boundaries (spaces).
+// When a word is longer than the available width, it falls back to hard
+// character-level splitting. They replace the naive `chars.chunks(w)`
+// approach used previously.
+
+/// Split a single logical line (no `\n`) into visual rows, preferring
+/// breaks at the last space within `width`. Returns a vec of
+/// `(char_start, char_end)` ranges into the char array.
+fn wrap_logical_line(chars: &[char], width: usize) -> Vec<(usize, usize)> {
+    if chars.is_empty() {
+        return vec![(0, 0)];
+    }
+    let mut rows = Vec::new();
+    let mut pos = 0;
+    while pos < chars.len() {
+        let remaining = chars.len() - pos;
+        if remaining <= width {
+            rows.push((pos, chars.len()));
+            break;
+        }
+        // Look for the last space within [pos..pos+width].
+        let window_end = pos + width;
+        let mut break_at = None;
+        for i in (pos..window_end).rev() {
+            if chars[i] == ' ' {
+                // Break after the space — the space stays on this line.
+                break_at = Some(i + 1);
+                break;
+            }
+        }
+        match break_at {
+            Some(bp) if bp > pos => {
+                rows.push((pos, bp));
+                pos = bp;
+            }
+            _ => {
+                // No space found — hard break at width.
+                rows.push((pos, window_end));
+                pos = window_end;
+            }
+        }
+    }
+    rows
+}
+
+/// Compute visual lines from text using word-aware soft-wrapping.
+/// If `width` is `None`, lines are only split at `\n`.
+fn wordwrap_visual_lines(text: &str, width: Option<usize>) -> Vec<String> {
+    let mut result = Vec::new();
+    for logical in text.split('\n') {
+        match width {
+            Some(w) if w > 0 => {
+                let chars: Vec<char> = logical.chars().collect();
+                for (start, end) in wrap_logical_line(&chars, w) {
+                    result.push(chars[start..end].iter().collect());
+                }
+            }
+            _ => result.push(logical.to_string()),
+        }
+    }
+    result
+}
+
+/// Count total visual lines using word-aware wrapping.
+fn wordwrap_line_count(text: &str, width: Option<usize>) -> usize {
+    let mut count = 0;
+    for logical in text.split('\n') {
+        match width {
+            Some(w) if w > 0 => {
+                let chars: Vec<char> = logical.chars().collect();
+                count += wrap_logical_line(&chars, w).len();
+            }
+            _ => count += 1,
+        }
+    }
+    count
+}
+
+/// Find the visual (row, col) of a cursor byte position using word-aware wrapping.
+fn wordwrap_cursor_pos(text: &str, cursor: usize, width: Option<usize>) -> (usize, usize) {
+    let idx = clamp_cursor(text, cursor);
+    let before = &text[..idx];
+    let mut vrow = 0;
+
+    for (i, logical) in text.split('\n').enumerate() {
+        let logical_start = if i == 0 {
+            0
+        } else {
+            text.split('\n').take(i).map(|l| l.len() + 1).sum::<usize>()
+        };
+        let logical_end = logical_start + logical.len();
+
+        if idx <= logical_end {
+            let col_in_logical = before[logical_start..].chars().count();
+            match width {
+                Some(w) if w > 0 => {
+                    let chars: Vec<char> = logical.chars().collect();
+                    let rows = wrap_logical_line(&chars, w);
+                    for (ri, &(start, end)) in rows.iter().enumerate() {
+                        let is_last_row = ri + 1 == rows.len();
+                        let col_offset = col_in_logical - start;
+                        let row_len = end - start;
+                        if col_in_logical >= start && (col_offset < row_len || is_last_row) {
+                            return (vrow + ri, col_offset);
+                        }
+                    }
+                    // Fallback: past the last row
+                    let last = rows.len().saturating_sub(1);
+                    return (vrow + last, col_in_logical - rows[last].0);
+                }
+                _ => return (vrow, col_in_logical),
+            }
+        }
+
+        match width {
+            Some(w) if w > 0 => {
+                let chars: Vec<char> = logical.chars().collect();
+                vrow += wrap_logical_line(&chars, w).len();
+            }
+            _ => vrow += 1,
+        }
+    }
+
+    (vrow.saturating_sub(1), 0)
+}
+
+/// Compute byte offset for a visual (row, col) using word-aware wrapping.
+fn wordwrap_byte_offset(
+    text: &str,
+    target_vrow: usize,
+    target_vcol: usize,
+    width: Option<usize>,
+) -> usize {
+    let mut vrow = 0;
+    let mut byte_pos = 0;
+
+    for (i, logical) in text.split('\n').enumerate() {
+        if i > 0 {
+            byte_pos += 1; // \n
+        }
+        let logical_start = byte_pos;
+
+        match width {
+            Some(w) if w > 0 => {
+                let chars: Vec<char> = logical.chars().collect();
+                let rows = wrap_logical_line(&chars, w);
+
+                if target_vrow < vrow + rows.len() {
+                    let ri = target_vrow - vrow;
+                    let (row_char_start, row_char_end) = rows[ri];
+                    let row_len = row_char_end - row_char_start;
+                    let target_char = row_char_start + target_vcol.min(row_len);
+                    let byte_offset: usize =
+                        chars[..target_char].iter().map(|c| c.len_utf8()).sum();
+                    return logical_start + byte_offset;
+                }
+                vrow += rows.len();
+            }
+            _ => {
+                if vrow == target_vrow {
+                    let chars: Vec<char> = logical.chars().collect();
+                    let target_char = target_vcol.min(chars.len());
+                    let byte_offset: usize =
+                        chars[..target_char].iter().map(|c| c.len_utf8()).sum();
+                    return logical_start + byte_offset;
+                }
+                vrow += 1;
+            }
+        }
+
+        byte_pos = logical_start + logical.len();
+    }
+
+    text.len()
 }
 
 #[cfg(test)]
@@ -1293,5 +1348,277 @@ mod tests {
         ti.move_down(); // row 2 — scrolls
         assert_eq!(ti.scroll_offset(), 1);
         assert_eq!(ti.visible_lines(), vec!["def", "g"]);
+    }
+
+    // ── Word-aware wrapping tests ─────────────────────────────────
+
+    #[test]
+    fn wordwrap_no_wrap_needed() {
+        assert_eq!(
+            wordwrap_visual_lines("hello world", None),
+            vec!["hello world"]
+        );
+        assert_eq!(
+            wordwrap_visual_lines("hello world", Some(20)),
+            vec!["hello world"]
+        );
+    }
+
+    #[test]
+    fn wordwrap_breaks_at_space() {
+        // "hello world" at width 8: "hello " fits (6 chars), "world" on next line
+        assert_eq!(
+            wordwrap_visual_lines("hello world", Some(8)),
+            vec!["hello ", "world"]
+        );
+    }
+
+    #[test]
+    fn wordwrap_breaks_at_last_space_in_window() {
+        // "one two three" at width 10: "one two " (8 chars) fits, "three" next
+        assert_eq!(
+            wordwrap_visual_lines("one two three", Some(10)),
+            vec!["one two ", "three"]
+        );
+    }
+
+    #[test]
+    fn wordwrap_hard_break_when_no_space() {
+        // "abcdefghij" at width 4: no spaces, hard breaks
+        assert_eq!(
+            wordwrap_visual_lines("abcdefghij", Some(4)),
+            vec!["abcd", "efgh", "ij"]
+        );
+    }
+
+    #[test]
+    fn wordwrap_long_word_then_short() {
+        // "abcdefgh xy" at width 5: "abcde" hard, "fgh " word, "xy"
+        assert_eq!(
+            wordwrap_visual_lines("abcdefgh xy", Some(5)),
+            vec!["abcde", "fgh ", "xy"]
+        );
+    }
+
+    #[test]
+    fn wordwrap_multiple_spaces() {
+        // "a  b  c" at width 4: "a  " (break at last space), "b  c" fits (4 chars)
+        assert_eq!(
+            wordwrap_visual_lines("a  b  c", Some(4)),
+            vec!["a  ", "b  c"]
+        );
+    }
+
+    #[test]
+    fn wordwrap_with_newlines() {
+        assert_eq!(
+            wordwrap_visual_lines("hello world\nfoo bar", Some(8)),
+            vec!["hello ", "world", "foo bar"]
+        );
+    }
+
+    #[test]
+    fn wordwrap_empty() {
+        assert_eq!(wordwrap_visual_lines("", Some(10)), vec![""]);
+        assert_eq!(wordwrap_visual_lines("", None), vec![""]);
+    }
+
+    #[test]
+    fn wordwrap_exact_width() {
+        // "abcde" at width 5: fits exactly, no wrap
+        assert_eq!(wordwrap_visual_lines("abcde", Some(5)), vec!["abcde"]);
+    }
+
+    #[test]
+    fn wordwrap_space_at_boundary() {
+        // "abcd efgh" at width 5: "abcd " (break after space), "efgh"
+        assert_eq!(
+            wordwrap_visual_lines("abcd efgh", Some(5)),
+            vec!["abcd ", "efgh"]
+        );
+    }
+
+    #[test]
+    fn wordwrap_line_count_matches_lines() {
+        let text = "hello world foo bar";
+        let width = Some(8);
+        let lines = wordwrap_visual_lines(text, width);
+        assert_eq!(wordwrap_line_count(text, width), lines.len());
+    }
+
+    #[test]
+    fn wordwrap_line_count_with_newlines() {
+        let text = "hello world\nfoo bar baz";
+        let width = Some(8);
+        let lines = wordwrap_visual_lines(text, width);
+        assert_eq!(wordwrap_line_count(text, width), lines.len());
+    }
+
+    #[test]
+    fn wordwrap_cursor_pos_simple() {
+        // "hello world" at width 8 → ["hello ", "world"]
+        // Cursor at byte 0 ('h') → row 0, col 0
+        assert_eq!(wordwrap_cursor_pos("hello world", 0, Some(8)), (0, 0));
+        // Cursor at byte 5 (' ') → row 0, col 5 (space is on first line)
+        assert_eq!(wordwrap_cursor_pos("hello world", 5, Some(8)), (0, 5));
+        // Cursor at byte 6 ('w') → row 1, col 0
+        assert_eq!(wordwrap_cursor_pos("hello world", 6, Some(8)), (1, 0));
+        // Cursor at byte 11 (end) → row 1, col 5
+        assert_eq!(wordwrap_cursor_pos("hello world", 11, Some(8)), (1, 5));
+    }
+
+    #[test]
+    fn wordwrap_cursor_pos_hard_break() {
+        // "abcdefgh" at width 5 → ["abcde", "fgh"]
+        assert_eq!(wordwrap_cursor_pos("abcdefgh", 0, Some(5)), (0, 0));
+        assert_eq!(wordwrap_cursor_pos("abcdefgh", 4, Some(5)), (0, 4));
+        assert_eq!(wordwrap_cursor_pos("abcdefgh", 5, Some(5)), (1, 0));
+        assert_eq!(wordwrap_cursor_pos("abcdefgh", 7, Some(5)), (1, 2));
+    }
+
+    #[test]
+    fn wordwrap_byte_offset_simple() {
+        // "hello world" at width 8 → ["hello ", "world"]
+        assert_eq!(wordwrap_byte_offset("hello world", 0, 0, Some(8)), 0); // 'h'
+        assert_eq!(wordwrap_byte_offset("hello world", 0, 5, Some(8)), 5); // ' '
+        assert_eq!(wordwrap_byte_offset("hello world", 1, 0, Some(8)), 6); // 'w'
+        assert_eq!(wordwrap_byte_offset("hello world", 1, 4, Some(8)), 10); // 'd'
+    }
+
+    #[test]
+    fn wordwrap_byte_offset_clamps() {
+        // "hello world" at width 8 → ["hello ", "world"]
+        // Row 1 has 5 chars; requesting col 10 clamps to end
+        assert_eq!(wordwrap_byte_offset("hello world", 1, 10, Some(8)), 11);
+    }
+
+    #[test]
+    fn wordwrap_consistency_roundtrip() {
+        // For every cursor position, cursor_pos → byte_offset should round-trip
+        let text = "the quick brown fox jumps over the lazy dog";
+        let width = Some(10);
+        for cursor in 0..=text.len() {
+            if !text.is_char_boundary(cursor) {
+                continue;
+            }
+            let (row, col) = wordwrap_cursor_pos(text, cursor, width);
+            let back = wordwrap_byte_offset(text, row, col, width);
+            assert_eq!(
+                back, cursor,
+                "round-trip failed: cursor={cursor} → ({row},{col}) → {back}"
+            );
+        }
+    }
+
+    #[test]
+    fn wordwrap_long_path_no_spaces() {
+        // A long path with no spaces — hard breaks at width
+        let path = "/var/home/user/.config/dux/worktrees/project";
+        assert_eq!(
+            wordwrap_visual_lines(path, Some(10)),
+            vec![
+                "/var/home/",
+                "user/.conf",
+                "ig/dux/wor",
+                "ktrees/pro",
+                "ject"
+            ]
+        );
+    }
+
+    #[test]
+    fn wordwrap_path_with_spaces_around() {
+        // Path embedded in text with spaces
+        let text = "check /usr/local/bin/dux for details";
+        // "check " (6) fits, "/usr/local/bin/" (15) fits exactly,
+        // "dux for details" (15) fits exactly
+        assert_eq!(
+            wordwrap_visual_lines(text, Some(15)),
+            vec!["check ", "/usr/local/bin/", "dux for details"]
+        );
+    }
+
+    #[test]
+    fn wordwrap_single_very_long_word() {
+        assert_eq!(
+            wordwrap_visual_lines("abcdefghijklmnopqrst", Some(7)),
+            vec!["abcdefg", "hijklmn", "opqrst"]
+        );
+    }
+
+    #[test]
+    fn wordwrap_trailing_spaces() {
+        // Trailing spaces should be preserved
+        assert_eq!(
+            wordwrap_visual_lines("hello   ", Some(10)),
+            vec!["hello   "]
+        );
+    }
+
+    #[test]
+    fn wordwrap_leading_spaces() {
+        assert_eq!(
+            wordwrap_visual_lines("   hello world", Some(8)),
+            vec!["   ", "hello ", "world"]
+        );
+    }
+
+    #[test]
+    fn wordwrap_width_one() {
+        // Width 1: every char is its own line (hard break, no room for space logic)
+        assert_eq!(
+            wordwrap_visual_lines("ab cd", Some(1)),
+            vec!["a", "b", " ", "c", "d"]
+        );
+    }
+
+    #[test]
+    fn wordwrap_width_two_with_spaces() {
+        assert_eq!(
+            wordwrap_visual_lines("a b c d", Some(2)),
+            vec!["a ", "b ", "c ", "d"]
+        );
+    }
+
+    #[test]
+    fn wordwrap_unicode_path() {
+        let text = "café/résumé/naïve";
+        let lines = wordwrap_visual_lines(text, Some(6));
+        // Should not break mid-character
+        assert_eq!(lines, vec!["café/r", "ésumé/", "naïve"]);
+    }
+
+    #[test]
+    fn wordwrap_long_path_roundtrip() {
+        let path = "/var/home/user/.config/dux/worktrees/project/src/main.rs";
+        let width = Some(12);
+        for cursor in 0..=path.len() {
+            if !path.is_char_boundary(cursor) {
+                continue;
+            }
+            let (row, col) = wordwrap_cursor_pos(path, cursor, width);
+            let back = wordwrap_byte_offset(path, row, col, width);
+            assert_eq!(
+                back, cursor,
+                "path round-trip failed: cursor={cursor} → ({row},{col}) → {back}"
+            );
+        }
+    }
+
+    #[test]
+    fn wordwrap_consistency_with_newlines_roundtrip() {
+        let text = "hello world\nfoo bar baz\nqux";
+        let width = Some(8);
+        for cursor in 0..=text.len() {
+            if !text.is_char_boundary(cursor) {
+                continue;
+            }
+            let (row, col) = wordwrap_cursor_pos(text, cursor, width);
+            let back = wordwrap_byte_offset(text, row, col, width);
+            assert_eq!(
+                back, cursor,
+                "round-trip failed: cursor={cursor} → ({row},{col}) → {back}"
+            );
+        }
     }
 }
