@@ -75,6 +75,8 @@ pub struct App {
     pub(crate) focus: FocusPane,
     pub(crate) center_mode: CenterMode,
     pub(crate) left_collapsed: bool,
+    pub(crate) right_collapsed: bool,
+    pub(crate) right_hidden: bool,
     pub(crate) resize_mode: bool,
     pub(crate) help_scroll: Option<u16>,
     pub(crate) last_help_height: u16,
@@ -613,6 +615,8 @@ impl App {
             commit_scroll: 0,
             commit_generating: false,
             left_collapsed: false,
+            right_collapsed: false,
+            right_hidden: false,
             focus: FocusPane::Left,
             center_mode: CenterMode::Agent,
             resize_mode: false,
@@ -866,6 +870,20 @@ impl App {
             }
             "toggle-sidebar" => {
                 self.left_collapsed = !self.left_collapsed;
+                Ok(())
+            }
+            "toggle-git-pane" => {
+                self.right_collapsed = !self.right_collapsed;
+                if self.right_collapsed && self.focus == FocusPane::Files {
+                    self.focus = FocusPane::Center;
+                }
+                Ok(())
+            }
+            "toggle-remove-git-pane" => {
+                self.right_hidden = !self.right_hidden;
+                if self.right_hidden && self.focus == FocusPane::Files {
+                    self.focus = FocusPane::Center;
+                }
                 Ok(())
             }
             "help" => {

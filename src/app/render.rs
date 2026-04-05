@@ -34,25 +34,34 @@ impl App {
             ])
             .areas(frame.area());
         self.render_header(frame, header);
+        let right_constraint = if self.right_hidden {
+            Constraint::Length(0)
+        } else if self.right_collapsed {
+            Constraint::Length(4)
+        } else {
+            Constraint::Percentage(self.right_width_pct)
+        };
+
         let [left, center, right] = if self.left_collapsed {
             Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Length(4),
-                    Constraint::Min(20),
-                    Constraint::Percentage(self.right_width_pct),
-                ])
+                .constraints([Constraint::Length(4), Constraint::Min(20), right_constraint])
                 .areas(body)
         } else {
+            let right_pct = if self.right_hidden || self.right_collapsed {
+                0
+            } else {
+                self.right_width_pct
+            };
             let center_pct = 100u16
-                .saturating_sub(self.left_width_pct + self.right_width_pct)
+                .saturating_sub(self.left_width_pct + right_pct)
                 .max(20);
             Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
                     Constraint::Percentage(self.left_width_pct),
                     Constraint::Percentage(center_pct),
-                    Constraint::Percentage(self.right_width_pct),
+                    right_constraint,
                 ])
                 .areas(body)
         };
@@ -840,6 +849,39 @@ impl App {
     }
 
     fn render_files(&mut self, frame: &mut Frame, area: Rect) {
+        if self.right_hidden {
+            return;
+        }
+
+        if self.right_collapsed {
+            let focused = self.focus == FocusPane::Files;
+            let all_files: Vec<(&str, Color)> = self
+                .unstaged_files
+                .iter()
+                .chain(self.staged_files.iter())
+                .map(|f| (f.status.as_str(), self.theme.file_status_fg))
+                .collect();
+            let items: Vec<ListItem> = all_files
+                .iter()
+                .map(|(s, color)| {
+                    ListItem::new(Line::from(Span::styled(
+                        format!("{s:>2}"),
+                        Style::default().fg(*color),
+                    )))
+                })
+                .collect();
+            let mut state = ListState::default().with_selected(Some(self.files_index));
+            StatefulWidget::render(
+                List::new(items)
+                    .block(self.themed_block("", focused))
+                    .highlight_style(self.theme.selection_style()),
+                area,
+                frame.buffer_mut(),
+                &mut state,
+            );
+            return;
+        }
+
         let has_staged = !self.staged_files.is_empty();
         let focused = self.focus == FocusPane::Files;
 
