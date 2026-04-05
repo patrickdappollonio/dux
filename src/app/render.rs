@@ -1942,7 +1942,7 @@ impl App {
                                 KillableRuntimeKind::Agent => self.theme.session_active,
                                 KillableRuntimeKind::Terminal => self.theme.session_detached,
                             };
-                            ListItem::new(Line::from(vec![
+                            let mut spans = vec![
                                 Span::styled(
                                     format!("{checked} "),
                                     Style::default().fg(self.theme.hint_key_fg),
@@ -1955,13 +1955,17 @@ impl App {
                                     label_padded,
                                     Style::default().add_modifier(Modifier::BOLD),
                                 ),
-                                Span::styled(
-                                    format!("  {}", runtime.context),
-                                    Style::default()
-                                        .fg(self.theme.hint_dim_desc_fg)
-                                        .add_modifier(Modifier::DIM),
-                                ),
-                            ]))
+                            ];
+                            spans.extend(runtime_context_spans(
+                                &format!("  {}", runtime.context),
+                                Style::default()
+                                    .fg(self.theme.hint_dim_desc_fg)
+                                    .add_modifier(Modifier::DIM),
+                                Style::default()
+                                    .fg(self.theme.branch_fg)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                            ListItem::new(Line::from(spans))
                         })
                         .collect::<Vec<_>>()
                 };
@@ -2971,6 +2975,41 @@ fn render_single_line_cursor_input(
     }
 }
 
+fn runtime_context_spans(
+    context: &str,
+    prose_style: Style,
+    quoted_style: Style,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut buf = String::new();
+    let mut in_quotes = false;
+
+    for ch in context.chars() {
+        if ch == '"' {
+            if in_quotes {
+                buf.push(ch);
+                spans.push(Span::styled(std::mem::take(&mut buf), quoted_style));
+                in_quotes = false;
+            } else {
+                if !buf.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut buf), prose_style));
+                }
+                buf.push(ch);
+                in_quotes = true;
+            }
+        } else {
+            buf.push(ch);
+        }
+    }
+
+    if !buf.is_empty() {
+        let style = if in_quotes { quoted_style } else { prose_style };
+        spans.push(Span::styled(buf, style));
+    }
+
+    spans
+}
+
 fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {
     if scrolled == 0 {
         return None;
@@ -3127,6 +3166,28 @@ mod tests {
             companion_terminal_row_badge(CompanionTerminalStatus::NotLaunched, &theme).is_empty()
         );
         assert!(!companion_terminal_row_badge(CompanionTerminalStatus::Running, &theme).is_empty());
+    }
+
+    #[test]
+    fn runtime_context_spans_highlight_quoted_values() {
+        let prose = Style::default().fg(Color::DarkGray);
+        let quoted = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+        let spans = runtime_context_spans(
+            "on agent \"foxy-basilisk\" under project \"http-server\"",
+            prose,
+            quoted,
+        );
+
+        assert_eq!(spans.len(), 4);
+        assert_eq!(spans[0].content.as_ref(), "on agent ");
+        assert_eq!(spans[1].content.as_ref(), "\"foxy-basilisk\"");
+        assert_eq!(spans[2].content.as_ref(), " under project ");
+        assert_eq!(spans[3].content.as_ref(), "\"http-server\"");
+        assert_eq!(spans[0].style, prose);
+        assert_eq!(spans[1].style, quoted);
+        assert_eq!(spans[3].style, quoted);
     }
 
     #[test]

@@ -3230,8 +3230,11 @@ mod tests {
                     .iter()
                     .find(|runtime| matches!(runtime.id, RuntimeTargetId::Agent(_)))
                     .expect("agent runtime");
-                assert_eq!(agent.label, "Codex agent-branch");
-                assert_eq!(agent.context, "under project \"demo\"");
+                assert_eq!(agent.label, "Codex");
+                assert_eq!(
+                    agent.context,
+                    "on agent \"agent-branch\" under project \"demo\""
+                );
 
                 let terminal = prompt
                     .runtimes

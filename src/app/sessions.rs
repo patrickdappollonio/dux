@@ -693,8 +693,8 @@ impl App {
             let project_name = self.project_name_for_session(session);
             let agent_name = self.session_label(session);
             let provider_name = session.provider.as_str();
-            let label = format!("{} {agent_name}", Self::title_case_word(provider_name));
-            let context = format!("under project \"{project_name}\"");
+            let label = Self::title_case_word(provider_name);
+            let context = format!("on agent \"{agent_name}\" under project \"{project_name}\"");
             let search_text = format!(
                 "{} {} {} {} {}",
                 label,
@@ -727,6 +727,14 @@ impl App {
             let foreground = terminal
                 .foreground_cmd
                 .clone()
+                .map(|cmd| {
+                    let trimmed = cmd.trim();
+                    trimmed
+                        .strip_prefix("TERM ")
+                        .or_else(|| trimmed.strip_prefix("term "))
+                        .unwrap_or(trimmed)
+                        .to_string()
+                })
                 .filter(|cmd| !cmd.trim().is_empty())
                 .unwrap_or_else(|| "shell".to_string());
             let label = foreground;
