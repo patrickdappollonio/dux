@@ -2743,8 +2743,330 @@ impl App {
                 self.overlay_layout.active =
                     OverlayMouseLayout::RenameSession { input: input_inner };
             }
+            PromptState::EditMacros { .. } => {
+                // Full rendering implemented in Task #5.
+                self.render_edit_macros(frame);
+            }
             PromptState::None => {}
         }
+    }
+
+    fn render_edit_macros(&mut self, frame: &mut Frame) {
+        use super::MacroEditStage;
+
+        // Pre-compute the popup layout so we can set the display width for
+        // soft-wrapping before taking the immutable borrow on self.prompt.
+        let popup = centered_rect_exact(64, 20, frame.area());
+        {
+            // Temporarily borrow prompt mutably to set the text input's
+            // display width to match the available inner area.
+            if let PromptState::EditMacros {
+                editing: Some(edit_state),
+                ..
+            } = &mut self.prompt
+            {
+                if edit_state.stage == MacroEditStage::EditText {
+                    // Inner width = popup - border(2) - padding(1 leading space)
+                    let inner_w = popup.width.saturating_sub(4) as usize;
+                    edit_state.text_input.set_display_width(if inner_w > 0 {
+                        Some(inner_w)
+                    } else {
+                        None
+                    });
+                }
+            }
+        }
+
+        let PromptState::EditMacros {
+            entries,
+            selected,
+            editing,
+        } = &self.prompt
+        else {
+            return;
+        };
+
+        self.render_dim_overlay(frame);
+        Clear.render(popup, frame.buffer_mut());
+
+        if let Some(edit_state) = editing {
+            // ── Edit view ──
+            let title = match edit_state.letter {
+                Some(ch) => format!("Edit Macro [{ch}]"),
+                None => "New Macro".to_string(),
+            };
+            let outer = self.themed_overlay_block(&title);
+            let inner = outer.inner(popup);
+            outer.render(popup, frame.buffer_mut());
+
+            match edit_state.stage {
+                MacroEditStage::PickLetter => {
+                    let [label_area, input_area, _, hint_area] = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Length(1),
+                            Constraint::Length(3),
+                            Constraint::Min(1),
+                            Constraint::Length(1),
+                        ])
+                        .areas(inner);
+
+                    Paragraph::new(Line::from(Span::styled(
+                        " Letter (a-z):",
+                        Style::default().fg(self.theme.input_label_fg),
+                    )))
+                    .render(label_area, frame.buffer_mut());
+
+                    self.render_single_line_input(&edit_state.letter_input, input_area, frame);
+
+                    let hints = self.edit_macro_hints(&[("Enter", "next"), ("Esc", "cancel")]);
+                    Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
+                }
+                MacroEditStage::EditName => {
+                    let [label_area, input_area, _, hint_area] = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Length(1),
+                            Constraint::Length(3),
+                            Constraint::Min(1),
+                            Constraint::Length(1),
+                        ])
+                        .areas(inner);
+
+                    Paragraph::new(Line::from(Span::styled(
+                        " Name (optional, shown in status bar):",
+                        Style::default().fg(self.theme.input_label_fg),
+                    )))
+                    .render(label_area, frame.buffer_mut());
+
+                    self.render_single_line_input(&edit_state.name_input, input_area, frame);
+
+                    let hints = self.edit_macro_hints(&[("Enter", "next"), ("Esc", "cancel")]);
+                    Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
+                }
+                MacroEditStage::EditText => {
+                    let [label_area, text_area, hint_area] = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Length(1),
+                            Constraint::Min(3),
+                            Constraint::Length(1),
+                        ])
+                        .areas(inner);
+
+                    Paragraph::new(Line::from(Span::styled(
+                        " Text (pasted to agent via bracketed paste):",
+                        Style::default().fg(self.theme.input_label_fg),
+                    )))
+                    .render(label_area, frame.buffer_mut());
+
+                    self.render_multiline_input(&edit_state.text_input, text_area, frame);
+
+                    let hints =
+                        self.edit_macro_hints(&[("Enter", "newline"), ("Esc", "save & close")]);
+                    Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
+                }
+            }
+        } else {
+            // ── List view ──
+            let outer = self.themed_overlay_block("Text Macros");
+            let inner = outer.inner(popup);
+            outer.render(popup, frame.buffer_mut());
+
+            if entries.is_empty() {
+                let [msg_area, _, hint_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(2),
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                    ])
+                    .areas(inner);
+
+                Paragraph::new(vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " No macros defined. Press n to create one.",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )),
+                ])
+                .render(msg_area, frame.buffer_mut());
+
+                let hints = self.edit_macro_hints(&[("n", "new"), ("Esc", "close")]);
+                Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
+            } else {
+                let [list_area, hint_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(1), Constraint::Length(1)])
+                    .areas(inner);
+
+                let items: Vec<ListItem> = entries
+                    .iter()
+                    .map(|(letter, entry)| {
+                        let prefix = format!(" [{letter}] ");
+                        let mut spans = vec![Span::styled(
+                            prefix,
+                            Style::default()
+                                .fg(self.theme.overlay_border)
+                                .add_modifier(ratatui::style::Modifier::BOLD),
+                        )];
+                        if let Some(name) = entry.name() {
+                            spans.push(Span::styled(
+                                format!("{name}: "),
+                                Style::default().fg(self.theme.input_label_fg),
+                            ));
+                        }
+                        let text_preview = entry.text().replace('\n', "↵");
+                        let max_len =
+                            list_area.width as usize - 8 - entry.name().map_or(0, |n| n.len() + 2);
+                        let truncated = if text_preview.len() > max_len {
+                            format!("{}…", &text_preview[..max_len.saturating_sub(1)])
+                        } else {
+                            text_preview
+                        };
+                        spans.push(Span::styled(
+                            truncated,
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ));
+                        ListItem::new(Line::from(spans))
+                    })
+                    .collect();
+
+                let list = List::new(items)
+                    .highlight_style(self.theme.selection_style())
+                    .highlight_symbol("▸ ");
+                let mut state = ratatui::widgets::ListState::default();
+                state.select(Some(*selected));
+                ratatui::prelude::StatefulWidget::render(
+                    list,
+                    list_area,
+                    frame.buffer_mut(),
+                    &mut state,
+                );
+
+                let hints = self.edit_macro_hints(&[
+                    ("Enter", "edit"),
+                    ("n", "new"),
+                    ("d", "delete"),
+                    ("Esc", "close"),
+                ]);
+                Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
+            }
+        }
+    }
+
+    /// Render a single-line TextInput with cursor in a bordered box.
+    fn render_single_line_input(&self, input: &TextInput, area: Rect, frame: &mut Frame) {
+        let display = if input.cursor < input.text.len() {
+            let (before, after) = input.text.split_at(input.cursor);
+            let mut chars = after.chars();
+            let cursor_char = chars.next().unwrap_or(' ');
+            let rest: String = chars.collect();
+            Line::from(vec![
+                Span::raw(format!(" {before}")),
+                Span::styled(
+                    cursor_char.to_string(),
+                    Style::default()
+                        .fg(self.theme.input_cursor_fg)
+                        .bg(self.theme.input_cursor_bg),
+                ),
+                Span::raw(rest),
+            ])
+        } else {
+            Line::from(vec![
+                Span::raw(format!(" {}", &input.text)),
+                Span::styled(
+                    " ",
+                    Style::default()
+                        .fg(self.theme.input_cursor_fg)
+                        .bg(self.theme.input_cursor_bg),
+                ),
+            ])
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
+            .border_style(Style::default().fg(self.theme.overlay_border));
+        Paragraph::new(display)
+            .block(block)
+            .render(area, frame.buffer_mut());
+    }
+
+    /// Render a multiline TextInput with cursor in a bordered box.
+    fn render_multiline_input(&self, input: &TextInput, area: Rect, frame: &mut Frame) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
+            .border_style(Style::default().fg(self.theme.overlay_border));
+        let inner = block.inner(area);
+        block.render(area, frame.buffer_mut());
+
+        let visible = input.visible_lines();
+        let (cursor_row, cursor_col) = input.cursor_display_position();
+
+        for (i, line_text) in visible.iter().enumerate() {
+            if i >= inner.height as usize {
+                break;
+            }
+            let y = inner.y + i as u16;
+            let line_area = Rect::new(inner.x, y, inner.width, 1);
+
+            if i == cursor_row {
+                // Render line with cursor highlight
+                let col_byte = char_col_to_byte(line_text, cursor_col);
+                if col_byte < line_text.len() {
+                    let before = &line_text[..col_byte];
+                    let mut chars = line_text[col_byte..].chars();
+                    let cursor_char = chars.next().unwrap_or(' ');
+                    let rest: String = chars.collect();
+                    let line = Line::from(vec![
+                        Span::raw(format!(" {before}")),
+                        Span::styled(
+                            cursor_char.to_string(),
+                            Style::default()
+                                .fg(self.theme.input_cursor_fg)
+                                .bg(self.theme.input_cursor_bg),
+                        ),
+                        Span::raw(rest),
+                    ]);
+                    Paragraph::new(line).render(line_area, frame.buffer_mut());
+                } else {
+                    let line = Line::from(vec![
+                        Span::raw(format!(" {line_text}")),
+                        Span::styled(
+                            " ",
+                            Style::default()
+                                .fg(self.theme.input_cursor_fg)
+                                .bg(self.theme.input_cursor_bg),
+                        ),
+                    ]);
+                    Paragraph::new(line).render(line_area, frame.buffer_mut());
+                }
+            } else {
+                let line = Line::from(Span::raw(format!(" {line_text}")));
+                Paragraph::new(line).render(line_area, frame.buffer_mut());
+            }
+        }
+    }
+
+    /// Build hint spans from alternating key/description pairs.
+    /// Each pair is (key_label, description). Spans are fully owned.
+    fn edit_macro_hints(&self, pairs: &[(&str, &str)]) -> Vec<Span<'static>> {
+        let mut spans = vec![Span::raw(" ")];
+        for (key, desc) in pairs {
+            // key_badge ties lifetime to &str, so we convert to owned spans.
+            let badge = self.theme.key_badge_default(key);
+            spans.extend(
+                badge
+                    .into_iter()
+                    .map(|s| Span::styled(s.content.to_string(), s.style)),
+            );
+            spans.push(Span::styled(
+                format!(" {desc}  "),
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+        }
+        spans
     }
 
     fn render_overlay(&mut self, frame: &mut Frame) {
@@ -2963,6 +3285,14 @@ pub(crate) fn centered_rect_exact(width: u16, height: u16, area: Rect) -> Rect {
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     Rect::new(x, y, width, height)
+}
+
+/// Convert a character column index to a byte offset in a string.
+fn char_col_to_byte(text: &str, col: usize) -> usize {
+    text.char_indices()
+        .nth(col)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len())
 }
 
 fn render_single_line_cursor_input(
