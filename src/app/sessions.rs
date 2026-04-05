@@ -691,16 +691,16 @@ impl App {
                 continue;
             }
             let project_name = self.project_name_for_session(session);
-            let label = self.session_label(session);
-            let context = format!(
-                "project: {project_name} | provider: {} | agent: {label}",
-                session.provider.as_str()
-            );
+            let agent_name = self.session_label(session);
+            let provider_name = session.provider.as_str();
+            let label = format!("{} {agent_name}", Self::title_case_word(provider_name));
+            let context = format!("under project {project_name}");
             let search_text = format!(
-                "{} {} {} {}",
+                "{} {} {} {} {}",
                 label,
                 context,
-                session.provider.as_str(),
+                provider_name,
+                agent_name,
                 KillableRuntimeKind::Agent.noun()
             );
             runtimes.push(KillableRuntime {
@@ -724,17 +724,24 @@ impl App {
                     )
                 })
                 .unwrap_or_else(|| ("unknown".to_string(), terminal.session_id.clone()));
-            let context = format!("project: {project_name} | agent: {session_label}");
+            let foreground = terminal
+                .foreground_cmd
+                .clone()
+                .filter(|cmd| !cmd.trim().is_empty())
+                .unwrap_or_else(|| "shell".to_string());
+            let label = format!("TERM {foreground}");
+            let context = format!("on agent {session_label} under project {project_name}");
             let search_text = format!(
-                "{} {} {}",
-                terminal.label,
+                "{} {} {} {}",
+                label,
                 context,
+                terminal.label,
                 KillableRuntimeKind::Terminal.noun()
             );
             runtimes.push(KillableRuntime {
                 id: RuntimeTargetId::Terminal(terminal_id.clone()),
                 kind: KillableRuntimeKind::Terminal,
-                label: terminal.label.clone(),
+                label,
                 context,
                 search_text,
             });
@@ -767,6 +774,14 @@ impl App {
             .filter(|(_, runtime)| runtime.search_text.to_lowercase().contains(&needle))
             .map(|(index, _)| index)
             .collect()
+    }
+
+    fn title_case_word(word: &str) -> String {
+        let mut chars = word.chars();
+        match chars.next() {
+            Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+            None => String::new(),
+        }
     }
 
     pub(crate) fn clamp_kill_running_prompt(prompt: &mut KillRunningPrompt) {

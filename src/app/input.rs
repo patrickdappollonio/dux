@@ -3214,7 +3214,7 @@ mod tests {
             crate::app::CompanionTerminal {
                 session_id: app.sessions[0].id.clone(),
                 label: "shell".to_string(),
-                foreground_cmd: None,
+                foreground_cmd: Some("python".to_string()),
                 client: PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
                     .expect("spawn terminal"),
             },
@@ -3230,19 +3230,16 @@ mod tests {
                     .iter()
                     .find(|runtime| matches!(runtime.id, RuntimeTargetId::Agent(_)))
                     .expect("agent runtime");
-                assert_eq!(agent.label, "agent-branch");
-                assert!(agent.context.contains("project: demo"));
-                assert!(agent.context.contains("provider: codex"));
-                assert!(agent.context.contains("agent: agent-branch"));
+                assert_eq!(agent.label, "Codex agent-branch");
+                assert_eq!(agent.context, "under project demo");
 
                 let terminal = prompt
                     .runtimes
                     .iter()
                     .find(|runtime| matches!(runtime.id, RuntimeTargetId::Terminal(_)))
                     .expect("terminal runtime");
-                assert_eq!(terminal.label, "shell");
-                assert!(terminal.context.contains("project: demo"));
-                assert!(terminal.context.contains("agent: agent-branch"));
+                assert_eq!(terminal.label, "TERM python");
+                assert_eq!(terminal.context, "on agent agent-branch under project demo");
             }
             other => panic!("expected kill-running prompt, got {other:?}"),
         }
