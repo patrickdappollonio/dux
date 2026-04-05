@@ -90,6 +90,7 @@ pub struct App {
     pub(crate) providers: HashMap<String, PtyClient>,
     pub(crate) companion_terminals: HashMap<String, CompanionTerminal>,
     pub(crate) active_terminal_id: Option<String>,
+    pub(crate) terminal_return_to_list: bool,
     pub(crate) terminal_counter: usize,
     pub(crate) create_agent_in_flight: bool,
     pub(crate) last_pty_size: (u16, u16),
@@ -629,6 +630,7 @@ impl App {
             providers: HashMap::new(),
             companion_terminals: HashMap::new(),
             active_terminal_id: None,
+            terminal_return_to_list: false,
             terminal_counter: 0,
             create_agent_in_flight: false,
             last_pty_size: (0, 0),
@@ -732,9 +734,15 @@ impl App {
 
     pub(crate) fn close_top_overlay(&mut self) -> bool {
         if matches!(self.fullscreen_overlay, FullscreenOverlay::Terminal) {
+            let return_to_list = self.terminal_return_to_list;
             self.fullscreen_overlay = FullscreenOverlay::None;
             self.session_surface = SessionSurface::Agent;
             self.input_target = InputTarget::None;
+            if return_to_list {
+                self.left_section = LeftSection::Terminals;
+                self.clamp_terminal_cursor();
+                self.focus = FocusPane::Left;
+            }
             let key = self.bindings.label_for(Action::ToggleFullscreen);
             self.set_info(format!(
                 "Closed fullscreen terminal. Press {key} to reopen."

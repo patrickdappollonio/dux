@@ -256,6 +256,7 @@ impl App {
             },
         );
         self.active_terminal_id = Some(terminal_id);
+        self.terminal_return_to_list = true;
         self.show_companion_terminal_surface();
         self.input_target = InputTarget::Terminal;
         self.set_info(format!(
@@ -287,6 +288,7 @@ impl App {
         self.reload_changed_files();
 
         self.active_terminal_id = Some(terminal_id);
+        self.terminal_return_to_list = false;
         self.show_companion_terminal_surface();
         self.input_target = InputTarget::Terminal;
         self.set_info(format!("Opened terminal \"{label}\"."));

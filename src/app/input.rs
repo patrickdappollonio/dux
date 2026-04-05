@@ -335,7 +335,9 @@ impl App {
                         self.reload_changed_files();
                     }
                 }
-                Action::FocusAgent => self.activate_selected_left_item()?,
+                Action::FocusAgent | Action::ExitInteractive => {
+                    self.activate_selected_left_item()?
+                }
                 Action::OpenProjectBrowser => {
                     self.open_project_browser()?;
                 }
@@ -400,7 +402,7 @@ impl App {
                         }
                     }
                 }
-                Action::FocusAgent => {
+                Action::FocusAgent | Action::ExitInteractive => {
                     // Open terminal overlay for the selected terminal item.
                     self.open_terminal_from_terminal_list()?;
                 }
@@ -418,6 +420,7 @@ impl App {
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Center) {
             match action {
                 Action::FocusAgent if !in_diff => self.activate_center_agent()?,
+                Action::ExitInteractive if !in_diff => self.activate_center_agent()?,
                 Action::ShowTerminal if !in_diff => self.show_companion_terminal()?,
                 Action::ReconnectAgent if !in_diff => {
                     // Allow relaunching an exited agent from the center pane,
@@ -863,10 +866,18 @@ impl App {
         for action in actions {
             match action {
                 SeqAction::Intercept(Action::ExitInteractive, _, _) => {
+                    let return_to_terminal_list =
+                        matches!(self.input_target, InputTarget::Terminal)
+                            && self.terminal_return_to_list;
                     self.input_target = InputTarget::None;
                     self.fullscreen_overlay = FullscreenOverlay::None;
                     self.session_surface = SessionSurface::Agent;
                     self.raw_input_buf.clear();
+                    if return_to_terminal_list {
+                        self.left_section = LeftSection::Terminals;
+                        self.clamp_terminal_cursor();
+                        self.focus = FocusPane::Left;
+                    }
                     self.set_info("Exited interactive mode.");
                     return Ok(false);
                 }
@@ -2985,6 +2996,7 @@ mod tests {
             providers: std::collections::HashMap::new(),
             companion_terminals: std::collections::HashMap::new(),
             active_terminal_id: None,
+            terminal_return_to_list: false,
             terminal_counter: 0,
             create_agent_in_flight: false,
             last_pty_size: (0, 0),
@@ -4944,14 +4956,49 @@ mod tests {
         assert_eq!(matched, Some((Action::ExitInteractive, false)));
 
         // Apply the same state change that poll_and_forward_raw_input does.
+        let return_to_list =
+            matches!(app.input_target, InputTarget::Terminal) && app.terminal_return_to_list;
         app.input_target = InputTarget::None;
         app.fullscreen_overlay = FullscreenOverlay::None;
         app.session_surface = SessionSurface::Agent;
         app.raw_input_buf.clear();
+        if return_to_list {
+            app.left_section = LeftSection::Terminals;
+            app.focus = FocusPane::Left;
+        }
 
+        // Launched via `t` → returns to terminals list on the left pane.
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
         assert_eq!(app.session_surface, SessionSurface::Agent);
         assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.left_section, LeftSection::Terminals);
+        assert_eq!(app.focus, FocusPane::Left);
+    }
+
+    #[test]
+    fn ctrl_g_enters_interactive_mode_from_center_pane() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        app.providers.insert(
+            "session-1".to_string(),
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "printf ready; sleep 0.2".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+
+        // Ctrl+G from non-interactive center pane should enter interactive mode.
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
     }
 
     #[test]
