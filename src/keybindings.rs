@@ -976,11 +976,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             KeyCode::Char('/'),
             KeyModifiers::NONE,
         )],
-        scopes: &[
-            BindingScope::Palette,
-            BindingScope::Browser,
-            BindingScope::RuntimeKill,
-        ],
+        scopes: &[BindingScope::Browser, BindingScope::RuntimeKill],
         help: Some(HelpEntry {
             section: "Overlays",
             description: "Toggle search mode",

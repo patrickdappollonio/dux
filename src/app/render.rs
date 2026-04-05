@@ -1450,11 +1450,7 @@ impl App {
 
     fn render_prompt(&mut self, frame: &mut Frame) {
         match &self.prompt {
-            PromptState::Command {
-                input,
-                selected,
-                searching,
-            } => {
+            PromptState::Command { input, selected } => {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(72, 40, frame.area());
                 Clear.render(popup, frame.buffer_mut());
@@ -1501,50 +1497,27 @@ impl App {
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Length(3), Constraint::Min(3)])
                     .areas(popup);
-                let title = if *searching {
-                    "Command Palette (searching)"
-                } else {
-                    "Command Palette"
-                };
+                let title = "Command Palette";
                 let confirm_key = self.bindings.label_for(Action::Confirm);
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
-                let search_key = self.bindings.label_for(Action::SearchToggle);
                 let mut bottom_spans = vec![Span::raw(" ")];
-                if *searching {
-                    bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
-                    bottom_spans.push(Span::styled(
-                        " done  ",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
-                    bottom_spans.extend(self.theme.key_badge_default(&close_key));
-                    bottom_spans.push(Span::styled(
-                        " clear",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
-                } else {
-                    bottom_spans.extend(self.theme.key_badge_default(&search_key));
-                    bottom_spans.push(Span::styled(
-                        " search  ",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
-                    bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
-                    bottom_spans.push(Span::styled(
-                        " run  ",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
-                    // Tab autocomplete is text-input behavior, not a rebindable action.
-                    bottom_spans.extend(self.theme.key_badge_default("Tab"));
-                    bottom_spans.push(Span::styled(
-                        " complete  ",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
-                    bottom_spans.extend(self.theme.key_badge_default(&close_key));
-                    bottom_spans.push(Span::styled(
-                        " cancel",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
-                }
-                let prompt_prefix = if *searching { "/ " } else { "> " };
+                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
+                bottom_spans.push(Span::styled(
+                    " run  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                // Tab autocomplete is text-input behavior, not a rebindable action.
+                bottom_spans.extend(self.theme.key_badge_default("Tab"));
+                bottom_spans.push(Span::styled(
+                    " complete  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&close_key));
+                bottom_spans.push(Span::styled(
+                    " cancel",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                let prompt_prefix = "> ";
                 let input_block = self
                     .themed_overlay_block(title)
                     .title_bottom(Line::from(bottom_spans));
