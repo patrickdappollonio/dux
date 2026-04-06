@@ -21,6 +21,11 @@ use anyhow::Context;
 
 const CLIPBOARD_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// How long the arboard background thread keeps the clipboard alive so that
+/// clipboard managers have time to read the contents before the owning
+/// `arboard::Clipboard` is dropped.
+const ARBOARD_SERVE_DURATION: Duration = Duration::from_secs(5);
+
 #[derive(Clone, Copy)]
 pub(crate) struct Clipboard {
     copy_text_fn: fn(&str) -> Result<()>,
@@ -59,7 +64,30 @@ fn copy_text_arboard(text: &str) -> Result<()> {
     let text = text.to_string();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(copy_text_arboard_inner(&text));
+        let mut clipboard = match arboard::Clipboard::new() {
+            Ok(cb) => cb,
+            Err(e) => {
+                let _ = tx.send(Err(anyhow!("Failed to access clipboard: {e}")));
+                return;
+            }
+        };
+
+        let result = clipboard
+            .set_text(text)
+            .map_err(|e| anyhow!("Failed to copy to clipboard: {e}"));
+        let _ = tx.send(result);
+
+        // On Linux, the clipboard is "owned" by the process: arboard keeps a
+        // background server thread that serves paste requests. If we drop the
+        // Clipboard immediately, clipboard managers will not have time to read
+        // the contents. Keep it alive for a few seconds so the data can be
+        // picked up. The thread is a fire-and-forget background worker — the
+        // caller already has the result.
+        #[cfg(target_os = "linux")]
+        {
+            std::thread::sleep(ARBOARD_SERVE_DURATION);
+        }
+        drop(clipboard);
     });
     rx.recv_timeout(CLIPBOARD_TIMEOUT).map_err(|_| {
         anyhow!(
@@ -67,15 +95,6 @@ fn copy_text_arboard(text: &str) -> Result<()> {
             CLIPBOARD_TIMEOUT.as_millis()
         )
     })?
-}
-
-fn copy_text_arboard_inner(text: &str) -> Result<()> {
-    let mut clipboard =
-        arboard::Clipboard::new().map_err(|e| anyhow!("Failed to access clipboard: {e}"))?;
-    clipboard
-        .set_text(text)
-        .map_err(|e| anyhow!("Failed to copy to clipboard: {e}"))?;
-    Ok(())
 }
 
 #[cfg(target_os = "linux")]
