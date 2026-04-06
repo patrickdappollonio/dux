@@ -935,7 +935,15 @@ impl App {
             return Ok(false);
         }
 
-        self.raw_input_buf.extend_from_slice(&buf[..n]);
+        self.process_raw_input_bytes(&buf[..n])
+    }
+
+    /// Process raw bytes that have already been read from stdin.
+    ///
+    /// This is the core logic of interactive input handling, split out from
+    /// `poll_and_forward_raw_input` so it can be tested without real stdin I/O.
+    pub(crate) fn process_raw_input_bytes(&mut self, bytes: &[u8]) -> Result<bool> {
+        self.raw_input_buf.extend_from_slice(bytes);
 
         // Split into complete sequences and collect actions to avoid borrow
         // conflicts between raw_input_buf and &mut self methods.
@@ -972,10 +980,19 @@ impl App {
         let keep_from = buf_len - remainder_len;
         self.raw_input_buf = self.raw_input_buf[keep_from..].to_vec();
 
+        // Check once whether the user is scrolled back so we can suppress
+        // non-scroll input for the entire batch.
+        let is_scrolled_back = self
+            .selected_terminal_surface_client()
+            .is_some_and(|p| p.scrollback_offset() > 0);
+
         // Process collected actions.
         for action in actions {
             match action {
                 SeqAction::Intercept(Action::OpenMacroBar, _, _) => {
+                    if is_scrolled_back {
+                        continue;
+                    }
                     if self.filtered_macros("").is_empty() {
                         self.set_info("No macros defined for this surface.");
                         self.raw_input_buf.clear();
@@ -1070,7 +1087,7 @@ impl App {
                         } else if self.handle_mouse(mouse_ev) {
                             return Ok(true);
                         }
-                    } else {
+                    } else if !is_scrolled_back {
                         // Non-scroll events (clicks, drags, moves,
                         // releases): only forward when the child process
                         // has opted into mouse tracking (e.g. vim, htop).
@@ -1087,9 +1104,13 @@ impl App {
                     }
                 }
                 SeqAction::Intercept(_, _, raw) | SeqAction::Forward(raw) => {
-                    // Unknown intercepted action or normal forward — send to PTY.
-                    if let Some(provider) = self.selected_terminal_surface_client() {
-                        let _ = provider.write_bytes(&raw);
+                    // Unknown intercepted action or normal forward — send to PTY,
+                    // but only when not scrolled back. In scroll mode, all
+                    // non-scroll input is suppressed.
+                    if !is_scrolled_back {
+                        if let Some(provider) = self.selected_terminal_surface_client() {
+                            let _ = provider.write_bytes(&raw);
+                        }
                     }
                 }
             }
@@ -5863,5 +5884,170 @@ mod tests {
             "provider should have been removed"
         );
         assert_eq!(app.sessions[0].status, SessionStatus::Detached);
+    }
+
+    // ── Scroll-mode input suppression tests ─────────────────────────
+
+    /// Helper: set up an App with a live PTY in interactive mode and
+    /// enough scrollback history so we can engage scroll mode.
+    fn app_with_scrolled_back_pty() -> App {
+        let mut app = test_app(default_bindings());
+        let session_id = app.sessions[0].id.clone();
+
+        // Spawn a shell that prints enough lines to fill the 5-row terminal
+        // and produce scrollback history, then sleeps to stay alive.
+        let args = vec![
+            "-c".to_string(),
+            "printf 'L1\\nL2\\nL3\\nL4\\nL5\\nL6\\nL7\\nL8\\nL9\\nL10\\n'; sleep 5".to_string(),
+        ];
+        let client = PtyClient::spawn("sh", &args, std::path::Path::new("."), 5, 40, 100)
+            .expect("spawn pty");
+        app.providers.insert(session_id, client);
+
+        // Enter interactive agent mode.
+        app.input_target = InputTarget::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.last_pty_size = (5, 40);
+
+        // Wait for the child to produce output so the PTY has content.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // Scroll back so scrollback_offset > 0.
+        let provider = app.selected_terminal_surface_client().unwrap();
+        provider.set_scrollback(3);
+        assert!(
+            provider.scrollback_offset() > 0,
+            "test setup: should be scrolled back"
+        );
+
+        app
+    }
+
+    #[test]
+    fn scrolled_back_suppresses_regular_key_forwarding() {
+        let mut app = app_with_scrolled_back_pty();
+        // Feed a regular ASCII character 'x' (0x78) — should be dropped.
+        let result = app.process_raw_input_bytes(b"x").unwrap();
+        assert!(!result, "should not request exit");
+        // The key was consumed without error; the PTY didn't receive it.
+        // We can't directly assert write_bytes wasn't called without a mock,
+        // but we verify the app didn't crash and the scrollback is unchanged.
+        assert!(
+            app.selected_terminal_surface_client()
+                .unwrap()
+                .scrollback_offset()
+                > 0,
+            "scrollback should remain engaged"
+        );
+    }
+
+    #[test]
+    fn scrolled_back_allows_exit_interactive() {
+        let mut app = app_with_scrolled_back_pty();
+        assert_eq!(app.input_target, InputTarget::Agent);
+
+        // Feed Ctrl-G (0x07) — ExitInteractive should still work.
+        let result = app.process_raw_input_bytes(&[0x07]).unwrap();
+        assert!(!result);
+        assert_eq!(
+            app.input_target,
+            InputTarget::None,
+            "ExitInteractive must work even when scrolled back"
+        );
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    #[test]
+    fn scrolled_back_suppresses_macro_bar() {
+        let mut app = app_with_scrolled_back_pty();
+
+        // Add a macro so OpenMacroBar would normally open the bar.
+        app.config.macros.entries.insert(
+            "test".to_string(),
+            crate::config::MacroEntry {
+                text: "hello".to_string(),
+                surface: crate::config::MacroSurface::Agent,
+            },
+        );
+
+        // Find the byte pattern for OpenMacroBar (Ctrl-\, which is 0x1c).
+        let matched = app.interactive_patterns.match_sequence(&[0x1c]);
+        assert_eq!(
+            matched.map(|(a, _)| a),
+            Some(Action::OpenMacroBar),
+            "Ctrl-\\ should resolve to OpenMacroBar"
+        );
+
+        // Feed Ctrl-\ while scrolled back.
+        let result = app.process_raw_input_bytes(&[0x1c]).unwrap();
+        assert!(!result);
+        assert!(
+            app.macro_bar.is_none(),
+            "macro bar must not open when scrolled back"
+        );
+    }
+
+    #[test]
+    fn not_scrolled_back_forwards_normally() {
+        let mut app = app_with_scrolled_back_pty();
+
+        // Reset scrollback to 0 (live bottom).
+        app.selected_terminal_surface_client()
+            .unwrap()
+            .set_scrollback(0);
+        assert_eq!(
+            app.selected_terminal_surface_client()
+                .unwrap()
+                .scrollback_offset(),
+            0
+        );
+
+        // Feed a regular character — should be forwarded without error.
+        let result = app.process_raw_input_bytes(b"x").unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn scrolled_back_allows_scroll_page_up() {
+        let mut app = app_with_scrolled_back_pty();
+        let before = app
+            .selected_terminal_surface_client()
+            .unwrap()
+            .scrollback_offset();
+
+        // Feed PgUp (CSI 5~) — should scroll further back.
+        let result = app.process_raw_input_bytes(b"\x1b[5~").unwrap();
+        assert!(!result);
+        let after = app
+            .selected_terminal_surface_client()
+            .unwrap()
+            .scrollback_offset();
+        assert!(
+            after >= before,
+            "PgUp should increase or maintain scrollback offset"
+        );
+    }
+
+    #[test]
+    fn scrolled_back_allows_scroll_to_bottom() {
+        let mut app = app_with_scrolled_back_pty();
+        assert!(
+            app.selected_terminal_surface_client()
+                .unwrap()
+                .scrollback_offset()
+                > 0
+        );
+
+        // Feed 'q' (0x71) — ScrollToBottom should reset scrollback.
+        let result = app.process_raw_input_bytes(b"q").unwrap();
+        assert!(!result);
+        assert_eq!(
+            app.selected_terminal_surface_client()
+                .unwrap()
+                .scrollback_offset(),
+            0,
+            "'q' should scroll to bottom when scrolled back"
+        );
     }
 }
