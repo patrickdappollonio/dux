@@ -1055,16 +1055,33 @@ impl App {
                             | MouseEventKind::ScrollRight
                     );
                     if is_scroll {
-                        // Scroll is always handled as host scrollback.
-                        if self.handle_mouse(mouse_ev) {
+                        // Check if the provider has forward_scroll enabled
+                        // (only applies to agents, not companion terminals).
+                        let forward = matches!(self.input_target, InputTarget::Agent)
+                            && self
+                                .selected_session()
+                                .map(|s| provider_config(&self.config, &s.provider).forward_scroll)
+                                .unwrap_or(false);
+                        if forward {
+                            if let Some(provider) = self.selected_terminal_surface_client() {
+                                let _ = provider.write_bytes(&raw);
+                            }
+                        } else if self.handle_mouse(mouse_ev) {
                             return Ok(true);
                         }
                     } else {
-                        // Positional events (clicks, drags, releases) are
-                        // forwarded to the PTY so the agent can use them
-                        // (e.g. cursor repositioning in an input field).
-                        if let Some(provider) = self.selected_terminal_surface_client() {
-                            let _ = provider.write_bytes(&raw);
+                        // Non-scroll events (clicks, drags, moves,
+                        // releases): only forward when the child process
+                        // has opted into mouse tracking (e.g. vim, htop).
+                        // Otherwise drop — the child would echo the raw
+                        // SGR bytes as garbage text.
+                        let child_wants_mouse = self
+                            .selected_terminal_surface_client()
+                            .is_some_and(|p| p.has_mouse_mode());
+                        if child_wants_mouse {
+                            if let Some(provider) = self.selected_terminal_surface_client() {
+                                let _ = provider.write_bytes(&raw);
+                            }
                         }
                     }
                 }

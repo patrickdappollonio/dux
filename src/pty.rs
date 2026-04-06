@@ -9,7 +9,7 @@ use std::thread;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{self, Config, Term};
+use alacritty_terminal::term::{self, Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{
     Color as TermColor, CursorShape, NamedColor, Processor, Rgb, StdSyncHandler,
 };
@@ -222,6 +222,13 @@ impl PtyClient {
         self.has_output.load(Ordering::Acquire)
     }
 
+    /// Whether the child process has enabled any mouse tracking mode
+    /// (e.g. via DECSET 1000/1002/1003). When true, non-scroll mouse
+    /// events should be forwarded to the PTY rather than dropped.
+    pub fn has_mouse_mode(&self) -> bool {
+        self.terminal.lock().map_or(false, |t| t.has_mouse_mode())
+    }
+
     /// Non-blocking check of the child's exit status.
     pub fn try_wait(&mut self) -> Option<portable_pty::ExitStatus> {
         self.child.try_wait().ok().flatten()
@@ -334,6 +341,12 @@ impl TerminalState {
             .renderable_content()
             .display_iter
             .any(|indexed| !indexed.cell.c.is_whitespace())
+    }
+
+    /// Whether the child process has enabled any mouse tracking mode
+    /// (e.g. via DECSET 1000/1002/1003).
+    fn has_mouse_mode(&self) -> bool {
+        self.term.mode().intersects(TermMode::MOUSE_MODE)
     }
 
     fn snapshot(&self) -> TerminalSnapshot {
@@ -857,6 +870,40 @@ mod tests {
         assert_eq!(
             cmd.get_env("COLORTERM").and_then(|value| value.to_str()),
             Some("truecolor")
+        );
+    }
+
+    #[test]
+    fn mouse_mode_off_by_default() {
+        let terminal = TerminalState::with_scrollback(24, 80, 100);
+        assert!(
+            !terminal.has_mouse_mode(),
+            "plain shell should not have mouse mode enabled"
+        );
+    }
+
+    #[test]
+    fn mouse_mode_on_after_enable_sequence() {
+        let mut terminal = TerminalState::with_scrollback(24, 80, 100);
+        // DECSET 1000: enable basic mouse reporting.
+        terminal.process(b"\x1b[?1000h");
+        assert!(
+            terminal.has_mouse_mode(),
+            "mouse mode should be enabled after DECSET 1000"
+        );
+    }
+
+    #[test]
+    fn mouse_mode_off_after_disable_sequence() {
+        let mut terminal = TerminalState::with_scrollback(24, 80, 100);
+        terminal.process(b"\x1b[?1000h");
+        assert!(terminal.has_mouse_mode());
+
+        // DECRST 1000: disable basic mouse reporting.
+        terminal.process(b"\x1b[?1000l");
+        assert!(
+            !terminal.has_mouse_mode(),
+            "mouse mode should be disabled after DECRST 1000"
         );
     }
 }
