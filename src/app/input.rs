@@ -1120,6 +1120,56 @@ impl App {
     }
 
     fn handle_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if let PromptState::DebugInput {
+            lines,
+            scroll_offset,
+        } = &mut self.prompt
+        {
+            // Esc always closes — hardcoded so a broken binding can't trap the user.
+            if key.code == KeyCode::Esc {
+                self.prompt = PromptState::None;
+                return Ok(false);
+            }
+
+            let kc = crokey::KeyCombination::from(key).normalized();
+            let label = crate::keybindings::display_format().to_string(kc);
+
+            // Look up what action this key resolves to in every scope.
+            let resolved: Vec<String> = BindingScope::ALL
+                .iter()
+                .filter_map(|&scope| {
+                    self.bindings
+                        .lookup(&key, scope)
+                        .map(|action| format!("{}: {}", scope.display_name(), action.config_name()))
+                })
+                .collect();
+            let action_text = if resolved.is_empty() {
+                "(none)".to_string()
+            } else {
+                resolved.join(", ")
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "Key   ",
+                    Style::default().fg(self.theme.help_section_header_fg),
+                ),
+                Span::raw(" │ "),
+                Span::styled(
+                    format!("{:<18}", label),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" │ "),
+                Span::styled(action_text, Style::default().add_modifier(Modifier::DIM)),
+            ]));
+
+            // Auto-scroll: keep the view pinned to the bottom.
+            let total = lines.len() as u16;
+            *scroll_offset = total;
+
+            return Ok(false);
+        }
+
         if matches!(self.prompt, PromptState::Command { .. }) {
             // Plain character keys always go to TextInput so j/k etc. can be
             // typed without conflicting with navigation bindings.
@@ -2641,6 +2691,49 @@ impl App {
     }
 
     fn handle_prompt_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if let PromptState::DebugInput {
+            lines,
+            scroll_offset,
+        } = &mut self.prompt
+        {
+            // Scroll wheel navigates history without logging.
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    *scroll_offset = scroll_offset.saturating_sub(3);
+                    return false;
+                }
+                MouseEventKind::ScrollDown => {
+                    *scroll_offset = (*scroll_offset + 3).min(lines.len() as u16);
+                    return false;
+                }
+                _ => {}
+            }
+
+            let kind_label = format!("{:?}", mouse.kind);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "Mouse",
+                    Style::default().fg(self.theme.help_section_header_fg),
+                ),
+                Span::raw(" │ "),
+                Span::styled(
+                    format!("{:<18}", kind_label),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" │ "),
+                Span::styled(
+                    format!("col={} row={}", mouse.column, mouse.row),
+                    Style::default().add_modifier(Modifier::DIM),
+                ),
+            ]));
+
+            // Auto-scroll to bottom.
+            let total = lines.len() as u16;
+            *scroll_offset = total;
+
+            return false;
+        }
+
         if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             return false;
         }

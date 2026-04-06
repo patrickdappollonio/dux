@@ -76,6 +76,7 @@ pub enum Action {
     SortAgentsByName,
     RemoveGitPane,
     EditMacros,
+    DebugInput,
 }
 
 /// Where a binding's key combo is matched.
@@ -96,6 +97,22 @@ pub enum BindingScope {
 }
 
 impl BindingScope {
+    /// All scope variants, for iteration in diagnostics.
+    pub const ALL: &[BindingScope] = &[
+        Self::Global,
+        Self::Left,
+        Self::Center,
+        Self::Files,
+        Self::Interactive,
+        Self::Resize,
+        Self::Palette,
+        Self::Browser,
+        Self::RuntimeKill,
+        Self::Dialog,
+        Self::CommitInput,
+        Self::Help,
+    ];
+
     /// Human-readable scope name for error messages and diagnostics.
     pub fn display_name(self) -> &'static str {
         match self {
@@ -215,6 +232,7 @@ impl Action {
             Action::ForceRedraw => "force_redraw",
             Action::RemoveGitPane => "remove_git_pane",
             Action::EditMacros => "edit_macros",
+            Action::DebugInput => "debug_input",
         }
     }
 
@@ -292,6 +310,7 @@ impl Action {
             Action::ForceRedraw => "Force a full terminal redraw.",
             Action::RemoveGitPane => "Remove or restore the git pane.",
             Action::EditMacros => "Open the text macros editor.",
+            Action::DebugInput => "Open input event debugger to inspect keyboard and mouse events.",
         }
     }
 
@@ -359,7 +378,8 @@ impl Action {
             | Action::SortAgentsByUpdated
             | Action::SortAgentsByCreated
             | Action::SortAgentsByName
-            | Action::EditMacros => None,
+            | Action::EditMacros
+            | Action::DebugInput => None,
         }
     }
 }
@@ -1227,6 +1247,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "edit-macros",
             description: "Edit text macros for interactive mode",
+        }),
+    },
+    BindingDef {
+        action: Action::DebugInput,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "input-debugging",
+            description: "Open input event debugger to inspect keyboard and mouse events",
         }),
     },
 ];
