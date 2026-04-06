@@ -837,10 +837,13 @@ impl App {
                     }
                 } else if session_active && nudge_active {
                     let warn_style = Style::default().fg(self.theme.nudge_border);
-                    spans.push(Span::styled("Read-only", warn_style));
-                    spans.push(Span::styled(" \u{2014} press ", desc_style));
+                    spans.push(Span::styled(
+                        "Read-only \u{2014} agent requires full keyboard control.",
+                        warn_style,
+                    ));
+                    spans.push(Span::styled(" Press ", desc_style));
                     spans.extend(self.theme.dim_key_badge_default(&focus_agent));
-                    spans.push(Span::styled(" to type here.", desc_style));
+                    spans.push(Span::styled(" to interact.", desc_style));
                 } else if session_active {
                     spans.extend(self.theme.dim_key_badge_default(&focus_agent));
                     spans.push(Span::styled(" to interact. ", desc_style));
