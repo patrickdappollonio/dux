@@ -166,6 +166,7 @@ pub struct ProviderCommandConfig {
     pub oneshot_args: Vec<String>,
     pub oneshot_output: OneshotOutput,
     pub install_hint: Option<String>,
+    pub forward_scroll: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -270,6 +271,7 @@ impl Default for ProviderCommandConfig {
             oneshot_args: Vec::new(),
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
+            forward_scroll: false,
         }
     }
 }
@@ -861,6 +863,7 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4] {
                 ],
                 oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("npm install -g @anthropic-ai/claude-code".to_string()),
+                forward_scroll: false,
             },
         ),
         (
@@ -881,6 +884,7 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4] {
                 ],
                 oneshot_output: OneshotOutput::Tempfile,
                 install_hint: Some("npm install -g @openai/codex".to_string()),
+                forward_scroll: false,
             },
         ),
         (
@@ -892,6 +896,7 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4] {
                 oneshot_args: vec!["run".to_string(), "{prompt}".to_string()],
                 oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("npm install -g opencode-ai".to_string()),
+                forward_scroll: true,
             },
         ),
         (
@@ -903,6 +908,7 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4] {
                 oneshot_args: vec!["-p".to_string(), "{prompt}".to_string()],
                 oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("npm install -g @google/gemini-cli".to_string()),
+                forward_scroll: false,
             },
         ),
     ]
@@ -970,6 +976,12 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
             escape_toml_string(hint)
         ));
     }
+    out.push_str(
+        "# When true, scroll events are forwarded to the provider instead of being\n\
+         # handled as dux host scrollback. Enable this for agents that manage their\n\
+         # own scrollback buffer (e.g. opencode).\n",
+    );
+    out.push_str(&format!("forward_scroll = {}\n", config.forward_scroll));
     out.push('\n');
 }
 
@@ -1282,6 +1294,7 @@ agent_scrollback_lines = 10000
             oneshot_args: Vec::new(),
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
+            forward_scroll: false,
         };
         assert_eq!(cfg.interactive_args(false), ["--interactive"]);
         assert_eq!(cfg.interactive_args(true), ["--resume", "--last"]);
@@ -1293,6 +1306,7 @@ agent_scrollback_lines = 10000
             oneshot_args: Vec::new(),
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
+            forward_scroll: false,
         };
         assert_eq!(unsupported.interactive_args(true), ["--interactive"]);
         assert!(!unsupported.supports_session_resume());
@@ -1310,6 +1324,7 @@ agent_scrollback_lines = 10000
                     oneshot_args: Vec::new(),
                     oneshot_output: OneshotOutput::Stdout,
                     install_hint: None,
+                    forward_scroll: false,
                 },
             )]),
         };
@@ -1337,6 +1352,7 @@ agent_scrollback_lines = 10000
                     oneshot_args: Vec::new(),
                     oneshot_output: OneshotOutput::Stdout,
                     install_hint: None,
+                    forward_scroll: false,
                 },
             )]),
         };
@@ -1631,6 +1647,7 @@ oneshot_output = "stdout"
                     oneshot_args: vec!["-p".to_string(), "{prompt}".to_string()],
                     oneshot_output: OneshotOutput::Stdout,
                     install_hint: None,
+                    forward_scroll: false,
                 },
             )]),
         };
