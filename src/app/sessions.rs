@@ -158,9 +158,13 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn spawn_pty_for_session(&self, session: &AgentSession) -> Result<PtyClient> {
+    pub(crate) fn spawn_pty_for_session(
+        &self,
+        session: &AgentSession,
+        resume: bool,
+    ) -> Result<PtyClient> {
         let cfg = provider_config(&self.config, &session.provider);
-        let launch_args = cfg.interactive_args(true);
+        let launch_args = cfg.interactive_args(resume);
         let (rows, cols) = if self.last_pty_size != (0, 0) {
             self.last_pty_size
         } else {
@@ -515,9 +519,14 @@ impl App {
             ));
             return Ok(());
         }
-        match self.spawn_pty_for_session(&session) {
+        let cfg = provider_config(&self.config, &session.provider);
+        let use_resume = cfg.supports_session_resume();
+        match self.spawn_pty_for_session(&session, use_resume) {
             Ok(client) => {
                 self.providers.insert(session.id.clone(), client);
+                if use_resume {
+                    self.resume_fallback_candidates.insert(session.id.clone());
+                }
                 self.mark_session_status(&session.id, SessionStatus::Active);
                 self.show_agent_surface();
                 self.input_target = InputTarget::Agent;

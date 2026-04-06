@@ -3335,6 +3335,7 @@ mod tests {
             sigwinch_flag: Arc::new(AtomicBool::new(false)),
             force_redraw: false,
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
+            resume_fallback_candidates: std::collections::HashSet::new(),
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();
@@ -5723,5 +5724,96 @@ mod tests {
             .unwrap();
 
         assert_eq!(app.focus, FocusPane::Center);
+    }
+
+    #[test]
+    fn resume_fallback_retries_with_fresh_session_on_quick_exit() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        // Spawn a process that exits immediately without producing output.
+        let args = vec!["-c".to_string(), "exit 1".to_string()];
+        let client =
+            PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn quick-exit");
+        app.providers.insert(session_id.clone(), client);
+        app.mark_session_status(&session_id, SessionStatus::Active);
+        app.resume_fallback_candidates.insert(session_id.clone());
+        app.selected_left = 1;
+        app.session_surface = SessionSurface::Agent;
+
+        // Wait for the process to exit.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.drain_events();
+
+        // The fallback should have spawned a fresh session, so the provider
+        // is still present and the session is active (not detached).
+        assert!(
+            app.providers.contains_key(&session_id),
+            "provider should still be present after fallback retry"
+        );
+        assert_eq!(app.sessions[0].status, SessionStatus::Active);
+        assert!(
+            !app.resume_fallback_candidates.contains(&session_id),
+            "candidate should have been removed after fallback"
+        );
+        assert!(
+            app.status.text().contains("No prior session to resume"),
+            "status should inform user about fallback: {:?}",
+            app.status.text()
+        );
+    }
+
+    #[test]
+    fn resume_fallback_skipped_when_pty_had_output() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        // Spawn a process that produces output before exiting.
+        let args = vec!["-c".to_string(), "echo hello".to_string()];
+        let client =
+            PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn with output");
+        app.providers.insert(session_id.clone(), client);
+        app.mark_session_status(&session_id, SessionStatus::Active);
+        app.resume_fallback_candidates.insert(session_id.clone());
+        app.selected_left = 1;
+        app.session_surface = SessionSurface::Agent;
+
+        // Wait for the process to produce output and exit.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.drain_events();
+
+        // Since the PTY had output, the fallback should NOT have triggered.
+        // The session should be detached (normal exit behavior).
+        assert_eq!(app.sessions[0].status, SessionStatus::Detached);
+        assert!(
+            !app.resume_fallback_candidates.contains(&session_id),
+            "candidate should have been removed even when skipped"
+        );
+    }
+
+    #[test]
+    fn no_fallback_for_non_candidate_sessions() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        // Spawn a process that exits immediately, but do NOT add it as a candidate.
+        let args = vec!["-c".to_string(), "exit 1".to_string()];
+        let client =
+            PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn quick-exit");
+        app.providers.insert(session_id.clone(), client);
+        app.mark_session_status(&session_id, SessionStatus::Active);
+        // Deliberately not adding to resume_fallback_candidates.
+        app.selected_left = 1;
+        app.session_surface = SessionSurface::Agent;
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.drain_events();
+
+        // Without being a candidate, the session should just go to detached.
+        assert!(
+            !app.providers.contains_key(&session_id),
+            "provider should have been removed"
+        );
+        assert_eq!(app.sessions[0].status, SessionStatus::Detached);
     }
 }
