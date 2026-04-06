@@ -519,6 +519,7 @@ pub(crate) enum MouseClickTarget {
 pub(crate) struct RecentMouseClick {
     pub(crate) target: MouseClickTarget,
     pub(crate) at: Instant,
+    pub(crate) threshold: Duration,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
