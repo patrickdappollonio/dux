@@ -26,6 +26,7 @@ impl App {
                     self.sessions.insert(0, session.clone());
                     self.update_branch_sync_sessions();
                     self.rebuild_left_items();
+                    self.sync_all_branch_sessions();
                     self.selected_left = self
                         .left_items()
                         .iter()
@@ -147,6 +148,19 @@ impl App {
                     if changed {
                         self.update_branch_sync_sessions();
                         self.rebuild_left_items();
+                    }
+                }
+                WorkerEvent::BranchStatusReady {
+                    session_id,
+                    pushed,
+                    merged,
+                } => {
+                    let entry = self.branch_status.entry(session_id).or_default();
+                    if let Some(p) = pushed {
+                        entry.pushed = Some(p);
+                    }
+                    if let Some(m) = merged {
+                        entry.merged = Some(m);
                     }
                 }
                 WorkerEvent::BrowserEntriesReady { dir, entries } => {
@@ -335,6 +349,78 @@ impl App {
         });
     }
 
+    pub(crate) fn trigger_branch_check(&self, input: BranchCheckInput) {
+        let tx = self.worker_tx.clone();
+        thread::spawn(move || {
+            let (pushed, merged) = check_branch_status(&input);
+            let _ = tx.send(WorkerEvent::BranchStatusReady {
+                session_id: input.session_id,
+                pushed,
+                merged,
+            });
+        });
+    }
+
+    pub(crate) fn spawn_branch_status_poller(&self) {
+        let interval_secs = self.config.ui.active_branch_check_interval_secs;
+        if interval_secs == 0 {
+            return;
+        }
+        let tx = self.worker_tx.clone();
+        let watched = Arc::clone(&self.watched_branch_session);
+        thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_secs(interval_secs as u64));
+                let input = watched.lock().ok().and_then(|guard| guard.clone());
+                if let Some(input) = input {
+                    let (pushed, merged) = check_branch_status(&input);
+                    if tx
+                        .send(WorkerEvent::BranchStatusReady {
+                            session_id: input.session_id,
+                            pushed,
+                            merged,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    pub(crate) fn spawn_all_branch_status_poller(&self) {
+        let interval_secs = self.config.ui.global_branch_check_interval_secs;
+        if interval_secs == 0 {
+            return;
+        }
+        let tx = self.worker_tx.clone();
+        let all_sessions = Arc::clone(&self.all_branch_sessions);
+        thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_secs(interval_secs as u64));
+                let inputs = all_sessions
+                    .lock()
+                    .ok()
+                    .map(|guard| guard.clone())
+                    .unwrap_or_default();
+                for input in inputs {
+                    let (pushed, merged) = check_branch_status(&input);
+                    if tx
+                        .send(WorkerEvent::BranchStatusReady {
+                            session_id: input.session_id,
+                            pushed,
+                            merged,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
     pub(crate) fn spawn_changed_files_poller(&self) {
         let tx = self.worker_tx.clone();
         let watched = Arc::clone(&self.watched_worktree);
@@ -359,6 +445,40 @@ impl App {
             }
         });
     }
+}
+
+fn check_branch_status(input: &BranchCheckInput) -> (Option<bool>, Option<bool>) {
+    let worktree = PathBuf::from(&input.worktree_path);
+    let pushed = match git::is_branch_pushed(&worktree, &input.branch_name) {
+        Ok(v) => Some(v),
+        Err(err) => {
+            logger::debug(&format!(
+                "branch pushed check failed for {}: {err}",
+                input.branch_name
+            ));
+            None
+        }
+    };
+    // Only check merged if the branch is pushed — can't be merged if never pushed.
+    let merged = if pushed == Some(true) {
+        if let Some(ref project_path) = input.project_path {
+            match git::is_branch_merged(Path::new(project_path), &worktree, &input.source_branch) {
+                Ok(v) => Some(v),
+                Err(err) => {
+                    logger::debug(&format!(
+                        "branch merged check failed for {}: {err}",
+                        input.branch_name
+                    ));
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    (pushed, merged)
 }
 
 pub(crate) fn run_create_agent_job(

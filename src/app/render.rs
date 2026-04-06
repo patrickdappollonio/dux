@@ -178,7 +178,15 @@ impl App {
                     }
                     LeftItem::Session(index) => {
                         let session = &self.sessions[*index];
-                        let (dot, dot_color) = self.theme.session_dot(&session.status);
+                        let is_merged = self
+                            .branch_status
+                            .get(&session.id)
+                            .is_some_and(|bs| bs.merged == Some(true));
+                        let (dot, dot_color) = if is_merged {
+                            ("✓", self.theme.session_merged)
+                        } else {
+                            self.theme.session_dot(&session.status)
+                        };
                         let is_last = !collapsed_left_items
                             .get(i + 1)
                             .is_some_and(|next| matches!(next, LeftItem::Session(_)));
@@ -271,12 +279,25 @@ impl App {
                         .title
                         .clone()
                         .unwrap_or_else(|| session.branch_name.clone());
-                    let (dot, dot_color) = self.theme.session_dot(&session.status);
+                    let is_merged = self
+                        .branch_status
+                        .get(&session.id)
+                        .is_some_and(|bs| bs.merged == Some(true));
+                    let (dot, dot_color) = if is_merged {
+                        ("✓", self.theme.session_merged)
+                    } else {
+                        self.theme.session_dot(&session.status)
+                    };
+                    let label_color = if is_merged {
+                        self.theme.session_merged
+                    } else {
+                        dot_color
+                    };
                     ListItem::new(Line::from(
                         vec![
                             Span::styled(connector, Style::default().fg(self.theme.project_icon)),
                             Span::styled(format!("{dot} "), Style::default().fg(dot_color)),
-                            Span::styled(label, Style::default().fg(dot_color)),
+                            Span::styled(label, Style::default().fg(label_color)),
                             Span::styled(
                                 format!(" ({})", session.provider.as_str()),
                                 Style::default().fg(self.theme.provider_label_fg),
@@ -3156,10 +3177,7 @@ impl App {
         self.render_dim_overlay(frame);
         let area = centered_rect(96, 94, frame.area());
         Clear.render(area, frame.buffer_mut());
-        let title = match self.selected_session() {
-            Some(session) => format!(" {} agent ", capitalize(session.provider.as_str())),
-            None => " Agent ".to_string(),
-        };
+        let title = self.center_pane_agent_title();
         let saved = self.session_surface;
         self.session_surface = SessionSurface::Agent;
         self.render_agent_terminal(frame, area, &title, true);
@@ -3345,12 +3363,19 @@ impl App {
     fn center_pane_agent_title(&self) -> String {
         if let Some(session) = self.selected_session() {
             let provider = capitalize(session.provider.as_str());
-            let base = format!("{provider} agent");
+            let mut base = format!("{provider} agent");
             let count = self.session_terminal_count(&session.id);
             if count == 1 {
-                return format!("{base} (+ 1 terminal)");
+                base = format!("{base} (+ 1 terminal)");
             } else if count > 1 {
-                return format!("{base} (+ {count} terminals)");
+                base = format!("{base} (+ {count} terminals)");
+            }
+            if let Some(status) = self.branch_status.get(&session.id) {
+                if status.merged == Some(true) {
+                    base = format!("{base} [merged]");
+                } else if status.pushed == Some(true) {
+                    base = format!("{base} [pushed]");
+                }
             }
             return base;
         }
