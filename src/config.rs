@@ -80,6 +80,15 @@ impl MacroSurface {
         }
     }
 
+    /// Cycle to the previous variant: Agent -> Both -> Terminal -> Agent.
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Agent => Self::Both,
+            Self::Both => Self::Terminal,
+            Self::Terminal => Self::Agent,
+        }
+    }
+
     /// Whether this surface matches the given session surface.
     pub fn matches(self, session: crate::model::SessionSurface) -> bool {
         match self {
@@ -1661,6 +1670,13 @@ oneshot_output = "stdout"
         assert_eq!(MacroSurface::Agent.next(), MacroSurface::Terminal);
         assert_eq!(MacroSurface::Terminal.next(), MacroSurface::Both);
         assert_eq!(MacroSurface::Both.next(), MacroSurface::Agent);
+    }
+
+    #[test]
+    fn macros_surface_prev_cycles() {
+        assert_eq!(MacroSurface::Agent.prev(), MacroSurface::Both);
+        assert_eq!(MacroSurface::Both.prev(), MacroSurface::Terminal);
+        assert_eq!(MacroSurface::Terminal.prev(), MacroSurface::Agent);
     }
 
     #[test]

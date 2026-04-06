@@ -2869,7 +2869,7 @@ impl App {
 
                     let hints = self.edit_macro_hints(&[
                         ("Enter", "next"),
-                        ("Tab", "surface"),
+                        ("Tab/Shift-Tab", "surface"),
                         ("Esc", "cancel"),
                     ]);
                     Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());

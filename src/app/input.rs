@@ -1648,6 +1648,10 @@ impl App {
                         edit_state.surface = edit_state.surface.next();
                         return Ok(false);
                     }
+                    if key.code == KeyCode::BackTab {
+                        edit_state.surface = edit_state.surface.prev();
+                        return Ok(false);
+                    }
                     if key.code == KeyCode::Enter && !edit_state.name_input.is_empty() {
                         let name = edit_state.name_input.text.clone();
                         // For new macros, check for duplicate names
