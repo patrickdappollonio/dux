@@ -3363,7 +3363,8 @@ impl App {
     fn center_pane_agent_title(&self) -> String {
         if let Some(session) = self.selected_session() {
             let provider = capitalize(session.provider.as_str());
-            let mut base = format!("{provider} agent");
+            let name = session.title.as_deref().unwrap_or(&session.branch_name);
+            let mut base = format!("{provider} agent · {name}");
             let count = self.session_terminal_count(&session.id);
             if count == 1 {
                 base = format!("{base} (+ 1 terminal)");
@@ -3413,7 +3414,7 @@ fn pty_cell_colors(fg: Color, bg: Color, is_input: bool, theme: &Theme) -> (Colo
     if is_input {
         (fg, bg)
     } else {
-        (theme.overlay_dim_fg, theme.overlay_dim_bg)
+        (theme.overlay_dim_fg, bg)
     }
 }
 
@@ -3743,7 +3744,7 @@ mod tests {
         let bg = Color::Rgb(10, 20, 30);
         assert_eq!(
             pty_cell_colors(fg, bg, false, &theme),
-            (theme.overlay_dim_fg, theme.overlay_dim_bg)
+            (theme.overlay_dim_fg, bg)
         );
     }
 }
