@@ -573,6 +573,10 @@ pub(crate) enum WorkerEvent {
         dir: PathBuf,
         entries: Vec<BrowserEntry>,
     },
+    ClipboardCopyCompleted {
+        path: String,
+        result: Result<(), String>,
+    },
 }
 
 mod input;

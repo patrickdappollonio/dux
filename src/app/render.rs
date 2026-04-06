@@ -681,10 +681,8 @@ impl App {
                     }
                     let x = term_area.x + cell.col;
                     let y = term_area.y + cell.row;
-                    let style = Style::default()
-                        .fg(cell.fg)
-                        .bg(cell.bg)
-                        .add_modifier(cell.modifier);
+                    let (fg, bg) = pty_cell_colors(cell.fg, cell.bg, is_input, &self.theme);
+                    let style = Style::default().fg(fg).bg(bg).add_modifier(cell.modifier);
                     let ratatui_cell = &mut buf[(x, y)];
                     ratatui_cell.set_symbol(&cell.symbol);
                     ratatui_cell.set_style(style);
@@ -3276,6 +3274,19 @@ impl App {
     }
 }
 
+/// Choose foreground/background colors for a PTY cell.
+///
+/// In interactive mode (`is_input == true`) the cell's original colors are
+/// returned. In non-interactive mode the theme's dim overlay colors are used
+/// instead, giving the pane a muted appearance that signals it is read-only.
+fn pty_cell_colors(fg: Color, bg: Color, is_input: bool, theme: &Theme) -> (Color, Color) {
+    if is_input {
+        (fg, bg)
+    } else {
+        (theme.overlay_dim_fg, theme.overlay_dim_bg)
+    }
+}
+
 fn quit_process_description(agents: usize, terminals: usize) -> String {
     match (agents, terminals) {
         (0, 1) => "1 running terminal".to_string(),
@@ -3583,5 +3594,26 @@ mod tests {
     #[test]
     fn capitalize_all_uppercase() {
         assert_eq!(capitalize("CODEX"), "CODEX");
+    }
+
+    // ── Unit tests for pty_cell_colors ────────────────────────────
+
+    #[test]
+    fn pty_cell_colors_passes_through_in_interactive_mode() {
+        let theme = Theme::default_dark();
+        let fg = Color::Rgb(200, 100, 50);
+        let bg = Color::Rgb(10, 20, 30);
+        assert_eq!(pty_cell_colors(fg, bg, true, &theme), (fg, bg));
+    }
+
+    #[test]
+    fn pty_cell_colors_dims_in_non_interactive_mode() {
+        let theme = Theme::default_dark();
+        let fg = Color::Rgb(200, 100, 50);
+        let bg = Color::Rgb(10, 20, 30);
+        assert_eq!(
+            pty_cell_colors(fg, bg, false, &theme),
+            (theme.overlay_dim_fg, theme.overlay_dim_bg)
+        );
     }
 }

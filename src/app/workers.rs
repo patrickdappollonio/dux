@@ -82,6 +82,12 @@ impl App {
                     }
                     Err(e) => self.set_error(format!("Pull from remote failed: {e}")),
                 },
+                WorkerEvent::ClipboardCopyCompleted { path, result } => match result {
+                    Ok(()) => {
+                        self.set_info(format!("Copied path to clipboard: \"{path}\""))
+                    }
+                    Err(e) => self.set_error(format!("Copy path failed: {e}")),
+                },
                 WorkerEvent::BrowserEntriesReady { dir, entries } => {
                     if let PromptState::BrowseProjects {
                         current_dir,
