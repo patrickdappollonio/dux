@@ -3157,7 +3157,11 @@ impl App {
         let area = centered_rect(96, 94, frame.area());
         Clear.render(area, frame.buffer_mut());
         let title = match self.selected_session() {
-            Some(session) => format!(" {} agent ", capitalize(session.provider.as_str())),
+            Some(session) => {
+                let provider = capitalize(session.provider.as_str());
+                let name = session.title.as_deref().unwrap_or(&session.branch_name);
+                format!(" {provider} agent · {name} ")
+            }
             None => " Agent ".to_string(),
         };
         let saved = self.session_surface;
@@ -3345,8 +3349,7 @@ impl App {
     fn center_pane_agent_title(&self) -> String {
         if let Some(session) = self.selected_session() {
             let provider = capitalize(session.provider.as_str());
-            let name = session.title.as_deref().unwrap_or(&session.branch_name);
-            let base = format!("{provider} agent · {name}");
+            let base = format!("{provider} agent");
             let count = self.session_terminal_count(&session.id);
             if count == 1 {
                 return format!("{base} (+ 1 terminal)");
