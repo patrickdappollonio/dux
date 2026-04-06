@@ -99,6 +99,7 @@ pub struct App {
     pub(crate) last_diff_visual_lines: u16,
     pub(crate) theme: Theme,
     pub(crate) tick_count: u64,
+    pub(crate) readonly_nudge_tick: Option<u64>,
     pub(crate) watched_worktree: Arc<Mutex<Option<PathBuf>>>,
     pub(crate) has_active_processes: Arc<AtomicBool>,
     pub(crate) collapsed_projects: HashSet<String>,
@@ -676,6 +677,7 @@ impl App {
             last_diff_visual_lines: 0,
             theme: Theme::default_dark(),
             tick_count: 0,
+            readonly_nudge_tick: None,
             watched_worktree: Arc::clone(&watched_worktree),
             has_active_processes: Arc::new(AtomicBool::new(false)),
             collapsed_projects: HashSet::new(),
@@ -878,6 +880,13 @@ impl App {
 
     pub(crate) fn set_error(&mut self, message: impl Into<String>) {
         self.status.error(message);
+    }
+
+    const NUDGE_DURATION_TICKS: u64 = 15; // ~1.5s at 100ms/tick
+
+    pub(crate) fn is_nudge_active(&self) -> bool {
+        self.readonly_nudge_tick
+            .is_some_and(|t| self.tick_count.wrapping_sub(t) < Self::NUDGE_DURATION_TICKS)
     }
 
     fn report_runtime_error(&mut self, context: &str, err: &dyn std::error::Error) {

@@ -515,6 +515,14 @@ impl App {
                 }
                 _ => {}
             }
+        } else if !in_diff && self.input_target == InputTarget::None {
+            let is_typeable = matches!(
+                key.code,
+                KeyCode::Char(_) | KeyCode::Enter | KeyCode::Backspace
+            );
+            if is_typeable && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+                self.readonly_nudge_tick = Some(self.tick_count);
+            }
         }
         Ok(())
     }
@@ -3306,6 +3314,7 @@ mod tests {
             last_diff_visual_lines: 0,
             theme: Theme::default_dark(),
             tick_count: 0,
+            readonly_nudge_tick: None,
             watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
             has_active_processes: Arc::new(AtomicBool::new(false)),
             collapsed_projects: std::collections::HashSet::new(),
