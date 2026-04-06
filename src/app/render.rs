@@ -2812,6 +2812,67 @@ impl App {
                 // Full rendering implemented in Task #5.
                 self.render_edit_macros(frame);
             }
+            PromptState::DebugInput {
+                lines,
+                scroll_offset,
+            } => {
+                self.render_dim_overlay(frame);
+                let popup = centered_rect(80, 70, frame.area());
+                Clear.render(popup, frame.buffer_mut());
+
+                // Split: content area + 1-line footer hint.
+                let chunks =
+                    Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(popup);
+                let content_area = chunks[0];
+                let hint_area = chunks[1];
+
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .title(" Input Debugger ")
+                    .title_style(
+                        Style::default()
+                            .fg(self.theme.help_section_header_fg)
+                            .add_modifier(Modifier::BOLD),
+                    );
+                let inner = block.inner(content_area);
+                block.render(content_area, frame.buffer_mut());
+
+                // Compute the visible window.
+                let visible_h = inner.height as usize;
+                let total = lines.len();
+                let max_offset = total.saturating_sub(visible_h);
+                let offset = (*scroll_offset as usize).min(max_offset);
+
+                // When scroll_offset exceeds max (auto-scroll sentinel), pin to bottom.
+                let start = if *scroll_offset as usize >= total {
+                    max_offset
+                } else {
+                    offset
+                };
+
+                let visible: Vec<Line> =
+                    lines.iter().skip(start).take(visible_h).cloned().collect();
+
+                let paragraph = Paragraph::new(visible);
+                paragraph.render(inner, frame.buffer_mut());
+
+                // Footer hint.
+                let hint = Line::from(vec![
+                    Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" close  "),
+                    Span::styled("Scroll", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" navigate"),
+                ]);
+                let hint_para = Paragraph::new(hint)
+                    .alignment(ratatui::layout::Alignment::Center)
+                    .style(
+                        Style::default()
+                            .fg(self.theme.hint_desc_fg)
+                            .add_modifier(Modifier::DIM),
+                    );
+                hint_para.render(hint_area, frame.buffer_mut());
+            }
             PromptState::None => {}
         }
     }

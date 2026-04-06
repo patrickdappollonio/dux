@@ -368,6 +368,10 @@ pub(crate) enum PromptState {
         selected: usize,
         editing: Option<MacroEditState>,
     },
+    DebugInput {
+        lines: Vec<Line<'static>>,
+        scroll_offset: u16,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1009,6 +1013,13 @@ impl App {
             }
             "edit-macros" => {
                 self.open_edit_macros();
+                Ok(())
+            }
+            "input-debugging" => {
+                self.prompt = PromptState::DebugInput {
+                    lines: Vec::new(),
+                    scroll_offset: 0,
+                };
                 Ok(())
             }
             "force-redraw" => {
