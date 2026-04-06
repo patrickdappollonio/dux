@@ -5124,14 +5124,19 @@ mod tests {
         app.cycle_selected_project_provider()
             .expect("cycle provider");
 
-        assert_eq!(app.projects[0].default_provider.as_str(), "claude");
+        // With providers [claude, codex, opencode, gemini], cycling from codex
+        // advances to the next provider: opencode.
+        assert_eq!(app.projects[0].default_provider.as_str(), "opencode");
         assert_eq!(
             app.config.projects[0].default_provider.as_deref(),
-            Some("claude")
+            Some("opencode")
         );
+        // Active session keeps its original provider.
         assert_eq!(app.sessions[0].provider.as_str(), "codex");
-        assert_eq!(app.sessions[1].provider.as_str(), "claude");
-        assert_eq!(app.sessions[2].provider.as_str(), "claude");
+        // Non-active sessions are updated to the new default.
+        assert_eq!(app.sessions[1].provider.as_str(), "opencode");
+        assert_eq!(app.sessions[2].provider.as_str(), "opencode");
+        // Session belonging to a different project is untouched.
         assert_eq!(app.sessions[3].provider.as_str(), "codex");
 
         let persisted = app.session_store.load_sessions().expect("load sessions");
@@ -5142,14 +5147,14 @@ mod tests {
                 .map(|session| session.provider.as_str())
         };
         assert_eq!(provider_for("session-1"), Some("codex"));
-        assert_eq!(provider_for("session-2"), Some("claude"));
-        assert_eq!(provider_for("session-3"), Some("claude"));
+        assert_eq!(provider_for("session-2"), Some("opencode"));
+        assert_eq!(provider_for("session-3"), Some("opencode"));
         assert_eq!(provider_for("session-4"), Some("codex"));
 
         assert!(
             app.status
                 .text()
-                .contains("Changed default CLI agent to \"claude\"")
+                .contains("Changed default CLI agent to \"opencode\"")
         );
     }
 

@@ -21,7 +21,7 @@ Principles that guide every decision in dux. If a change conflicts with a tenet,
 
 - **A provider is supported if and only if it supports PTY and oneshot mode.** PTY for interactive sessions; oneshot (headless: send a prompt, get one response) for automated tasks like commit message generation.
 - **Any CLI tool can be a provider.** Configure `command` in `config.toml` and dux spawns it. No adapters, no protocol layer. Adding a new provider is a config-only change, not a code change.
-- **Claude and Codex are the defaults.**
+- **Claude, Codex, OpenCode, and Gemini CLI are the defaults.**
 - **No protocol layer.** No JSON-RPC, no custom message format, no adapter binaries. The CLI runs exactly as it would in a normal terminal.
 
 ### Git and Data Safety
@@ -47,7 +47,7 @@ The current app provides:
 - Commented user config in the platform-specific dux config directory (`~/.dux/` on macOS, `~/.config/dux/` on Linux)
 - Session persistence in `sessions.sqlite3` alongside the config
 - Logging in `dux.log` alongside the config
-- PTY-based agent startup: spawns CLI tools (`claude`, `codex`) directly in a pseudo-terminal
+- PTY-based agent startup: spawns CLI tools (`claude`, `codex`, `opencode`, `gemini`) directly in a pseudo-terminal
 
 ## Important Constraints
 
