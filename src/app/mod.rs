@@ -117,6 +117,9 @@ pub struct App {
     /// Session IDs spawned with resume_args that should fall back to regular
     /// args if the PTY exits before producing any output.
     pub(crate) resume_fallback_candidates: HashSet<String>,
+    pub(crate) branch_status: HashMap<String, BranchStatus>,
+    pub(crate) watched_branch_session: Arc<Mutex<Option<BranchCheckInput>>>,
+    pub(crate) all_branch_sessions: Arc<Mutex<Vec<BranchCheckInput>>>,
 }
 
 /// Snapshot of session data shared with the branch-sync background worker.
@@ -575,6 +578,21 @@ pub(crate) enum CreateAgentRequest {
     },
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct BranchStatus {
+    pub pushed: Option<bool>,
+    pub merged: Option<bool>,
+}
+
+#[derive(Clone)]
+pub(crate) struct BranchCheckInput {
+    pub session_id: String,
+    pub project_path: Option<String>,
+    pub worktree_path: String,
+    pub source_branch: String,
+    pub branch_name: String,
+}
+
 pub(crate) enum WorkerEvent {
     CreateAgentProgress(String),
     CreateAgentReady(Box<AgentReadyData>),
@@ -601,6 +619,11 @@ pub(crate) enum WorkerEvent {
         new_branch: String,
         previous_title: Option<String>,
         result: Result<(), String>,
+    },
+    BranchStatusReady {
+        session_id: String,
+        pushed: Option<bool>,
+        merged: Option<bool>,
     },
 }
 
@@ -713,6 +736,9 @@ impl App {
             force_redraw: false,
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             resume_fallback_candidates: HashSet::new(),
+            branch_status: HashMap::new(),
+            watched_branch_session: Arc::new(Mutex::new(None)),
+            all_branch_sessions: Arc::new(Mutex::new(Vec::new())),
         };
         app.restore_sessions();
         app.rebuild_left_items();
@@ -724,6 +750,8 @@ impl App {
     pub fn run(&mut self) -> Result<()> {
         self.spawn_changed_files_poller();
         self.spawn_branch_sync_worker();
+        self.spawn_branch_status_poller();
+        self.spawn_all_branch_status_poller();
         let mut terminal = ratatui::init();
         execute!(stdout(), EnableMouseCapture)?;
 
@@ -851,6 +879,7 @@ impl App {
                 self.mark_session_status(&id, SessionStatus::Exited);
             }
         }
+        self.sync_all_branch_sessions();
     }
 
     pub(crate) fn close_top_overlay(&mut self) -> bool {
@@ -1145,6 +1174,43 @@ impl App {
         self.staged_files = staged;
         self.unstaged_files = unstaged;
         self.clamp_files_cursor();
+        self.sync_watched_branch_session();
+    }
+
+    pub(crate) fn sync_watched_branch_session(&mut self) {
+        let input = self.selected_session().map(|s| BranchCheckInput {
+            session_id: s.id.clone(),
+            project_path: s.project_path.clone(),
+            worktree_path: s.worktree_path.clone(),
+            source_branch: s.source_branch.clone(),
+            branch_name: s.branch_name.clone(),
+        });
+        // Fire a one-shot check if this session has no cached status yet.
+        if let Some(ref inp) = input
+            && !self.branch_status.contains_key(&inp.session_id)
+        {
+            self.trigger_branch_check(inp.clone());
+        }
+        if let Ok(mut guard) = self.watched_branch_session.lock() {
+            *guard = input;
+        }
+    }
+
+    pub(crate) fn sync_all_branch_sessions(&mut self) {
+        let inputs: Vec<BranchCheckInput> = self
+            .sessions
+            .iter()
+            .map(|s| BranchCheckInput {
+                session_id: s.id.clone(),
+                project_path: s.project_path.clone(),
+                worktree_path: s.worktree_path.clone(),
+                source_branch: s.source_branch.clone(),
+                branch_name: s.branch_name.clone(),
+            })
+            .collect();
+        if let Ok(mut guard) = self.all_branch_sessions.lock() {
+            *guard = inputs;
+        }
     }
 
     pub(crate) fn selected_changed_file(&self) -> Option<&ChangedFile> {

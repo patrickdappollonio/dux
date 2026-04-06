@@ -363,9 +363,11 @@ impl App {
         self.providers.remove(&session.id);
         self.clear_companion_terminals_for_session(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
+        self.branch_status.remove(&session.id);
         self.session_store.delete_session(&session.id)?;
         self.update_branch_sync_sessions();
         self.rebuild_left_items();
+        self.sync_all_branch_sessions();
         self.selected_left = self.selected_left.saturating_sub(1);
         self.reload_changed_files();
         if result.branch_already_deleted {
