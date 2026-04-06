@@ -745,6 +745,9 @@ impl App {
                     if let Err(err) = terminal.clear() {
                         self.report_runtime_error("force redraw failed", &err);
                     }
+                    // Re-enable mouse capture — terminal.clear() resets
+                    // terminal state which drops the mouse capture mode.
+                    let _ = execute!(stdout(), EnableMouseCapture);
                 }
 
                 if let Err(err) = terminal.draw(|frame| self.render(frame)) {
