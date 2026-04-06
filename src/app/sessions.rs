@@ -361,6 +361,7 @@ impl App {
         self.clear_companion_terminals_for_session(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
         self.session_store.delete_session(&session.id)?;
+        self.update_branch_sync_sessions();
         self.rebuild_left_items();
         self.selected_left = self.selected_left.saturating_sub(1);
         self.reload_changed_files();

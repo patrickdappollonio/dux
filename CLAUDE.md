@@ -53,6 +53,7 @@ The current app provides:
 
 - The app spawns CLI tools directly via PTY (portable-pty) and renders their output using an embedded terminal emulator built on alacritty_terminal. There is no protocol layer (no ACP, no JSON-RPC).
 - Long-running actions should not block the UI thread.
+- All periodic or potentially-blocking work (git commands, file I/O, network) must run in background workers, never on the main UI thread. Even fast operations like `git symbolic-ref` should use workers to prevent UI freezes if the filesystem or git lock stalls.
 - User state lives under `~/.dux/` on macOS and `$XDG_CONFIG_HOME/dux/` (or `~/.config/dux/`) on Linux.
 - Worktrees are user data and should not be removed or mutated casually.
 - Git operations should be explicit and conservative, especially around the source checkout.

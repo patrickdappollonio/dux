@@ -112,6 +112,15 @@ pub struct App {
     pub(crate) macro_bar: Option<MacroBarState>,
     pub(crate) sigwinch_flag: Arc<AtomicBool>,
     pub(crate) force_redraw: bool,
+    pub(crate) branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,
+}
+
+/// Snapshot of session data shared with the branch-sync background worker.
+#[derive(Clone, Debug)]
+pub(crate) struct BranchSyncEntry {
+    pub(crate) session_id: String,
+    pub(crate) worktree_path: String,
+    pub(crate) branch_name: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -342,6 +351,7 @@ pub(crate) enum PromptState {
     RenameSession {
         session_id: String,
         input: TextInput,
+        rename_branch: bool,
     },
     PickEditor {
         session_label: String,
@@ -581,6 +591,13 @@ pub(crate) enum WorkerEvent {
         path: String,
         result: Result<(), String>,
     },
+    BranchSyncReady(Vec<(String, String)>),
+    BranchRenameCompleted {
+        session_id: String,
+        new_branch: String,
+        previous_title: Option<String>,
+        result: Result<(), String>,
+    },
 }
 
 mod input;
@@ -689,15 +706,18 @@ impl App {
             macro_bar: None,
             sigwinch_flag,
             force_redraw: false,
+            branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
         };
         app.restore_sessions();
         app.rebuild_left_items();
         app.reload_changed_files();
+        app.update_branch_sync_sessions();
         Ok(app)
     }
 
     pub fn run(&mut self) -> Result<()> {
         self.spawn_changed_files_poller();
+        self.spawn_branch_sync_worker();
         let mut terminal = ratatui::init();
         execute!(stdout(), EnableMouseCapture)?;
 
@@ -1225,6 +1245,7 @@ impl App {
             self.prompt = PromptState::RenameSession {
                 session_id: session.id,
                 input: TextInput::with_text(current_name),
+                rename_branch: false,
             };
         } else {
             self.set_error("No agent session selected.");
@@ -1232,39 +1253,65 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn apply_rename_session(&mut self, session_id: &str, new_name: String) {
+    pub(crate) fn apply_rename_session(
+        &mut self,
+        session_id: &str,
+        new_name: String,
+        rename_branch: bool,
+    ) {
         let name = new_name.trim().to_string();
         if name.is_empty() {
             self.set_error("Name cannot be empty.");
             return;
         }
 
-        // Gather session info we need before mutating.
-        let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
-            return;
-        };
-        let old_branch = session.branch_name.clone();
-        let worktree = session.worktree_path.clone();
+        // Capture the previous title before mutating, in case we need to
+        // revert on a failed branch rename.
+        let previous_title = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .and_then(|s| s.title.clone());
 
-        // Skip the git rename if the branch name is unchanged.
-        if name != old_branch
-            && let Err(e) = git::rename_branch(Path::new(&worktree), &old_branch, &name)
-        {
-            self.set_error(format!("Rename failed: {e}"));
-            return;
-        }
-
-        // Git rename succeeded — update the session.
+        // Always update the display title immediately.
         if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
-            session.branch_name = name.clone();
             session.title = Some(name.clone());
             session.updated_at = Utc::now();
         }
         if let Some(session) = self.sessions.iter().find(|s| s.id == session_id) {
             let _ = self.session_store.upsert_session(session);
         }
-        self.set_info(format!("Renamed agent to \"{name}\" (branch updated)."));
         self.rebuild_left_items();
+
+        // Optionally rename the git branch in a background worker.
+        if rename_branch {
+            let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
+                return;
+            };
+            let old_branch = session.branch_name.clone();
+            if name == old_branch {
+                self.set_info(format!("Renamed agent to \"{name}\"."));
+                return;
+            }
+            let worktree = session.worktree_path.clone();
+            let sid = session.id.clone();
+            let new_branch = name.clone();
+            let tx = self.worker_tx.clone();
+            std::thread::spawn(move || {
+                let result = git::rename_branch(Path::new(&worktree), &old_branch, &new_branch)
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(WorkerEvent::BranchRenameCompleted {
+                    session_id: sid,
+                    new_branch,
+                    previous_title,
+                    result,
+                });
+            });
+            self.set_busy(format!("Renaming branch to \"{name}\"\u{2026}"));
+        } else {
+            self.set_info(format!("Renamed agent to \"{name}\"."));
+            self.update_branch_sync_sessions();
+        }
     }
 
     pub(crate) fn mark_session_status(&mut self, session_id: &str, status: SessionStatus) {
@@ -1279,6 +1326,21 @@ impl App {
             session.status = status;
             session.updated_at = Utc::now();
             let _ = self.session_store.upsert_session(session);
+        }
+    }
+
+    /// Refreshes the shared session snapshot used by the branch-sync worker.
+    pub(crate) fn update_branch_sync_sessions(&self) {
+        if let Ok(mut guard) = self.branch_sync_sessions.lock() {
+            *guard = self
+                .sessions
+                .iter()
+                .map(|s| BranchSyncEntry {
+                    session_id: s.id.clone(),
+                    worktree_path: s.worktree_path.clone(),
+                    branch_name: s.branch_name.clone(),
+                })
+                .collect();
         }
     }
 

@@ -191,6 +191,7 @@ pub struct UiConfig {
     pub staged_pane_height_pct: u16,
     pub commit_pane_height_pct: u16,
     pub agent_scrollback_lines: usize,
+    pub branch_sync_interval: u16,
 }
 
 impl Default for Config {
@@ -211,6 +212,7 @@ impl Default for Config {
                 staged_pane_height_pct: 50,
                 commit_pane_height_pct: 40,
                 agent_scrollback_lines: 10_000,
+                branch_sync_interval: 30,
             },
             editor: EditorConfig::default(),
             keys: KeysConfig::default(),
@@ -327,6 +329,7 @@ impl Default for UiConfig {
             staged_pane_height_pct: 50,
             commit_pane_height_pct: 40,
             agent_scrollback_lines: 10_000,
+            branch_sync_interval: 30,
         }
     }
 }
@@ -564,6 +567,13 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
                 "# Maximum number of lines retained in the embedded agent terminal scrollback.",
             )),
             value_fn: |c| FieldValue::Usize(c.ui.agent_scrollback_lines),
+        },
+        ConfigEntry::Field {
+            key: "branch_sync_interval",
+            comment: Some(CommentSource::Static(
+                "# Interval in seconds for syncing git branch names in the background.\n# Keeps dux in sync if a branch is renamed outside the app.\n# Set to 0 to disable.",
+            )),
+            value_fn: |c| FieldValue::U16(c.ui.branch_sync_interval),
         },
         ConfigEntry::Blank,
         ConfigEntry::Section("editor"),

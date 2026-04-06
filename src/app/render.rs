@@ -113,6 +113,19 @@ impl App {
                 project.current_branch.clone(),
                 Style::default().fg(self.theme.branch_fg).bg(bg),
             ));
+            if let Some(session) = self.selected_session() {
+                if session.branch_name != project.current_branch {
+                    spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
+                    spans.push(Span::styled(
+                        "agent: ",
+                        Style::default().fg(label_fg).bg(bg),
+                    ));
+                    spans.push(Span::styled(
+                        session.branch_name.clone(),
+                        Style::default().fg(self.theme.branch_fg).bg(bg),
+                    ));
+                }
+            }
             spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
             spans.push(Span::styled(
                 "provider: ",
@@ -2680,20 +2693,25 @@ impl App {
                     discard_button: discard_area,
                 };
             }
-            PromptState::RenameSession { input, .. } => {
+            PromptState::RenameSession {
+                input,
+                rename_branch,
+                ..
+            } => {
                 self.render_dim_overlay(frame);
-                let area = centered_rect_exact(56, 9, frame.area());
+                let area = centered_rect_exact(60, 11, frame.area());
                 Clear.render(area, frame.buffer_mut());
 
                 let outer = self.themed_overlay_block("Rename Agent");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
 
-                let [label_area, input_area, hint_area] = Layout::default()
+                let [label_area, input_area, checkbox_area, hint_area] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(1),
                         Constraint::Length(3),
+                        Constraint::Length(2),
                         Constraint::Min(1),
                     ])
                     .areas(inner);
@@ -2738,12 +2756,33 @@ impl App {
                     .block(input_block)
                     .render(input_area, frame.buffer_mut());
 
+                // Checkbox for optional branch rename.
+                let check = if *rename_branch { "x" } else { " " };
+                let checkbox_line = Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(
+                        format!("[{check}]"),
+                        Style::default().fg(self.theme.hint_key_fg),
+                    ),
+                    Span::styled(
+                        " Also rename git branch (use with care if a PR is open)",
+                        Style::default().fg(self.theme.input_label_fg),
+                    ),
+                ]);
+                Paragraph::new(checkbox_line).render(checkbox_area, frame.buffer_mut());
+
                 let confirm_key = self.bindings.label_for(Action::Confirm);
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let toggle_key = self.bindings.label_for(Action::ToggleSelection);
                 let mut hints = vec![Span::raw(" ")];
                 hints.extend(self.theme.key_badge_default(&confirm_key));
                 hints.push(Span::styled(
                     " confirm  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                hints.extend(self.theme.key_badge_default(&toggle_key));
+                hints.push(Span::styled(
+                    " toggle  ",
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
                 hints.extend(self.theme.key_badge_default(&close_key));
