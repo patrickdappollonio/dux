@@ -557,10 +557,14 @@ impl App {
         let Some(file) = self.selected_changed_file() else {
             return Ok(());
         };
-        let output =
-            crate::diff::diff_file(Path::new(&session.worktree_path), &file.path, &self.theme)?;
+        let output = crate::diff::diff_file(
+            Path::new(&session.worktree_path),
+            &file.path,
+            &self.theme,
+            &self.syntax_cache,
+        )?;
         self.center_mode = CenterMode::Diff {
-            lines: output.lines,
+            lines: Arc::new(output.lines),
             scroll: 0,
         };
         self.focus = FocusPane::Center;

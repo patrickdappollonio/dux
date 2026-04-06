@@ -34,3 +34,10 @@ opt-level = "z"   # Optimize for size.
 lto = true        # Enable link time optimization.
 codegen-units = 1 # Reduce parallel code generation units.
 debug = 0         # No debug information
+
+[profile.profiling]
+inherits = "release"
+opt-level = 2     # Full speed optimizations (not size-optimized).
+debug = 2         # Full debug info for symbols in flamegraphs.
+strip = false     # Keep symbols intact for profilers.
+lto = false       # Disable LTO so builds are faster during profiling.

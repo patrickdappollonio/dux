@@ -11,6 +11,21 @@ use syntect::parsing::SyntaxSet;
 
 use crate::theme::Theme as AppTheme;
 
+/// Cached syntax highlighting resources to avoid reloading on every diff.
+pub struct SyntaxCache {
+    pub syntax_set: SyntaxSet,
+    pub theme_set: ThemeSet,
+}
+
+impl SyntaxCache {
+    pub fn new() -> Self {
+        Self {
+            syntax_set: SyntaxSet::load_defaults_newlines(),
+            theme_set: ThemeSet::load_defaults(),
+        }
+    }
+}
+
 /// Pre-rendered diff ready for display.
 pub struct DiffOutput {
     pub lines: Vec<Line<'static>>,
@@ -20,7 +35,12 @@ pub struct DiffOutput {
 ///
 /// `worktree_path` is the root of the git worktree and `rel_path` is the
 /// file path relative to it (as reported by `git status --porcelain`).
-pub fn diff_file(worktree_path: &Path, rel_path: &str, theme: &AppTheme) -> Result<DiffOutput> {
+pub fn diff_file(
+    worktree_path: &Path,
+    rel_path: &str,
+    theme: &AppTheme,
+    cache: &SyntaxCache,
+) -> Result<DiffOutput> {
     let old_bytes = crate::git::file_bytes_at_head(worktree_path, rel_path)?.unwrap_or_default();
     let abs_path = worktree_path.join(rel_path);
     let new_bytes = std::fs::read(&abs_path).unwrap_or_default();
@@ -43,18 +63,17 @@ pub fn diff_file(worktree_path: &Path, rel_path: &str, theme: &AppTheme) -> Resu
     let old_text = String::from_utf8(old_bytes).unwrap_or_default();
     let new_text = String::from_utf8(new_bytes).unwrap_or_default();
 
-    let syntax_set = SyntaxSet::load_defaults_newlines();
-    let theme_set = ThemeSet::load_defaults();
-    let syn_theme = &theme_set.themes["base16-ocean.dark"];
+    let syn_theme = &cache.theme_set.themes["base16-ocean.dark"];
 
-    let syntax = syntax_set
+    let syntax = cache
+        .syntax_set
         .find_syntax_by_extension(
             Path::new(rel_path)
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or(""),
         )
-        .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
+        .unwrap_or_else(|| cache.syntax_set.find_syntax_plain_text());
 
     let text_diff = TextDiff::from_lines(&old_text, &new_text);
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -104,7 +123,7 @@ pub fn diff_file(worktree_path: &Path, rel_path: &str, theme: &AppTheme) -> Resu
 
             // Attempt syntax highlighting; fall back to plain coloring.
             let content = text.trim_end_matches('\n');
-            let spans = match highlighter.highlight_line(content, &syntax_set) {
+            let spans = match highlighter.highlight_line(content, &cache.syntax_set) {
                 Ok(ranges) if tag == ChangeTag::Equal => {
                     // Context lines: full syntax colors, no background tint.
                     let mut out = vec![Span::styled(
@@ -256,7 +275,8 @@ mod tests {
 
         std::fs::write(&file, [0_u8, 159, 146, 151, 152]).unwrap();
 
-        let output = diff_file(repo, "image.bin", &AppTheme::default_dark()).unwrap();
+        let cache = SyntaxCache::new();
+        let output = diff_file(repo, "image.bin", &AppTheme::default_dark(), &cache).unwrap();
         let rendered = output
             .lines
             .iter()

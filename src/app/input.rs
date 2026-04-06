@@ -3375,6 +3375,7 @@ mod tests {
             force_redraw: false,
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             resume_fallback_candidates: std::collections::HashSet::new(),
+            syntax_cache: crate::diff::SyntaxCache::new(),
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();
@@ -4707,7 +4708,11 @@ mod tests {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
         app.center_mode = CenterMode::Diff {
-            lines: vec![Line::from("one"), Line::from("two"), Line::from("three")],
+            lines: Arc::new(vec![
+                Line::from("one"),
+                Line::from("two"),
+                Line::from("three"),
+            ]),
             scroll: 0,
         };
         app.last_diff_height = 2;

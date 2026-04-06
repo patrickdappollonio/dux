@@ -382,7 +382,7 @@ impl App {
 
     fn render_diff(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
         let (lines, scroll) = match &self.center_mode {
-            CenterMode::Diff { lines, scroll } => (lines.clone(), *scroll),
+            CenterMode::Diff { lines, scroll } => (Arc::clone(lines), *scroll),
             _ => return,
         };
 
@@ -419,7 +419,7 @@ impl App {
             .saturating_sub(content_area.height);
         let scroll = scroll.min(max_scroll);
 
-        Paragraph::new(lines.clone())
+        Paragraph::new((*lines).clone())
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0))
             .render(content_area, frame.buffer_mut());
