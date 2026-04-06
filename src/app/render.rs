@@ -838,7 +838,7 @@ impl App {
                 } else if session_active && nudge_active {
                     let warn_style = Style::default().fg(self.theme.nudge_border);
                     spans.push(Span::styled(
-                        "Read-only \u{2014} agent requires full keyboard control.",
+                        "Read-only as agent requires full keyboard control in fullscreen.",
                         warn_style,
                     ));
                     spans.push(Span::styled(" Press ", desc_style));
