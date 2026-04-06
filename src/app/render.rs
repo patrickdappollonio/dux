@@ -2890,7 +2890,7 @@ impl App {
                         MacroSurface::Both => "agent + terminal macro",
                     };
                     Paragraph::new(Line::from(Span::styled(
-                        format!(" Text ({surface_desc}):"),
+                        format!(" Text for the {surface_desc}:"),
                         Style::default().fg(self.theme.input_label_fg),
                     )))
                     .render(label_area, frame.buffer_mut());
