@@ -30,6 +30,7 @@ use crate::config::{
     Config, DuxPaths, MacroSurface, ProjectConfig, ProviderCommandConfig, check_provider_available,
     ensure_config, save_config, validate_keys,
 };
+use crate::diff::SyntaxCache;
 use crate::editor::DetectedEditor;
 use crate::git;
 use crate::keybindings::{
@@ -117,6 +118,8 @@ pub struct App {
     /// Session IDs spawned with resume_args that should fall back to regular
     /// args if the PTY exits before producing any output.
     pub(crate) resume_fallback_candidates: HashSet<String>,
+    /// Cached syntax highlighting resources shared across diff computations.
+    pub(crate) syntax_cache: SyntaxCache,
 }
 
 /// Snapshot of session data shared with the branch-sync background worker.
@@ -205,7 +208,7 @@ pub(crate) enum FullscreenOverlay {
 pub(crate) enum CenterMode {
     Agent,
     Diff {
-        lines: Vec<Line<'static>>,
+        lines: Arc<Vec<Line<'static>>>,
         scroll: u16,
     },
 }
@@ -713,6 +716,7 @@ impl App {
             force_redraw: false,
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             resume_fallback_candidates: HashSet::new(),
+            syntax_cache: SyntaxCache::new(),
         };
         app.restore_sessions();
         app.rebuild_left_items();
