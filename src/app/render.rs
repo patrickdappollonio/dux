@@ -670,6 +670,15 @@ impl App {
                 // during painting.
                 let snapshot = provider.snapshot();
                 scrollback_offset = snapshot.scrollback_offset;
+
+                // When returning from scrollback to the live bottom,
+                // clear the PTY area so stale cells don't linger in
+                // ratatui's diff buffer.
+                if self.prev_scrollback_offset > 0 && scrollback_offset == 0 {
+                    Clear.render(term_area, frame.buffer_mut());
+                }
+                self.prev_scrollback_offset = scrollback_offset;
+
                 let buf = frame.buffer_mut();
                 for cell in &snapshot.cells {
                     if cell.row >= snapshot.rows

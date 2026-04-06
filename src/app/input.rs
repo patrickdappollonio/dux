@@ -3253,6 +3253,7 @@ mod tests {
             terminal_counter: 0,
             create_agent_in_flight: false,
             last_pty_size: (0, 0),
+            prev_scrollback_offset: 0,
             last_diff_height: 0,
             last_diff_visual_lines: 0,
             theme: Theme::default_dark(),
