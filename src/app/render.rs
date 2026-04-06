@@ -114,15 +114,17 @@ impl App {
                 Style::default().fg(self.theme.branch_fg).bg(bg),
             ));
             if let Some(session) = self.selected_session() {
-                spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
-                spans.push(Span::styled(
-                    "agent: ",
-                    Style::default().fg(label_fg).bg(bg),
-                ));
-                spans.push(Span::styled(
-                    session.branch_name.clone(),
-                    Style::default().fg(self.theme.branch_fg).bg(bg),
-                ));
+                if session.branch_name != project.current_branch {
+                    spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
+                    spans.push(Span::styled(
+                        "agent: ",
+                        Style::default().fg(label_fg).bg(bg),
+                    ));
+                    spans.push(Span::styled(
+                        session.branch_name.clone(),
+                        Style::default().fg(self.theme.branch_fg).bg(bg),
+                    ));
+                }
             }
             spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
             spans.push(Span::styled(
