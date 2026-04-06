@@ -579,7 +579,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         }),
         hint_contexts: &[(HintContext::LeftProject, "Pull")],
         palette: Some(PaletteEntry {
-            name: "refresh-project",
+            name: "pull-project",
             description: "Git pull the selected project checkout",
         }),
     },

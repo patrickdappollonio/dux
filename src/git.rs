@@ -77,7 +77,7 @@ pub fn is_dirty(repo_path: &Path) -> Result<bool> {
     Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
-pub fn pull_current_branch(repo_path: &Path) -> Result<String> {
+pub fn pull_current_branch(repo_path: &Path) -> Result<()> {
     let branch = current_branch(repo_path)?;
     let output = Command::new("git")
         .args([
@@ -95,7 +95,7 @@ pub fn pull_current_branch(repo_path: &Path) -> Result<String> {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(())
 }
 
 pub fn create_worktree(

@@ -891,7 +891,7 @@ impl App {
             "new-agent" => self.create_agent_for_selected_project(),
             "fork-agent" => self.fork_selected_session(),
             "provider" => self.cycle_selected_project_provider(),
-            "refresh-project" => self.refresh_selected_project(),
+            "pull-project" => self.refresh_selected_project(),
             "delete-project" => self.delete_selected_project(),
             "remove-project" => self.remove_selected_project(),
             "delete-agent" => self.confirm_delete_selected_session(),

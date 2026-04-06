@@ -306,7 +306,7 @@ impl App {
             self.set_error("Refresh blocked because the source checkout has uncommitted changes.");
             return Ok(());
         }
-        let output = git::pull_current_branch(path)?;
+        git::pull_current_branch(path)?;
         if let Some(existing) = self
             .projects
             .iter_mut()
@@ -316,9 +316,8 @@ impl App {
                 git::current_branch(path).unwrap_or_else(|_| existing.current_branch.clone());
         }
         self.set_info(format!(
-            "Refreshed project \"{}\": {}",
+            "Refreshed project \"{}\" — local branch is up to date with remote.",
             project.name,
-            output.trim()
         ));
         Ok(())
     }

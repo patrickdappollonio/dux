@@ -859,9 +859,7 @@ impl App {
         let tx = self.worker_tx.clone();
         self.set_busy("Pulling latest changes from remote…");
         thread::spawn(move || {
-            let result = git::pull_current_branch(&worktree)
-                .map(|_| ())
-                .map_err(|e| e.to_string());
+            let result = git::pull_current_branch(&worktree).map_err(|e| e.to_string());
             let _ = tx.send(WorkerEvent::PullCompleted(result));
         });
         Ok(())
