@@ -193,8 +193,6 @@ pub struct UiConfig {
     pub commit_pane_height_pct: u16,
     pub agent_scrollback_lines: usize,
     pub branch_sync_interval: u16,
-    pub active_branch_check_interval_secs: usize,
-    pub global_branch_check_interval_secs: usize,
 }
 
 impl Default for Config {
@@ -216,8 +214,6 @@ impl Default for Config {
                 commit_pane_height_pct: 40,
                 agent_scrollback_lines: 10_000,
                 branch_sync_interval: 30,
-                active_branch_check_interval_secs: 15,
-                global_branch_check_interval_secs: 0,
             },
             editor: EditorConfig::default(),
             keys: KeysConfig::default(),
@@ -336,8 +332,6 @@ impl Default for UiConfig {
             commit_pane_height_pct: 40,
             agent_scrollback_lines: 10_000,
             branch_sync_interval: 30,
-            active_branch_check_interval_secs: 15,
-            global_branch_check_interval_secs: 0,
         }
     }
 }
@@ -582,25 +576,6 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
                 "# Interval in seconds for syncing git branch names in the background.\n# Keeps dux in sync if a branch is renamed outside the app.\n# Set to 0 to disable.",
             )),
             value_fn: |c| FieldValue::U16(c.ui.branch_sync_interval),
-        },
-        ConfigEntry::Field {
-            key: "active_branch_check_interval_secs",
-            comment: Some(CommentSource::Static(
-                "# How often (in seconds) to check whether the active session's branch\n\
-                 # was pushed or merged on the remote. Set to 0 to only check once when\n\
-                 # you switch to a session.",
-            )),
-            value_fn: |c| FieldValue::Usize(c.ui.active_branch_check_interval_secs),
-        },
-        ConfigEntry::Field {
-            key: "global_branch_check_interval_secs",
-            comment: Some(CommentSource::Static(
-                "# How often (in seconds) to check all sessions for branch push/merge\n\
-                 # status. Useful for seeing merged indicators across all sessions at a\n\
-                 # glance. Set to 0 to disable (default). When enabled, 60 is a\n\
-                 # reasonable starting value.",
-            )),
-            value_fn: |c| FieldValue::Usize(c.ui.global_branch_check_interval_secs),
         },
         ConfigEntry::Blank,
         ConfigEntry::Section("editor"),

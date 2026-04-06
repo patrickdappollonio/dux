@@ -3354,9 +3354,6 @@ mod tests {
             force_redraw: false,
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             resume_fallback_candidates: std::collections::HashSet::new(),
-            branch_status: std::collections::HashMap::new(),
-            watched_branch_session: Arc::new(Mutex::new(None)),
-            all_branch_sessions: Arc::new(Mutex::new(Vec::new())),
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();
