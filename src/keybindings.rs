@@ -336,6 +336,7 @@ impl Action {
             | Action::ToggleResizeMode
             | Action::ToggleSidebar
             | Action::ToggleGitPane
+            | Action::RemoveGitPane
             | Action::ToggleHelp
             | Action::Quit
             | Action::CloseOverlay => Some("Global"),
@@ -354,7 +355,6 @@ impl Action {
             | Action::SortAgentsByUpdated
             | Action::SortAgentsByCreated
             | Action::SortAgentsByName
-            | Action::RemoveGitPane
             | Action::EditMacros => None,
         }
     }
@@ -1185,9 +1185,12 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     },
     BindingDef {
         action: Action::RemoveGitPane,
-        default_keys: &[],
-        scopes: &[],
-        help: None,
+        default_keys: &[key!(ctrl - ']')],
+        scopes: &[BindingScope::Global],
+        help: Some(HelpEntry {
+            section: "Global",
+            description: "Remove or restore git pane",
+        }),
         hint_contexts: &[],
         palette: Some(PaletteEntry {
             name: "toggle-remove-git-pane",
