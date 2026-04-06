@@ -779,6 +779,11 @@ impl App {
                     }
                 } else {
                     // Normal UI mode: use crossterm's structured event reader.
+                    // Block up to 100ms for the first event, then drain any
+                    // remaining queued events before rendering so that
+                    // intermediate events (Up, scroll, etc.) don't each cost
+                    // a full render cycle.  This keeps double-click timestamps
+                    // close to wall-clock time.
                     let ready = match crate::io_retry::retry_on_interrupt(|| {
                         event::poll(Duration::from_millis(100))
                     }) {
@@ -792,39 +797,63 @@ impl App {
                         }
                     };
                     if ready {
-                        let event = match crate::io_retry::retry_on_interrupt(event::read) {
-                            Ok(event) => event,
-                            Err(err) => {
-                                self.report_runtime_error(
-                                    "event read failed; input handling was skipped",
-                                    &err,
-                                );
-                                continue;
-                            }
-                        };
-                        match event {
-                            Event::Key(key) => {
-                                let should_exit = match self.handle_key(key) {
-                                    Ok(should_exit) => should_exit,
-                                    Err(err) => {
-                                        self.report_runtime_error(
-                                            "key handling failed",
-                                            err.as_ref(),
-                                        );
-                                        false
-                                    }
-                                };
-                                if should_exit {
+                        let mut should_exit = false;
+                        loop {
+                            let event = match crate::io_retry::retry_on_interrupt(event::read) {
+                                Ok(event) => event,
+                                Err(err) => {
+                                    self.report_runtime_error(
+                                        "event read failed; input handling was skipped",
+                                        &err,
+                                    );
                                     break;
                                 }
-                            }
-                            Event::Mouse(mouse) => {
-                                if self.handle_mouse(mouse) {
-                                    break;
+                            };
+                            match event {
+                                Event::Key(key) => {
+                                    should_exit = match self.handle_key(key) {
+                                        Ok(exit) => exit,
+                                        Err(err) => {
+                                            self.report_runtime_error(
+                                                "key handling failed",
+                                                err.as_ref(),
+                                            );
+                                            false
+                                        }
+                                    };
                                 }
+                                Event::Mouse(mouse) => {
+                                    should_exit = self.handle_mouse(mouse);
+                                }
+                                Event::Resize(_, _) => {}
+                                _ => {}
                             }
-                            Event::Resize(_, _) => {}
-                            _ => {}
+
+                            // Stop draining if exit was requested.
+                            if should_exit {
+                                break;
+                            }
+
+                            // Stop draining if we switched to interactive
+                            // mode — remaining events must go through the
+                            // raw stdin path.
+                            if matches!(
+                                self.input_target,
+                                InputTarget::Agent | InputTarget::Terminal
+                            ) {
+                                break;
+                            }
+
+                            // Check for more queued events without blocking.
+                            match crate::io_retry::retry_on_interrupt(|| {
+                                event::poll(Duration::ZERO)
+                            }) {
+                                Ok(true) => continue,
+                                _ => break,
+                            }
+                        }
+                        if should_exit {
+                            break;
                         }
                     }
                 }
