@@ -776,7 +776,7 @@ impl App {
                 } else {
                     spans.push(Span::styled(" down", desc_style));
                 }
-                if !self.config.macros.entries.is_empty() && !macro_key.is_empty() {
+                if !self.filtered_macros("").is_empty() && !macro_key.is_empty() {
                     spans.push(Span::styled(" ", desc_style));
                     spans.extend(self.theme.dim_key_badge_default(&macro_key));
                     spans.push(Span::styled(" macros.", desc_style));
@@ -2818,11 +2818,13 @@ impl App {
 
             match edit_state.stage {
                 MacroEditStage::EditName => {
-                    let [label_area, input_area, _, hint_area] = Layout::default()
+                    let [label_area, input_area, _, surface_area, _, hint_area] = Layout::default()
                         .direction(Direction::Vertical)
                         .constraints([
                             Constraint::Length(1),
                             Constraint::Length(3),
+                            Constraint::Length(1),
+                            Constraint::Length(1),
                             Constraint::Min(1),
                             Constraint::Length(1),
                         ])
@@ -2836,7 +2838,38 @@ impl App {
 
                     self.render_single_line_input(&edit_state.name_input, input_area, frame);
 
-                    let hints = self.edit_macro_hints(&[("Enter", "next"), ("Esc", "cancel")]);
+                    // Surface radio buttons
+                    let current = edit_state.surface;
+                    let options = [
+                        (MacroSurface::Agent, "Agent"),
+                        (MacroSurface::Terminal, "Terminal"),
+                        (MacroSurface::Both, "Both"),
+                    ];
+                    let mut radio_spans: Vec<Span> = vec![Span::styled(
+                        " Surface:  ",
+                        Style::default().fg(self.theme.input_label_fg),
+                    )];
+                    for (i, (variant, label)) in options.iter().enumerate() {
+                        if i > 0 {
+                            radio_spans.push(Span::styled("    ", Style::default()));
+                        }
+                        let bullet = if *variant == current { "● " } else { "○ " };
+                        let style = if *variant == current {
+                            Style::default().fg(self.theme.input_label_fg)
+                        } else {
+                            Style::default().fg(self.theme.hint_desc_fg)
+                        };
+                        radio_spans.push(Span::styled(bullet, style));
+                        radio_spans.push(Span::styled(*label, style));
+                    }
+                    Paragraph::new(Line::from(radio_spans))
+                        .render(surface_area, frame.buffer_mut());
+
+                    let hints = self.edit_macro_hints(&[
+                        ("Enter", "next"),
+                        ("Tab/Shift-Tab", "surface"),
+                        ("Esc", "cancel"),
+                    ]);
                     Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
                 }
                 MacroEditStage::EditText => {
@@ -2849,8 +2882,13 @@ impl App {
                         ])
                         .areas(inner);
 
+                    let surface_desc = match edit_state.surface {
+                        MacroSurface::Agent => "agent macro",
+                        MacroSurface::Terminal => "terminal macro",
+                        MacroSurface::Both => "agent + terminal macro",
+                    };
                     Paragraph::new(Line::from(Span::styled(
-                        " Text (pasted to agent via bracketed paste):",
+                        format!(" Text for the {surface_desc}:"),
                         Style::default().fg(self.theme.input_label_fg),
                     )))
                     .render(label_area, frame.buffer_mut());
@@ -2905,13 +2943,22 @@ impl App {
 
                 let items: Vec<ListItem> = entries
                     .iter()
-                    .map(|(name, text)| {
-                        let mut spans = vec![Span::styled(
-                            format!(" {name} — "),
-                            Style::default().fg(self.theme.input_label_fg),
-                        )];
+                    .map(|(name, text, surface)| {
+                        let surface_label = format!(" ({})", surface.label());
+                        let mut spans = vec![
+                            Span::styled(
+                                format!(" {name}"),
+                                Style::default().fg(self.theme.input_label_fg),
+                            ),
+                            Span::styled(
+                                surface_label.clone(),
+                                Style::default().fg(self.theme.hint_dim_desc_fg),
+                            ),
+                            Span::styled(" — ", Style::default().fg(self.theme.input_label_fg)),
+                        ];
                         let text_preview = text.replace('\n', "↵");
-                        let prefix_len = name.len() + 4; // " " + name + " — "
+                        // " " + name + " (label)" + " — "
+                        let prefix_len = 1 + name.len() + surface_label.len() + 3;
                         let max_len = (list_area.width as usize).saturating_sub(prefix_len + 2);
                         let truncated = if text_preview.len() > max_len {
                             format!("{}…", &text_preview[..max_len.saturating_sub(1)])
@@ -3153,11 +3200,7 @@ impl App {
         let gap = 2usize;
 
         let items: Vec<ListItem> = if filtered.is_empty() {
-            let msg = if self.config.macros.entries.is_empty() {
-                "No macros configured. Use \"edit-macros\" in the command palette."
-            } else {
-                "No matching macros."
-            };
+            let msg = "No matching macros.";
             vec![ListItem::new(Span::styled(
                 msg,
                 Style::default().fg(self.theme.hint_desc_fg),
