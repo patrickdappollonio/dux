@@ -459,8 +459,12 @@ fn check_branch_status(input: &BranchCheckInput) -> (Option<bool>, Option<bool>)
             None
         }
     };
-    // Only check merged if the branch is pushed — can't be merged if never pushed.
-    let merged = if pushed == Some(true) {
+    // Always check merged when the remote is reachable (pushed is Some).
+    // The branch may still exist on the remote (pushed=true) or may have been
+    // deleted after merge (pushed=false). In either case the diff-based merge
+    // detection in is_branch_merged handles it correctly.
+    let should_check_merged = pushed.is_some();
+    let merged = if should_check_merged {
         if let Some(ref project_path) = input.project_path {
             match git::is_branch_merged(Path::new(project_path), &worktree, &input.source_branch) {
                 Ok(v) => Some(v),

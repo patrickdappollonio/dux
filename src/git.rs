@@ -93,6 +93,7 @@ pub fn is_branch_merged(
     let tip = head_commit(worktree_path)?;
 
     // Step 3: check if the tip is an ancestor of origin/<source_branch>.
+    // This detects regular merge commits where the original SHAs are preserved.
     let remote_ref = format!("origin/{source_branch}");
     let check = Command::new("git")
         .args([
@@ -106,16 +107,45 @@ pub fn is_branch_merged(
         .output()
         .with_context(|| format!("failed to run merge-base --is-ancestor for {tip}"))?;
 
-    // Exit 0 = ancestor (merged), exit 1 = not ancestor (not merged).
-    // Any other exit code is a real error.
     match check.status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => Err(anyhow!(
-            "git merge-base --is-ancestor failed: {}",
-            String::from_utf8_lossy(&check.stderr)
-        )),
+        Some(0) => return Ok(true),
+        Some(1) => {} // not a direct ancestor — may still be squash/rebase merged
+        _ => {
+            return Err(anyhow!(
+                "git merge-base --is-ancestor failed: {}",
+                String::from_utf8_lossy(&check.stderr)
+            ));
+        }
     }
+
+    // Step 4: squash/rebase merge detection. GitHub rewrites commit SHAs for
+    // these strategies, so merge-base --is-ancestor fails even though the
+    // changes are fully incorporated. Use `git cherry` which compares commits
+    // by patch-id — it detects equivalent changes regardless of commit SHA.
+    // Lines prefixed with `-` are already applied; `+` means not yet merged.
+    let cherry = Command::new("git")
+        .args([
+            "-C",
+            project_path.to_string_lossy().as_ref(),
+            "cherry",
+            &remote_ref,
+            &tip,
+        ])
+        .output()
+        .with_context(|| format!("failed to run git cherry for squash-merge detection on {tip}"))?;
+    if !cherry.status.success() {
+        return Err(anyhow!(
+            "git cherry failed: {}",
+            String::from_utf8_lossy(&cherry.stderr)
+        ));
+    }
+
+    // If every line starts with `-`, all commits are already in the source
+    // branch (squash/rebase merged). If any line starts with `+`, there are
+    // un-merged commits.
+    let output = String::from_utf8_lossy(&cherry.stdout);
+    let all_applied = !output.is_empty() && output.lines().all(|line| line.starts_with('-'));
+    Ok(all_applied)
 }
 
 pub fn is_git_repo(path: &Path) -> bool {
@@ -1299,6 +1329,48 @@ mod tests {
         // Simulate merge: fast-forward main on the bare origin to include the branch tip.
         run_git(repo.path(), &["checkout", "main"]);
         run_git(repo.path(), &["merge", "--ff-only", &tip]);
+        run_git(repo.path(), &["push", "origin", "main"]);
+
+        assert!(is_branch_merged(repo.path(), &wt, "main").unwrap());
+    }
+
+    #[test]
+    fn is_branch_merged_detects_squash_merge() {
+        let repo = init_test_repo();
+        let _bare = add_bare_origin(repo.path());
+        run_git(repo.path(), &["push", "-u", "origin", "main"]);
+
+        // Create the worktree in a separate temp dir (like dux does) so the
+        // worktree directory doesn't appear as a file in the repo tree.
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt = wt_dir.path().join("squash-me");
+        let out = Command::new("git")
+            .args([
+                "-C",
+                repo.path().to_string_lossy().as_ref(),
+                "worktree",
+                "add",
+                "-b",
+                "squash-me",
+                wt.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "worktree add failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        fs::write(wt.join("squashed.txt"), "squash content\n").unwrap();
+        commit_all(&wt, "feature commit");
+        run_git(&wt, &["push", "-u", "origin", "squash-me"]);
+
+        // Simulate squash merge: create a NEW commit on main with the same
+        // changes but a different SHA (mimics GitHub's squash-and-merge).
+        run_git(repo.path(), &["checkout", "main"]);
+        fs::write(repo.path().join("squashed.txt"), "squash content\n").unwrap();
+        commit_all(repo.path(), "squash-merge: feature commit (#1)");
         run_git(repo.path(), &["push", "origin", "main"]);
 
         assert!(is_branch_merged(repo.path(), &wt, "main").unwrap());
