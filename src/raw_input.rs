@@ -142,6 +142,36 @@ pub fn split_sequences(buf: &[u8]) -> (Vec<&[u8]>, &[u8]) {
                     i += 3; // ESC O <byte>
                     sequences.push(&buf[start..i]);
                 }
+                b']' => {
+                    // OSC sequence: ESC ] <params> <BEL|ST>
+                    // Terminated by BEL (0x07) or ST (ESC \).
+                    i += 2; // skip ESC ]
+                    loop {
+                        if i >= buf.len() {
+                            // Incomplete OSC — return as remainder.
+                            return (sequences, &buf[start..]);
+                        }
+                        if buf[i] == 0x07 {
+                            // BEL terminator.
+                            i += 1;
+                            break;
+                        }
+                        if buf[i] == 0x1b {
+                            // Possible ST (ESC \).
+                            if i + 1 >= buf.len() {
+                                return (sequences, &buf[start..]);
+                            }
+                            if buf[i + 1] == b'\\' {
+                                i += 2;
+                                break;
+                            }
+                            // Malformed — treat ESC as start of next sequence.
+                            break;
+                        }
+                        i += 1;
+                    }
+                    sequences.push(&buf[start..i]);
+                }
                 _ => {
                     // Alt+key or other two-byte ESC sequence.
                     i += 2;
@@ -415,6 +445,86 @@ mod tests {
         assert!(rem.is_empty());
         assert!(is_sgr_mouse(seqs[0]));
         assert!(is_sgr_mouse(seqs[1]));
+    }
+
+    #[test]
+    fn osc_bel_terminated() {
+        // OSC color response: ESC ] 11 ; rgb:0000/0000/0000 BEL
+        let input = b"\x1b]11;rgb:0000/0000/0000\x07";
+        let (seqs, rem) = split_sequences(input);
+        assert_eq!(seqs.len(), 1);
+        assert_eq!(seqs[0], input.as_slice());
+        assert!(rem.is_empty());
+    }
+
+    #[test]
+    fn osc_st_terminated() {
+        // OSC terminated by ST (ESC \)
+        let input = b"\x1b]11;rgb:0000/0000/0000\x1b\\";
+        let (seqs, rem) = split_sequences(input);
+        assert_eq!(seqs.len(), 1);
+        assert_eq!(seqs[0], input.as_slice());
+        assert!(rem.is_empty());
+    }
+
+    #[test]
+    fn osc_palette_color_response() {
+        // OSC 4 palette query response: ESC ] 4 ; 1 ; rgb:0000/0000/0000 BEL
+        // This is the exact sequence that was appearing as garbage text.
+        let input = b"\x1b]4;1;rgb:0000/0000/0000\x07";
+        let (seqs, rem) = split_sequences(input);
+        assert_eq!(seqs.len(), 1);
+        assert_eq!(seqs[0], input.as_slice());
+        assert!(rem.is_empty());
+    }
+
+    #[test]
+    fn osc_incomplete() {
+        // Incomplete OSC — no terminator yet.
+        let input = b"\x1b]11;rgb:0000/0000";
+        let (seqs, rem) = split_sequences(input);
+        assert!(seqs.is_empty());
+        assert_eq!(rem, input.as_slice());
+    }
+
+    #[test]
+    fn osc_incomplete_st() {
+        // OSC followed by ESC but no backslash yet.
+        let input = b"\x1b]11;rgb:0000/0000/0000\x1b";
+        let (seqs, rem) = split_sequences(input);
+        assert!(seqs.is_empty());
+        assert_eq!(rem, input.as_slice());
+    }
+
+    #[test]
+    fn osc_followed_by_other_input() {
+        // OSC response followed by a normal keypress.
+        let mut input = Vec::new();
+        input.extend_from_slice(b"\x1b]11;rgb:0000/0000/0000\x07");
+        input.push(b'a');
+        let (seqs, rem) = split_sequences(&input);
+        assert_eq!(seqs.len(), 2);
+        assert_eq!(seqs[0], b"\x1b]11;rgb:0000/0000/0000\x07");
+        assert_eq!(seqs[1], b"a");
+        assert!(rem.is_empty());
+    }
+
+    #[test]
+    fn osc_not_fragmented_into_garbage() {
+        // Before the fix, ESC ] was treated as a 2-byte alt-key sequence,
+        // leaving "11;rgb:0000/0000/0000\x07" as separate bytes that would
+        // be forwarded to the PTY child as garbage text input.
+        let input = b"\x1b]11;rgb:0000/0000/0000\x07";
+        let (seqs, rem) = split_sequences(input);
+        // Must be exactly 1 sequence — not fragmented.
+        assert_eq!(
+            seqs.len(),
+            1,
+            "OSC must not be fragmented into multiple sequences"
+        );
+        // The full OSC including terminator must be preserved.
+        assert_eq!(seqs[0], input.as_slice());
+        assert!(rem.is_empty());
     }
 
     #[test]
