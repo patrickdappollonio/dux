@@ -1,6 +1,3 @@
-use std::sync::mpsc;
-use std::time::Duration;
-
 use anyhow::{Result, anyhow};
 
 #[cfg(target_os = "linux")]
@@ -15,10 +12,15 @@ use std::io::Write;
 use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
+#[cfg(target_os = "linux")]
+use std::sync::mpsc;
+#[cfg(target_os = "linux")]
+use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use anyhow::Context;
 
+#[cfg(target_os = "linux")]
 const CLIPBOARD_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy)]
@@ -55,21 +57,8 @@ fn copy_text_impl(text: &str) -> Result<()> {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn copy_text_arboard(text: &str) -> Result<()> {
-    let text = text.to_string();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(copy_text_arboard_inner(&text));
-    });
-    rx.recv_timeout(CLIPBOARD_TIMEOUT).map_err(|_| {
-        anyhow!(
-            "Clipboard access timed out after {}ms",
-            CLIPBOARD_TIMEOUT.as_millis()
-        )
-    })?
-}
-
-fn copy_text_arboard_inner(text: &str) -> Result<()> {
     let mut clipboard =
         arboard::Clipboard::new().map_err(|e| anyhow!("Failed to access clipboard: {e}"))?;
     clipboard
@@ -84,7 +73,6 @@ enum LinuxClipboardBackend {
     WlCopy,
     Xclip,
     Xsel,
-    Arboard,
 }
 
 #[cfg(target_os = "linux")]
@@ -94,25 +82,23 @@ impl LinuxClipboardBackend {
             Self::WlCopy => "wl-copy",
             Self::Xclip => "xclip",
             Self::Xsel => "xsel",
-            Self::Arboard => "arboard",
         }
     }
 
-    fn command_spec(self) -> Option<LinuxClipboardCommand> {
+    fn command_spec(self) -> LinuxClipboardCommand {
         match self {
-            Self::WlCopy => Some(LinuxClipboardCommand {
+            Self::WlCopy => LinuxClipboardCommand {
                 program: "wl-copy",
                 args: &[],
-            }),
-            Self::Xclip => Some(LinuxClipboardCommand {
+            },
+            Self::Xclip => LinuxClipboardCommand {
                 program: "xclip",
                 args: &["-selection", "clipboard"],
-            }),
-            Self::Xsel => Some(LinuxClipboardCommand {
+            },
+            Self::Xsel => LinuxClipboardCommand {
                 program: "xsel",
                 args: &["--clipboard", "--input"],
-            }),
-            Self::Arboard => None,
+            },
         }
     }
 }
@@ -198,22 +184,21 @@ fn linux_backends(env: &LinuxClipboardEnvironment) -> Vec<LinuxClipboardBackend>
         backends.push(LinuxClipboardBackend::Xsel);
     }
 
-    backends.push(LinuxClipboardBackend::Arboard);
     backends
 }
 
 #[cfg(target_os = "linux")]
 fn copy_text_linux(text: &str) -> Result<()> {
     let env = LinuxClipboardEnvironment::current();
+    let backends = linux_backends(&env);
+
+    if backends.is_empty() {
+        return Err(anyhow!(format_linux_clipboard_error(&env, &[])));
+    }
+
     let mut errors = Vec::new();
-
-    for backend in linux_backends(&env) {
-        let result = match backend.command_spec() {
-            Some(command) => run_linux_clipboard_command(command, text),
-            None => copy_text_arboard(text),
-        };
-
-        match result {
+    for backend in backends {
+        match run_linux_clipboard_command(backend.command_spec(), text) {
             Ok(()) => return Ok(()),
             Err(err) => errors.push(format!("{}: {err}", backend.label())),
         }
@@ -270,7 +255,7 @@ fn run_linux_clipboard_command(command: LinuxClipboardCommand, text: &str) -> Re
 
 #[cfg(target_os = "linux")]
 fn format_linux_clipboard_error(env: &LinuxClipboardEnvironment, errors: &[String]) -> String {
-    let mut message = String::from("Failed to copy path to the Linux clipboard.");
+    let mut message = String::from("Clipboard copy failed.");
 
     if !errors.is_empty() {
         message.push_str(" Tried ");
@@ -280,13 +265,14 @@ fn format_linux_clipboard_error(env: &LinuxClipboardEnvironment, errors: &[Strin
 
     if env.wayland_display {
         message.push_str(
-            " Install `wl-clipboard` or ensure `wl-copy` can access the active Wayland session.",
+            " Install `wl-clipboard` (provides `wl-copy`) for Wayland clipboard support.",
         );
     } else if env.x11_display {
-        message.push_str(" Install `xclip` or `xsel`, or ensure the X11 clipboard is reachable.");
+        message.push_str(" Install `xclip` or `xsel` for X11 clipboard support.");
     } else {
         message.push_str(
-            " No `WAYLAND_DISPLAY` or `DISPLAY` session was detected. Install `wl-clipboard` for Wayland or `xclip`/`xsel` for X11.",
+            " No display session detected (`WAYLAND_DISPLAY` and `DISPLAY` are both unset). \
+             Clipboard requires a graphical session with `wl-clipboard` (Wayland) or `xclip`/`xsel` (X11) installed.",
         );
     }
 
@@ -324,7 +310,6 @@ mod tests {
                 LinuxClipboardBackend::WlCopy,
                 LinuxClipboardBackend::Xclip,
                 LinuxClipboardBackend::Xsel,
-                LinuxClipboardBackend::Arboard,
             ]
         );
     }
@@ -336,20 +321,16 @@ mod tests {
 
         assert_eq!(
             linux_backends(&env),
-            vec![
-                LinuxClipboardBackend::Xclip,
-                LinuxClipboardBackend::Xsel,
-                LinuxClipboardBackend::Arboard,
-            ]
+            vec![LinuxClipboardBackend::Xclip, LinuxClipboardBackend::Xsel,]
         );
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_falls_back_to_arboard_when_no_helpers_are_available() {
+    fn linux_returns_empty_when_no_tools_are_available() {
         let env = env_with(false, false, &[]);
 
-        assert_eq!(linux_backends(&env), vec![LinuxClipboardBackend::Arboard]);
+        assert!(linux_backends(&env).is_empty());
     }
 
     #[cfg(target_os = "linux")]
@@ -357,26 +338,25 @@ mod tests {
     fn linux_backend_command_specs_match_expected_args() {
         assert_eq!(
             LinuxClipboardBackend::WlCopy.command_spec(),
-            Some(LinuxClipboardCommand {
+            LinuxClipboardCommand {
                 program: "wl-copy",
                 args: &[],
-            })
+            }
         );
         assert_eq!(
             LinuxClipboardBackend::Xclip.command_spec(),
-            Some(LinuxClipboardCommand {
+            LinuxClipboardCommand {
                 program: "xclip",
                 args: &["-selection", "clipboard"],
-            })
+            }
         );
         assert_eq!(
             LinuxClipboardBackend::Xsel.command_spec(),
-            Some(LinuxClipboardCommand {
+            LinuxClipboardCommand {
                 program: "xsel",
                 args: &["--clipboard", "--input"],
-            })
+            }
         );
-        assert_eq!(LinuxClipboardBackend::Arboard.command_spec(), None);
     }
 
     #[cfg(target_os = "linux")]
