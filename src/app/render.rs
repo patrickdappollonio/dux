@@ -2885,9 +2885,9 @@ impl App {
                         .areas(inner);
 
                     let surface_desc = match edit_state.surface {
-                        MacroSurface::Agent => "given to agent",
-                        MacroSurface::Terminal => "given to terminal",
-                        MacroSurface::Both => "given to agent + terminal",
+                        MacroSurface::Agent => "agent macro",
+                        MacroSurface::Terminal => "terminal macro",
+                        MacroSurface::Both => "agent + terminal macro",
                     };
                     Paragraph::new(Line::from(Span::styled(
                         format!(" Text ({surface_desc}):"),
