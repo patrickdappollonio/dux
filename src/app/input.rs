@@ -6,6 +6,7 @@ const MIN_RIGHT_WIDTH_PCT: u16 = 14;
 const MAX_RIGHT_WIDTH_PCT: u16 = 50;
 const MIN_CENTER_WIDTH_PCT: u16 = 20;
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
+const DOUBLE_CLICK_FOCUS_THRESHOLD: Duration = Duration::from_millis(1500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MouseTarget {
@@ -2118,16 +2119,28 @@ impl App {
     }
 
     fn register_mouse_click(&mut self, target: MouseClickTarget) -> bool {
+        self.register_mouse_click_with_timeout(target, DOUBLE_CLICK_THRESHOLD)
+    }
+
+    fn register_mouse_click_with_timeout(
+        &mut self,
+        target: MouseClickTarget,
+        timeout: Duration,
+    ) -> bool {
         let now = Instant::now();
         if let Some(last) = self.last_mouse_click
             && last.target == target
-            && now.duration_since(last.at) <= DOUBLE_CLICK_THRESHOLD
+            && now.duration_since(last.at) <= last.threshold
         {
             self.last_mouse_click = None;
             return true;
         }
 
-        self.last_mouse_click = Some(RecentMouseClick { target, at: now });
+        self.last_mouse_click = Some(RecentMouseClick {
+            target,
+            at: now,
+            threshold: timeout,
+        });
         false
     }
 
@@ -3008,7 +3021,16 @@ impl App {
                         self.fullscreen_overlay = FullscreenOverlay::None;
                     }
                     Some(MouseTarget::Center) => {
-                        let double_click = self.register_mouse_click(MouseClickTarget::CenterPane);
+                        let changing_focus = self.focus != FocusPane::Center;
+                        let timeout = if changing_focus {
+                            DOUBLE_CLICK_FOCUS_THRESHOLD
+                        } else {
+                            DOUBLE_CLICK_THRESHOLD
+                        };
+                        let double_click = self.register_mouse_click_with_timeout(
+                            MouseClickTarget::CenterPane,
+                            timeout,
+                        );
                         self.focus = FocusPane::Center;
                         if double_click {
                             self.activate_center_agent_from_mouse();
@@ -4309,6 +4331,73 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
 
         assert_eq!(app.focus, FocusPane::Center);
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+    }
+
+    #[test]
+    fn mouse_double_click_center_from_left_pane_opens_fullscreen() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.selected_left = 1;
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Left;
+        app.providers.insert(
+            "session-1".to_string(),
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "printf ready; sleep 0.2".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+
+        // First click focuses the center pane (from Left).
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        assert_eq!(app.focus, FocusPane::Center);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+
+        // Second click completes the double-click and activates fullscreen.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+    }
+
+    #[test]
+    fn mouse_cross_focus_click_uses_longer_threshold() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.selected_left = 1;
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Left;
+        app.providers.insert(
+            "session-1".to_string(),
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "printf ready; sleep 0.2".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+
+        // First click focuses the center pane — stores the longer threshold.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+
+        // Simulate a pause longer than the normal 500ms but within the
+        // focus threshold (1500ms) by back-dating the recorded click.
+        if let Some(ref mut click) = app.last_mouse_click {
+            click.at -= std::time::Duration::from_millis(800);
+        }
+
+        // Second click should still detect a double-click thanks to the
+        // extended threshold.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
         assert_eq!(app.input_target, InputTarget::Agent);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
     }
