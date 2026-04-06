@@ -681,10 +681,12 @@ impl App {
                     }
                     let x = term_area.x + cell.col;
                     let y = term_area.y + cell.row;
-                    let style = Style::default()
-                        .fg(cell.fg)
-                        .bg(cell.bg)
-                        .add_modifier(cell.modifier);
+                    let (fg, bg) = if is_input {
+                        (cell.fg, cell.bg)
+                    } else {
+                        (self.theme.overlay_dim_fg, self.theme.overlay_dim_bg)
+                    };
+                    let style = Style::default().fg(fg).bg(bg).add_modifier(cell.modifier);
                     let ratatui_cell = &mut buf[(x, y)];
                     ratatui_cell.set_symbol(&cell.symbol);
                     ratatui_cell.set_style(style);
