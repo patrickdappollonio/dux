@@ -46,7 +46,7 @@ impl App {
         let right_constraint = if self.right_hidden {
             Constraint::Length(0)
         } else if self.right_collapsed {
-            Constraint::Length(4)
+            Constraint::Length(3)
         } else {
             Constraint::Percentage(self.right_width_pct)
         };
@@ -869,7 +869,7 @@ impl App {
                 .iter()
                 .map(|(s, color)| {
                     ListItem::new(Line::from(Span::styled(
-                        format!("{s:>2}"),
+                        format!("{s}"),
                         Style::default().fg(*color),
                     )))
                 })
