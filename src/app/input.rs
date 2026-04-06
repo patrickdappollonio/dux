@@ -964,6 +964,11 @@ impl App {
         for action in actions {
             match action {
                 SeqAction::Intercept(Action::OpenMacroBar, _, _) => {
+                    if self.filtered_macros("").is_empty() {
+                        self.set_info("No macros defined for this surface.");
+                        self.raw_input_buf.clear();
+                        return Ok(false);
+                    }
                     let prev = self.input_target;
                     self.macro_bar = Some(MacroBarState {
                         input: TextInput::new(),
@@ -1639,10 +1644,14 @@ impl App {
                         *editing = None;
                         return Ok(false);
                     }
+                    if key.code == KeyCode::Tab {
+                        edit_state.surface = edit_state.surface.next();
+                        return Ok(false);
+                    }
                     if key.code == KeyCode::Enter && !edit_state.name_input.is_empty() {
                         let name = edit_state.name_input.text.clone();
                         // For new macros, check for duplicate names
-                        if edit_state.id.is_none() && entries.iter().any(|(n, _)| *n == name) {
+                        if edit_state.id.is_none() && entries.iter().any(|(n, _, _)| *n == name) {
                             self.set_warning(format!(
                                 "Name \"{name}\" is already in use. Choose another."
                             ));
@@ -1658,6 +1667,7 @@ impl App {
                         // Save the macro
                         let name = edit_state.name_input.text.clone();
                         let text = edit_state.text_input.text.clone();
+                        let surface = edit_state.surface;
                         let old_id = edit_state.id.clone();
 
                         if text.is_empty() {
@@ -1674,10 +1684,13 @@ impl App {
                         }
 
                         // Update config
-                        self.config
-                            .macros
-                            .entries
-                            .insert(name.clone(), text.clone());
+                        self.config.macros.entries.insert(
+                            name.clone(),
+                            crate::config::MacroEntry {
+                                text: text.clone(),
+                                surface,
+                            },
+                        );
 
                         // Update the entries snapshot in PromptState
                         let PromptState::EditMacros {
@@ -1690,17 +1703,19 @@ impl App {
 
                         // Update entries list
                         if let Some(old_name) = old_id {
-                            if let Some(existing) = entries.iter_mut().find(|(n, _)| *n == old_name)
+                            if let Some(existing) =
+                                entries.iter_mut().find(|(n, _, _)| *n == old_name)
                             {
                                 existing.0 = name.clone();
                                 existing.1 = text;
+                                existing.2 = surface;
                             } else {
-                                entries.push((name.clone(), text));
+                                entries.push((name.clone(), text, surface));
                             }
                         } else {
-                            entries.push((name.clone(), text));
+                            entries.push((name.clone(), text, surface));
                         }
-                        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+                        entries.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
 
                         // Persist
                         let _ = crate::config::save_config(
@@ -1735,13 +1750,15 @@ impl App {
             }
             KeyCode::Enter => {
                 // Edit selected macro
-                if let Some((name, text)) = entries.get(*selected) {
+                if let Some((name, text, surface)) = entries.get(*selected) {
                     let name = name.clone();
                     let text = text.clone();
+                    let surface = *surface;
                     *editing = Some(MacroEditState {
                         id: Some(name.clone()),
                         name_input: TextInput::with_text(name),
                         text_input: TextInput::with_text(text).with_multiline(8),
+                        surface,
                         stage: MacroEditStage::EditName,
                     });
                 }
@@ -1752,12 +1769,13 @@ impl App {
                     id: None,
                     name_input: TextInput::new(),
                     text_input: TextInput::new().with_multiline(8),
+                    surface: MacroSurface::default(),
                     stage: MacroEditStage::EditName,
                 });
             }
             KeyCode::Char('d') | KeyCode::Delete => {
                 // Delete selected macro
-                if let Some((name, _)) = entries.get(*selected) {
+                if let Some((name, _, _)) = entries.get(*selected) {
                     let name = name.clone();
                     self.config.macros.entries.remove(&name);
 
@@ -1767,7 +1785,7 @@ impl App {
                     else {
                         return Ok(false);
                     };
-                    entries.retain(|(n, _)| *n != name);
+                    entries.retain(|(n, _, _)| *n != name);
                     if *selected > 0 && *selected >= entries.len() {
                         *selected = entries.len().saturating_sub(1);
                     }

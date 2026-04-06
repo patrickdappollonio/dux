@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 use crate::clipboard::Clipboard;
 use crate::config::{
-    Config, DuxPaths, ProjectConfig, ProviderCommandConfig, check_provider_available,
+    Config, DuxPaths, MacroSurface, ProjectConfig, ProviderCommandConfig, check_provider_available,
     ensure_config, save_config, validate_keys,
 };
 use crate::editor::DetectedEditor;
@@ -348,7 +348,7 @@ pub(crate) enum PromptState {
         selected: usize,
     },
     EditMacros {
-        entries: Vec<(String, String)>,
+        entries: Vec<(String, String, MacroSurface)>,
         selected: usize,
         editing: Option<MacroEditState>,
     },
@@ -366,6 +366,7 @@ pub(crate) struct MacroEditState {
     pub(crate) id: Option<String>,
     pub(crate) name_input: TextInput,
     pub(crate) text_input: TextInput,
+    pub(crate) surface: MacroSurface,
     pub(crate) stage: MacroEditStage,
 }
 
@@ -942,14 +943,14 @@ impl App {
     }
 
     pub(crate) fn open_edit_macros(&mut self) {
-        let mut entries: Vec<(String, String)> = self
+        let mut entries: Vec<(String, String, MacroSurface)> = self
             .config
             .macros
             .entries
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| (k.clone(), v.text.clone(), v.surface))
             .collect();
-        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+        entries.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
         self.prompt = PromptState::EditMacros {
             entries,
             selected: 0,
@@ -957,9 +958,11 @@ impl App {
         };
     }
 
-    /// Return macros matching `query`, searching name first then text content.
-    /// If `query` is empty, returns all macros in their config order.
+    /// Return macros matching `query` and the current session surface,
+    /// searching name first then text content.
+    /// If `query` is empty, returns all surface-matching macros in config order.
     pub(crate) fn filtered_macros(&self, query: &str) -> Vec<(&str, &str)> {
+        let surface = self.session_surface;
         let needle = query.trim().to_lowercase();
         if needle.is_empty() {
             return self
@@ -967,16 +970,20 @@ impl App {
                 .macros
                 .entries
                 .iter()
-                .map(|(name, text)| (name.as_str(), text.as_str()))
+                .filter(|(_, entry)| entry.surface.matches(surface))
+                .map(|(name, entry)| (name.as_str(), entry.text.as_str()))
                 .collect();
         }
         let mut name_matches = Vec::new();
         let mut text_matches = Vec::new();
-        for (name, text) in &self.config.macros.entries {
+        for (name, entry) in &self.config.macros.entries {
+            if !entry.surface.matches(surface) {
+                continue;
+            }
             if name.to_lowercase().contains(&needle) {
-                name_matches.push((name.as_str(), text.as_str()));
-            } else if text.to_lowercase().contains(&needle) {
-                text_matches.push((name.as_str(), text.as_str()));
+                name_matches.push((name.as_str(), entry.text.as_str()));
+            } else if entry.text.to_lowercase().contains(&needle) {
+                text_matches.push((name.as_str(), entry.text.as_str()));
             }
         }
         name_matches.extend(text_matches);

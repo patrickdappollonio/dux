@@ -46,13 +46,64 @@ pub struct KeysConfig {
     pub bindings: BTreeMap<String, Vec<String>>,
 }
 
-/// Text macros: a map from name to text.
+/// Which surface(s) a macro is available on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MacroSurface {
+    Agent,
+    Terminal,
+    Both,
+}
+
+impl Default for MacroSurface {
+    fn default() -> Self {
+        Self::Agent
+    }
+}
+
+impl MacroSurface {
+    /// Human-readable label for UI display.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Agent => "agent only",
+            Self::Terminal => "terminal only",
+            Self::Both => "agent + terminal",
+        }
+    }
+
+    /// Cycle to the next variant: Agent -> Terminal -> Both -> Agent.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Agent => Self::Terminal,
+            Self::Terminal => Self::Both,
+            Self::Both => Self::Agent,
+        }
+    }
+
+    /// Whether this surface matches the given session surface.
+    pub fn matches(self, session: crate::model::SessionSurface) -> bool {
+        match self {
+            Self::Both => true,
+            Self::Agent => session == crate::model::SessionSurface::Agent,
+            Self::Terminal => session == crate::model::SessionSurface::Terminal,
+        }
+    }
+}
+
+/// A single text macro entry with surface restriction.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MacroEntry {
+    pub text: String,
+    pub surface: MacroSurface,
+}
+
+/// Text macros: a map from name to entry.
 /// Each entry is triggered from the macro bar (Ctrl+\).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MacrosConfig {
     #[serde(flatten)]
-    pub entries: BTreeMap<String, String>,
+    pub entries: BTreeMap<String, MacroEntry>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -671,22 +722,32 @@ fn render_macros_config(
     let _ = writeln!(
         out,
         "# Text macros: press {macro_key} to open the macro bar and select one to paste.\n\
-         # Each entry is a name mapped to the text that will be pasted via bracketed paste.\n\
+         # Each entry is a name mapped to its text and a surface restriction.\n\
+         # surface = \"agent\"    — only shown when the agent pane is focused.\n\
+         # surface = \"terminal\" — only shown when the terminal pane is focused.\n\
+         # surface = \"both\"     — shown on both surfaces.\n\
          # Newlines in text values are safe — they are sent atomically and not interpreted as Enter.",
     );
     if macros.entries.is_empty() {
         out.push_str(
-            "# \"Review\" = \"review this code for bugs and security issues\"\n\
-             # \"Explain\" = \"explain what this function does\"\n",
+            "# \"Review\" = { text = \"review this code for bugs\", surface = \"agent\" }\n\
+             # \"Build\" = { text = \"cargo build --release\", surface = \"terminal\" }\n",
         );
     } else {
         out.push('\n');
-        for (name, text) in &macros.entries {
+        for (name, entry) in &macros.entries {
+            let text = escape_toml_string(&entry.text);
+            let surface = match entry.surface {
+                MacroSurface::Agent => "agent",
+                MacroSurface::Terminal => "terminal",
+                MacroSurface::Both => "both",
+            };
             let _ = writeln!(
                 out,
-                "\"{}\" = \"{}\"",
+                "\"{}\" = {{ text = \"{}\", surface = \"{}\" }}",
                 escape_toml_string(name),
-                escape_toml_string(text)
+                text,
+                surface
             );
         }
     }
@@ -1551,25 +1612,55 @@ oneshot_output = "stdout"
     }
 
     #[test]
-    fn macros_config_string_entry_round_trip() {
+    fn macros_config_entry_round_trip() {
         let toml_str = r#"
-"Review" = "review this code"
+"Review" = { text = "review this code", surface = "agent" }
 "#;
         let config: MacrosConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.entries.len(), 1);
-        assert_eq!(config.entries["Review"], "review this code");
+        assert_eq!(config.entries["Review"].text, "review this code");
+        assert_eq!(config.entries["Review"].surface, MacroSurface::Agent);
     }
 
     #[test]
     fn macros_config_multiple_entries() {
         let toml_str = r#"
-"Explain" = "explain what this function does"
-"Review" = "review this code for bugs"
+"Explain" = { text = "explain what this function does", surface = "agent" }
+"Review" = { text = "review this code for bugs", surface = "both" }
+"Build" = { text = "cargo build", surface = "terminal" }
 "#;
         let config: MacrosConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.entries.len(), 2);
-        assert_eq!(config.entries["Explain"], "explain what this function does");
-        assert_eq!(config.entries["Review"], "review this code for bugs");
+        assert_eq!(config.entries.len(), 3);
+        assert_eq!(
+            config.entries["Explain"].text,
+            "explain what this function does"
+        );
+        assert_eq!(config.entries["Explain"].surface, MacroSurface::Agent);
+        assert_eq!(config.entries["Review"].surface, MacroSurface::Both);
+        assert_eq!(config.entries["Build"].surface, MacroSurface::Terminal);
+    }
+
+    #[test]
+    fn macros_surface_default_is_agent() {
+        assert_eq!(MacroSurface::default(), MacroSurface::Agent);
+    }
+
+    #[test]
+    fn macros_surface_matches() {
+        use crate::model::SessionSurface;
+        assert!(MacroSurface::Both.matches(SessionSurface::Agent));
+        assert!(MacroSurface::Both.matches(SessionSurface::Terminal));
+        assert!(MacroSurface::Agent.matches(SessionSurface::Agent));
+        assert!(!MacroSurface::Agent.matches(SessionSurface::Terminal));
+        assert!(MacroSurface::Terminal.matches(SessionSurface::Terminal));
+        assert!(!MacroSurface::Terminal.matches(SessionSurface::Agent));
+    }
+
+    #[test]
+    fn macros_surface_next_cycles() {
+        assert_eq!(MacroSurface::Agent.next(), MacroSurface::Terminal);
+        assert_eq!(MacroSurface::Terminal.next(), MacroSurface::Both);
+        assert_eq!(MacroSurface::Both.next(), MacroSurface::Agent);
     }
 
     #[test]
@@ -1577,34 +1668,43 @@ oneshot_output = "stdout"
         let config = Config::default();
         let rendered = render_config_default(&config);
         assert!(rendered.contains("[macros]"));
-        assert!(rendered.contains("# \"Review\" = \"review this code"));
+        assert!(rendered.contains("# \"Review\" = { text = \"review this code"));
+        assert!(rendered.contains("surface = \"agent\""));
     }
 
     #[test]
     fn render_macros_config_with_entries() {
         let mut config = Config::default();
-        config
-            .macros
-            .entries
-            .insert("Review".to_string(), "hello world".to_string());
-        config
-            .macros
-            .entries
-            .insert("Test".to_string(), "foo bar".to_string());
+        config.macros.entries.insert(
+            "Review".to_string(),
+            MacroEntry {
+                text: "hello world".to_string(),
+                surface: MacroSurface::Agent,
+            },
+        );
+        config.macros.entries.insert(
+            "Test".to_string(),
+            MacroEntry {
+                text: "foo bar".to_string(),
+                surface: MacroSurface::Terminal,
+            },
+        );
         let rendered = render_config_default(&config);
-        assert!(rendered.contains("\"Review\" = \"hello world\""));
-        assert!(rendered.contains("\"Test\" = \"foo bar\""));
+        assert!(rendered.contains("\"Review\" = { text = \"hello world\", surface = \"agent\" }"));
+        assert!(rendered.contains("\"Test\" = { text = \"foo bar\", surface = \"terminal\" }"));
     }
 
     #[test]
     fn render_macros_config_escapes_special_chars() {
         let mut config = Config::default();
-        config
-            .macros
-            .entries
-            .insert("Multi".to_string(), "line1\nline2".to_string());
+        config.macros.entries.insert(
+            "Multi".to_string(),
+            MacroEntry {
+                text: "line1\nline2".to_string(),
+                surface: MacroSurface::Both,
+            },
+        );
         let rendered = render_config_default(&config);
-        // Newlines must be escaped in the TOML output
-        assert!(rendered.contains("\"Multi\" = \"line1\\nline2\""));
+        assert!(rendered.contains("\"Multi\" = { text = \"line1\\nline2\", surface = \"both\" }"));
     }
 }
