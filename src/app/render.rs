@@ -693,7 +693,7 @@ impl App {
                 // When returning from scrollback to the live bottom,
                 // clear the PTY area so stale cells don't linger in
                 // ratatui's diff buffer.
-                if self.prev_scrollback_offset > 0 && scrollback_offset == 0 {
+                if scrollback_offset != self.prev_scrollback_offset {
                     Clear.render(term_area, frame.buffer_mut());
                 }
                 self.prev_scrollback_offset = scrollback_offset;
