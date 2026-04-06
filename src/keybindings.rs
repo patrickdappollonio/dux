@@ -617,12 +617,15 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     BindingDef {
         action: Action::DeleteSession,
         default_keys: &[key!(ctrl - d)],
-        scopes: &[BindingScope::Left],
+        scopes: &[BindingScope::Left, BindingScope::Center],
         help: Some(HelpEntry {
             section: "Projects pane",
             description: "Delete selected session/worktree",
         }),
-        hint_contexts: &[(HintContext::LeftSession, "Delete")],
+        hint_contexts: &[
+            (HintContext::LeftSession, "Delete"),
+            (HintContext::Center, "Delete"),
+        ],
         palette: Some(PaletteEntry {
             name: "delete-agent",
             description: "Delete the selected agent session",

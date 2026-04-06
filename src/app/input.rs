@@ -452,6 +452,7 @@ impl App {
                 Action::FocusAgent if !in_diff => self.activate_center_agent()?,
                 Action::ExitInteractive if !in_diff => self.activate_center_agent()?,
                 Action::ShowTerminal if !in_diff => self.show_companion_terminal()?,
+                Action::DeleteSession if !in_diff => self.confirm_delete_selected_session()?,
                 Action::ReconnectAgent if !in_diff => {
                     // Allow relaunching an exited agent from the center pane,
                     // or entering interactive mode if the agent is active.
