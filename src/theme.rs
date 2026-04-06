@@ -61,6 +61,7 @@ pub struct Theme {
     pub diff_stat_add_fg: Color,
     pub diff_stat_remove_fg: Color,
     pub runtime_context_value_fg: Color,
+    pub nudge_border: Color,
 }
 
 impl Theme {
@@ -123,6 +124,7 @@ impl Theme {
             diff_stat_add_fg: Color::Green,
             diff_stat_remove_fg: Color::Red,
             runtime_context_value_fg: Color::Rgb(125, 150, 160),
+            nudge_border: Color::Rgb(180, 150, 50),
         }
     }
 

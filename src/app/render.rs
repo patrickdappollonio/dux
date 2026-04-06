@@ -541,7 +541,13 @@ impl App {
     }
 
     fn render_agent_terminal(&mut self, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
-        let outer_block = self.themed_block(title, focused);
+        let nudge_active = self.is_nudge_active();
+        let outer_block = if nudge_active {
+            self.themed_block(title, focused)
+                .border_style(Style::default().fg(self.theme.nudge_border))
+        } else {
+            self.themed_block(title, focused)
+        };
         let inner = outer_block.inner(area);
         outer_block.render(area, frame.buffer_mut());
 
@@ -842,6 +848,14 @@ impl App {
                             ));
                         }
                     }
+                } else if session_active && nudge_active {
+                    let warn_style = Style::default().fg(self.theme.nudge_border);
+                    spans.push(Span::styled(
+                        "Read-only \u{2014} agent needs full keyboard control. ",
+                        warn_style,
+                    ));
+                    spans.extend(self.theme.dim_key_badge_default(&focus_agent));
+                    spans.push(Span::styled(" to interact.", desc_style));
                 } else if session_active {
                     spans.extend(self.theme.dim_key_badge_default(&focus_agent));
                     spans.push(Span::styled(" to interact. ", desc_style));
