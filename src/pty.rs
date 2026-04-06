@@ -19,7 +19,7 @@ use ratatui::style::{Color, Modifier};
 
 use crate::logger;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SnapshotCursor {
     pub row: u16,
     pub col: u16,
@@ -904,6 +904,221 @@ mod tests {
         assert!(
             !terminal.has_mouse_mode(),
             "mouse mode should be disabled after DECRST 1000"
+        );
+    }
+
+    /// Simulates the Claude CLI plan-view scenario:
+    ///  - Fill the terminal so there's scrollback history
+    ///  - Draw 4 option labels at the bottom rows using cursor positioning
+    ///  - Scroll up (user reads the plan) then scroll back to bottom
+    ///  - Verify the option labels are still present and at the correct rows
+    ///
+    /// This tests whether `Term::scroll_display` round-tripping corrupts the
+    /// grid content or cursor position that the child process last wrote.
+    #[test]
+    fn scroll_roundtrip_preserves_bottom_content() {
+        // 10-row viewport, 40 cols, generous scrollback.
+        let mut terminal = TerminalState::with_scrollback(10, 40, 200);
+
+        // Fill enough lines to create scrollback history (simulate the plan text).
+        for i in 0..20 {
+            let line = format!("Plan line {i}\r\n");
+            terminal.process(line.as_bytes());
+        }
+
+        // Now position cursor at rows 7-10 (bottom 4 rows of the 10-row viewport)
+        // and draw the 4 option labels, simulating how a TUI app would draw them.
+        // ESC[<row>;<col>H moves cursor to absolute position (1-indexed).
+        // ESC[2K clears the entire line before writing.
+        terminal.process(b"\x1b[7;1H\x1b[2K> Accept all edits");
+        terminal.process(b"\x1b[8;1H\x1b[2KAccept and prompt");
+        terminal.process(b"\x1b[9;1H\x1b[2KChange something");
+        terminal.process(b"\x1b[10;1H\x1b[2KCustom input");
+
+        // Snapshot before scrolling — this is the "known good" state.
+        let before = terminal.snapshot();
+        let before_lines = viewport_lines(&before);
+
+        assert!(
+            before_lines[6].contains("Accept all edits"),
+            "row 7 should have first option, got: {:?}",
+            before_lines[6]
+        );
+        assert!(
+            before_lines[7].contains("Accept and prompt"),
+            "row 8 should have second option, got: {:?}",
+            before_lines[7]
+        );
+        assert!(
+            before_lines[8].contains("Change something"),
+            "row 9 should have third option, got: {:?}",
+            before_lines[8]
+        );
+        assert!(
+            before_lines[9].contains("Custom input"),
+            "row 10 should have fourth option, got: {:?}",
+            before_lines[9]
+        );
+
+        // User scrolls up to read the plan (scroll up by 5 rows).
+        terminal.scroll(true, 5);
+        assert_eq!(terminal.scrollback_offset(), 5);
+
+        // Verify the bottom options are NOT visible while scrolled (they're
+        // below the viewport). This is expected — just confirming the scroll
+        // actually shifted the view.
+        let scrolled = terminal.snapshot();
+        let scrolled_lines = viewport_lines(&scrolled);
+        assert!(
+            !scrolled_lines[9].contains("Custom input"),
+            "bottom option should not be visible while scrolled up"
+        );
+
+        // User scrolls back to bottom.
+        terminal.scroll(false, 5);
+        assert_eq!(
+            terminal.scrollback_offset(),
+            0,
+            "should be back at live bottom"
+        );
+
+        // Take snapshot after the round-trip.
+        let after = terminal.snapshot();
+        let after_lines = viewport_lines(&after);
+
+        // The critical assertions: content at the bottom rows must be identical
+        // to what was there before scrolling.
+        assert_eq!(
+            before_lines[6], after_lines[6],
+            "row 7 content changed after scroll round-trip"
+        );
+        assert_eq!(
+            before_lines[7], after_lines[7],
+            "row 8 content changed after scroll round-trip"
+        );
+        assert_eq!(
+            before_lines[8], after_lines[8],
+            "row 9 content changed after scroll round-trip"
+        );
+        assert_eq!(
+            before_lines[9], after_lines[9],
+            "row 10 content changed after scroll round-trip"
+        );
+
+        // Also verify cursor position is preserved — the child process left
+        // the cursor at row 10 after writing "Custom input". After scroll
+        // round-trip, the cursor should still be at the same viewport position.
+        let cursor_before = before.cursor;
+        let cursor_after = after.cursor;
+        assert_eq!(
+            cursor_before, cursor_after,
+            "cursor position changed after scroll round-trip: before={cursor_before:?}, after={cursor_after:?}"
+        );
+    }
+
+    /// Verify that when scrolled up by 1, the snapshot still contains the
+    /// options that remain in the viewport (all but the very last row).
+    /// This tests whether the snapshot faithfully captures styled content
+    /// at the bottom of the viewport during partial scrolling.
+    #[test]
+    fn scroll_up_by_one_preserves_visible_bottom_rows() {
+        let mut terminal = TerminalState::with_scrollback(10, 40, 200);
+
+        // Fill scrollback.
+        for i in 0..20 {
+            terminal.process(format!("Plan line {i}\r\n").as_bytes());
+        }
+
+        // Draw 4 options at the bottom using cursor positioning + reverse video
+        // to simulate styled TUI options (bold, reverse, etc.).
+        terminal.process(b"\x1b[7;1H\x1b[2K\x1b[1m> Accept all edits\x1b[0m");
+        terminal.process(b"\x1b[8;1H\x1b[2K  Accept and prompt");
+        terminal.process(b"\x1b[9;1H\x1b[2K  Change something");
+        terminal.process(b"\x1b[10;1H\x1b[2K  Custom input");
+
+        // Scroll up by just 1 row.
+        terminal.scroll(true, 1);
+        assert_eq!(terminal.scrollback_offset(), 1);
+
+        let scrolled = terminal.snapshot();
+        let lines = viewport_lines(&scrolled);
+
+        // The bottom row ("Custom input") scrolled off, but the other 3
+        // should now be at rows 7, 8, 9 (shifted up by 1 from 6, 7, 8).
+        // Rows are 0-indexed in viewport_lines.
+        let has_accept_all = lines.iter().any(|l| l.contains("Accept all edits"));
+        let has_accept_prompt = lines.iter().any(|l| l.contains("Accept and prompt"));
+        let has_change = lines.iter().any(|l| l.contains("Change something"));
+        let has_custom = lines.iter().any(|l| l.contains("Custom input"));
+
+        assert!(
+            has_accept_all,
+            "\"Accept all edits\" should still be visible when scrolled up by 1. Lines: {lines:?}"
+        );
+        assert!(
+            has_accept_prompt,
+            "\"Accept and prompt\" should still be visible when scrolled up by 1. Lines: {lines:?}"
+        );
+        assert!(
+            has_change,
+            "\"Change something\" should still be visible when scrolled up by 1. Lines: {lines:?}"
+        );
+        assert!(
+            !has_custom,
+            "\"Custom input\" (bottom row) should NOT be visible when scrolled up by 1. Lines: {lines:?}"
+        );
+
+        // Verify the snapshot actually has non-empty cells for those rows
+        // (not just whitespace). This catches the case where the grid is
+        // fine but the snapshot iteration skips or blanks styled cells.
+        let accept_cells: Vec<_> = scrolled
+            .cells
+            .iter()
+            .filter(|c| c.symbol == "A" || c.symbol == ">" || c.symbol == "C")
+            .collect();
+        assert!(
+            !accept_cells.is_empty(),
+            "snapshot should contain non-whitespace cells for the option rows"
+        );
+    }
+
+    /// Same as above but with a larger scroll distance that goes all the way
+    /// to the top of history, then back. Tests the extreme case.
+    #[test]
+    fn scroll_to_top_and_back_preserves_bottom_content() {
+        let mut terminal = TerminalState::with_scrollback(10, 40, 200);
+
+        // Generate enough content for substantial scrollback.
+        for i in 0..50 {
+            let line = format!("Line {i}\r\n");
+            terminal.process(line.as_bytes());
+        }
+
+        // Draw options at the bottom.
+        terminal.process(b"\x1b[9;1H\x1b[2KOption A");
+        terminal.process(b"\x1b[10;1H\x1b[2KOption B");
+
+        let before = terminal.snapshot();
+        let before_lines = viewport_lines(&before);
+
+        // Scroll all the way to the top of history.
+        let history = terminal.term.grid().history_size();
+        terminal.scroll(true, history);
+
+        // Then scroll all the way back to bottom.
+        terminal.scroll(false, history);
+        assert_eq!(terminal.scrollback_offset(), 0);
+
+        let after = terminal.snapshot();
+        let after_lines = viewport_lines(&after);
+
+        assert_eq!(
+            before_lines, after_lines,
+            "viewport content should be identical after full scroll round-trip"
+        );
+        assert_eq!(
+            before.cursor, after.cursor,
+            "cursor should be identical after full scroll round-trip"
         );
     }
 }
