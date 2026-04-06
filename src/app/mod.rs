@@ -114,6 +114,9 @@ pub struct App {
     pub(crate) sigwinch_flag: Arc<AtomicBool>,
     pub(crate) force_redraw: bool,
     pub(crate) branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,
+    /// Session IDs spawned with resume_args that should fall back to regular
+    /// args if the PTY exits before producing any output.
+    pub(crate) resume_fallback_candidates: HashSet<String>,
 }
 
 /// Snapshot of session data shared with the branch-sync background worker.
@@ -709,6 +712,7 @@ impl App {
             sigwinch_flag,
             force_redraw: false,
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
+            resume_fallback_candidates: HashSet::new(),
         };
         app.restore_sessions();
         app.rebuild_left_items();

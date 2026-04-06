@@ -173,14 +173,67 @@ impl App {
                 exited.push(session_id.clone());
             }
         }
+
+        // For sessions that were spawned with resume_args and exited before
+        // producing any output, retry with regular args (fresh session).
+        // This handles `claude --continue || claude` style fallback.
+        let mut retried = HashSet::new();
         for session_id in &exited {
+            if !self.resume_fallback_candidates.remove(session_id) {
+                continue;
+            }
+            let had_output = self
+                .providers
+                .get(session_id)
+                .map(|p| p.has_output())
+                .unwrap_or(false);
+            if had_output {
+                continue;
+            }
+            let Some(session) = self.sessions.iter().find(|s| s.id == *session_id).cloned() else {
+                continue;
+            };
+            self.providers.remove(session_id);
+            logger::info(&format!(
+                "resume args exited without output for agent \"{}\", retrying with regular args",
+                session.branch_name
+            ));
+            match self.spawn_pty_for_session(&session, false) {
+                Ok(client) => {
+                    self.providers.insert(session_id.clone(), client);
+                    self.mark_session_status(session_id, SessionStatus::Active);
+                    let proj_name = self.project_name_for_session(&session);
+                    self.set_info(format!(
+                        "No prior session to resume for agent \"{}\". Started a fresh {} session in project \"{}\".",
+                        session.branch_name,
+                        session.provider.as_str(),
+                        proj_name,
+                    ));
+                    retried.insert(session_id.clone());
+                }
+                Err(err) => {
+                    logger::error(&format!(
+                        "fallback PTY spawn also failed for {}: {err}",
+                        session_id
+                    ));
+                    self.mark_session_status(session_id, SessionStatus::Detached);
+                }
+            }
+        }
+
+        for session_id in &exited {
+            if retried.contains(session_id) {
+                continue;
+            }
             self.providers.remove(session_id);
             self.mark_session_status(session_id, SessionStatus::Detached);
         }
         if !exited.is_empty() {
-            // If the currently-viewed session just exited, leave interactive mode.
+            // If the currently-viewed session just exited (and was not retried),
+            // leave interactive mode.
             if let Some(current) = self.selected_session()
                 && exited.contains(&current.id)
+                && !retried.contains(&current.id)
             {
                 let key = self.bindings.label_for(Action::ReconnectAgent);
                 if self.session_surface == SessionSurface::Agent {
