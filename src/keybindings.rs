@@ -336,6 +336,7 @@ impl Action {
             | Action::ToggleResizeMode
             | Action::ToggleSidebar
             | Action::ToggleGitPane
+            | Action::RemoveGitPane
             | Action::ToggleHelp
             | Action::Quit
             | Action::CloseOverlay => Some("Global"),
@@ -354,7 +355,6 @@ impl Action {
             | Action::SortAgentsByUpdated
             | Action::SortAgentsByCreated
             | Action::SortAgentsByName
-            | Action::RemoveGitPane
             | Action::EditMacros => None,
         }
     }
@@ -1185,9 +1185,12 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     },
     BindingDef {
         action: Action::RemoveGitPane,
-        default_keys: &[],
-        scopes: &[],
-        help: None,
+        default_keys: &[key!(ctrl - ']')],
+        scopes: &[BindingScope::Global],
+        help: Some(HelpEntry {
+            section: "Global",
+            description: "Remove or restore git pane",
+        }),
         hint_contexts: &[],
         palette: Some(PaletteEntry {
             name: "toggle-remove-git-pane",
@@ -1225,6 +1228,24 @@ fn normalize_backtab(kc: KeyCombination) -> KeyCombination {
     } else {
         kc
     }
+}
+
+/// Crossterm maps Ctrl+punctuation bytes 0x1C..0x1F to Ctrl+'4'..'7' instead
+/// of the actual characters `\`, `]`, `^`, `_`. Normalize the digit back to
+/// the real punctuation so that `key!(ctrl - ']')` matches what the terminal
+/// actually delivers.
+fn normalize_ctrl_punct(kc: KeyCombination) -> KeyCombination {
+    if !kc.modifiers.contains(KeyModifiers::CONTROL) {
+        return kc;
+    }
+    let replacement = match kc.codes {
+        crokey::OneToThree::One(KeyCode::Char('4')) => '\\',
+        crokey::OneToThree::One(KeyCode::Char('5')) => ']',
+        crokey::OneToThree::One(KeyCode::Char('6')) => '^',
+        crokey::OneToThree::One(KeyCode::Char('7')) => '_',
+        _ => return kc,
+    };
+    KeyCombination::new(KeyCode::Char(replacement), kc.modifiers)
 }
 
 /// Returns the shared display format: lowercase modifiers, dash separator.
@@ -1345,13 +1366,14 @@ impl RuntimeBindings {
     /// Plain bindings (no modifiers) reject Ctrl/Alt combos so that e.g.
     /// Ctrl+D does not accidentally match a plain `d` binding.
     pub fn lookup(&self, key: &KeyEvent, scope: BindingScope) -> Option<Action> {
-        let incoming = normalize_backtab(KeyCombination::from(*key).normalized());
+        let incoming =
+            normalize_ctrl_punct(normalize_backtab(KeyCombination::from(*key).normalized()));
         self.bindings
             .iter()
             .filter(|b| b.scopes.contains(&scope))
             .find(|b| {
                 b.keys.iter().any(|k| {
-                    let norm = normalize_backtab(k.normalized());
+                    let norm = normalize_ctrl_punct(normalize_backtab(k.normalized()));
                     if norm.codes != incoming.codes {
                         return false;
                     }
@@ -1504,8 +1526,8 @@ pub struct KeyConflict {
 /// - Plain bindings (no modifiers) only conflict with other plain bindings.
 /// - Modifier bindings conflict only when modifiers are identical.
 fn keys_conflict(a: &KeyCombination, b: &KeyCombination) -> bool {
-    let na = normalize_backtab(a.normalized());
-    let nb = normalize_backtab(b.normalized());
+    let na = normalize_ctrl_punct(normalize_backtab(a.normalized()));
+    let nb = normalize_ctrl_punct(normalize_backtab(b.normalized()));
     if na.codes != nb.codes {
         return false;
     }
@@ -1768,6 +1790,29 @@ mod tests {
             bindings.lookup(&key, BindingScope::Global),
             Some(Action::OpenPalette)
         );
+    }
+
+    #[test]
+    fn lookup_ctrl_close_bracket_matches() {
+        let bindings = default_bindings();
+        // Crossterm delivers Ctrl+] as Char('5') + CONTROL (byte 0x1D maps
+        // to '5' in crossterm's parser). The normalize_ctrl_punct layer
+        // should remap this so the binding fires.
+        let key = KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL);
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Global),
+            Some(Action::RemoveGitPane),
+        );
+    }
+
+    #[test]
+    fn crokey_parses_ctrl_bracket_as_real_char() {
+        // Verify that crokey::parse("ctrl-]") produces Char(']') + CONTROL,
+        // meaning users can write `ctrl-]` in their config file and it will
+        // match after normalize_ctrl_punct remaps the crossterm event.
+        let kc = crokey::parse("ctrl-]").unwrap();
+        assert_eq!(kc.codes, crokey::OneToThree::One(KeyCode::Char(']')));
+        assert!(kc.modifiers.contains(KeyModifiers::CONTROL));
     }
 
     #[test]
