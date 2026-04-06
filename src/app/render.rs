@@ -2884,8 +2884,13 @@ impl App {
                         ])
                         .areas(inner);
 
+                    let surface_desc = match edit_state.surface {
+                        MacroSurface::Agent => "given to agent",
+                        MacroSurface::Terminal => "given to terminal",
+                        MacroSurface::Both => "given to agent + terminal",
+                    };
                     Paragraph::new(Line::from(Span::styled(
-                        " Text (pasted via bracketed paste):",
+                        format!(" Text ({surface_desc}):"),
                         Style::default().fg(self.theme.input_label_fg),
                     )))
                     .render(label_area, frame.buffer_mut());
