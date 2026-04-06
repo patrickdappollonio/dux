@@ -196,6 +196,10 @@ impl App {
                         Some(0)
                     };
                 }
+                Action::ForceRedraw => {
+                    self.force_redraw = true;
+                    self.set_info("Interface redrawn. All screen contents have been repainted.");
+                }
                 Action::OpenPalette => {
                     self.prompt = PromptState::Command {
                         input: TextInput::new(),
@@ -3316,6 +3320,7 @@ mod tests {
             raw_input_buf: Vec::new(),
             macro_bar: None,
             sigwinch_flag: Arc::new(AtomicBool::new(false)),
+            force_redraw: false,
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();

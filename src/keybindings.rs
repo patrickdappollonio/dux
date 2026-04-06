@@ -52,6 +52,7 @@ pub enum Action {
     ToggleSidebar,
     ToggleGitPane,
     ToggleHelp,
+    ForceRedraw,
     Quit,
     CloseOverlay,
     // Resize mode
@@ -211,6 +212,7 @@ impl Action {
             Action::SortAgentsByUpdated => "sort_agents_by_updated",
             Action::SortAgentsByCreated => "sort_agents_by_created",
             Action::SortAgentsByName => "sort_agents_by_name",
+            Action::ForceRedraw => "force_redraw",
             Action::RemoveGitPane => "remove_git_pane",
             Action::EditMacros => "edit_macros",
         }
@@ -287,6 +289,7 @@ impl Action {
             Action::SortAgentsByUpdated => "Sort agents by most recently updated.",
             Action::SortAgentsByCreated => "Sort agents by creation date (newest first).",
             Action::SortAgentsByName => "Sort agents alphabetically by name.",
+            Action::ForceRedraw => "Force a full terminal redraw.",
             Action::RemoveGitPane => "Remove or restore the git pane.",
             Action::EditMacros => "Open the text macros editor.",
         }
@@ -338,6 +341,7 @@ impl Action {
             | Action::ToggleGitPane
             | Action::RemoveGitPane
             | Action::ToggleHelp
+            | Action::ForceRedraw
             | Action::Quit
             | Action::CloseOverlay => Some("Global"),
             Action::ResizeGrow | Action::ResizeShrink => Some("Resize mode"),
@@ -964,6 +968,20 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "help",
             description: "Open the help overlay",
+        }),
+    },
+    BindingDef {
+        action: Action::ForceRedraw,
+        default_keys: &[key!(ctrl - l)],
+        scopes: &[BindingScope::Global],
+        help: Some(HelpEntry {
+            section: "Global",
+            description: "Force a full terminal redraw",
+        }),
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "force-redraw",
+            description: "Force a full terminal redraw (clears rendering artifacts)",
         }),
     },
     BindingDef {
@@ -1981,6 +1999,7 @@ mod tests {
         assert!(actions_in_defs.contains(&Action::AddCurrentDir));
         assert!(actions_in_defs.contains(&Action::SearchFiles));
         assert!(actions_in_defs.contains(&Action::SearchNext));
+        assert!(actions_in_defs.contains(&Action::ForceRedraw));
     }
 
     #[test]

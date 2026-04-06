@@ -111,6 +111,7 @@ pub struct App {
     pub(crate) raw_input_buf: Vec<u8>,
     pub(crate) macro_bar: Option<MacroBarState>,
     pub(crate) sigwinch_flag: Arc<AtomicBool>,
+    pub(crate) force_redraw: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -687,6 +688,7 @@ impl App {
             raw_input_buf: Vec::new(),
             macro_bar: None,
             sigwinch_flag,
+            force_redraw: false,
         };
         app.restore_sessions();
         app.rebuild_left_items();
@@ -710,6 +712,13 @@ impl App {
                     && let Err(err) = crate::io_retry::retry_on_interrupt(|| terminal.autoresize())
                 {
                     self.report_runtime_error("terminal resize failed", &err);
+                }
+
+                if self.force_redraw {
+                    self.force_redraw = false;
+                    if let Err(err) = terminal.clear() {
+                        self.report_runtime_error("force redraw failed", &err);
+                    }
                 }
 
                 if let Err(err) = terminal.draw(|frame| self.render(frame)) {
@@ -935,6 +944,11 @@ impl App {
             }
             "edit-macros" => {
                 self.open_edit_macros();
+                Ok(())
+            }
+            "force-redraw" => {
+                self.force_redraw = true;
+                self.set_info("Interface redrawn. All screen contents have been repainted.");
                 Ok(())
             }
             "" => Ok(()),
