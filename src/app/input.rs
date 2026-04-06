@@ -4534,6 +4534,36 @@ mod tests {
     }
 
     #[test]
+    fn mouse_up_between_clicks_does_not_break_double_click() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.selected_left = 1;
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Center;
+        app.providers.insert(
+            "session-1".to_string(),
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "printf ready; sleep 0.2".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+
+        // Down → Up → Down mirrors what the event loop sees for a real
+        // double-click.  The Up must not interfere with detection.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
+
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+    }
+
+    #[test]
     fn mouse_wheel_left_pane_advances_selection_under_cursor() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
