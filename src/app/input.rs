@@ -1601,7 +1601,9 @@ impl App {
         }
 
         if let PromptState::RenameSession {
-            session_id, input, ..
+            session_id,
+            input,
+            rename_branch,
         } = &mut self.prompt
         {
             let is_plain_char = matches!(key.code, KeyCode::Char(_))
@@ -1619,8 +1621,12 @@ impl App {
                 Some(Action::Confirm) => {
                     let id = session_id.clone();
                     let new_name = input.text.clone();
+                    let also_rename_branch = *rename_branch;
                     self.prompt = PromptState::None;
-                    self.apply_rename_session(&id, new_name);
+                    self.apply_rename_session(&id, new_name, also_rename_branch);
+                }
+                Some(Action::ToggleSelection) => {
+                    *rename_branch = !*rename_branch;
                 }
                 _ => {
                     input.handle_key(key);
@@ -3321,6 +3327,7 @@ mod tests {
             macro_bar: None,
             sigwinch_flag: Arc::new(AtomicBool::new(false)),
             force_redraw: false,
+            branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();
@@ -3492,6 +3499,7 @@ mod tests {
         app.prompt = PromptState::RenameSession {
             session_id: "session-1".to_string(),
             input: TextInput::with_text("agent".to_string()),
+            rename_branch: false,
         };
         app.input_target = InputTarget::Agent;
 
@@ -3513,6 +3521,7 @@ mod tests {
         app.prompt = PromptState::RenameSession {
             session_id: "session-1".to_string(),
             input: TextInput::with_text("agent".to_string()),
+            rename_branch: false,
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
@@ -3533,6 +3542,7 @@ mod tests {
         app.prompt = PromptState::RenameSession {
             session_id: "session-1".to_string(),
             input: TextInput::with_text("agent-branch".to_string()),
+            rename_branch: false,
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
@@ -3557,6 +3567,73 @@ mod tests {
         assert!(matches!(app.prompt, PromptState::RenameSession { .. }));
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    #[test]
+    fn rename_title_only_does_not_change_branch_name() {
+        let mut app = test_app(default_bindings());
+        let original_branch = app.sessions[0].branch_name.clone();
+
+        app.apply_rename_session("session-1", "new-title".to_string(), false);
+
+        assert_eq!(
+            app.sessions[0].title.as_deref(),
+            Some("new-title"),
+            "title should be updated"
+        );
+        assert_eq!(
+            app.sessions[0].branch_name, original_branch,
+            "branch_name should remain unchanged when rename_branch is false"
+        );
+    }
+
+    #[test]
+    fn rename_toggle_checkbox_flips_rename_branch() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::RenameSession {
+            session_id: "session-1".to_string(),
+            input: TextInput::with_text("test".to_string()),
+            rename_branch: false,
+        };
+
+        // Tab toggles the checkbox.
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::RenameSession { rename_branch, .. } => {
+                assert!(*rename_branch, "Tab should toggle rename_branch to true");
+            }
+            other => panic!("expected RenameSession, got {other:?}"),
+        }
+
+        // Tab again toggles it back.
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::RenameSession { rename_branch, .. } => {
+                assert!(
+                    !*rename_branch,
+                    "second Tab should toggle rename_branch back to false"
+                );
+            }
+            other => panic!("expected RenameSession, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn open_rename_session_initializes_rename_branch_false() {
+        let mut app = test_app(default_bindings());
+
+        app.open_rename_session().unwrap();
+
+        match &app.prompt {
+            PromptState::RenameSession { rename_branch, .. } => {
+                assert!(!*rename_branch, "rename_branch should default to false");
+            }
+            other => panic!("expected RenameSession, got {other:?}"),
+        }
     }
 
     #[test]
@@ -5535,6 +5612,7 @@ mod tests {
         app.prompt = PromptState::RenameSession {
             session_id: sid,
             input: TextInput::with_text("rename me".to_string()),
+            rename_branch: false,
         };
         install_rename_overlay(&mut app);
 

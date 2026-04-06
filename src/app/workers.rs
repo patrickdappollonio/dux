@@ -24,6 +24,7 @@ impl App {
                     }
                     self.providers.insert(session.id.clone(), client);
                     self.sessions.insert(0, session.clone());
+                    self.update_branch_sync_sessions();
                     self.rebuild_left_items();
                     self.selected_left = self
                         .left_items()
@@ -88,6 +89,66 @@ impl App {
                     }
                     Err(e) => self.set_error(format!("Copy path failed: {e}")),
                 },
+                WorkerEvent::BranchRenameCompleted {
+                    session_id,
+                    new_branch,
+                    previous_title,
+                    result,
+                } => match result {
+                    Ok(()) => {
+                        if let Some(session) =
+                            self.sessions.iter_mut().find(|s| s.id == session_id)
+                        {
+                            session.branch_name = new_branch.clone();
+                            session.updated_at = Utc::now();
+                            let _ = self.session_store.upsert_session(session);
+                        }
+                        self.update_branch_sync_sessions();
+                        self.rebuild_left_items();
+                        self.set_info(format!(
+                            "Renamed agent and branch to \"{new_branch}\"."
+                        ));
+                    }
+                    Err(e) => {
+                        // Revert the title so the session doesn't stay in a
+                        // mixed state where the display name changed but the
+                        // branch didn't.
+                        if let Some(session) =
+                            self.sessions.iter_mut().find(|s| s.id == session_id)
+                        {
+                            session.title = previous_title;
+                            session.updated_at = Utc::now();
+                            let _ = self.session_store.upsert_session(session);
+                        }
+                        self.rebuild_left_items();
+                        self.set_error(format!(
+                            "Branch rename failed, reverted agent name: {e}"
+                        ));
+                    }
+                },
+                WorkerEvent::BranchSyncReady(updates) => {
+                    let mut changed = false;
+                    for (session_id, actual_branch) in updates {
+                        if let Some(session) =
+                            self.sessions.iter_mut().find(|s| s.id == session_id)
+                        {
+                            if session.branch_name != actual_branch {
+                                logger::info(&format!(
+                                    "branch sync: session {} branch changed {} -> {}",
+                                    session_id, session.branch_name, actual_branch,
+                                ));
+                                session.branch_name = actual_branch;
+                                session.updated_at = Utc::now();
+                                let _ = self.session_store.upsert_session(session);
+                                changed = true;
+                            }
+                        }
+                    }
+                    if changed {
+                        self.update_branch_sync_sessions();
+                        self.rebuild_left_items();
+                    }
+                }
                 WorkerEvent::BrowserEntriesReady { dir, entries } => {
                     if let PromptState::BrowseProjects {
                         current_dir,
@@ -188,6 +249,36 @@ impl App {
                 dir: dir.clone(),
                 entries,
             });
+        });
+    }
+
+    pub(crate) fn spawn_branch_sync_worker(&self) {
+        let interval_secs = self.config.ui.branch_sync_interval;
+        if interval_secs == 0 {
+            return; // disabled by config
+        }
+        let tx = self.worker_tx.clone();
+        let sessions = Arc::clone(&self.branch_sync_sessions);
+        thread::spawn(move || {
+            let interval = Duration::from_secs(u64::from(interval_secs));
+            loop {
+                thread::sleep(interval);
+                let snapshot = match sessions.lock() {
+                    Ok(guard) => guard.clone(),
+                    Err(_) => continue,
+                };
+                let mut updates = Vec::new();
+                for entry in &snapshot {
+                    if let Ok(actual) = git::current_branch(Path::new(&entry.worktree_path)) {
+                        if actual != entry.branch_name {
+                            updates.push((entry.session_id.clone(), actual));
+                        }
+                    }
+                }
+                if !updates.is_empty() && tx.send(WorkerEvent::BranchSyncReady(updates)).is_err() {
+                    break; // receiver dropped, app is shutting down
+                }
+            }
         });
     }
 
