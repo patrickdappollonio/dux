@@ -129,10 +129,10 @@ impl Theme {
             diff_stat_remove_fg: Color::Red,
             runtime_context_value_fg: Color::Rgb(125, 150, 160),
             nudge_border: Color::Rgb(180, 150, 50),
-            tip_pill_fg: Color::White,
-            tip_pill_bg: Color::Rgb(120, 80, 200),
-            tip_text_fg: Color::Rgb(120, 120, 120),
-            tip_highlight_fg: Color::Rgb(0, 190, 190),
+            tip_pill_fg: Color::Rgb(180, 180, 180),
+            tip_pill_bg: Color::Rgb(70, 50, 120),
+            tip_text_fg: Color::Rgb(90, 90, 90),
+            tip_highlight_fg: Color::Rgb(0, 120, 120),
         }
     }
 
