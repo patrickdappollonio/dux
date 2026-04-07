@@ -608,7 +608,7 @@ impl App {
             let tip_y = y + ASCII_LOGO_HEIGHT + TIP_GAP;
 
             Paragraph::new(vec![tip_line])
-                .wrap(Wrap { trim: true })
+                .wrap(Wrap { trim: false })
                 .alignment(ratatui::layout::Alignment::Center)
                 .render(
                     Rect::new(tip_x, tip_y, tip_width, TIP_MAX_LINES),
