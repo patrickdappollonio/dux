@@ -1,4 +1,5 @@
 mod app;
+mod cli;
 mod clipboard;
 mod config;
 mod diff;
@@ -11,7 +12,6 @@ mod model;
 mod provider;
 mod pty;
 mod raw_input;
-mod reset;
 mod statusline;
 mod storage;
 mod theme;
@@ -26,10 +26,9 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if args.first().map(|s| s.as_str()) == Some("reset") {
-        let options = reset::ResetOptions::from_args(&args[1..])?;
+    if args.first().map(|s| s.as_str()) == Some("config") {
         let paths = config::DuxPaths::discover()?;
-        return reset::run(&paths, options);
+        return cli::run(&args[1..], &paths);
     }
 
     let mut app = app::App::bootstrap()?;
@@ -42,9 +41,16 @@ fn print_help() {
          Terminal UI for AI worktree sessions.\n\n\
          Usage:\n\
           dux              Launch the TUI\n\
-          dux reset        Remove config and logs, keep saved agents and worktrees\n\
-          dux reset --delete-agent-data\n\
-                            Same as reset, and also remove sessions.sqlite3 and worktrees\n\n\
+          dux config       Manage the configuration file\n\n\
+         Config subcommands:\n\
+          dux config path          Print the config file path\n\
+          dux config diff          Show settings that differ from defaults\n\
+          dux config diff --raw    Show a unified diff against the default config\n\
+          dux config reset         Remove config and logs (keeps agents and worktrees)\n\
+          dux config reset --all   Full factory reset (config, logs, sessions, worktrees)\n\
+          dux config regenerate    Preview a fresh default config (shows diff)\n\
+          dux config regenerate --yes\n\
+                                   Overwrite the config file with fresh defaults\n\n\
          Environment variables:\n\
            DUX_HOME    Override the config directory (must be an absolute path).\n\
                        When unset, defaults to:\n\

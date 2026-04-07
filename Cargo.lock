@@ -459,6 +459,7 @@ dependencies = [
  "syntect",
  "tempfile",
  "toml",
+ "toml_edit",
  "uuid",
 ]
 

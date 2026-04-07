@@ -32,11 +32,17 @@ Download the latest binary for your platform from the [GitHub Releases](https://
 
 On first launch, `dux` creates the config file with the full default configuration and comments.
 
-## Reset
+## Config Management
 
-`dux reset` removes local config and logs so dux can recover from a broken or outdated configuration while keeping saved agents and their worktrees intact.
+`dux config` provides subcommands for inspecting and managing the configuration file:
 
-If you want a full wipe, run `dux reset --delete-agent-data` to also remove `sessions.sqlite3` and the managed `worktrees/` directory.
+- `dux config path` — print the config file path.
+- `dux config diff` — show settings that differ from defaults (summary view).
+- `dux config diff --raw` — show a unified diff against the default config.
+- `dux config reset` — remove config and logs so dux can recover from a broken or outdated configuration while keeping saved agents and their worktrees intact.
+- `dux config reset --all` — full factory reset: also remove `sessions.sqlite3` and the managed `worktrees/` directory.
+- `dux config regenerate` — preview a fresh default config (shows diff against current).
+- `dux config regenerate --yes` — overwrite the config file with fresh defaults.
 
 ## Provider Setup
 
