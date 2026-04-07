@@ -121,7 +121,7 @@ When shelling out to git, **always ensure the command output is immune to user-s
 - Keep changes scoped to one submodule at a time; avoid cross-cutting edits across multiple app submodules in the same PR when possible.
 - Use `theme.rs` constants for all colors and styles — never use raw `Color::*` values in rendering code.
 - When adding new UI elements, define semantic color names in `Theme` rather than picking ad-hoc colors. `theme.rs` is the single source of truth for visual styling.
-- Preserve the fully materialized commented config behavior.
+- The canonical config renderer produces a fully commented config on first creation. Subsequent saves preserve user edits via `toml_edit`. Users can run `dux config diff` to see what changed or `dux config regenerate` to get the latest canonical template.
 - When a setting can have a sensible default at first boot (e.g., the user's home directory, platform-specific paths), resolve and store the concrete value in `config.toml` right away — do not leave it commented out or empty. Users should see a working value they can edit, not a placeholder they have to fill in.
 - Preserve safe failure behavior around project refresh and failed agent startup.
 
