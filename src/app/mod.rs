@@ -537,21 +537,17 @@ pub(crate) enum ResizeDragState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MouseClickTarget {
-    LeftRow(usize),
-    TerminalRow(usize),
+    LeftPane,
     CenterPane,
-    UnstagedFile(usize),
-    StagedFile(usize),
-    CommandItem(usize),
-    BrowseProjectItem(usize),
-    PickEditorItem(usize),
+    UnstagedPane,
+    StagedPane,
+    CommandPalette,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RecentMouseClick {
     pub(crate) target: MouseClickTarget,
     pub(crate) at: Instant,
-    pub(crate) threshold: Duration,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

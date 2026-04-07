@@ -7,7 +7,6 @@ const MIN_RIGHT_WIDTH_PCT: u16 = 14;
 const MAX_RIGHT_WIDTH_PCT: u16 = 50;
 const MIN_CENTER_WIDTH_PCT: u16 = 20;
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
-const DOUBLE_CLICK_FOCUS_THRESHOLD: Duration = Duration::from_millis(1500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MouseTarget {
@@ -2322,28 +2321,16 @@ impl App {
     }
 
     fn register_mouse_click(&mut self, target: MouseClickTarget) -> bool {
-        self.register_mouse_click_with_timeout(target, DOUBLE_CLICK_THRESHOLD)
-    }
-
-    fn register_mouse_click_with_timeout(
-        &mut self,
-        target: MouseClickTarget,
-        timeout: Duration,
-    ) -> bool {
         let now = Instant::now();
         if let Some(last) = self.last_mouse_click
             && last.target == target
-            && now.duration_since(last.at) <= last.threshold
+            && now.duration_since(last.at) <= DOUBLE_CLICK_THRESHOLD
         {
             self.last_mouse_click = None;
             return true;
         }
 
-        self.last_mouse_click = Some(RecentMouseClick {
-            target,
-            at: now,
-            threshold: timeout,
-        });
+        self.last_mouse_click = Some(RecentMouseClick { target, at: now });
         false
     }
 
@@ -2836,7 +2823,7 @@ impl App {
                 self.set_command_palette_cursor_from_mouse(mouse.column);
             }
             PromptMouseTarget::CommandItem(index) => {
-                let double_click = self.register_mouse_click(MouseClickTarget::CommandItem(index));
+                let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette);
                 self.set_command_palette_selection(index);
                 if double_click {
                     self.execute_selected_command_palette();
@@ -2846,16 +2833,14 @@ impl App {
                 self.set_browser_input_cursor_from_mouse(mouse.column);
             }
             PromptMouseTarget::BrowseProjectItem(index) => {
-                let double_click =
-                    self.register_mouse_click(MouseClickTarget::BrowseProjectItem(index));
+                let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette);
                 self.set_browser_selection(index);
                 if double_click {
                     self.open_selected_browser_entry();
                 }
             }
             PromptMouseTarget::PickEditorItem(index) => {
-                let double_click =
-                    self.register_mouse_click(MouseClickTarget::PickEditorItem(index));
+                let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette);
                 self.set_pick_editor_selection(index);
                 if double_click {
                     self.open_selected_pick_editor();
@@ -3248,25 +3233,15 @@ impl App {
                         self.fullscreen_overlay = FullscreenOverlay::None;
                     }
                     Some(MouseTarget::LeftRow(index)) => {
-                        let double_click =
-                            self.register_mouse_click(MouseClickTarget::LeftRow(index));
+                        let double_click = self.register_mouse_click(MouseClickTarget::LeftPane);
                         self.left_section = LeftSection::Projects;
                         self.set_left_selection(index);
                         if double_click {
-                            match self.left_items().get(self.selected_left) {
-                                Some(LeftItem::Project(_)) => {
-                                    self.toggle_collapse_selected_project()
-                                }
-                                Some(LeftItem::Session(_)) => {
-                                    self.activate_selected_left_item_from_mouse()
-                                }
-                                None => {}
-                            }
+                            self.activate_selected_left_item_from_mouse();
                         }
                     }
                     Some(MouseTarget::TerminalRow(index)) => {
-                        let double_click =
-                            self.register_mouse_click(MouseClickTarget::TerminalRow(index));
+                        let double_click = self.register_mouse_click(MouseClickTarget::LeftPane);
                         self.focus = FocusPane::Left;
                         self.left_section = LeftSection::Terminals;
                         self.selected_terminal_index = index;
@@ -3283,16 +3258,7 @@ impl App {
                         self.fullscreen_overlay = FullscreenOverlay::None;
                     }
                     Some(MouseTarget::Center) => {
-                        let changing_focus = self.focus != FocusPane::Center;
-                        let timeout = if changing_focus {
-                            DOUBLE_CLICK_FOCUS_THRESHOLD
-                        } else {
-                            DOUBLE_CLICK_THRESHOLD
-                        };
-                        let double_click = self.register_mouse_click_with_timeout(
-                            MouseClickTarget::CenterPane,
-                            timeout,
-                        );
+                        let double_click = self.register_mouse_click(MouseClickTarget::CenterPane);
                         self.focus = FocusPane::Center;
                         if double_click {
                             self.activate_center_agent_from_mouse();
@@ -3304,19 +3270,23 @@ impl App {
                         self.fullscreen_overlay = FullscreenOverlay::None;
                     }
                     Some(MouseTarget::UnstagedFile(index)) => {
-                        let double_click = index
-                            .map(|i| self.register_mouse_click(MouseClickTarget::UnstagedFile(i)));
                         self.set_file_selection(RightSection::Unstaged, index);
-                        if matches!(double_click, Some(true)) {
-                            self.open_selected_file_diff_from_mouse();
+                        if let Some(_) = index {
+                            let double_click =
+                                self.register_mouse_click(MouseClickTarget::UnstagedPane);
+                            if double_click {
+                                self.open_selected_file_diff_from_mouse();
+                            }
                         }
                     }
                     Some(MouseTarget::StagedFile(index)) => {
-                        let double_click = index
-                            .map(|i| self.register_mouse_click(MouseClickTarget::StagedFile(i)));
                         self.set_file_selection(RightSection::Staged, index);
-                        if matches!(double_click, Some(true)) {
-                            self.open_selected_file_diff_from_mouse();
+                        if let Some(_) = index {
+                            let double_click =
+                                self.register_mouse_click(MouseClickTarget::StagedPane);
+                            if double_click {
+                                self.open_selected_file_diff_from_mouse();
+                            }
                         }
                     }
                     Some(MouseTarget::CommitChrome) => {
@@ -4597,21 +4567,18 @@ mod tests {
     }
 
     #[test]
-    fn mouse_double_click_project_row_toggles_collapse_like_space() {
+    fn mouse_double_click_project_row_activates_like_enter() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
         app.selected_left = 0;
         app.focus = FocusPane::Left;
-        let project_id = app.projects[0].id.clone();
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 1));
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 1));
 
-        assert_eq!(app.focus, FocusPane::Left);
-        assert!(app.collapsed_projects.contains(&project_id));
-        assert_eq!(app.selected_left, 0);
-        assert_eq!(app.input_target, InputTarget::None);
-        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+        // Double-clicking a project activates it (opens latest session).
+        assert_eq!(app.focus, FocusPane::Center);
+        assert!(matches!(app.center_mode, CenterMode::Agent));
     }
 
     #[test]
@@ -4700,42 +4667,6 @@ mod tests {
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
 
         // Second click completes the double-click and activates fullscreen.
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
-        assert_eq!(app.input_target, InputTarget::Agent);
-        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
-    }
-
-    #[test]
-    fn mouse_cross_focus_click_uses_longer_threshold() {
-        let mut app = test_app(default_bindings());
-        install_mouse_layout(&mut app);
-        app.selected_left = 1;
-        app.center_mode = CenterMode::Agent;
-        app.focus = FocusPane::Left;
-        app.providers.insert(
-            "session-1".to_string(),
-            PtyClient::spawn(
-                "sh",
-                &["-c".to_string(), "printf ready; sleep 0.2".to_string()],
-                std::path::Path::new("."),
-                10,
-                10,
-                100,
-            )
-            .expect("spawn pty"),
-        );
-
-        // First click focuses the center pane — stores the longer threshold.
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
-
-        // Simulate a pause longer than the normal 500ms but within the
-        // focus threshold (1500ms) by back-dating the recorded click.
-        if let Some(ref mut click) = app.last_mouse_click {
-            click.at -= std::time::Duration::from_millis(800);
-        }
-
-        // Second click should still detect a double-click thanks to the
-        // extended threshold.
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
         assert_eq!(app.input_target, InputTarget::Agent);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
