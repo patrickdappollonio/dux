@@ -1,4 +1,5 @@
 use super::*;
+use chrono::Local;
 const MOUSE_WHEEL_LINES: usize = 3;
 const MIN_LEFT_WIDTH_PCT: u16 = 14;
 const MAX_LEFT_WIDTH_PCT: u16 = 38;
@@ -1150,7 +1151,10 @@ impl App {
                 resolved.join(", ")
             };
 
+            let ts = Local::now().format("%H:%M:%S%.3f").to_string();
             lines.push(Line::from(vec![
+                Span::styled(ts, Style::default().add_modifier(Modifier::DIM)),
+                Span::raw(" │ "),
                 Span::styled(
                     "Key   ",
                     Style::default().fg(self.theme.help_section_header_fg),
@@ -2792,7 +2796,10 @@ impl App {
             }
 
             let kind_label = format!("{:?}", mouse.kind);
+            let ts = Local::now().format("%H:%M:%S%.3f").to_string();
             lines.push(Line::from(vec![
+                Span::styled(ts, Style::default().add_modifier(Modifier::DIM)),
+                Span::raw(" │ "),
                 Span::styled(
                     "Mouse",
                     Style::default().fg(self.theme.help_section_header_fg),
