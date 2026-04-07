@@ -1210,4 +1210,48 @@ mod tests {
         assert!(!is_valid_agent_name("foo..bar"));
         assert!(!is_valid_agent_name("hello world!"));
     }
+
+    #[test]
+    fn create_worktree_uses_custom_name() {
+        let repo = init_test_repo();
+        let worktrees_root = repo.path().join("agents");
+        let (branch, path) =
+            create_worktree(repo.path(), &worktrees_root, "proj", Some("my-agent")).unwrap();
+        assert_eq!(branch, "my-agent");
+        assert!(path.ends_with("proj/my-agent"));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn create_worktree_generates_name_when_none() {
+        let repo = init_test_repo();
+        let worktrees_root = repo.path().join("agents");
+        let (branch, path) = create_worktree(repo.path(), &worktrees_root, "proj", None).unwrap();
+        // Auto-generated names contain a dash (docker-style petname).
+        assert!(branch.contains('-'), "expected dash in '{branch}'");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn create_worktree_from_start_point_uses_custom_name() {
+        let repo = init_test_repo();
+        let source = add_worktree(repo.path(), "src-branch");
+        fs::write(source.join("marker.txt"), "data\n").unwrap();
+        commit_all(&source, "add marker");
+        let source_head = head_commit(&source).unwrap();
+
+        let worktrees_root = repo.path().join("forks");
+        let (branch, forked) = create_worktree_from_start_point(
+            repo.path(),
+            &worktrees_root,
+            "proj",
+            Some(&source_head),
+            Some("my-fork"),
+        )
+        .unwrap();
+
+        assert_eq!(branch, "my-fork");
+        assert!(forked.ends_with("proj/my-fork"));
+        assert_eq!(head_commit(&forked).unwrap(), source_head);
+    }
 }
