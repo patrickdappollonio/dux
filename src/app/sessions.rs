@@ -99,10 +99,25 @@ impl App {
             self.set_error("Select a project first.");
             return Ok(());
         };
+
+        if self.config.defaults.prompt_for_name {
+            self.input_target = InputTarget::None;
+            self.fullscreen_overlay = FullscreenOverlay::None;
+            self.prompt = PromptState::NameNewAgent {
+                request: CreateAgentRequest::NewProject {
+                    project,
+                    custom_name: None,
+                },
+                input: TextInput::default(),
+            };
+            return Ok(());
+        }
+
         logger::info(&format!("creating agent for project {}", project.path));
         self.dispatch_create_agent_request(
             CreateAgentRequest::NewProject {
                 project: project.clone(),
+                custom_name: None,
             },
             format!(
                 "Creating a new agent worktree for project \"{}\" and launching a fresh session...",
@@ -121,6 +136,22 @@ impl App {
             return Ok(());
         };
         let source_label = self.session_label(&source_session);
+
+        if self.config.defaults.prompt_for_name {
+            self.input_target = InputTarget::None;
+            self.fullscreen_overlay = FullscreenOverlay::None;
+            self.prompt = PromptState::NameNewAgent {
+                request: CreateAgentRequest::ForkSession {
+                    project: project.clone(),
+                    source_session: Box::new(source_session),
+                    source_label,
+                    custom_name: None,
+                },
+                input: TextInput::default(),
+            };
+            return Ok(());
+        }
+
         logger::info(&format!(
             "forking session {} from worktree {}",
             source_session.id, source_session.worktree_path
@@ -130,6 +161,7 @@ impl App {
                 project: project.clone(),
                 source_session: Box::new(source_session),
                 source_label: source_label.clone(),
+                custom_name: None,
             },
             format!(
                 "Forking agent \"{source_label}\" by cloning its current worktree contents into a fresh session...",
@@ -137,7 +169,7 @@ impl App {
         )
     }
 
-    fn dispatch_create_agent_request(
+    pub(crate) fn dispatch_create_agent_request(
         &mut self,
         request: CreateAgentRequest,
         busy_message: String,

@@ -121,6 +121,7 @@ pub struct Defaults {
     pub provider: String,
     pub start_directory: Option<String>,
     pub commit_prompt: Option<String>,
+    pub prompt_for_name: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -250,6 +251,7 @@ impl Default for Defaults {
             provider: "claude".to_string(),
             start_directory,
             commit_prompt: Some(DEFAULT_COMMIT_PROMPT.to_string()),
+            prompt_for_name: false,
         }
     }
 }
@@ -441,6 +443,7 @@ enum FieldValue {
     OptStr(Option<String>),
     U16(u16),
     Usize(usize),
+    Bool(bool),
     MultilineStr(Option<String>),
 }
 
@@ -507,6 +510,16 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
                  # Override per-project by adding commit_prompt in a [[projects]] entry.",
             ))),
             value_fn: |c| FieldValue::MultilineStr(c.defaults.commit_prompt.clone()),
+        },
+        ConfigEntry::Blank,
+        ConfigEntry::Field {
+            key: "prompt_for_name",
+            comment: Some(CommentSource::Static(
+                "# When true, dux prompts for a custom agent name before creating or forking a session.\n\
+                 # The name becomes the git branch name for the new worktree.\n\
+                 # When false, a random two-word name is generated automatically.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.defaults.prompt_for_name),
         },
         ConfigEntry::Blank,
         ConfigEntry::Providers,
@@ -635,6 +648,9 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
                     }
                     FieldValue::Usize(n) => {
                         let _ = writeln!(out, "{key} = {n}");
+                    }
+                    FieldValue::Bool(b) => {
+                        let _ = writeln!(out, "{key} = {b}");
                     }
                     FieldValue::MultilineStr(Some(s)) => {
                         let escaped = escape_toml_multiline(&s);

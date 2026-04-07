@@ -102,8 +102,9 @@ pub fn create_worktree(
     repo_path: &Path,
     worktrees_root: &Path,
     project_name: &str,
+    custom_name: Option<&str>,
 ) -> Result<(String, PathBuf)> {
-    create_worktree_from_start_point(repo_path, worktrees_root, project_name, None)
+    create_worktree_from_start_point(repo_path, worktrees_root, project_name, None, custom_name)
 }
 
 pub fn create_worktree_from_start_point(
@@ -111,8 +112,11 @@ pub fn create_worktree_from_start_point(
     worktrees_root: &Path,
     project_name: &str,
     start_point: Option<&str>,
+    custom_name: Option<&str>,
 ) -> Result<(String, PathBuf)> {
-    let branch_name = docker_style_name();
+    let branch_name = custom_name
+        .map(|s| s.to_string())
+        .unwrap_or_else(docker_style_name);
     let project_root = worktrees_root.join(project_name);
     fs::create_dir_all(&project_root)?;
     let worktree_path = project_root.join(&branch_name);
@@ -650,6 +654,24 @@ pub fn docker_style_name() -> String {
         .expect("petname generation should not fail")
 }
 
+/// Returns `true` if `name` contains only characters safe for git branch names:
+/// ASCII alphanumeric, dash (`-`), underscore (`_`), and slash (`/`).
+/// Also rejects names that start or end with `/`, contain consecutive slashes,
+/// or start with `-`, since git forbids these patterns in ref names.
+pub fn is_valid_agent_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    if name.starts_with('-') || name.starts_with('/') || name.ends_with('/') {
+        return false;
+    }
+    if name.contains("//") {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '/')
+}
+
 fn sync_directory_contents(source: &Path, destination: &Path) -> Result<()> {
     let mut source_entries = Vec::new();
     for entry in fs::read_dir(source)? {
@@ -854,6 +876,7 @@ mod tests {
             &worktrees_root,
             "demo",
             Some(&source_head),
+            None,
         )
         .unwrap();
 
@@ -1162,5 +1185,73 @@ mod tests {
         assert_eq!(staged.len(), 1);
         assert_eq!(staged[0].path, "new name.txt");
         assert_eq!(staged[0].status, "R");
+    }
+
+    #[test]
+    fn valid_agent_names() {
+        assert!(is_valid_agent_name("foo"));
+        assert!(is_valid_agent_name("foo-bar"));
+        assert!(is_valid_agent_name("foo_bar"));
+        assert!(is_valid_agent_name("foo/bar"));
+        assert!(is_valid_agent_name("ABC123"));
+        assert!(is_valid_agent_name("feature/my-branch_v2"));
+    }
+
+    #[test]
+    fn invalid_agent_names() {
+        assert!(!is_valid_agent_name(""));
+        assert!(!is_valid_agent_name("foo bar"));
+        assert!(!is_valid_agent_name("foo@bar"));
+        assert!(!is_valid_agent_name("-foo"));
+        assert!(!is_valid_agent_name("foo/"));
+        assert!(!is_valid_agent_name("/foo"));
+        assert!(!is_valid_agent_name("foo//bar"));
+        assert!(!is_valid_agent_name("foo.bar"));
+        assert!(!is_valid_agent_name("foo..bar"));
+        assert!(!is_valid_agent_name("hello world!"));
+    }
+
+    #[test]
+    fn create_worktree_uses_custom_name() {
+        let repo = init_test_repo();
+        let worktrees_root = repo.path().join("agents");
+        let (branch, path) =
+            create_worktree(repo.path(), &worktrees_root, "proj", Some("my-agent")).unwrap();
+        assert_eq!(branch, "my-agent");
+        assert!(path.ends_with("proj/my-agent"));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn create_worktree_generates_name_when_none() {
+        let repo = init_test_repo();
+        let worktrees_root = repo.path().join("agents");
+        let (branch, path) = create_worktree(repo.path(), &worktrees_root, "proj", None).unwrap();
+        // Auto-generated names contain a dash (docker-style petname).
+        assert!(branch.contains('-'), "expected dash in '{branch}'");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn create_worktree_from_start_point_uses_custom_name() {
+        let repo = init_test_repo();
+        let source = add_worktree(repo.path(), "src-branch");
+        fs::write(source.join("marker.txt"), "data\n").unwrap();
+        commit_all(&source, "add marker");
+        let source_head = head_commit(&source).unwrap();
+
+        let worktrees_root = repo.path().join("forks");
+        let (branch, forked) = create_worktree_from_start_point(
+            repo.path(),
+            &worktrees_root,
+            "proj",
+            Some(&source_head),
+            Some("my-fork"),
+        )
+        .unwrap();
+
+        assert_eq!(branch, "my-fork");
+        assert!(forked.ends_with("proj/my-fork"));
+        assert_eq!(head_commit(&forked).unwrap(), source_head);
     }
 }
