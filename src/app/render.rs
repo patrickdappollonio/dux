@@ -3657,7 +3657,12 @@ fn pty_cell_colors(fg: Color, bg: Color, is_input: bool, theme: &Theme) -> (Colo
     if is_input {
         (fg, bg)
     } else {
-        (theme.overlay_dim_fg, bg)
+        let dimmed_bg = if bg == Color::Reset {
+            bg
+        } else {
+            theme.overlay_dim_bg
+        };
+        (theme.overlay_dim_fg, dimmed_bg)
     }
 }
 
@@ -3987,7 +3992,17 @@ mod tests {
         let bg = Color::Rgb(10, 20, 30);
         assert_eq!(
             pty_cell_colors(fg, bg, false, &theme),
-            (theme.overlay_dim_fg, bg)
+            (theme.overlay_dim_fg, theme.overlay_dim_bg)
+        );
+    }
+
+    #[test]
+    fn pty_cell_colors_preserves_default_bg_in_non_interactive_mode() {
+        let theme = Theme::default_dark();
+        let fg = Color::Rgb(200, 100, 50);
+        assert_eq!(
+            pty_cell_colors(fg, Color::Reset, false, &theme),
+            (theme.overlay_dim_fg, Color::Reset)
         );
     }
 }
