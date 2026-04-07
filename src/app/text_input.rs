@@ -21,6 +21,11 @@ pub struct TextInput {
     /// are applied normally — when the overlay is dismissed the current text
     /// is shown.
     overlay: Option<String>,
+    /// Optional filter consulted before each character insertion. Receives
+    /// the current text, the cursor byte-offset where the character would be
+    /// inserted, and the candidate character. Return `true` to allow, `false`
+    /// to silently reject.
+    char_filter: Option<fn(&str, usize, char) -> bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -47,6 +52,7 @@ impl TextInput {
             multiline: None,
             placeholder: None,
             overlay: None,
+            char_filter: None,
         }
     }
 
@@ -58,6 +64,7 @@ impl TextInput {
             multiline: None,
             placeholder: None,
             overlay: None,
+            char_filter: None,
         }
     }
 
@@ -87,6 +94,14 @@ impl TextInput {
     /// Returns the overlay message if one is active.
     pub fn overlay(&self) -> Option<&str> {
         self.overlay.as_deref()
+    }
+
+    /// Set a character filter that is consulted before each insertion.
+    /// The filter receives the current text, cursor byte-offset, and candidate
+    /// character. Return `true` to allow, `false` to silently reject.
+    pub fn with_char_filter(mut self, filter: fn(&str, usize, char) -> bool) -> Self {
+        self.char_filter = Some(filter);
+        self
     }
 
     /// Enable multiline editing with a visible line limit for rendering.
@@ -127,6 +142,11 @@ impl TextInput {
 
     pub fn insert_char(&mut self, ch: char) {
         let index = clamp_cursor(&self.text, self.cursor);
+        if let Some(filter) = self.char_filter {
+            if !filter(&self.text, index, ch) {
+                return;
+            }
+        }
         self.text.insert(index, ch);
         self.cursor = index + ch.len_utf8();
     }
@@ -1712,5 +1732,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── char_filter tests ─────────────────────────────────────────
+
+    /// A filter that rejects the character 'x'.
+    fn reject_x(_text: &str, _cursor: usize, ch: char) -> bool {
+        ch != 'x'
+    }
+
+    #[test]
+    fn filter_rejects_char() {
+        let mut input = TextInput::new().with_char_filter(reject_x);
+        input.handle_key(key(KeyCode::Char('a')));
+        input.handle_key(key(KeyCode::Char('x')));
+        input.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(input.text, "ab");
+    }
+
+    #[test]
+    fn no_filter_allows_all() {
+        let mut input = TextInput::new();
+        input.handle_key(key(KeyCode::Char('a')));
+        input.handle_key(key(KeyCode::Char('x')));
+        input.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(input.text, "axb");
+    }
+
+    /// A filter that enforces a max length of 3 characters.
+    fn max_three(text: &str, _cursor: usize, _ch: char) -> bool {
+        text.len() < 3
+    }
+
+    #[test]
+    fn filter_receives_current_text() {
+        let mut input = TextInput::new().with_char_filter(max_three);
+        for ch in "abcde".chars() {
+            input.handle_key(key(KeyCode::Char(ch)));
+        }
+        assert_eq!(input.text, "abc");
+    }
+
+    #[test]
+    fn filter_applies_to_insert_char_directly() {
+        let mut input = TextInput::new().with_char_filter(reject_x);
+        input.insert_char('x');
+        input.insert_char('y');
+        assert_eq!(input.text, "y");
     }
 }

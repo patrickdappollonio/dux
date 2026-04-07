@@ -108,7 +108,7 @@ impl App {
                     project,
                     custom_name: None,
                 },
-                input: TextInput::default(),
+                input: TextInput::new().with_char_filter(crate::git::agent_name_char_filter),
             };
             return Ok(());
         }
@@ -147,7 +147,7 @@ impl App {
                     source_label,
                     custom_name: None,
                 },
-                input: TextInput::default(),
+                input: TextInput::new().with_char_filter(crate::git::agent_name_char_filter),
             };
             return Ok(());
         }

@@ -672,6 +672,30 @@ pub fn is_valid_agent_name(name: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '/')
 }
 
+/// Input filter for agent name text fields. Rejects characters that would
+/// make the name invalid per [`is_valid_agent_name`] rules. Designed for use
+/// with [`TextInput::with_char_filter`].
+pub fn agent_name_char_filter(text: &str, cursor: usize, ch: char) -> bool {
+    // Only allow ASCII alphanumeric, '-', '_', '/'
+    if !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '/') {
+        return false;
+    }
+    // First position must be alphanumeric (reject '-', '_', '/')
+    if cursor == 0 && !ch.is_ascii_alphanumeric() {
+        return false;
+    }
+    // Prevent '//' by checking the character before and after the cursor
+    if ch == '/' {
+        if cursor > 0 && text.as_bytes().get(cursor - 1) == Some(&b'/') {
+            return false;
+        }
+        if text.as_bytes().get(cursor) == Some(&b'/') {
+            return false;
+        }
+    }
+    true
+}
+
 fn sync_directory_contents(source: &Path, destination: &Path) -> Result<()> {
     let mut source_entries = Vec::new();
     for entry in fs::read_dir(source)? {
@@ -1253,5 +1277,48 @@ mod tests {
         assert_eq!(branch, "my-fork");
         assert!(forked.ends_with("proj/my-fork"));
         assert_eq!(head_commit(&forked).unwrap(), source_head);
+    }
+
+    // ── agent_name_char_filter tests ──────────────────────────────
+
+    #[test]
+    fn agent_filter_allows_valid_chars() {
+        assert!(agent_name_char_filter("a", 1, 'b'));
+        assert!(agent_name_char_filter("a", 1, '0'));
+        assert!(agent_name_char_filter("a", 1, '-'));
+        assert!(agent_name_char_filter("a", 1, '_'));
+        assert!(agent_name_char_filter("a", 1, '/'));
+    }
+
+    #[test]
+    fn agent_filter_rejects_invalid_chars() {
+        assert!(!agent_name_char_filter("a", 1, ' '));
+        assert!(!agent_name_char_filter("a", 1, '@'));
+        assert!(!agent_name_char_filter("a", 1, '.'));
+        assert!(!agent_name_char_filter("a", 1, '!'));
+        assert!(!agent_name_char_filter("a", 1, '#'));
+    }
+
+    #[test]
+    fn agent_filter_first_char_must_be_alphanumeric() {
+        // Rejected at position 0
+        assert!(!agent_name_char_filter("", 0, '-'));
+        assert!(!agent_name_char_filter("", 0, '_'));
+        assert!(!agent_name_char_filter("", 0, '/'));
+        // Accepted at position 0
+        assert!(agent_name_char_filter("", 0, 'a'));
+        assert!(agent_name_char_filter("", 0, '1'));
+        // Also rejected when inserting at position 0 in non-empty text
+        assert!(!agent_name_char_filter("abc", 0, '-'));
+    }
+
+    #[test]
+    fn agent_filter_prevents_double_slash() {
+        // Inserting '/' right after an existing '/'
+        assert!(!agent_name_char_filter("a/", 2, '/'));
+        // Inserting '/' right before an existing '/'
+        assert!(!agent_name_char_filter("a/b", 1, '/'));
+        // Inserting '/' where no adjacent slash exists
+        assert!(agent_name_char_filter("ab", 1, '/'));
     }
 }

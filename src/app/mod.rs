@@ -1323,7 +1323,8 @@ impl App {
             self.fullscreen_overlay = FullscreenOverlay::None;
             self.prompt = PromptState::RenameSession {
                 session_id: session.id,
-                input: TextInput::with_text(current_name),
+                input: TextInput::with_text(current_name)
+                    .with_char_filter(crate::git::agent_name_char_filter),
                 rename_branch: false,
             };
         } else {
@@ -1343,9 +1344,9 @@ impl App {
             self.set_error("Name cannot be empty.");
             return;
         }
-        if rename_branch && !git::is_valid_agent_name(&name) {
+        if !git::is_valid_agent_name(&name) {
             self.set_error(
-                "Branch name may only contain letters, digits, dashes, underscores, or slashes. \
+                "Agent name may only contain letters, digits, dashes, underscores, or slashes. \
                  It cannot start with \"-\" or \"/\", end with \"/\", or contain \"//\".",
             );
             return;
