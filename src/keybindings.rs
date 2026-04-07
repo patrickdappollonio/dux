@@ -68,6 +68,7 @@ pub enum Action {
     ToggleMarked,
     // Palette-only (no direct keybinding)
     KillRunning,
+    NewTerminal,
     RenameSession,
     DeleteProject,
     RemoveProject,
@@ -223,6 +224,7 @@ impl Action {
             Action::ToggleSelection => "toggle_selection",
             Action::ToggleMarked => "toggle_marked",
             Action::KillRunning => "kill_running",
+            Action::NewTerminal => "new_terminal",
             Action::RenameSession => "rename_session",
             Action::DeleteProject => "delete_project",
             Action::RemoveProject => "remove_project",
@@ -259,8 +261,9 @@ impl Action {
             Action::DeleteSession => "Delete the selected session and worktree.",
             Action::InteractAgent => "Start a prompt turn for the agent.",
             Action::ShowTerminal => {
-                "Launch, show, or relaunch the selected agent's companion terminal."
+                "Open the first companion terminal for the selected agent, or launch a new one if none exists."
             }
+            Action::NewTerminal => "Spawn a new companion terminal for the selected agent.",
             Action::ExitInteractive => "Exit interactive mode (stop forwarding keys to agent).",
             Action::OpenMacroBar => "Open the macro command bar to paste text macros.",
             Action::ToggleFullscreen => "Toggle fullscreen overlay for the agent terminal.",
@@ -372,6 +375,7 @@ impl Action {
             | Action::ToggleSelection
             | Action::ToggleMarked => Some("Overlays"),
             Action::KillRunning
+            | Action::NewTerminal
             | Action::RenameSession
             | Action::DeleteProject
             | Action::RemoveProject
@@ -623,7 +627,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Left, BindingScope::Center],
         help: Some(HelpEntry {
             section: "Agent pane",
-            description: "Launch/show companion terminal",
+            description: "Open/launch companion terminal",
         }),
         hint_contexts: &[
             (HintContext::LeftSession, "Terminal"),
@@ -631,7 +635,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         ],
         palette: Some(PaletteEntry {
             name: "show-terminal",
-            description: "Launch, show, or relaunch the selected companion terminal",
+            description: "Open the first companion terminal, or launch a new one",
         }),
     },
     BindingDef {
@@ -1153,6 +1157,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "kill-running",
             description: "Open a modal to kill running agents and companion terminals",
+        }),
+    },
+    BindingDef {
+        action: Action::NewTerminal,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "new-terminal",
+            description: "Spawn a new companion terminal for the selected agent",
         }),
     },
     BindingDef {

@@ -374,7 +374,7 @@ impl App {
                 Action::NewAgent => self.create_agent_for_selected_project()?,
                 Action::ForkAgent => self.fork_selected_session()?,
                 Action::RefreshProject => self.refresh_selected_project()?,
-                Action::ShowTerminal => self.show_companion_terminal()?,
+                Action::ShowTerminal => self.show_or_open_first_terminal()?,
                 Action::DeleteSession => self.confirm_delete_selected_session()?,
                 Action::RenameSession => self.open_rename_session()?,
                 Action::EditMacros => self.open_edit_macros(),
@@ -438,7 +438,7 @@ impl App {
                     self.open_terminal_from_terminal_list()?;
                 }
                 Action::ShowTerminal => {
-                    self.open_terminal_from_terminal_list()?;
+                    self.spawn_terminal_for_selected_terminal()?;
                 }
                 _ => {}
             }
@@ -452,7 +452,7 @@ impl App {
             match action {
                 Action::FocusAgent if !in_diff => self.activate_center_agent()?,
                 Action::ExitInteractive if !in_diff => self.activate_center_agent()?,
-                Action::ShowTerminal if !in_diff => self.show_companion_terminal()?,
+                Action::ShowTerminal if !in_diff => self.show_or_open_first_terminal()?,
                 Action::DeleteSession if !in_diff => self.confirm_delete_selected_session()?,
                 Action::ReconnectAgent if !in_diff => {
                     // Allow relaunching an exited agent from the center pane,
