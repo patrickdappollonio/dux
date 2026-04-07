@@ -441,6 +441,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "chrono",
+ "compact_str",
  "content_inspector",
  "crokey",
  "crossterm 0.29.0",

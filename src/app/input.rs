@@ -3469,6 +3469,7 @@ mod tests {
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             resume_fallback_candidates: std::collections::HashSet::new(),
             syntax_cache: crate::diff::SyntaxCache::new(),
+            snapshot_buf: crate::pty::TerminalSnapshot::empty(),
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();

@@ -43,6 +43,7 @@ use crate::model::{
 };
 use crate::provider;
 use crate::pty::PtyClient;
+use crate::pty::TerminalSnapshot;
 use crate::statusline::{StatusLine, StatusTone};
 use crate::storage::SessionStore;
 use crate::theme::Theme;
@@ -120,6 +121,8 @@ pub struct App {
     pub(crate) resume_fallback_candidates: HashSet<String>,
     /// Cached syntax highlighting resources shared across diff computations.
     pub(crate) syntax_cache: SyntaxCache,
+    /// Reusable snapshot buffer to avoid per-frame allocation of terminal cells.
+    pub(crate) snapshot_buf: TerminalSnapshot,
 }
 
 /// Snapshot of session data shared with the branch-sync background worker.
@@ -721,6 +724,7 @@ impl App {
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             resume_fallback_candidates: HashSet::new(),
             syntax_cache: SyntaxCache::new(),
+            snapshot_buf: TerminalSnapshot::empty(),
         };
         app.restore_sessions();
         app.rebuild_left_items();
@@ -1485,6 +1489,34 @@ impl App {
                 let id = self.active_terminal_id.as_ref()?;
                 self.companion_terminals.get(id).map(|t| &t.client)
             }
+        }
+    }
+
+    /// Refresh `self.snapshot_buf` from the currently selected terminal
+    /// surface, reusing the existing cell allocation. Returns `true` if a
+    /// provider was found and the snapshot was updated.
+    pub(crate) fn refresh_snapshot_buf(&mut self) -> bool {
+        let client: Option<&PtyClient> = match self.session_surface {
+            SessionSurface::Agent => {
+                let session_id = match self.selected_session() {
+                    Some(s) => s.id.clone(),
+                    None => return false,
+                };
+                self.providers.get(&session_id)
+            }
+            SessionSurface::Terminal => {
+                let id = match self.active_terminal_id.as_ref() {
+                    Some(id) => id.clone(),
+                    None => return false,
+                };
+                self.companion_terminals.get(&id).map(|t| &t.client)
+            }
+        };
+        if let Some(provider) = client {
+            provider.snapshot_into(&mut self.snapshot_buf);
+            true
+        } else {
+            false
         }
     }
 }

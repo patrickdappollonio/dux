@@ -685,10 +685,10 @@ impl App {
                 }
             } else {
                 // Render the current terminal viewport into the ratatui
-                // buffer from an owned snapshot to avoid holding locks
-                // during painting.
-                let snapshot = provider.snapshot();
-                scrollback_offset = snapshot.scrollback_offset;
+                // buffer, reusing the pre-allocated snapshot buffer to
+                // avoid per-frame heap allocation.
+                self.refresh_snapshot_buf();
+                scrollback_offset = self.snapshot_buf.scrollback_offset;
 
                 // When returning from scrollback to the live bottom,
                 // clear the PTY area so stale cells don't linger in
@@ -699,9 +699,9 @@ impl App {
                 self.prev_scrollback_offset = scrollback_offset;
 
                 let buf = frame.buffer_mut();
-                for cell in &snapshot.cells {
-                    if cell.row >= snapshot.rows
-                        || cell.col >= snapshot.cols
+                for cell in &self.snapshot_buf.cells {
+                    if cell.row >= self.snapshot_buf.rows
+                        || cell.col >= self.snapshot_buf.cols
                         || cell.row >= term_area.height
                         || cell.col >= term_area.width
                     {
@@ -718,9 +718,9 @@ impl App {
 
                 // Render cursor if in input mode.
                 if is_input
-                    && let Some(cursor) = snapshot.cursor
-                    && cursor.row < snapshot.rows
-                    && cursor.col < snapshot.cols
+                    && let Some(cursor) = self.snapshot_buf.cursor
+                    && cursor.row < self.snapshot_buf.rows
+                    && cursor.col < self.snapshot_buf.cols
                 {
                     let cx = term_area.x + cursor.col;
                     let cy = term_area.y + cursor.row;
@@ -735,8 +735,8 @@ impl App {
                 }
 
                 if let Some(label) = scrollback_indicator_label(
-                    snapshot.scrollback_offset,
-                    snapshot.scrollback_total,
+                    self.snapshot_buf.scrollback_offset,
+                    self.snapshot_buf.scrollback_total,
                 ) {
                     let badge_width = label.len() as u16;
                     if term_area.height > 0 && badge_width <= term_area.width {
