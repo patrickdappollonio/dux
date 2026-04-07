@@ -370,27 +370,34 @@ pub(crate) fn run_create_agent_job(
 ) {
     let (project, provider, source_branch, status_message, branch_name, worktree_path) =
         match request {
-            CreateAgentRequest::NewProject { project } => {
+            CreateAgentRequest::NewProject {
+                project,
+                custom_name,
+            } => {
                 let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
                     "Creating a new worktree for project \"{}\"...",
                     project.name
                 )));
                 let repo_path = PathBuf::from(&project.path);
-                let (branch_name, worktree_path) =
-                    match git::create_worktree(&repo_path, &paths.worktrees_root, &project.name) {
-                        Ok(result) => result,
-                        Err(err) => {
-                            logger::error(&format!(
-                                "worktree creation failed for {}: {err}",
-                                project.path
-                            ));
-                            let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
-                                "Failed to create a new worktree for project \"{}\": {err}",
-                                project.name
-                            )));
-                            return;
-                        }
-                    };
+                let (branch_name, worktree_path) = match git::create_worktree(
+                    &repo_path,
+                    &paths.worktrees_root,
+                    &project.name,
+                    custom_name.as_deref(),
+                ) {
+                    Ok(result) => result,
+                    Err(err) => {
+                        logger::error(&format!(
+                            "worktree creation failed for {}: {err}",
+                            project.path
+                        ));
+                        let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
+                            "Failed to create a new worktree for project \"{}\": {err}",
+                            project.name
+                        )));
+                        return;
+                    }
+                };
                 let status_message = format!(
                     "Created {} agent \"{}\" in project \"{}\". The new worktree is ready in a fresh session.",
                     project.default_provider.as_str(),
@@ -410,6 +417,7 @@ pub(crate) fn run_create_agent_job(
                 project,
                 source_session,
                 source_label,
+                custom_name,
             } => {
                 let source_worktree = PathBuf::from(&source_session.worktree_path);
                 let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
@@ -434,6 +442,7 @@ pub(crate) fn run_create_agent_job(
                     &paths.worktrees_root,
                     &project.name,
                     Some(&source_head),
+                    custom_name.as_deref(),
                 ) {
                     Ok(result) => result,
                     Err(err) => {

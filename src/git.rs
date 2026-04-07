@@ -102,8 +102,9 @@ pub fn create_worktree(
     repo_path: &Path,
     worktrees_root: &Path,
     project_name: &str,
+    custom_name: Option<&str>,
 ) -> Result<(String, PathBuf)> {
-    create_worktree_from_start_point(repo_path, worktrees_root, project_name, None)
+    create_worktree_from_start_point(repo_path, worktrees_root, project_name, None, custom_name)
 }
 
 pub fn create_worktree_from_start_point(
@@ -111,8 +112,11 @@ pub fn create_worktree_from_start_point(
     worktrees_root: &Path,
     project_name: &str,
     start_point: Option<&str>,
+    custom_name: Option<&str>,
 ) -> Result<(String, PathBuf)> {
-    let branch_name = docker_style_name();
+    let branch_name = custom_name
+        .map(|s| s.to_string())
+        .unwrap_or_else(docker_style_name);
     let project_root = worktrees_root.join(project_name);
     fs::create_dir_all(&project_root)?;
     let worktree_path = project_root.join(&branch_name);
@@ -650,6 +654,24 @@ pub fn docker_style_name() -> String {
         .expect("petname generation should not fail")
 }
 
+/// Returns `true` if `name` contains only characters safe for git branch names:
+/// ASCII alphanumeric, dash (`-`), underscore (`_`), and slash (`/`).
+/// Also rejects names that start or end with `/`, contain consecutive slashes,
+/// or start with `-`, since git forbids these patterns in ref names.
+pub fn is_valid_agent_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    if name.starts_with('-') || name.starts_with('/') || name.ends_with('/') {
+        return false;
+    }
+    if name.contains("//") {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '/')
+}
+
 fn sync_directory_contents(source: &Path, destination: &Path) -> Result<()> {
     let mut source_entries = Vec::new();
     for entry in fs::read_dir(source)? {
@@ -854,6 +876,7 @@ mod tests {
             &worktrees_root,
             "demo",
             Some(&source_head),
+            None,
         )
         .unwrap();
 
@@ -1162,5 +1185,29 @@ mod tests {
         assert_eq!(staged.len(), 1);
         assert_eq!(staged[0].path, "new name.txt");
         assert_eq!(staged[0].status, "R");
+    }
+
+    #[test]
+    fn valid_agent_names() {
+        assert!(is_valid_agent_name("foo"));
+        assert!(is_valid_agent_name("foo-bar"));
+        assert!(is_valid_agent_name("foo_bar"));
+        assert!(is_valid_agent_name("foo/bar"));
+        assert!(is_valid_agent_name("ABC123"));
+        assert!(is_valid_agent_name("feature/my-branch_v2"));
+    }
+
+    #[test]
+    fn invalid_agent_names() {
+        assert!(!is_valid_agent_name(""));
+        assert!(!is_valid_agent_name("foo bar"));
+        assert!(!is_valid_agent_name("foo@bar"));
+        assert!(!is_valid_agent_name("-foo"));
+        assert!(!is_valid_agent_name("foo/"));
+        assert!(!is_valid_agent_name("/foo"));
+        assert!(!is_valid_agent_name("foo//bar"));
+        assert!(!is_valid_agent_name("foo.bar"));
+        assert!(!is_valid_agent_name("foo..bar"));
+        assert!(!is_valid_agent_name("hello world!"));
     }
 }

@@ -44,6 +44,7 @@ enum PromptMouseTarget {
     ConfirmDiscardCancel,
     ConfirmDiscardConfirm,
     RenameInput,
+    NameNewAgentInput,
 }
 
 fn contains_point(rect: Rect, column: u16, row: u16) -> bool {
@@ -1695,6 +1696,74 @@ impl App {
             return Ok(false);
         }
 
+        if matches!(self.prompt, PromptState::NameNewAgent { .. }) {
+            let is_plain_char = matches!(key.code, KeyCode::Char(_))
+                && !key.modifiers.contains(KeyModifiers::CONTROL);
+            let action = if is_plain_char {
+                None
+            } else {
+                self.bindings.lookup(&key, BindingScope::Dialog)
+            };
+
+            match action {
+                Some(Action::CloseOverlay) => {
+                    self.prompt = PromptState::None;
+                }
+                Some(Action::Confirm) => {
+                    // Extract the name from the input before taking ownership.
+                    let name = if let PromptState::NameNewAgent { input, .. } = &self.prompt {
+                        input.text.trim().to_string()
+                    } else {
+                        unreachable!()
+                    };
+                    if name.is_empty() {
+                        self.set_error("Agent name cannot be empty.");
+                        self.prompt = PromptState::None;
+                        return Ok(false);
+                    }
+                    if !git::is_valid_agent_name(&name) {
+                        self.set_error(
+                            "Agent name may only contain letters, digits, dashes, underscores, \
+                             or slashes. It cannot start with \"-\" or \"/\", end with \"/\", \
+                             or contain \"//\".",
+                        );
+                        return Ok(false);
+                    }
+                    // Take ownership of the prompt to extract the request.
+                    let old_prompt = std::mem::replace(&mut self.prompt, PromptState::None);
+                    let PromptState::NameNewAgent { mut request, .. } = old_prompt else {
+                        unreachable!()
+                    };
+                    let msg = match &request {
+                        CreateAgentRequest::NewProject { project, .. } => {
+                            format!(
+                                "Creating a new agent worktree \"{name}\" for project \"{}\" and launching a fresh session...",
+                                project.name
+                            )
+                        }
+                        CreateAgentRequest::ForkSession { source_label, .. } => {
+                            format!(
+                                "Forking agent \"{source_label}\" as \"{name}\" by cloning its current worktree contents into a fresh session...",
+                            )
+                        }
+                    };
+                    match &mut request {
+                        CreateAgentRequest::NewProject { custom_name, .. }
+                        | CreateAgentRequest::ForkSession { custom_name, .. } => {
+                            *custom_name = Some(name);
+                        }
+                    }
+                    self.dispatch_create_agent_request(request, msg)?;
+                }
+                _ => {
+                    if let PromptState::NameNewAgent { input, .. } = &mut self.prompt {
+                        input.handle_key(key);
+                    }
+                }
+            }
+            return Ok(false);
+        }
+
         if let PromptState::RenameSession {
             session_id,
             input,
@@ -2074,6 +2143,9 @@ impl App {
             }
             OverlayMouseLayout::RenameSession { input } => {
                 contains_point(input, column, row).then_some(PromptMouseTarget::RenameInput)
+            }
+            OverlayMouseLayout::NameNewAgent { input } => {
+                contains_point(input, column, row).then_some(PromptMouseTarget::NameNewAgentInput)
             }
         }
     }
@@ -2690,6 +2762,16 @@ impl App {
         }
     }
 
+    fn set_name_new_agent_cursor_from_mouse(&mut self, column: u16) {
+        let input_area = match self.overlay_layout.active {
+            OverlayMouseLayout::NameNewAgent { input } => input,
+            _ => return,
+        };
+        if let PromptState::NameNewAgent { input, .. } = &mut self.prompt {
+            input.cursor = cursor_from_single_line_position(&input.text, input_area, 0, column);
+        }
+    }
+
     fn handle_prompt_mouse(&mut self, mouse: MouseEvent) -> bool {
         if let PromptState::DebugInput {
             lines,
@@ -2829,6 +2911,9 @@ impl App {
             }
             PromptMouseTarget::RenameInput => {
                 self.set_rename_cursor_from_mouse(mouse.column);
+            }
+            PromptMouseTarget::NameNewAgentInput => {
+                self.set_name_new_agent_cursor_from_mouse(mouse.column);
             }
         }
 

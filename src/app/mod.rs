@@ -363,6 +363,10 @@ pub(crate) enum PromptState {
         input: TextInput,
         rename_branch: bool,
     },
+    NameNewAgent {
+        request: CreateAgentRequest,
+        input: TextInput,
+    },
     PickEditor {
         session_label: String,
         worktree_path: String,
@@ -516,6 +520,9 @@ pub(crate) enum OverlayMouseLayout {
     RenameSession {
         input: Rect,
     },
+    NameNewAgent {
+        input: Rect,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -577,11 +584,13 @@ pub(crate) struct AgentReadyData {
 pub(crate) enum CreateAgentRequest {
     NewProject {
         project: Project,
+        custom_name: Option<String>,
     },
     ForkSession {
         project: Project,
         source_session: Box<AgentSession>,
         source_label: String,
+        custom_name: Option<String>,
     },
 }
 
@@ -1326,6 +1335,13 @@ impl App {
         let name = new_name.trim().to_string();
         if name.is_empty() {
             self.set_error("Name cannot be empty.");
+            return;
+        }
+        if rename_branch && !git::is_valid_agent_name(&name) {
+            self.set_error(
+                "Branch name may only contain letters, digits, dashes, underscores, or slashes. \
+                 It cannot start with \"-\" or \"/\", end with \"/\", or contain \"//\".",
+            );
             return;
         }
 

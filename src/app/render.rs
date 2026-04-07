@@ -2878,6 +2878,81 @@ impl App {
                     );
                 hint_para.render(hint_area, frame.buffer_mut());
             }
+            PromptState::NameNewAgent { input, .. } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect_exact(60, 8, frame.area());
+                Clear.render(area, frame.buffer_mut());
+
+                let outer = self.themed_overlay_block("Name New Agent");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [label_area, input_area, hint_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                        Constraint::Min(1),
+                    ])
+                    .areas(inner);
+
+                Paragraph::new(Line::from(Span::styled(
+                    " Enter a name for the new agent (used as branch name):",
+                    Style::default().fg(self.theme.input_label_fg),
+                )))
+                .render(label_area, frame.buffer_mut());
+
+                // Input field with cursor indicator.
+                let display = if input.cursor < input.text.len() {
+                    let (before, after) = input.text.split_at(input.cursor);
+                    let (cursor_char, rest) = after.split_at(1);
+                    Line::from(vec![
+                        Span::raw(format!(" {before}")),
+                        Span::styled(
+                            cursor_char.to_string(),
+                            Style::default()
+                                .fg(self.theme.input_cursor_fg)
+                                .bg(self.theme.input_cursor_bg),
+                        ),
+                        Span::raw(rest.to_string()),
+                    ])
+                } else {
+                    Line::from(vec![
+                        Span::raw(format!(" {}", &input.text)),
+                        Span::styled(
+                            " ",
+                            Style::default()
+                                .fg(self.theme.input_cursor_fg)
+                                .bg(self.theme.input_cursor_bg),
+                        ),
+                    ])
+                };
+                let input_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_set(border::ROUNDED)
+                    .border_style(Style::default().fg(self.theme.overlay_border));
+                let input_inner = input_block.inner(input_area);
+                Paragraph::new(display)
+                    .block(input_block)
+                    .render(input_area, frame.buffer_mut());
+
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let mut hints = vec![Span::raw(" ")];
+                hints.extend(self.theme.key_badge_default(&confirm_key));
+                hints.push(Span::styled(
+                    " confirm  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                hints.extend(self.theme.key_badge_default(&close_key));
+                hints.push(Span::styled(
+                    " cancel",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
+                self.overlay_layout.active =
+                    OverlayMouseLayout::NameNewAgent { input: input_inner };
+            }
             PromptState::None => {}
         }
     }
