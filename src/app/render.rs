@@ -22,95 +22,67 @@ const TIP_GAP: u16 = 2;
 /// Maximum number of wrapped lines a tip may occupy.
 const TIP_MAX_LINES: u16 = 2;
 
-#[derive(Clone, Copy)]
-enum TipCategory {
-    Tip,
-    Shortcut,
-    DidYouKnow,
-}
-
-impl TipCategory {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Tip => " Tip ",
-            Self::Shortcut => " Shortcut ",
-            Self::DidYouKnow => " Did you know ",
-        }
-    }
-
-    fn bg(self, theme: &Theme) -> Color {
-        match self {
-            Self::Tip => theme.tip_pill_tip_bg,
-            Self::Shortcut => theme.tip_pill_shortcut_bg,
-            Self::DidYouKnow => theme.tip_pill_trivia_bg,
-        }
-    }
-}
-
-/// Welcome-screen tips shown beneath the ASCII logo. Each entry pairs a pill
-/// category with a function that produces the tip text. Wrap text in backticks
+/// Welcome-screen tips shown beneath the ASCII logo. Wrap text in backticks
 /// to highlight it in an accent color (the backticks themselves are not
-/// rendered). The function receives `&RuntimeBindings` so keybinding labels
+/// rendered). Each function receives `&RuntimeBindings` so keybinding labels
 /// stay accurate after rebinding.
-const WELCOME_TIPS: &[(TipCategory, fn(&RuntimeBindings) -> String)] = &[
-    (TipCategory::Shortcut, |b| {
+const WELCOME_TIPS: &[fn(&RuntimeBindings) -> String] = &[
+    |b| {
         format!(
             "`{}` opens the command palette — every action is searchable.",
             b.label_for(Action::OpenPalette)
         )
-    }),
-    (TipCategory::Tip, |b| {
+    },
+    |b| {
         format!(
             "`{}` toggles fullscreen on the active pane.",
             b.label_for(Action::ToggleFullscreen)
         )
-    }),
-    (TipCategory::Shortcut, |b| {
+    },
+    |b| {
         format!(
             "`{}` creates a new agent in the current worktree.",
             b.label_for(Action::NewAgent)
         )
-    }),
-    (TipCategory::DidYouKnow, |_b| {
-        "Any CLI tool can be a provider — just set its `command` in config.toml.".into()
-    }),
-    (TipCategory::Tip, |b| {
+    },
+    |_b| "Any CLI tool can be a provider — just set its `command` in config.toml.".into(),
+    |b| {
         format!(
             "`{}` switches between agent and companion terminal.",
             b.label_for(Action::ShowTerminal)
         )
-    }),
-    (TipCategory::Shortcut, |b| {
+    },
+    |b| {
         format!(
             "`{}` stages or unstages the selected file.",
             b.label_for(Action::StageUnstage)
         )
-    }),
-    (TipCategory::DidYouKnow, |b| {
+    },
+    |b| {
         format!(
             "`{}` auto-generates a commit message with AI.",
             b.label_for(Action::GenerateCommitMessage)
         )
-    }),
-    (TipCategory::Tip, |b| {
+    },
+    |b| {
         format!(
             "`{}` forks the current agent into a new session.",
             b.label_for(Action::ForkAgent)
         )
-    }),
-    (TipCategory::Shortcut, |b| {
+    },
+    |b| {
         format!(
             "`{}` and `{}` navigate between panes.",
             b.label_for(Action::FocusNext),
             b.label_for(Action::FocusPrev)
         )
-    }),
-    (TipCategory::DidYouKnow, |b| {
+    },
+    |b| {
         format!(
             "`{}` cycles through providers for a project.",
             b.label_for(Action::CycleProvider)
         )
-    }),
+    },
 ];
 
 /// Capitalize the first character of a string.
@@ -591,14 +563,14 @@ impl App {
 
         // --- tip pill ---
         if show_tip {
-            let (category, text_fn) = &WELCOME_TIPS[self.welcome_tip_index % WELCOME_TIPS.len()];
+            let text_fn = &WELCOME_TIPS[self.welcome_tip_index % WELCOME_TIPS.len()];
             let tip_text = text_fn(&self.bindings);
 
             let pill_span = Span::styled(
-                category.label(),
+                " Tip ",
                 Style::default()
                     .fg(self.theme.tip_pill_fg)
-                    .bg(category.bg(&self.theme))
+                    .bg(self.theme.tip_pill_bg)
                     .add_modifier(Modifier::BOLD),
             );
 
