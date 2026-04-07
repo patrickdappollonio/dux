@@ -14,12 +14,13 @@ use alacritty_terminal::vte::ansi::{
     Color as TermColor, CursorShape, NamedColor, Processor, Rgb, StdSyncHandler,
 };
 use anyhow::{Context, Result};
+use compact_str::CompactString;
 use portable_pty::{Child, CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use ratatui::style::{Color, Modifier};
 
 use crate::logger;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SnapshotCursor {
     pub row: u16,
     pub col: u16,
@@ -29,7 +30,7 @@ pub struct SnapshotCursor {
 pub struct SnapshotCell {
     pub row: u16,
     pub col: u16,
-    pub symbol: String,
+    pub symbol: CompactString,
     pub fg: Color,
     pub bg: Color,
     pub modifier: Modifier,
@@ -45,6 +46,20 @@ pub struct TerminalSnapshot {
     pub cells: Vec<SnapshotCell>,
 }
 
+impl TerminalSnapshot {
+    /// Create an empty snapshot suitable for reuse as a pre-allocated buffer.
+    pub fn empty() -> Self {
+        Self {
+            rows: 0,
+            cols: 0,
+            scrollback_offset: 0,
+            scrollback_total: 0,
+            cursor: None,
+            cells: Vec::new(),
+        }
+    }
+}
+
 /// A PTY-based client that spawns a CLI tool in a pseudo-terminal and keeps a
 /// full terminal grid with scrollback using `alacritty_terminal`.
 pub struct PtyClient {
@@ -55,6 +70,9 @@ pub struct PtyClient {
     child: Box<dyn Child + Send + Sync>,
     exited: Arc<AtomicBool>,
     has_output: Arc<AtomicBool>,
+    /// Set by the reader thread or scroll/resize methods when the terminal
+    /// state changes. Cleared by `snapshot_into` after rebuilding the buffer.
+    dirty: Arc<AtomicBool>,
 }
 
 impl PtyClient {
@@ -105,13 +123,22 @@ impl PtyClient {
         let writer = Arc::new(Mutex::new(writer));
         let exited = Arc::new(AtomicBool::new(false));
         let has_output = Arc::new(AtomicBool::new(false));
+        let dirty = Arc::new(AtomicBool::new(true));
 
         let terminal_ref = Arc::clone(&terminal);
         let writer_ref = Arc::clone(&writer);
         let exited_ref = Arc::clone(&exited);
         let has_output_ref = Arc::clone(&has_output);
+        let dirty_ref = Arc::clone(&dirty);
         thread::spawn(move || {
-            Self::reader_loop(reader, terminal_ref, writer_ref, exited_ref, has_output_ref);
+            Self::reader_loop(
+                reader,
+                terminal_ref,
+                writer_ref,
+                exited_ref,
+                has_output_ref,
+                dirty_ref,
+            );
         });
 
         Ok(Self {
@@ -121,6 +148,7 @@ impl PtyClient {
             child,
             exited,
             has_output,
+            dirty,
         })
     }
 
@@ -130,6 +158,7 @@ impl PtyClient {
         writer: Arc<Mutex<Box<dyn Write + Send>>>,
         exited: Arc<AtomicBool>,
         has_output: Arc<AtomicBool>,
+        dirty: Arc<AtomicBool>,
     ) {
         let mut buf = [0u8; 4096];
         loop {
@@ -142,6 +171,7 @@ impl PtyClient {
                     let data = &buf[..n];
                     if let Ok(mut terminal) = terminal.lock() {
                         let replies = terminal.process(data);
+                        dirty.store(true, Ordering::Release);
                         if !replies.is_empty()
                             && let Ok(mut w) = writer.lock()
                         {
@@ -171,9 +201,23 @@ impl PtyClient {
     }
 
     /// Get an owned snapshot of the currently visible terminal viewport.
+    #[allow(dead_code)]
     pub fn snapshot(&self) -> TerminalSnapshot {
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
         terminal.snapshot()
+    }
+
+    /// Fill `target` with the current terminal viewport, reusing its `cells`
+    /// allocation to avoid per-frame heap churn. Returns `true` if the
+    /// snapshot was rebuilt, `false` if the terminal was unchanged and
+    /// `target` still holds valid data from the previous call.
+    pub fn snapshot_into(&self, target: &mut TerminalSnapshot) -> bool {
+        if !self.dirty.swap(false, Ordering::AcqRel) {
+            return false;
+        }
+        let terminal = self.terminal.lock().expect("terminal mutex poisoned");
+        terminal.snapshot_into(target);
+        true
     }
 
     pub fn scrollback_offset(&self) -> usize {
@@ -186,6 +230,7 @@ impl PtyClient {
     pub fn scroll(&self, up: bool, amount: usize) {
         if let Ok(mut terminal) = self.terminal.lock() {
             terminal.scroll(up, amount);
+            self.dirty.store(true, Ordering::Release);
         }
     }
 
@@ -193,6 +238,7 @@ impl PtyClient {
     pub fn set_scrollback(&self, rows: usize) {
         if let Ok(mut terminal) = self.terminal.lock() {
             terminal.set_scrollback(rows);
+            self.dirty.store(true, Ordering::Release);
         }
     }
 
@@ -208,6 +254,7 @@ impl PtyClient {
             .context("failed to resize PTY")?;
         if let Ok(mut terminal) = self.terminal.lock() {
             terminal.resize(rows, cols);
+            self.dirty.store(true, Ordering::Release);
         }
         Ok(())
     }
@@ -350,6 +397,14 @@ impl TerminalState {
     }
 
     fn snapshot(&self) -> TerminalSnapshot {
+        let mut snap = TerminalSnapshot::empty();
+        self.snapshot_into(&mut snap);
+        snap
+    }
+
+    /// Fill `target` with the current terminal viewport, reusing its existing
+    /// `cells` allocation to avoid per-frame heap churn.
+    fn snapshot_into(&self, target: &mut TerminalSnapshot) {
         let renderable = self.term.renderable_content();
         let display_offset = renderable.display_offset;
         let history_size = self.term.grid().history_size();
@@ -365,7 +420,7 @@ impl TerminalState {
             })
         };
 
-        let mut cells = Vec::with_capacity(usize::from(self.rows) * usize::from(self.cols));
+        target.cells.clear();
         for indexed in renderable.display_iter {
             let cell = indexed.cell;
             if cell
@@ -379,7 +434,7 @@ impl TerminalState {
                 continue;
             };
 
-            let mut symbol = String::new();
+            let mut symbol = CompactString::new("");
             symbol.push(cell.c);
             if let Some(zerowidth) = cell.zerowidth() {
                 for ch in zerowidth {
@@ -407,7 +462,7 @@ impl TerminalState {
                 modifier |= Modifier::CROSSED_OUT;
             }
 
-            cells.push(SnapshotCell {
+            target.cells.push(SnapshotCell {
                 row: point.line as u16,
                 col: point.column.0 as u16,
                 symbol,
@@ -417,14 +472,11 @@ impl TerminalState {
             });
         }
 
-        TerminalSnapshot {
-            rows: self.rows,
-            cols: self.cols,
-            scrollback_offset: display_offset,
-            scrollback_total: history_size,
-            cursor,
-            cells,
-        }
+        target.rows = self.rows;
+        target.cols = self.cols;
+        target.scrollback_offset = display_offset;
+        target.scrollback_total = history_size;
+        target.cursor = cursor;
     }
 
     fn scrollback_offset(&self) -> usize {
@@ -1119,6 +1171,107 @@ mod tests {
         assert_eq!(
             before.cursor, after.cursor,
             "cursor should be identical after full scroll round-trip"
+        );
+    }
+
+    #[test]
+    fn snapshot_into_reuses_capacity() {
+        let mut terminal = TerminalState::with_scrollback(3, 12, 100);
+        terminal.process(b"hello\r\nworld\r\n");
+
+        let mut buf = TerminalSnapshot::empty();
+        terminal.snapshot_into(&mut buf);
+        let cap_after_first = buf.cells.capacity();
+        assert!(!buf.cells.is_empty(), "first snapshot should have cells");
+
+        // Second call should reuse the Vec capacity.
+        terminal.process(b"more\r\n");
+        terminal.snapshot_into(&mut buf);
+        assert_eq!(
+            buf.cells.capacity(),
+            cap_after_first,
+            "Vec capacity should be reused across snapshot_into calls"
+        );
+        assert!(!buf.cells.is_empty());
+    }
+
+    #[test]
+    fn snapshot_into_matches_snapshot() {
+        let mut terminal = TerminalState::with_scrollback(3, 12, 100);
+        terminal.process(b"hello\r\nworld\r\n");
+
+        let owned = terminal.snapshot();
+        let mut buf = TerminalSnapshot::empty();
+        terminal.snapshot_into(&mut buf);
+
+        assert_eq!(owned.rows, buf.rows);
+        assert_eq!(owned.cols, buf.cols);
+        assert_eq!(owned.scrollback_offset, buf.scrollback_offset);
+        assert_eq!(owned.scrollback_total, buf.scrollback_total);
+        assert_eq!(owned.cells.len(), buf.cells.len());
+        for (a, b) in owned.cells.iter().zip(buf.cells.iter()) {
+            assert_eq!(a.row, b.row);
+            assert_eq!(a.col, b.col);
+            assert_eq!(a.symbol, b.symbol);
+            assert_eq!(a.fg, b.fg);
+            assert_eq!(a.bg, b.bg);
+            assert_eq!(a.modifier, b.modifier);
+        }
+    }
+
+    #[test]
+    fn compact_string_symbol_handles_ascii_and_multibyte() {
+        let mut terminal = TerminalState::with_scrollback(2, 8, 100);
+        // Write ASCII 'A' followed by a multi-byte character.
+        terminal.process("Aé".as_bytes());
+
+        let snapshot = terminal.snapshot();
+        let a_cell = snapshot
+            .cells
+            .iter()
+            .find(|c| c.symbol == "A")
+            .expect("should have cell for A");
+        let e_cell = snapshot
+            .cells
+            .iter()
+            .find(|c| c.symbol == "é")
+            .expect("should have cell for é");
+
+        assert_eq!(a_cell.symbol.len(), 1);
+        assert_eq!(e_cell.symbol.len(), 2); // é is 2 bytes in UTF-8
+    }
+
+    #[test]
+    fn dirty_flag_skips_rebuild_when_unchanged() {
+        let dirty = Arc::new(AtomicBool::new(true));
+        let mut terminal = TerminalState::with_scrollback(3, 12, 100);
+        terminal.process(b"hello\r\n");
+
+        // Simulate first snapshot (dirty=true).
+        assert!(dirty.swap(false, Ordering::AcqRel));
+        let mut buf = TerminalSnapshot::empty();
+        terminal.snapshot_into(&mut buf);
+        assert!(!buf.cells.is_empty());
+
+        // Second check without new data: dirty should be false.
+        assert!(
+            !dirty.swap(false, Ordering::AcqRel),
+            "dirty flag should be false when no new data arrived"
+        );
+    }
+
+    #[test]
+    fn dirty_flag_set_after_process() {
+        let dirty = Arc::new(AtomicBool::new(true));
+
+        // Consume initial dirty.
+        assert!(dirty.swap(false, Ordering::AcqRel));
+
+        // Simulate reader thread setting dirty after process.
+        dirty.store(true, Ordering::Release);
+        assert!(
+            dirty.swap(false, Ordering::AcqRel),
+            "dirty flag should be true after data arrives"
         );
     }
 }
