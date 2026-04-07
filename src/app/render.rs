@@ -15,6 +15,102 @@ const ASCII_LOGO_WIDTH: u16 = 33;
 /// Number of lines in `ASCII_LOGO`.
 const ASCII_LOGO_HEIGHT: u16 = 7;
 
+/// Maximum display width for a tip line (logo width + padding on each side).
+const TIP_MAX_WIDTH: u16 = 47;
+/// Blank lines between the bottom of the logo and the tip.
+const TIP_GAP: u16 = 2;
+/// Maximum number of wrapped lines a tip may occupy.
+const TIP_MAX_LINES: u16 = 2;
+
+#[derive(Clone, Copy)]
+enum TipCategory {
+    Tip,
+    Shortcut,
+    DidYouKnow,
+}
+
+impl TipCategory {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tip => " Tip ",
+            Self::Shortcut => " Shortcut ",
+            Self::DidYouKnow => " Did you know ",
+        }
+    }
+
+    fn bg(self, theme: &Theme) -> Color {
+        match self {
+            Self::Tip => theme.tip_pill_tip_bg,
+            Self::Shortcut => theme.tip_pill_shortcut_bg,
+            Self::DidYouKnow => theme.tip_pill_trivia_bg,
+        }
+    }
+}
+
+/// Welcome-screen tips shown beneath the ASCII logo. Each entry pairs a pill
+/// category with a function that produces the tip text (receiving the runtime
+/// keybindings so labels stay accurate after rebinding).
+const WELCOME_TIPS: &[(TipCategory, fn(&RuntimeBindings) -> String)] = &[
+    (TipCategory::Shortcut, |b| {
+        format!(
+            "{} opens the command palette — every action is searchable.",
+            b.label_for(Action::OpenPalette)
+        )
+    }),
+    (TipCategory::Tip, |b| {
+        format!(
+            "{} toggles fullscreen on the active pane.",
+            b.label_for(Action::ToggleFullscreen)
+        )
+    }),
+    (TipCategory::Shortcut, |b| {
+        format!(
+            "{} creates a new agent in the current worktree.",
+            b.label_for(Action::NewAgent)
+        )
+    }),
+    (TipCategory::DidYouKnow, |_b| {
+        "Any CLI tool can be a provider — just set its command in config.toml.".into()
+    }),
+    (TipCategory::Tip, |b| {
+        format!(
+            "{} switches between agent and companion terminal.",
+            b.label_for(Action::ShowTerminal)
+        )
+    }),
+    (TipCategory::Shortcut, |b| {
+        format!(
+            "{} stages or unstages the selected file.",
+            b.label_for(Action::StageUnstage)
+        )
+    }),
+    (TipCategory::DidYouKnow, |b| {
+        format!(
+            "{} auto-generates a commit message with AI.",
+            b.label_for(Action::GenerateCommitMessage)
+        )
+    }),
+    (TipCategory::Tip, |b| {
+        format!(
+            "{} forks the current agent into a new session.",
+            b.label_for(Action::ForkAgent)
+        )
+    }),
+    (TipCategory::Shortcut, |b| {
+        format!(
+            "{} and {} navigate between panes.",
+            b.label_for(Action::FocusNext),
+            b.label_for(Action::FocusPrev)
+        )
+    }),
+    (TipCategory::DidYouKnow, |b| {
+        format!(
+            "{} cycles through providers for a project.",
+            b.label_for(Action::CycleProvider)
+        )
+    }),
+];
+
 /// Capitalize the first character of a string.
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
@@ -465,21 +561,59 @@ impl App {
         }
     }
 
-    /// Render the ASCII "dux" logo centered in the given area.
+    /// Render the ASCII "dux" logo centered in the given area, with an
+    /// optional feature tip displayed below.
     fn render_ascii_logo(&self, frame: &mut Frame, area: Rect) {
         if area.width < ASCII_LOGO_WIDTH || area.height < ASCII_LOGO_HEIGHT {
             return;
         }
 
-        let x = area.x + (area.width - ASCII_LOGO_WIDTH) / 2;
-        let y = area.y + (area.height - ASCII_LOGO_HEIGHT) / 2;
-        let style = Style::default().fg(self.theme.border_normal);
+        let total_height = ASCII_LOGO_HEIGHT + TIP_GAP + TIP_MAX_LINES;
+        let show_tip = area.width >= TIP_MAX_WIDTH && area.height >= total_height;
 
+        let block_height = if show_tip {
+            total_height
+        } else {
+            ASCII_LOGO_HEIGHT
+        };
+        let x = area.x + (area.width - ASCII_LOGO_WIDTH) / 2;
+        let y = area.y + (area.height - block_height) / 2;
+
+        // --- logo ---
+        let style = Style::default().fg(self.theme.border_normal);
         let lines: Vec<Line> = ASCII_LOGO.iter().map(|l| Line::styled(*l, style)).collect();
         Paragraph::new(lines).render(
             Rect::new(x, y, ASCII_LOGO_WIDTH, ASCII_LOGO_HEIGHT),
             frame.buffer_mut(),
         );
+
+        // --- tip pill ---
+        if show_tip {
+            let (category, text_fn) = &WELCOME_TIPS[self.welcome_tip_index % WELCOME_TIPS.len()];
+            let tip_text = text_fn(&self.bindings);
+
+            let pill_span = Span::styled(
+                category.label(),
+                Style::default()
+                    .fg(self.theme.tip_pill_fg)
+                    .bg(category.bg(&self.theme))
+                    .add_modifier(Modifier::BOLD),
+            );
+            let gap_span = Span::raw(" ");
+            let text_span = Span::styled(tip_text, Style::default().fg(self.theme.tip_text_fg));
+
+            let tip_line = Line::from(vec![pill_span, gap_span, text_span]);
+            let tip_width = TIP_MAX_WIDTH.min(area.width.saturating_sub(2));
+            let tip_x = area.x + (area.width - tip_width) / 2;
+            let tip_y = y + ASCII_LOGO_HEIGHT + TIP_GAP;
+
+            Paragraph::new(vec![tip_line])
+                .wrap(Wrap { trim: true })
+                .render(
+                    Rect::new(tip_x, tip_y, tip_width, TIP_MAX_LINES),
+                    frame.buffer_mut(),
+                );
+        }
     }
 
     fn render_terminal_placeholder(

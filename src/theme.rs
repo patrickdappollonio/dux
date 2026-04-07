@@ -62,6 +62,11 @@ pub struct Theme {
     pub diff_stat_remove_fg: Color,
     pub runtime_context_value_fg: Color,
     pub nudge_border: Color,
+    pub tip_pill_fg: Color,
+    pub tip_pill_shortcut_bg: Color,
+    pub tip_pill_tip_bg: Color,
+    pub tip_pill_trivia_bg: Color,
+    pub tip_text_fg: Color,
 }
 
 impl Theme {
@@ -125,6 +130,11 @@ impl Theme {
             diff_stat_remove_fg: Color::Red,
             runtime_context_value_fg: Color::Rgb(125, 150, 160),
             nudge_border: Color::Rgb(180, 150, 50),
+            tip_pill_fg: Color::White,
+            tip_pill_shortcut_bg: Color::Rgb(120, 80, 200),
+            tip_pill_tip_bg: Color::Rgb(0, 150, 150),
+            tip_pill_trivia_bg: Color::Rgb(180, 140, 30),
+            tip_text_fg: Color::Rgb(120, 120, 120),
         }
     }
 
