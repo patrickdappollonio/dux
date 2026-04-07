@@ -302,6 +302,95 @@ impl App {
         Ok(())
     }
 
+    /// Opens the first existing companion terminal for the selected session,
+    /// or spawns a new one if none exists.
+    pub(crate) fn show_or_open_first_terminal(&mut self) -> Result<()> {
+        let Some(session) = self.selected_session().cloned() else {
+            self.set_error("Select an agent session first.");
+            return Ok(());
+        };
+
+        let first = self
+            .companion_terminals
+            .iter()
+            .filter(|(_, t)| t.session_id == session.id)
+            .min_by_key(|(id, _)| {
+                id.strip_prefix("term-")
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .unwrap_or(u64::MAX)
+            })
+            .map(|(id, t)| (id.clone(), t.label.clone()));
+
+        if let Some((terminal_id, label)) = first {
+            self.active_terminal_id = Some(terminal_id);
+            self.terminal_return_to_list = false;
+            self.show_companion_terminal_surface();
+            self.input_target = InputTarget::Terminal;
+            self.set_info(format!("Opened terminal \"{label}\"."));
+            Ok(())
+        } else {
+            self.show_companion_terminal()
+        }
+    }
+
+    /// Spawns a new companion terminal for the agent that owns the currently
+    /// selected terminal in the terminals list.
+    pub(crate) fn spawn_terminal_for_selected_terminal(&mut self) -> Result<()> {
+        let items = self.terminal_items();
+        let Some(&(_, terminal)) = items.get(self.selected_terminal_index) else {
+            self.set_warning("No terminal selected.");
+            return Ok(());
+        };
+        let session_id = terminal.session_id.clone();
+        drop(items);
+
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
+            self.set_warning("The parent agent session no longer exists.");
+            return Ok(());
+        };
+
+        let client = self.spawn_companion_terminal_for_session(&session)?;
+        let terminal_id = self.next_terminal_id();
+        let count = self.session_terminal_count(&session.id) + 1;
+        let base = session
+            .title
+            .clone()
+            .unwrap_or_else(|| session.branch_name.clone());
+        let label = if count == 1 {
+            base
+        } else {
+            format!("{base} ({count})")
+        };
+        self.companion_terminals.insert(
+            terminal_id.clone(),
+            CompanionTerminal {
+                session_id: session.id.clone(),
+                label,
+                foreground_cmd: None,
+                client,
+            },
+        );
+        self.active_terminal_id = Some(terminal_id);
+        self.terminal_return_to_list = true;
+        self.show_companion_terminal_surface();
+        self.input_target = InputTarget::Terminal;
+        self.set_info(format!(
+            "Launched new terminal for agent \"{}\".",
+            session.branch_name
+        ));
+        Ok(())
+    }
+
+    /// Palette command: always spawns a new companion terminal.
+    /// Uses a yellow warning if no agent session is selected.
+    pub(crate) fn new_companion_terminal(&mut self) -> Result<()> {
+        if self.selected_session().is_none() {
+            self.set_warning("Select an agent session first to launch a companion terminal.");
+            return Ok(());
+        }
+        self.show_companion_terminal()
+    }
+
     /// Opens the terminal overlay for the terminal selected in the terminals list.
     pub(crate) fn open_terminal_from_terminal_list(&mut self) -> Result<()> {
         let items = self.terminal_items();

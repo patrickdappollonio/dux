@@ -374,7 +374,7 @@ impl App {
                 Action::NewAgent => self.create_agent_for_selected_project()?,
                 Action::ForkAgent => self.fork_selected_session()?,
                 Action::RefreshProject => self.refresh_selected_project()?,
-                Action::ShowTerminal => self.show_companion_terminal()?,
+                Action::ShowTerminal => self.show_or_open_first_terminal()?,
                 Action::DeleteSession => self.confirm_delete_selected_session()?,
                 Action::RenameSession => self.open_rename_session()?,
                 Action::EditMacros => self.open_edit_macros(),
@@ -438,7 +438,7 @@ impl App {
                     self.open_terminal_from_terminal_list()?;
                 }
                 Action::ShowTerminal => {
-                    self.open_terminal_from_terminal_list()?;
+                    self.spawn_terminal_for_selected_terminal()?;
                 }
                 _ => {}
             }
@@ -452,7 +452,7 @@ impl App {
             match action {
                 Action::FocusAgent if !in_diff => self.activate_center_agent()?,
                 Action::ExitInteractive if !in_diff => self.activate_center_agent()?,
-                Action::ShowTerminal if !in_diff => self.show_companion_terminal()?,
+                Action::ShowTerminal if !in_diff => self.show_or_open_first_terminal()?,
                 Action::DeleteSession if !in_diff => self.confirm_delete_selected_session()?,
                 Action::ReconnectAgent if !in_diff => {
                     // Allow relaunching an exited agent from the center pane,
@@ -5753,6 +5753,142 @@ mod tests {
         );
 
         assert_eq!(app.running_companion_terminal_count(), 1);
+    }
+
+    #[test]
+    fn show_or_open_first_terminal_spawns_when_none_exist() {
+        let mut app = test_app(default_bindings());
+
+        assert!(app.companion_terminals.is_empty());
+
+        app.show_or_open_first_terminal()
+            .expect("should spawn new terminal");
+
+        assert_eq!(app.companion_terminals.len(), 1);
+        assert!(app.active_terminal_id.is_some());
+        assert_eq!(app.session_surface, SessionSurface::Terminal);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
+        assert_eq!(app.input_target, InputTarget::Terminal);
+        // Spawned via fallback — returns to terminal list on close.
+        assert!(app.terminal_return_to_list);
+    }
+
+    #[test]
+    fn show_or_open_first_terminal_reuses_existing() {
+        let mut app = test_app(default_bindings());
+
+        // Spawn an initial terminal.
+        app.show_companion_terminal().expect("spawn first");
+        let first_id = app.active_terminal_id.clone().unwrap();
+        assert_eq!(app.companion_terminals.len(), 1);
+
+        // Close overlay to simulate returning to normal view.
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        app.input_target = InputTarget::None;
+        app.session_surface = SessionSurface::Agent;
+
+        // Now use the "open first" method — it should reuse, not spawn.
+        app.show_or_open_first_terminal()
+            .expect("should reuse existing terminal");
+
+        assert_eq!(app.companion_terminals.len(), 1, "no new terminal spawned");
+        assert_eq!(app.active_terminal_id.as_deref(), Some(first_id.as_str()));
+        assert_eq!(app.session_surface, SessionSurface::Terminal);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
+        assert_eq!(app.input_target, InputTarget::Terminal);
+        // Reused — should NOT return to terminal list on close.
+        assert!(!app.terminal_return_to_list);
+    }
+
+    #[test]
+    fn show_or_open_first_terminal_picks_lowest_id() {
+        let mut app = test_app(default_bindings());
+
+        // Spawn two terminals.
+        app.show_companion_terminal().expect("first");
+        let first_id = app.active_terminal_id.clone().unwrap();
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        app.input_target = InputTarget::None;
+        app.session_surface = SessionSurface::Agent;
+
+        app.show_companion_terminal().expect("second");
+        let second_id = app.active_terminal_id.clone().unwrap();
+        assert_ne!(first_id, second_id);
+        assert_eq!(app.companion_terminals.len(), 2);
+
+        // Close overlay.
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        app.input_target = InputTarget::None;
+        app.session_surface = SessionSurface::Agent;
+
+        // Should pick the first (lowest ID), not the second.
+        app.show_or_open_first_terminal()
+            .expect("should reuse first");
+
+        assert_eq!(app.active_terminal_id.as_deref(), Some(first_id.as_str()));
+        assert_eq!(app.companion_terminals.len(), 2, "still two terminals");
+    }
+
+    #[test]
+    fn spawn_terminal_for_selected_terminal_creates_new() {
+        let mut app = test_app(default_bindings());
+
+        // Spawn an initial terminal so the terminals list is populated.
+        app.show_companion_terminal().expect("initial terminal");
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        app.input_target = InputTarget::None;
+        app.session_surface = SessionSurface::Agent;
+
+        // Point the terminal cursor at the first terminal.
+        app.left_section = LeftSection::Terminals;
+        app.selected_terminal_index = 0;
+
+        let initial_count = app.companion_terminals.len();
+        app.spawn_terminal_for_selected_terminal()
+            .expect("spawn from terminals pane");
+
+        assert_eq!(
+            app.companion_terminals.len(),
+            initial_count + 1,
+            "a new terminal was created"
+        );
+        assert_eq!(app.session_surface, SessionSurface::Terminal);
+        assert_eq!(app.input_target, InputTarget::Terminal);
+        assert!(app.terminal_return_to_list);
+    }
+
+    #[test]
+    fn new_companion_terminal_warns_without_selected_session() {
+        let mut app = test_app(default_bindings());
+
+        // Deselect everything by pointing at a project header.
+        app.selected_left = 0;
+
+        app.new_companion_terminal()
+            .expect("should not error, just warn");
+
+        assert_eq!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Warning,
+            "should show yellow warning, not red error"
+        );
+        assert!(app.status.text().contains("Select an agent session"));
+        assert!(
+            app.companion_terminals.is_empty(),
+            "no terminal should be spawned"
+        );
+    }
+
+    #[test]
+    fn new_companion_terminal_spawns_when_session_selected() {
+        let mut app = test_app(default_bindings());
+
+        app.new_companion_terminal()
+            .expect("should spawn new terminal");
+
+        assert_eq!(app.companion_terminals.len(), 1);
+        assert!(app.active_terminal_id.is_some());
+        assert_eq!(app.input_target, InputTarget::Terminal);
     }
 
     #[test]
