@@ -609,6 +609,7 @@ impl App {
 
             Paragraph::new(vec![tip_line])
                 .wrap(Wrap { trim: true })
+                .alignment(ratatui::layout::Alignment::Center)
                 .render(
                     Rect::new(tip_x, tip_y, tip_width, TIP_MAX_LINES),
                     frame.buffer_mut(),
