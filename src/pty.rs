@@ -193,10 +193,15 @@ impl PtyClient {
     }
 
     /// Write raw bytes to the PTY (forwards keystrokes to the child process).
+    /// Also marks the terminal dirty so the next render frame rebuilds the
+    /// snapshot — the child process will echo or react to this input, and
+    /// pre-marking dirty avoids a one-frame delay waiting for the reader
+    /// thread to process the echo.
     pub fn write_bytes(&self, bytes: &[u8]) -> Result<()> {
         let mut writer = self.writer.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         writer.write_all(bytes).context("failed to write to PTY")?;
         writer.flush().context("failed to flush PTY writer")?;
+        self.dirty.store(true, Ordering::Release);
         Ok(())
     }
 
