@@ -15,6 +15,76 @@ const ASCII_LOGO_WIDTH: u16 = 33;
 /// Number of lines in `ASCII_LOGO`.
 const ASCII_LOGO_HEIGHT: u16 = 7;
 
+/// Maximum display width for a tip line (logo width + padding on each side).
+const TIP_MAX_WIDTH: u16 = 47;
+/// Blank lines between the bottom of the logo and the tip.
+const TIP_GAP: u16 = 2;
+/// Maximum number of wrapped lines a tip may occupy.
+const TIP_MAX_LINES: u16 = 2;
+
+/// Welcome-screen tips shown beneath the ASCII logo. Wrap text in backticks
+/// to highlight it in an accent color (the backticks themselves are not
+/// rendered). Each function receives `&RuntimeBindings` so keybinding labels
+/// stay accurate after rebinding.
+const WELCOME_TIPS: &[fn(&RuntimeBindings) -> String] = &[
+    |b| {
+        format!(
+            "`{}` opens the command palette — every action is searchable.",
+            b.label_for(Action::OpenPalette)
+        )
+    },
+    |b| {
+        format!(
+            "`{}` toggles fullscreen on the active pane.",
+            b.label_for(Action::ToggleFullscreen)
+        )
+    },
+    |b| {
+        format!(
+            "`{}` creates a new agent in the current worktree.",
+            b.label_for(Action::NewAgent)
+        )
+    },
+    |_b| "Any CLI tool can be a provider — just set its `command` in config.toml.".into(),
+    |b| {
+        format!(
+            "`{}` switches between agent and companion terminal.",
+            b.label_for(Action::ShowTerminal)
+        )
+    },
+    |b| {
+        format!(
+            "`{}` stages or unstages the selected file.",
+            b.label_for(Action::StageUnstage)
+        )
+    },
+    |b| {
+        format!(
+            "`{}` auto-generates a commit message with AI.",
+            b.label_for(Action::GenerateCommitMessage)
+        )
+    },
+    |b| {
+        format!(
+            "`{}` forks the current agent into a new session.",
+            b.label_for(Action::ForkAgent)
+        )
+    },
+    |b| {
+        format!(
+            "`{}` and `{}` navigate between panes.",
+            b.label_for(Action::FocusNext),
+            b.label_for(Action::FocusPrev)
+        )
+    },
+    |b| {
+        format!(
+            "`{}` cycles through providers for a project.",
+            b.label_for(Action::CycleProvider)
+        )
+    },
+];
+
 /// Capitalize the first character of a string.
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
@@ -465,21 +535,75 @@ impl App {
         }
     }
 
-    /// Render the ASCII "dux" logo centered in the given area.
+    /// Render the ASCII "dux" logo centered in the given area, with an
+    /// optional feature tip displayed below.
     fn render_ascii_logo(&self, frame: &mut Frame, area: Rect) {
         if area.width < ASCII_LOGO_WIDTH || area.height < ASCII_LOGO_HEIGHT {
             return;
         }
 
-        let x = area.x + (area.width - ASCII_LOGO_WIDTH) / 2;
-        let y = area.y + (area.height - ASCII_LOGO_HEIGHT) / 2;
-        let style = Style::default().fg(self.theme.border_normal);
+        let total_height = ASCII_LOGO_HEIGHT + TIP_GAP + TIP_MAX_LINES;
+        let show_tip = area.width >= TIP_MAX_WIDTH && area.height >= total_height;
 
+        let block_height = if show_tip {
+            total_height
+        } else {
+            ASCII_LOGO_HEIGHT
+        };
+        let x = area.x + (area.width - ASCII_LOGO_WIDTH) / 2;
+        let y = area.y + (area.height - block_height) / 2;
+
+        // --- logo ---
+        let style = Style::default().fg(self.theme.border_normal);
         let lines: Vec<Line> = ASCII_LOGO.iter().map(|l| Line::styled(*l, style)).collect();
         Paragraph::new(lines).render(
             Rect::new(x, y, ASCII_LOGO_WIDTH, ASCII_LOGO_HEIGHT),
             frame.buffer_mut(),
         );
+
+        // --- tip pill ---
+        if show_tip {
+            let text_fn = &WELCOME_TIPS[self.welcome_tip_index % WELCOME_TIPS.len()];
+            let tip_text = text_fn(&self.bindings);
+
+            let pill_span = Span::styled(
+                " Tip ",
+                Style::default()
+                    .fg(self.theme.tip_pill_fg)
+                    .bg(self.theme.tip_pill_bg)
+                    .add_modifier(Modifier::BOLD),
+            );
+
+            let normal = Style::default().fg(self.theme.tip_text_fg);
+            let highlight = Style::default()
+                .fg(self.theme.tip_highlight_fg)
+                .add_modifier(Modifier::BOLD);
+
+            let mut spans: Vec<Span> = vec![pill_span, Span::raw(" ")];
+            let mut inside_backtick = false;
+            for segment in tip_text.split('`') {
+                if !segment.is_empty() {
+                    spans.push(Span::styled(
+                        segment.to_owned(),
+                        if inside_backtick { highlight } else { normal },
+                    ));
+                }
+                inside_backtick = !inside_backtick;
+            }
+
+            let tip_line = Line::from(spans);
+            let tip_width = TIP_MAX_WIDTH.min(area.width.saturating_sub(2));
+            let tip_x = area.x + (area.width - tip_width) / 2;
+            let tip_y = y + ASCII_LOGO_HEIGHT + TIP_GAP;
+
+            Paragraph::new(vec![tip_line])
+                .wrap(Wrap { trim: false })
+                .alignment(ratatui::layout::Alignment::Center)
+                .render(
+                    Rect::new(tip_x, tip_y, tip_width, TIP_MAX_LINES),
+                    frame.buffer_mut(),
+                );
+        }
     }
 
     fn render_terminal_placeholder(

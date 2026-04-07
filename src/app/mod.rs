@@ -115,6 +115,7 @@ pub struct App {
     pub(crate) macro_bar: Option<MacroBarState>,
     pub(crate) sigwinch_flag: Arc<AtomicBool>,
     pub(crate) force_redraw: bool,
+    pub(crate) welcome_tip_index: usize,
     pub(crate) branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,
     /// Session IDs spawned with resume_args that should fall back to regular
     /// args if the PTY exits before producing any output.
@@ -729,6 +730,10 @@ impl App {
             macro_bar: None,
             sigwinch_flag,
             force_redraw: false,
+            welcome_tip_index: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as usize)
+                .unwrap_or(0),
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             resume_fallback_candidates: HashSet::new(),
             syntax_cache: SyntaxCache::new(),
