@@ -48,64 +48,66 @@ impl TipCategory {
 }
 
 /// Welcome-screen tips shown beneath the ASCII logo. Each entry pairs a pill
-/// category with a function that produces the tip text (receiving the runtime
-/// keybindings so labels stay accurate after rebinding).
+/// category with a function that produces the tip text. Wrap text in backticks
+/// to highlight it in an accent color (the backticks themselves are not
+/// rendered). The function receives `&RuntimeBindings` so keybinding labels
+/// stay accurate after rebinding.
 const WELCOME_TIPS: &[(TipCategory, fn(&RuntimeBindings) -> String)] = &[
     (TipCategory::Shortcut, |b| {
         format!(
-            "{} opens the command palette — every action is searchable.",
+            "`{}` opens the command palette — every action is searchable.",
             b.label_for(Action::OpenPalette)
         )
     }),
     (TipCategory::Tip, |b| {
         format!(
-            "{} toggles fullscreen on the active pane.",
+            "`{}` toggles fullscreen on the active pane.",
             b.label_for(Action::ToggleFullscreen)
         )
     }),
     (TipCategory::Shortcut, |b| {
         format!(
-            "{} creates a new agent in the current worktree.",
+            "`{}` creates a new agent in the current worktree.",
             b.label_for(Action::NewAgent)
         )
     }),
     (TipCategory::DidYouKnow, |_b| {
-        "Any CLI tool can be a provider — just set its command in config.toml.".into()
+        "Any CLI tool can be a provider — just set its `command` in config.toml.".into()
     }),
     (TipCategory::Tip, |b| {
         format!(
-            "{} switches between agent and companion terminal.",
+            "`{}` switches between agent and companion terminal.",
             b.label_for(Action::ShowTerminal)
         )
     }),
     (TipCategory::Shortcut, |b| {
         format!(
-            "{} stages or unstages the selected file.",
+            "`{}` stages or unstages the selected file.",
             b.label_for(Action::StageUnstage)
         )
     }),
     (TipCategory::DidYouKnow, |b| {
         format!(
-            "{} auto-generates a commit message with AI.",
+            "`{}` auto-generates a commit message with AI.",
             b.label_for(Action::GenerateCommitMessage)
         )
     }),
     (TipCategory::Tip, |b| {
         format!(
-            "{} forks the current agent into a new session.",
+            "`{}` forks the current agent into a new session.",
             b.label_for(Action::ForkAgent)
         )
     }),
     (TipCategory::Shortcut, |b| {
         format!(
-            "{} and {} navigate between panes.",
+            "`{}` and `{}` navigate between panes.",
             b.label_for(Action::FocusNext),
             b.label_for(Action::FocusPrev)
         )
     }),
     (TipCategory::DidYouKnow, |b| {
         format!(
-            "{} cycles through providers for a project.",
+            "`{}` cycles through providers for a project.",
             b.label_for(Action::CycleProvider)
         )
     }),
@@ -599,10 +601,25 @@ impl App {
                     .bg(category.bg(&self.theme))
                     .add_modifier(Modifier::BOLD),
             );
-            let gap_span = Span::raw(" ");
-            let text_span = Span::styled(tip_text, Style::default().fg(self.theme.tip_text_fg));
 
-            let tip_line = Line::from(vec![pill_span, gap_span, text_span]);
+            let normal = Style::default().fg(self.theme.tip_text_fg);
+            let highlight = Style::default()
+                .fg(self.theme.tip_highlight_fg)
+                .add_modifier(Modifier::BOLD);
+
+            let mut spans: Vec<Span> = vec![pill_span, Span::raw(" ")];
+            let mut inside_backtick = false;
+            for segment in tip_text.split('`') {
+                if !segment.is_empty() {
+                    spans.push(Span::styled(
+                        segment.to_owned(),
+                        if inside_backtick { highlight } else { normal },
+                    ));
+                }
+                inside_backtick = !inside_backtick;
+            }
+
+            let tip_line = Line::from(spans);
             let tip_width = TIP_MAX_WIDTH.min(area.width.saturating_sub(2));
             let tip_x = area.x + (area.width - tip_width) / 2;
             let tip_y = y + ASCII_LOGO_HEIGHT + TIP_GAP;

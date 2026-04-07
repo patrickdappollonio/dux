@@ -67,6 +67,7 @@ pub struct Theme {
     pub tip_pill_tip_bg: Color,
     pub tip_pill_trivia_bg: Color,
     pub tip_text_fg: Color,
+    pub tip_highlight_fg: Color,
 }
 
 impl Theme {
@@ -135,6 +136,7 @@ impl Theme {
             tip_pill_tip_bg: Color::Rgb(0, 150, 150),
             tip_pill_trivia_bg: Color::Rgb(180, 140, 30),
             tip_text_fg: Color::Rgb(120, 120, 120),
+            tip_highlight_fg: Color::Rgb(0, 190, 190),
         }
     }
 
