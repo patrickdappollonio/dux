@@ -264,6 +264,11 @@ impl PtyClient {
         Ok(())
     }
 
+    /// Force the dirty flag on so the next `snapshot_into` rebuilds.
+    pub fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::Release);
+    }
+
     /// Check whether the child process has exited (reader thread detected EOF).
     pub fn is_exited(&self) -> bool {
         self.exited.load(Ordering::Acquire)

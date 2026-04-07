@@ -123,6 +123,9 @@ pub struct App {
     pub(crate) syntax_cache: SyntaxCache,
     /// Reusable snapshot buffer to avoid per-frame allocation of terminal cells.
     pub(crate) snapshot_buf: TerminalSnapshot,
+    /// ID of the provider that last populated `snapshot_buf`, used to detect
+    /// agent switches and force a snapshot rebuild.
+    last_snapshot_id: Option<String>,
 }
 
 /// Snapshot of session data shared with the branch-sync background worker.
@@ -730,6 +733,7 @@ impl App {
             resume_fallback_candidates: HashSet::new(),
             syntax_cache: SyntaxCache::new(),
             snapshot_buf: TerminalSnapshot::empty(),
+            last_snapshot_id: None,
         };
         app.restore_sessions();
         app.rebuild_left_items();
@@ -1508,23 +1512,29 @@ impl App {
     /// surface, reusing the existing cell allocation. Returns `true` if a
     /// provider was found and the snapshot was updated.
     pub(crate) fn refresh_snapshot_buf(&mut self) -> bool {
-        let client: Option<&PtyClient> = match self.session_surface {
+        let (client_id, client): (String, Option<&PtyClient>) = match self.session_surface {
             SessionSurface::Agent => {
                 let session_id = match self.selected_session() {
                     Some(s) => s.id.clone(),
                     None => return false,
                 };
-                self.providers.get(&session_id)
+                let provider = self.providers.get(&session_id);
+                (session_id, provider)
             }
             SessionSurface::Terminal => {
                 let id = match self.active_terminal_id.as_ref() {
                     Some(id) => id.clone(),
                     None => return false,
                 };
-                self.companion_terminals.get(&id).map(|t| &t.client)
+                let provider = self.companion_terminals.get(&id).map(|t| &t.client);
+                (id, provider)
             }
         };
         if let Some(provider) = client {
+            if self.last_snapshot_id.as_deref() != Some(&client_id) {
+                provider.mark_dirty();
+                self.last_snapshot_id = Some(client_id);
+            }
             provider.snapshot_into(&mut self.snapshot_buf);
             true
         } else {

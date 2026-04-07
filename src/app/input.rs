@@ -3532,6 +3532,7 @@ mod tests {
             resume_fallback_candidates: std::collections::HashSet::new(),
             syntax_cache: crate::diff::SyntaxCache::new(),
             snapshot_buf: crate::pty::TerminalSnapshot::empty(),
+            last_snapshot_id: None,
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();
