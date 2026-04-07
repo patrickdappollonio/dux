@@ -2713,7 +2713,7 @@ impl App {
                 ..
             } => {
                 self.render_dim_overlay(frame);
-                let area = centered_rect_exact(60, 11, frame.area());
+                let area = centered_rect_exact(62, 12, frame.area());
                 Clear.render(area, frame.buffer_mut());
 
                 let outer = self.themed_overlay_block("Rename Agent");
@@ -2725,7 +2725,7 @@ impl App {
                     .constraints([
                         Constraint::Length(1),
                         Constraint::Length(3),
-                        Constraint::Length(2),
+                        Constraint::Length(3),
                         Constraint::Min(1),
                     ])
                     .areas(inner);
@@ -2779,11 +2779,16 @@ impl App {
                         Style::default().fg(self.theme.hint_key_fg),
                     ),
                     Span::styled(
-                        " Also rename git branch (use with care if a PR is open)",
+                        " Also rename the git branch",
                         Style::default().fg(self.theme.input_label_fg),
                     ),
                 ]);
-                Paragraph::new(checkbox_line).render(checkbox_area, frame.buffer_mut());
+                let checkbox_hint = Line::from(Span::styled(
+                    "     Open PRs will still reference the old branch name",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                Paragraph::new(vec![checkbox_line, checkbox_hint])
+                    .render(checkbox_area, frame.buffer_mut());
 
                 let confirm_key = self.bindings.label_for(Action::Confirm);
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
