@@ -36,8 +36,7 @@ const WELCOME_TIPS: &[fn(&RuntimeBindings) -> String] = &[
     },
     |b| {
         format!(
-            "Need more room? `{}` enters interactive mode, going fullscreen. `{}` exits. Focus mode: activated.",
-            b.label_for(Action::InteractAgent),
+            "Need more room? `{}` toggles interactive mode, going fullscreen. Focus mode: activated.",
             b.label_for(Action::ExitInteractive)
         )
     },
@@ -152,8 +151,8 @@ const WELCOME_TIPS: &[fn(&RuntimeBindings) -> String] = &[
     },
     |b| {
         format!(
-            "Agent keybinds clashing with dux? `{}` enters interactive mode. Most keys go straight to the agent.",
-            b.label_for(Action::InteractAgent)
+            "Agent keybinds clashing with dux? `{}` toggles interactive mode. Most keys go straight to the agent.",
+            b.label_for(Action::ExitInteractive)
         )
     },
     |_b| {
