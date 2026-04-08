@@ -34,8 +34,12 @@ const WELCOME_TIPS: &[fn(&RuntimeBindings) -> String] = &[
             b.label_for(Action::OpenPalette)
         )
     },
-    |_b| {
-        "Need more room? Toggle fullscreen from the command palette. Focus mode: activated.".into()
+    |b| {
+        format!(
+            "Need more room? `{}` enters interactive mode, going fullscreen. `{}` exits. Focus mode: activated.",
+            b.label_for(Action::InteractAgent),
+            b.label_for(Action::ExitInteractive)
+        )
     },
     |b| {
         format!(
@@ -146,9 +150,11 @@ const WELCOME_TIPS: &[fn(&RuntimeBindings) -> String] = &[
         "Curious what you changed in your config? Run `dux config diff` to see exactly what's different from the defaults."
             .into()
     },
-    |_b| {
-        "Agent keybinds clashing with dux? Toggle fullscreen from the command palette. Most keys go straight to the agent."
-            .into()
+    |b| {
+        format!(
+            "Agent keybinds clashing with dux? `{}` enters interactive mode. Most keys go straight to the agent.",
+            b.label_for(Action::InteractAgent)
+        )
     },
     |_b| {
         "Not a fan of random animal names? Turn them off in config.toml and dux will ask you for a name every time."
