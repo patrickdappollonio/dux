@@ -1097,10 +1097,10 @@ impl App {
                         let child_wants_mouse = self
                             .selected_terminal_surface_client()
                             .is_some_and(|p| p.has_mouse_mode());
-                        if child_wants_mouse {
-                            if let Some(provider) = self.selected_terminal_surface_client() {
-                                let _ = provider.write_bytes(&raw);
-                            }
+                        if child_wants_mouse
+                            && let Some(provider) = self.selected_terminal_surface_client()
+                        {
+                            let _ = provider.write_bytes(&raw);
                         }
                     }
                 }
@@ -1108,10 +1108,10 @@ impl App {
                     // Unknown intercepted action or normal forward — send to PTY,
                     // but only when not scrolled back. In scroll mode, all
                     // non-scroll input is suppressed.
-                    if !is_scrolled_back {
-                        if let Some(provider) = self.selected_terminal_surface_client() {
-                            let _ = provider.write_bytes(&raw);
-                        }
+                    if !is_scrolled_back
+                        && let Some(provider) = self.selected_terminal_surface_client()
+                    {
+                        let _ = provider.write_bytes(&raw);
                     }
                 }
             }
@@ -3271,7 +3271,7 @@ impl App {
                     }
                     Some(MouseTarget::UnstagedFile(index)) => {
                         self.set_file_selection(RightSection::Unstaged, index);
-                        if let Some(_) = index {
+                        if index.is_some() {
                             let double_click =
                                 self.register_mouse_click(MouseClickTarget::UnstagedPane);
                             if double_click {
@@ -3281,7 +3281,7 @@ impl App {
                     }
                     Some(MouseTarget::StagedFile(index)) => {
                         self.set_file_selection(RightSection::Staged, index);
-                        if let Some(_) = index {
+                        if index.is_some() {
                             let double_click =
                                 self.register_mouse_click(MouseClickTarget::StagedPane);
                             if double_click {

@@ -279,18 +279,18 @@ impl App {
                 project.current_branch.clone(),
                 Style::default().fg(self.theme.branch_fg).bg(bg),
             ));
-            if let Some(session) = self.selected_session() {
-                if session.branch_name != project.current_branch {
-                    spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
-                    spans.push(Span::styled(
-                        "agent: ",
-                        Style::default().fg(label_fg).bg(bg),
-                    ));
-                    spans.push(Span::styled(
-                        session.branch_name.clone(),
-                        Style::default().fg(self.theme.branch_fg).bg(bg),
-                    ));
-                }
+            if let Some(session) = self.selected_session()
+                && session.branch_name != project.current_branch
+            {
+                spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
+                spans.push(Span::styled(
+                    "agent: ",
+                    Style::default().fg(label_fg).bg(bg),
+                ));
+                spans.push(Span::styled(
+                    session.branch_name.clone(),
+                    Style::default().fg(self.theme.branch_fg).bg(bg),
+                ));
             }
             spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
             spans.push(Span::styled(
@@ -1137,7 +1137,7 @@ impl App {
                 .iter()
                 .map(|(s, color)| {
                     ListItem::new(Line::from(Span::styled(
-                        format!("{s}"),
+                        s.to_string(),
                         Style::default().fg(*color),
                     )))
                 })

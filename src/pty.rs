@@ -283,7 +283,7 @@ impl PtyClient {
     /// (e.g. via DECSET 1000/1002/1003). When true, non-scroll mouse
     /// events should be forwarded to the PTY rather than dropped.
     pub fn has_mouse_mode(&self) -> bool {
-        self.terminal.lock().map_or(false, |t| t.has_mouse_mode())
+        self.terminal.lock().is_ok_and(|t| t.has_mouse_mode())
     }
 
     /// Non-blocking check of the child's exit status.
