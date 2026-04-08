@@ -173,6 +173,12 @@ const WELCOME_TIPS: &[fn(&RuntimeBindings) -> String] = &[
             b.label_for(Action::ForceRedraw)
         )
     },
+    |b| {
+        format!(
+            "The command palette (`{}`) has features that don't have keybinds. Poke around, you might be surprised.",
+            b.label_for(Action::OpenPalette)
+        )
+    },
 ];
 
 /// Capitalize the first character of a string.
