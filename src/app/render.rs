@@ -163,6 +163,10 @@ const WELCOME_TIPS: &[fn(&RuntimeBindings) -> String] = &[
         "Install the `gh` CLI and your agents can create commits and pull requests. Pair it with macros or skills to match your style."
             .into()
     },
+    |_b| {
+        "All your MCP servers, tools, and hooks work out of the box. We don't add or remove anything from your setup."
+            .into()
+    },
 ];
 
 /// Capitalize the first character of a string.
