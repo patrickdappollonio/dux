@@ -3529,6 +3529,7 @@ mod tests {
             sigwinch_flag: Arc::new(AtomicBool::new(false)),
             force_redraw: false,
             welcome_tip_index: 0,
+            welcome_logo_visible: false,
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             resume_fallback_candidates: std::collections::HashSet::new(),
             syntax_cache: crate::diff::SyntaxCache::new(),

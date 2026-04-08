@@ -116,6 +116,8 @@ pub struct App {
     pub(crate) sigwinch_flag: Arc<AtomicBool>,
     pub(crate) force_redraw: bool,
     pub(crate) welcome_tip_index: usize,
+    /// Whether the ASCII logo was rendered in the previous frame.
+    pub(crate) welcome_logo_visible: bool,
     pub(crate) branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,
     /// Session IDs spawned with resume_args that should fall back to regular
     /// args if the PTY exits before producing any output.
@@ -734,6 +736,7 @@ impl App {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as usize)
                 .unwrap_or(0),
+            welcome_logo_visible: false,
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             resume_fallback_candidates: HashSet::new(),
             syntax_cache: SyntaxCache::new(),
@@ -1198,8 +1201,6 @@ impl App {
     }
 
     pub(crate) fn reload_changed_files(&mut self) {
-        // Rotate the welcome-screen tip so each session switch shows a new one.
-        self.welcome_tip_index = self.welcome_tip_index.wrapping_add(1);
         let worktree = self
             .selected_session()
             .map(|s| PathBuf::from(&s.worktree_path));

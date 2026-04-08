@@ -633,10 +633,16 @@ impl App {
 
     /// Render the ASCII "dux" logo centered in the given area, with an
     /// optional feature tip displayed below.
-    fn render_ascii_logo(&self, frame: &mut Frame, area: Rect) {
+    fn render_ascii_logo(&mut self, frame: &mut Frame, area: Rect) {
         if area.width < ASCII_LOGO_WIDTH || area.height < ASCII_LOGO_HEIGHT {
             return;
         }
+
+        // Rotate the tip when the logo becomes visible again after being hidden.
+        if !self.welcome_logo_visible {
+            self.welcome_tip_index = self.welcome_tip_index.wrapping_add(1);
+        }
+        self.welcome_logo_visible = true;
 
         let total_height = ASCII_LOGO_HEIGHT + TIP_GAP + TIP_MAX_LINES;
         let show_tip = area.width >= TIP_MAX_WIDTH && area.height >= total_height;
@@ -980,15 +986,20 @@ impl App {
             }
         }
 
-        if !rendered_content {
+        if rendered_content {
+            self.welcome_logo_visible = false;
+        } else {
             match active_surface {
                 SessionSurface::Agent => self.render_ascii_logo(frame, term_area),
-                SessionSurface::Terminal => self.render_terminal_placeholder(
-                    frame,
-                    term_area,
-                    terminal_status,
-                    session_provider_name.as_deref(),
-                ),
+                SessionSurface::Terminal => {
+                    self.welcome_logo_visible = false;
+                    self.render_terminal_placeholder(
+                        frame,
+                        term_area,
+                        terminal_status,
+                        session_provider_name.as_deref(),
+                    );
+                }
             }
         }
 
