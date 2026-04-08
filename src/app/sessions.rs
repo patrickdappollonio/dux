@@ -702,14 +702,10 @@ impl App {
         };
         match path {
             Some(p) => {
-                let clipboard = self.clipboard;
-                let tx = self.worker_tx.clone();
-                let path = p.clone();
-                std::thread::spawn(move || {
-                    let result = clipboard.copy_text(&path).map_err(|e| e.to_string());
-                    let _ = tx.send(WorkerEvent::ClipboardCopyCompleted { path, result });
-                });
-                self.set_busy(format!("Copying path to clipboard: \"{p}\"…"));
+                match self.clipboard.copy_text(&p, &self.worker_tx) {
+                    Ok(()) => self.set_busy(format!("Copying path to clipboard: \"{p}\"…")),
+                    Err(e) => self.set_error(format!("Copy path failed: {e}")),
+                }
                 Ok(())
             }
             None => {
