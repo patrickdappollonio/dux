@@ -164,7 +164,7 @@ const WELCOME_TIPS: &[fn(&RuntimeBindings) -> String] = &[
             .into()
     },
     |_b| {
-        "All your MCP servers, tools, and hooks work out of the box. We don't add or remove anything from your setup."
+        "Your MCP servers, tools, and hooks? They all just work. We don't mess with your setup. Promise."
             .into()
     },
 ];
