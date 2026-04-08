@@ -27,60 +27,132 @@ const TIP_MAX_LINES: u16 = 2;
 /// rendered). Each function receives `&RuntimeBindings` so keybinding labels
 /// stay accurate after rebinding.
 const WELCOME_TIPS: &[fn(&RuntimeBindings) -> String] = &[
+    // --- rewritten originals ---
     |b| {
         format!(
-            "`{}` opens the command palette — every action is searchable.",
+            "Lost? `{}` opens the command palette. Every action lives there, even the ones you forgot existed.",
             b.label_for(Action::OpenPalette)
         )
     },
     |b| {
         format!(
-            "`{}` toggles fullscreen on the active pane.",
+            "Need more room? `{}` goes fullscreen on the active pane. Focus mode: activated.",
             b.label_for(Action::ToggleFullscreen)
         )
     },
     |b| {
         format!(
-            "`{}` creates a new agent in the current worktree.",
+            "`{}` spawns a new agent in the current worktree. The more, the merrier.",
             b.label_for(Action::NewAgent)
         )
     },
-    |_b| "Any CLI tool can be a provider — just set its `command` in config.toml.".into(),
+    |_b| {
+        "Any CLI tool can be a provider. Just set its `command` in config.toml. No plugins, no adapters.".into()
+    },
     |b| {
         format!(
-            "`{}` switches between agent and companion terminal.",
+            "`{}` flips between agent and companion terminal. Two views, one worktree.",
             b.label_for(Action::ShowTerminal)
         )
     },
     |b| {
         format!(
-            "`{}` stages or unstages the selected file.",
+            "`{}` stages or unstages the selected file. Git add, minus the typing.",
             b.label_for(Action::StageUnstage)
         )
     },
     |b| {
         format!(
-            "`{}` auto-generates a commit message with AI.",
+            "Tired of writing commit messages? `{}` lets AI do it for you.",
             b.label_for(Action::GenerateCommitMessage)
         )
     },
     |b| {
         format!(
-            "`{}` forks the current agent into a new session.",
+            "`{}` forks the current agent into a brand new session. Cloning never felt so good.",
             b.label_for(Action::ForkAgent)
         )
     },
     |b| {
         format!(
-            "`{}` and `{}` navigate between panes.",
+            "`{}` and `{}` hop between panes. Tab your way through everything.",
             b.label_for(Action::FocusNext),
             b.label_for(Action::FocusPrev)
         )
     },
     |b| {
         format!(
-            "`{}` cycles through providers for a project.",
+            "`{}` cycles through providers. Claude today, Codex tomorrow; your call.",
             b.label_for(Action::CycleProvider)
+        )
+    },
+    // --- new tips ---
+    |_b| {
+        "The mouse works everywhere: click panes, scroll output, select files. Go ahead, click around.".into()
+    },
+    |_b| "Drag pane borders with the mouse to resize them. No keybindings required.".into(),
+    |b| {
+        format!(
+            "Each agent gets its own companion terminal. Press `{}` to spawn more than one.",
+            b.label_for(Action::ShowTerminal)
+        )
+    },
+    |b| {
+        format!(
+            "Don't need the git pane? `{}` hides it. Want it gone for good? Check the command palette.",
+            b.label_for(Action::ToggleGitPane)
+        )
+    },
+    |b| {
+        format!(
+            "The `{}` key toggles the left sidebar. Maximum screen real estate, minimum distractions.",
+            b.label_for(Action::ToggleSidebar)
+        )
+    },
+    |_b| "Every keybinding is configurable. Open config.toml and make dux truly yours.".into(),
+    |_b| {
+        "Worktrees are the secret sauce: each agent gets its own isolated branch. No conflicts, ever."
+            .into()
+    },
+    |b| {
+        format!(
+            "`{}` opens the project browser. Add worktrees from anywhere on disk.",
+            b.label_for(Action::OpenProjectBrowser)
+        )
+    },
+    |b| {
+        format!(
+            "`{}` opens the help overlay, the full keybinding reference, right in the app.",
+            b.label_for(Action::ToggleHelp)
+        )
+    },
+    |b| {
+        format!(
+            "Macros let you save and replay prompts. Configure them in config.toml, trigger with `{}`.",
+            b.label_for(Action::OpenMacroBar)
+        )
+    },
+    |_b| {
+        "Launch 5 agents on 5 worktrees and let them all work in parallel. Conflicts? Let AI sort it out."
+            .into()
+    },
+    |_b| {
+        "Tired of typing the same prompt to your AI agent over and over? Turn it into a macro!"
+            .into()
+    },
+    |_b| "Dux runs Claude the way Anthropic intended. No workarounds, no bans. Just vibes.".into(),
+    |_b| {
+        "The config file is also the documentation. Every option is configurable and the comments explain it all."
+            .into()
+    },
+    |_b| {
+        "Curious what you changed in your config? Run `dux config diff` to see exactly what's different from the defaults."
+            .into()
+    },
+    |b| {
+        format!(
+            "Agent keybinds clashing with dux? `{}` enters fullscreen interactive mode. Most keys go straight to the agent.",
+            b.label_for(Action::ToggleFullscreen)
         )
     },
 ];

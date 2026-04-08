@@ -1198,6 +1198,8 @@ impl App {
     }
 
     pub(crate) fn reload_changed_files(&mut self) {
+        // Rotate the welcome-screen tip so each session switch shows a new one.
+        self.welcome_tip_index = self.welcome_tip_index.wrapping_add(1);
         let worktree = self
             .selected_session()
             .map(|s| PathBuf::from(&s.worktree_path));
