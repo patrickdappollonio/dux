@@ -155,6 +155,10 @@ const WELCOME_TIPS: &[fn(&RuntimeBindings) -> String] = &[
             b.label_for(Action::ToggleFullscreen)
         )
     },
+    |_b| {
+        "Not a fan of random animal names? Turn them off in config.toml and dux will ask you for a name every time."
+            .into()
+    },
 ];
 
 /// Capitalize the first character of a string.
