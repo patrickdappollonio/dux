@@ -167,6 +167,12 @@ const WELCOME_TIPS: &[fn(&RuntimeBindings) -> String] = &[
         "Your MCP servers, tools, and hooks? They all just work. We don't mess with your setup. Promise."
             .into()
     },
+    |b| {
+        format!(
+            "Terminal looking glitchy? `{}` redraws the entire screen. Good as new.",
+            b.label_for(Action::ForceRedraw)
+        )
+    },
 ];
 
 /// Capitalize the first character of a string.
