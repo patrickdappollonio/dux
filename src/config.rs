@@ -50,16 +50,12 @@ pub struct KeysConfig {
 /// Which surface(s) a macro is available on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum MacroSurface {
+    #[default]
     Agent,
     Terminal,
     Both,
-}
-
-impl Default for MacroSurface {
-    fn default() -> Self {
-        Self::Agent
-    }
 }
 
 impl MacroSurface {
@@ -838,11 +834,11 @@ fn patch_table_opt_multiline(doc: &mut DocumentMut, section: &str, key: &str, va
             // the parsed value so the repr uses the multiline form.
             let escaped = escape_toml_multiline(s);
             let snippet = format!("v = \"\"\"\n{escaped}\"\"\"");
-            if let Ok(mini) = snippet.parse::<DocumentMut>() {
-                if let Some(item) = mini.get("v") {
-                    table[key] = item.clone();
-                    return;
-                }
+            if let Ok(mini) = snippet.parse::<DocumentMut>()
+                && let Some(item) = mini.get("v")
+            {
+                table[key] = item.clone();
+                return;
             }
             // Fallback: regular string (newlines escaped as \n).
             table[key] = toml_edit::value(s);

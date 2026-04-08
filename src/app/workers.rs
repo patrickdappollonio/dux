@@ -131,8 +131,7 @@ impl App {
                     for (session_id, actual_branch) in updates {
                         if let Some(session) =
                             self.sessions.iter_mut().find(|s| s.id == session_id)
-                        {
-                            if session.branch_name != actual_branch {
+                            && session.branch_name != actual_branch {
                                 logger::info(&format!(
                                     "branch sync: session {} branch changed {} -> {}",
                                     session_id, session.branch_name, actual_branch,
@@ -142,7 +141,6 @@ impl App {
                                 let _ = self.session_store.upsert_session(session);
                                 changed = true;
                             }
-                        }
                     }
                     if changed {
                         self.update_branch_sync_sessions();
@@ -322,10 +320,10 @@ impl App {
                 };
                 let mut updates = Vec::new();
                 for entry in &snapshot {
-                    if let Ok(actual) = git::current_branch(Path::new(&entry.worktree_path)) {
-                        if actual != entry.branch_name {
-                            updates.push((entry.session_id.clone(), actual));
-                        }
+                    if let Ok(actual) = git::current_branch(Path::new(&entry.worktree_path))
+                        && actual != entry.branch_name
+                    {
+                        updates.push((entry.session_id.clone(), actual));
                     }
                 }
                 if !updates.is_empty() && tx.send(WorkerEvent::BranchSyncReady(updates)).is_err() {

@@ -116,6 +116,10 @@ pub struct App {
     pub(crate) sigwinch_flag: Arc<AtomicBool>,
     pub(crate) force_redraw: bool,
     pub(crate) welcome_tip_index: usize,
+    /// Whether the ASCII logo was rendered in the previous frame.
+    pub(crate) welcome_logo_visible: bool,
+    /// The left-pane selection index when the logo last rendered a tip.
+    pub(crate) welcome_tip_selection: usize,
     pub(crate) branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,
     /// Session IDs spawned with resume_args that should fall back to regular
     /// args if the PTY exits before producing any output.
@@ -734,6 +738,8 @@ impl App {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as usize)
                 .unwrap_or(0),
+            welcome_logo_visible: false,
+            welcome_tip_selection: usize::MAX,
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             resume_fallback_candidates: HashSet::new(),
             syntax_cache: SyntaxCache::new(),

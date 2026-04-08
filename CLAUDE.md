@@ -30,6 +30,10 @@ Principles that guide every decision in dux. If a change conflicts with a tenet,
 - **Git operations are conservative.** Source checkout refresh uses `--ff-only`. Destructive operations require confirmation.
 - **Prefer explicit failure over silent waiting.** If something fails, say so immediately with context.
 
+### Tone
+
+- **Welcome tips are playful and sassy.** They should feel fun, not like a manual. Lead with surprise or delight, highlight non-obvious features that differentiate dux, and keep keybinding references secondary to the feature discovery. Avoid dry "press X to do Y" phrasing.
+
 ### Quality
 
 - **Prove your work with tests.** Every change should include unit tests. When feasible and low-lift, add integration tests as well.

@@ -142,10 +142,10 @@ impl TextInput {
 
     pub fn insert_char(&mut self, ch: char) {
         let index = clamp_cursor(&self.text, self.cursor);
-        if let Some(filter) = self.char_filter {
-            if !filter(&self.text, index, ch) {
-                return;
-            }
+        if let Some(filter) = self.char_filter
+            && !filter(&self.text, index, ch)
+        {
+            return;
         }
         self.text.insert(index, ch);
         self.cursor = index + ch.len_utf8();
