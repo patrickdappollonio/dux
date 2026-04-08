@@ -20,7 +20,7 @@ const TIP_MAX_WIDTH: u16 = 47;
 /// Blank lines between the bottom of the logo and the tip.
 const TIP_GAP: u16 = 2;
 /// Maximum number of wrapped lines a tip may occupy.
-const TIP_MAX_LINES: u16 = 2;
+const TIP_MAX_LINES: u16 = 3;
 
 /// Welcome-screen tips shown beneath the ASCII logo. Wrap text in backticks
 /// to highlight it in an accent color (the backticks themselves are not
