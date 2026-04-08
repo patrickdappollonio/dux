@@ -638,11 +638,14 @@ impl App {
             return;
         }
 
-        // Rotate the tip when the logo becomes visible again after being hidden.
-        if !self.welcome_logo_visible {
+        // Rotate the tip when the logo becomes visible again after being
+        // hidden, or when the selected left-pane item changes while the logo
+        // stays visible (e.g. navigating between projects).
+        if !self.welcome_logo_visible || self.welcome_tip_selection != self.selected_left {
             self.welcome_tip_index = self.welcome_tip_index.wrapping_add(1);
         }
         self.welcome_logo_visible = true;
+        self.welcome_tip_selection = self.selected_left;
 
         let total_height = ASCII_LOGO_HEIGHT + TIP_GAP + TIP_MAX_LINES;
         let show_tip = area.width >= TIP_MAX_WIDTH && area.height >= total_height;
