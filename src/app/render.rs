@@ -3786,8 +3786,7 @@ impl App {
             Cell::from("Procs").style(header_style),
             Cell::from("CPU %").style(header_style),
             Cell::from("RSS").style(header_style),
-        ])
-        .bottom_margin(1);
+        ]);
 
         let table_rows: Vec<Row> = rows
             .iter()
@@ -3827,9 +3826,7 @@ impl App {
             Constraint::Length(12),
         ];
 
-        let table = Table::new(table_rows, widths)
-            .header(header)
-            .style(Style::default().bg(self.theme.overlay_bg));
+        let table = Table::new(table_rows, widths).header(header);
 
         let mut table_state = TableState::default().with_offset(scroll_offset as usize);
         StatefulWidget::render(table, inner, frame.buffer_mut(), &mut table_state);

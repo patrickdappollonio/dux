@@ -1060,13 +1060,18 @@ impl App {
             if let Some(pty) = self.providers.get(&session.id) {
                 if let Some(pid) = pty.child_process_id() {
                     let title = session.title.as_deref().unwrap_or(&session.branch_name);
-                    targets.push((format!("Agent: {title}"), pid));
+                    let provider = session.provider.as_str();
+                    targets.push((format!("Agent ({provider}): {title}"), pid));
                 }
             }
         }
         for terminal in self.companion_terminals.values() {
             if let Some(pid) = terminal.client.child_process_id() {
-                targets.push((format!("Terminal: {}", terminal.label), pid));
+                let label = match &terminal.foreground_cmd {
+                    Some(cmd) => format!("Terminal ({cmd}): {}", terminal.label),
+                    None => format!("Terminal: {}", terminal.label),
+                };
+                targets.push((label, pid));
             }
         }
         targets
