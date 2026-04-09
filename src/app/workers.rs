@@ -171,13 +171,37 @@ impl App {
                         self.pr_last_checked.insert(session_id.clone(), now);
                         match maybe_pr {
                             Some(pr) => {
-                                // Persist the PR association so it survives restarts
-                                // and squash-merge branch deletions.
+                                // Persist the PR association (including state) so it
+                                // survives restarts and squash-merge branch deletions.
+                                let state_str = match pr.state {
+                                    crate::model::PrState::Open => "OPEN",
+                                    crate::model::PrState::Merged => "MERGED",
+                                    crate::model::PrState::Closed => "CLOSED",
+                                };
                                 let _ = self.session_store.upsert_pr(
                                     &session_id,
                                     pr.number,
                                     &pr.owner_repo,
+                                    state_str,
                                 );
+                                // Preserve existing title if the incoming one is empty
+                                // (happens for reconstructed terminal-state PRs).
+                                let pr = if pr.title.is_empty() {
+                                    if let Some(existing) = self.pr_statuses.get(&session_id) {
+                                        if existing.number == pr.number {
+                                            crate::model::PrInfo {
+                                                title: existing.title.clone(),
+                                                ..pr
+                                            }
+                                        } else {
+                                            pr
+                                        }
+                                    } else {
+                                        pr
+                                    }
+                                } else {
+                                    pr
+                                };
                                 self.pr_statuses.insert(session_id, pr);
                                 changed = true;
                             }
@@ -628,9 +652,9 @@ impl App {
         // Load known PRs from the database so the worker can use `gh pr view`
         // for sessions that already have a persisted PR association.
         let known_prs = self.session_store.load_all_latest_prs().unwrap_or_default();
-        let known_map: HashMap<String, (u64, String)> = known_prs
+        let known_map: HashMap<String, (u64, String, String)> = known_prs
             .into_iter()
-            .map(|(sid, num, repo)| (sid, (num, repo)))
+            .map(|(sid, num, repo, state)| (sid, (num, repo, state)))
             .collect();
 
         if let Ok(mut guard) = self.pr_sync_sessions.lock() {
@@ -998,16 +1022,30 @@ fn run_pr_sync(
 }
 
 fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<crate::model::PrInfo> {
-    use crate::model::{PrInfo, PrState};
-
     let owner_repo = git::remote_owner_repo(Path::new(&entry.worktree_path))
-        .or_else(|| entry.known_pr.as_ref().map(|(_, repo)| repo.clone()))?;
+        .or_else(|| entry.known_pr.as_ref().map(|(_, repo, _)| repo.clone()))?;
 
-    // Strategy 1: if we already know a PR, check it by number using `gh pr view`.
-    // This works even after the branch is deleted (e.g. squash merge).
-    if let Some((known_number, ref known_repo)) = entry.known_pr {
+    if let Some((known_number, ref known_repo, ref known_state)) = entry.known_pr {
+        let is_terminal = known_state == "MERGED" || known_state == "CLOSED";
+
+        if is_terminal {
+            // Terminal state: skip `gh pr view` — the PR won't change back.
+            // Only try to discover a *newer* PR via branch listing.
+            if let Some(newer) =
+                discover_pr_by_branch(&entry.branch_name, &owner_repo, &entry.session_id)
+            {
+                if newer.number > known_number {
+                    return Some(newer);
+                }
+            }
+            // No newer PR found — reconstruct from stored data so the UI still
+            // shows the merged/closed state without hitting the network.
+            return reconstruct_from_stored(known_number, known_repo, known_state);
+        }
+
+        // Open PR: refresh its current state via `gh pr view`.
         if let Some(pr) = view_pr_by_number(known_number, known_repo, &entry.session_id) {
-            // Also try to discover a newer PR via list (there might be a new one).
+            // Also check if a newer PR was opened.
             if let Some(newer) =
                 discover_pr_by_branch(&entry.branch_name, &owner_repo, &entry.session_id)
             {
@@ -1019,8 +1057,33 @@ fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<crate::model::PrInfo> {
         }
     }
 
-    // Strategy 2: discover PR by branch name (catches new PRs).
+    // No known PR — discover by branch name.
     discover_pr_by_branch(&entry.branch_name, &owner_repo, &entry.session_id)
+}
+
+/// Reconstruct a PrInfo from stored data without a network call.
+/// Used for terminal states (merged/closed) that don't need refreshing.
+fn reconstruct_from_stored(
+    number: u64,
+    owner_repo: &str,
+    state_str: &str,
+) -> Option<crate::model::PrInfo> {
+    use crate::model::{PrInfo, PrState};
+    let state = match state_str {
+        "MERGED" => PrState::Merged,
+        "CLOSED" => PrState::Closed,
+        "OPEN" => PrState::Open,
+        _ => return None,
+    };
+    // We don't have the title stored, but the in-memory PrInfo from the
+    // previous check should still be in pr_statuses. Return a placeholder
+    // title that will be overridden if the in-memory version exists.
+    Some(PrInfo {
+        number,
+        state,
+        title: String::new(),
+        owner_repo: owner_repo.to_string(),
+    })
 }
 
 /// Check a known PR by number using `gh pr view`.

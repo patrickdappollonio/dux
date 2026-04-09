@@ -171,8 +171,9 @@ pub(crate) struct PrSyncEntry {
     pub(crate) branch_name: String,
     pub(crate) worktree_path: String,
     /// If we already know a PR for this session, store the latest number + repo
-    /// so the worker can use `gh pr view` (works even after branch deletion).
-    pub(crate) known_pr: Option<(u64, String)>,
+    /// + state so the worker can use `gh pr view` (works even after branch
+    /// deletion) and skip terminal states (merged/closed).
+    pub(crate) known_pr: Option<(u64, String, String)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
