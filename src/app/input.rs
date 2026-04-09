@@ -1146,6 +1146,35 @@ impl App {
     }
 
     fn handle_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if let PromptState::ResourceMonitor {
+            scroll_offset,
+            rows,
+            ..
+        } = &mut self.prompt
+        {
+            if key.code == KeyCode::Esc {
+                self.prompt = PromptState::None;
+                return Ok(false);
+            }
+            let max_offset = rows.len().saturating_sub(1) as u16;
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *scroll_offset = scroll_offset.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *scroll_offset = (*scroll_offset + 1).min(max_offset);
+                }
+                KeyCode::PageUp => {
+                    *scroll_offset = scroll_offset.saturating_sub(10);
+                }
+                KeyCode::PageDown => {
+                    *scroll_offset = (*scroll_offset + 10).min(max_offset);
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+
         if let PromptState::DebugInput {
             lines,
             scroll_offset,
@@ -2789,6 +2818,25 @@ impl App {
     }
 
     fn handle_prompt_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if let PromptState::ResourceMonitor {
+            scroll_offset,
+            rows,
+            ..
+        } = &mut self.prompt
+        {
+            let max_offset = rows.len().saturating_sub(1) as u16;
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    *scroll_offset = scroll_offset.saturating_sub(3);
+                }
+                MouseEventKind::ScrollDown => {
+                    *scroll_offset = (*scroll_offset + 3).min(max_offset);
+                }
+                _ => {}
+            }
+            return false;
+        }
+
         if let PromptState::DebugInput {
             lines,
             scroll_offset,
@@ -3532,6 +3580,7 @@ mod tests {
             terminal_return_to_list: false,
             terminal_counter: 0,
             create_agent_in_flight: false,
+            resource_stats_in_flight: false,
             last_pty_size: (0, 0),
             last_pty_activity: std::collections::HashMap::new(),
             prev_scrollback_offset: 0,

@@ -162,6 +162,20 @@ impl App {
                         *selected = 0;
                     }
                 }
+                WorkerEvent::ResourceStatsReady(stats) => {
+                    self.resource_stats_in_flight = false;
+                    if let PromptState::ResourceMonitor {
+                        rows,
+                        last_refresh,
+                        first_sample,
+                        ..
+                    } = &mut self.prompt
+                    {
+                        *rows = stats;
+                        *last_refresh = Instant::now();
+                        *first_sample = false;
+                    }
+                }
             }
         }
         // Detect PTY exits.
@@ -280,6 +294,17 @@ impl App {
         if self.tick_count.is_multiple_of(20) {
             for terminal in self.companion_terminals.values_mut() {
                 terminal.foreground_cmd = terminal.client.foreground_process_name();
+            }
+        }
+
+        // Spawn a background worker to refresh resource monitor stats when
+        // the overlay is open and enough wall-clock time has elapsed (~2s).
+        if let PromptState::ResourceMonitor {
+            ref last_refresh, ..
+        } = self.prompt
+        {
+            if last_refresh.elapsed() >= Duration::from_secs(2) {
+                self.spawn_resource_stats_worker();
             }
         }
 

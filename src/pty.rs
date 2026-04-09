@@ -329,6 +329,11 @@ impl PtyClient {
         self.child.try_wait().ok().flatten()
     }
 
+    /// Returns the PID of the shell process spawned in this PTY.
+    pub fn child_process_id(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
     /// Returns the name of the foreground process running in this PTY, or
     /// `None` if the shell itself is in the foreground (idle).
     ///

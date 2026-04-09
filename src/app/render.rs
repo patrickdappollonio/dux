@@ -3059,6 +3059,17 @@ impl App {
                 // Full rendering implemented in Task #5.
                 self.render_edit_macros(frame);
             }
+            PromptState::ResourceMonitor {
+                rows,
+                scroll_offset,
+                first_sample,
+                ..
+            } => {
+                let rows = rows.clone();
+                let scroll_offset = *scroll_offset;
+                let first_sample = *first_sample;
+                self.render_resource_monitor(frame, &rows, scroll_offset, first_sample);
+            }
             PromptState::DebugInput {
                 lines,
                 scroll_offset,
@@ -3744,6 +3755,103 @@ impl App {
         "Agent".to_string()
     }
 
+    fn render_resource_monitor(
+        &mut self,
+        frame: &mut Frame,
+        rows: &[ResourceStats],
+        scroll_offset: u16,
+        first_sample: bool,
+    ) {
+        use ratatui::widgets::{Cell, Row, Table, TableState};
+
+        self.render_dim_overlay(frame);
+        let popup = centered_rect(85, 78, frame.area());
+        Clear.render(popup, frame.buffer_mut());
+
+        let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(popup);
+        let content_area = chunks[0];
+        let hint_area = chunks[1];
+
+        let block = self.themed_overlay_block(" Resource Monitor ");
+        let inner = block.inner(content_area);
+        block.render(content_area, frame.buffer_mut());
+
+        let header_style = Style::default()
+            .fg(self.theme.help_section_header_fg)
+            .add_modifier(Modifier::BOLD);
+
+        let header = Row::new(vec![
+            Cell::from("Name").style(header_style),
+            Cell::from("PID").style(header_style),
+            Cell::from("Procs").style(header_style),
+            Cell::from("CPU %").style(header_style),
+            Cell::from("RSS").style(header_style),
+        ]);
+
+        let table_rows: Vec<Row> = rows
+            .iter()
+            .map(|stat| {
+                let pid_str = stat.pid.map(|p| p.to_string()).unwrap_or_default();
+                let cpu_str = if first_sample {
+                    format!("~{:.1}%", stat.cpu_percent)
+                } else {
+                    format!("{:.1}%", stat.cpu_percent)
+                };
+                let rss_str = format_bytes(stat.rss_bytes);
+                let procs_str = stat.process_count.to_string();
+
+                let is_total = stat.label == "TOTAL";
+                let style = if is_total {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+
+                Row::new(vec![
+                    Cell::from(stat.label.clone()),
+                    Cell::from(pid_str),
+                    Cell::from(procs_str),
+                    Cell::from(cpu_str),
+                    Cell::from(rss_str),
+                ])
+                .style(style)
+            })
+            .collect();
+
+        let widths = [
+            Constraint::Min(30),
+            Constraint::Length(8),
+            Constraint::Length(6),
+            Constraint::Length(8),
+            Constraint::Length(12),
+        ];
+
+        let table = Table::new(table_rows, widths).header(header);
+
+        let mut table_state = TableState::default().with_offset(scroll_offset as usize);
+        StatefulWidget::render(table, inner, frame.buffer_mut(), &mut table_state);
+
+        // Footer hint.
+        let hint = Line::from(vec![
+            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" close  "),
+            Span::styled("Scroll", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" navigate  "),
+            Span::styled(
+                "refreshes every ~2s",
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+        ]);
+        let hint_para = Paragraph::new(hint)
+            .alignment(ratatui::layout::Alignment::Center)
+            .style(
+                Style::default()
+                    .fg(self.theme.hint_desc_fg)
+                    .add_modifier(Modifier::DIM),
+            );
+        hint_para.render(hint_area, frame.buffer_mut());
+    }
+
     fn render_dim_overlay(&self, frame: &mut Frame) {
         let full = frame.area();
         // Keep the statusline (bottom rows) undimmed so errors stay visible.
@@ -3781,6 +3889,21 @@ fn pty_cell_colors(fg: Color, bg: Color, is_input: bool, theme: &Theme) -> (Colo
             theme.overlay_dim_bg
         };
         (theme.overlay_dim_fg, dimmed_bg)
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.0} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes} B")
     }
 }
 
@@ -4122,5 +4245,32 @@ mod tests {
             pty_cell_colors(fg, Color::Reset, false, &theme),
             (theme.overlay_dim_fg, Color::Reset)
         );
+    }
+
+    #[test]
+    fn format_bytes_zero() {
+        assert_eq!(format_bytes(0), "0 B");
+    }
+
+    #[test]
+    fn format_bytes_below_kib() {
+        assert_eq!(format_bytes(1023), "1023 B");
+    }
+
+    #[test]
+    fn format_bytes_exactly_one_kib() {
+        assert_eq!(format_bytes(1024), "1 KiB");
+    }
+
+    #[test]
+    fn format_bytes_mib_range() {
+        assert_eq!(format_bytes(1024 * 1024), "1.0 MiB");
+        assert_eq!(format_bytes(1024 * 1024 * 512), "512.0 MiB");
+    }
+
+    #[test]
+    fn format_bytes_gib_range() {
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GiB");
+        assert_eq!(format_bytes(1024 * 1024 * 1024 * 3), "3.0 GiB");
     }
 }
