@@ -1414,7 +1414,7 @@ impl App {
 
         if let Some(overlay) = self.commit_input.overlay() {
             // Overlay (e.g. "Generating commit message…") with animated dots.
-            let dots = ".".repeat((self.tick_count as usize / 5) % 4);
+            let dots = ".".repeat((self.start_time.elapsed().as_millis() as usize / 500) % 4);
             let text = format!("{overlay}{dots}");
             Paragraph::new(text)
                 .style(Style::default().fg(self.theme.hint_desc_fg))
@@ -1893,12 +1893,8 @@ impl App {
                         .collect()
                 };
                 let items = if *loading {
-                    let spinner = match (self.tick_count / 2) % 4 {
-                        0 => "⠋",
-                        1 => "⠙",
-                        2 => "⠹",
-                        _ => "⠸",
-                    };
+                    let idx = self.spinner_frame_index();
+                    let spinner = crate::theme::SPINNER_FRAMES[idx];
                     vec![ListItem::new(Line::from(vec![
                         Span::styled(
                             format!("{spinner} "),

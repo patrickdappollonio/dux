@@ -973,8 +973,7 @@ impl App {
     /// time (80ms per frame). Unlike `tick_count`, this stays constant-speed
     /// regardless of event loop frequency.
     pub(crate) fn spinner_frame_index(&self) -> usize {
-        ((self.start_time.elapsed().as_millis() / 80) as usize)
-            % crate::theme::SPINNER_FRAMES.len()
+        ((self.start_time.elapsed().as_millis() / 80) as usize) % crate::theme::SPINNER_FRAMES.len()
     }
 
     /// Poll each PTY provider for recent data and update the per-agent
