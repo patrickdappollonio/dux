@@ -3514,6 +3514,7 @@ mod tests {
             last_diff_visual_lines: 0,
             theme: Theme::default_dark(),
             tick_count: 0,
+            start_time: std::time::Instant::now(),
             readonly_nudge_tick: None,
             watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
             has_active_processes: Arc::new(AtomicBool::new(false)),

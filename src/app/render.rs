@@ -441,8 +441,7 @@ impl App {
                         if matches!(session.status, crate::model::SessionStatus::Active)
                             && self.is_agent_streaming(&session.id)
                         {
-                            let idx =
-                                (self.tick_count as usize) % crate::theme::SPINNER_FRAMES.len();
+                            let idx = self.spinner_frame_index();
                             (
                                 crate::theme::SPINNER_FRAMES[idx].to_string(),
                                 self.theme.session_active,
@@ -853,7 +852,7 @@ impl App {
 
             if !provider.has_output() {
                 // Show a centered loading card until the PTY produces output.
-                let idx = (self.tick_count as usize) % crate::theme::SPINNER_FRAMES.len();
+                let idx = self.spinner_frame_index();
                 let spinner = crate::theme::SPINNER_FRAMES[idx];
                 let (label_spans, label_len) = match session_provider_name.as_deref() {
                     Some(name) => {
