@@ -4171,9 +4171,15 @@ fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {
 }
 
 impl App {
-    /// Render the GitHub PR pill as a single-line rounded pill using
-    /// Powerline half-circle glyphs for the caps and a solid background:
-    /// ` owner/repo#1234 │ PR title ellipsized… `
+    /// Render the GitHub PR pill as a single-line pill using Unicode
+    /// half-block characters for the caps and a solid background:
+    /// `▐ owner/repo#1234 │ PR title ellipsized… ▌`
+    ///
+    /// The left cap `▐` (U+2590) paints the right half of the cell in the
+    /// state color; the right cap `▌` (U+258C) paints the left half. This
+    /// creates a pill-like shape without requiring Powerline/Nerd Fonts.
+    /// The `│` divider uses terminal default colors so it blends with the
+    /// user's background.
     fn render_pr_banner(&self, frame: &mut Frame, area: Rect, pr: &crate::model::PrInfo) {
         use crate::model::PrState;
 
@@ -4187,16 +4193,17 @@ impl App {
             PrState::Closed => self.theme.pr_closed_bg,
         };
         let fg = self.theme.pr_banner_fg;
-        // Half-circle caps: foreground is the pill color, background is terminal default.
+        // Half-block caps: fg is the pill color, bg is terminal default.
         let cap_style = Style::default().fg(bg);
         // Inner content: white text on colored background.
         let text_style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
         let title_style = Style::default().fg(fg).bg(bg);
-        let divider_style = Style::default().fg(fg).bg(bg);
+        // Divider uses terminal defaults so it blends with the background.
+        let divider_style = Style::default();
 
-        // Powerline rounded glyphs.
-        let left_cap = "\u{e0b6}"; //
-        let right_cap = "\u{e0b4}"; //
+        // Half-block caps (universally supported Unicode).
+        let left_cap = "\u{2590}"; // ▐ — right half block
+        let right_cap = "\u{258c}"; // ▌ — left half block
 
         let left_text = format!(" {}#{} ", pr.owner_repo, pr.number);
         let left_w = left_text.len();
