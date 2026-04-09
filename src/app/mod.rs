@@ -130,6 +130,20 @@ pub struct App {
     /// The left-pane selection index when the logo last rendered a tip.
     pub(crate) welcome_tip_selection: usize,
     pub(crate) branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,
+    pub(crate) gh_status: crate::model::GhStatus,
+    pub(crate) github_integration_enabled: bool,
+    pub(crate) pr_statuses: HashMap<String, crate::model::PrInfo>,
+    pub(crate) pr_sync_sessions: Arc<Mutex<Vec<PrSyncEntry>>>,
+    pub(crate) pr_sync_enabled: Arc<AtomicBool>,
+    /// Timestamps of the last PR check per session, to avoid hammering on rapid
+    /// state transitions.
+    pub(crate) pr_last_checked: HashMap<String, Instant>,
+    /// File-system watcher for `.git/refs/heads/` directories. `None` if the
+    /// watcher could not be created (graceful fallback to poll-only).
+    pub(crate) refs_watcher: Option<Arc<Mutex<notify::RecommendedWatcher>>>,
+    /// Maps watched worktree paths back to session IDs so the refs watcher
+    /// can route change events.
+    pub(crate) refs_watch_paths: HashMap<PathBuf, String>,
     /// Session IDs spawned with resume_args that should fall back to regular
     /// args if the PTY exits before producing any output.
     pub(crate) resume_fallback_candidates: HashSet<String>,
@@ -148,6 +162,21 @@ pub(crate) struct BranchSyncEntry {
     pub(crate) session_id: String,
     pub(crate) worktree_path: String,
     pub(crate) branch_name: String,
+}
+
+/// Snapshot of session data shared with the PR-sync background worker.
+#[derive(Clone, Debug)]
+pub(crate) struct PrSyncEntry {
+    pub(crate) session_id: String,
+    pub(crate) branch_name: String,
+    pub(crate) worktree_path: String,
+    /// If we already know a PR for this session, the worker can use `gh pr view`
+    /// (works even after branch deletion) and skip terminal states (merged/closed).
+    pub(crate) known_pr: Option<crate::storage::StoredPr>,
+    /// Whether the agent process has exited. Used to skip PR discovery calls
+    /// for sessions that are both exited and in a terminal PR state — nobody
+    /// is pushing to that branch anymore.
+    pub(crate) agent_exited: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -653,6 +682,9 @@ pub(crate) enum WorkerEvent {
         result: Result<(), String>,
     },
     ResourceStatsReady(Vec<ResourceStats>),
+    GhStatusChecked(crate::model::GhStatus),
+    PrStatusReady(Vec<(String, Option<crate::model::PrInfo>)>),
+    RefsChanged(String),
 }
 
 mod input;
@@ -695,6 +727,7 @@ impl App {
             bindings.label_for(Action::NewAgent),
             bindings.label_for(Action::ToggleHelp),
         );
+        let gh_integration_val = config.ui.github_integration;
         let mut app = Self {
             show_diff_line_numbers: config.ui.show_diff_line_numbers,
             left_width_pct: config.ui.left_width_pct,
@@ -773,12 +806,21 @@ impl App {
             welcome_logo_visible: false,
             welcome_tip_selection: usize::MAX,
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
+            gh_status: crate::model::GhStatus::Unknown,
+            github_integration_enabled: gh_integration_val,
+            pr_statuses: HashMap::new(),
+            pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
+            pr_sync_enabled: Arc::new(AtomicBool::new(false)),
+            pr_last_checked: HashMap::new(),
+            refs_watcher: None,
+            refs_watch_paths: HashMap::new(),
             resume_fallback_candidates: HashSet::new(),
             syntax_cache: SyntaxCache::new(),
             snapshot_buf: TerminalSnapshot::empty(),
             last_snapshot_id: None,
         };
         app.restore_sessions();
+        app.seed_pr_statuses_from_db();
         app.rebuild_left_items();
         app.reload_changed_files();
         app.update_branch_sync_sessions();
@@ -788,6 +830,7 @@ impl App {
     pub fn run(&mut self) -> Result<()> {
         self.spawn_changed_files_poller();
         self.spawn_branch_sync_worker();
+        self.spawn_gh_status_check();
         let mut terminal = ratatui::init();
         execute!(stdout(), EnableMouseCapture)?;
 
@@ -950,6 +993,39 @@ impl App {
         }
     }
 
+    /// Populate the in-memory PR status map from the database so the UI shows
+    /// PR state immediately on startup, before the first background poll.
+    fn seed_pr_statuses_from_db(&mut self) {
+        if !self.github_integration_enabled {
+            return;
+        }
+        let stored = self.session_store.load_all_latest_prs().unwrap_or_default();
+        for pr in stored {
+            use crate::model::{PrInfo, PrState};
+            let state = match pr.state.as_str() {
+                "OPEN" => PrState::Open,
+                "MERGED" => PrState::Merged,
+                "CLOSED" => PrState::Closed,
+                _ => continue,
+            };
+            self.pr_statuses.insert(
+                pr.session_id,
+                PrInfo {
+                    number: pr.pr_number,
+                    state,
+                    title: pr.title,
+                    owner_repo: pr.owner_repo,
+                },
+            );
+        }
+        if !self.pr_statuses.is_empty() {
+            logger::info(&format!(
+                "[gh-integration] seeded {} PR statuses from database",
+                self.pr_statuses.len(),
+            ));
+        }
+    }
+
     pub(crate) fn close_top_overlay(&mut self) -> bool {
         if matches!(self.fullscreen_overlay, FullscreenOverlay::Terminal) {
             let return_to_list = self.terminal_return_to_list;
@@ -1057,12 +1133,12 @@ impl App {
     fn resource_monitor_targets(&self) -> Vec<(String, u32)> {
         let mut targets = Vec::new();
         for session in &self.sessions {
-            if let Some(pty) = self.providers.get(&session.id) {
-                if let Some(pid) = pty.child_process_id() {
-                    let title = session.title.as_deref().unwrap_or(&session.branch_name);
-                    let provider = session.provider.as_str();
-                    targets.push((format!("Agent ({provider}): {title}"), pid));
-                }
+            if let Some(pty) = self.providers.get(&session.id)
+                && let Some(pid) = pty.child_process_id()
+            {
+                let title = session.title.as_deref().unwrap_or(&session.branch_name);
+                let provider = session.provider.as_str();
+                targets.push((format!("Agent ({provider}): {title}"), pid));
             }
         }
         for terminal in self.companion_terminals.values() {
@@ -1177,6 +1253,29 @@ impl App {
                 self.set_info(format!(
                     "Diff line numbers {state}. Press {palette_key} to open the palette and toggle back."
                 ));
+                Ok(())
+            }
+            "toggle-github-integration" => {
+                self.github_integration_enabled = !self.github_integration_enabled;
+                self.config.ui.github_integration = self.github_integration_enabled;
+                let _ = save_config(&self.paths.config_path, &self.config, &self.bindings);
+                if self.github_integration_enabled
+                    && matches!(self.gh_status, crate::model::GhStatus::Available)
+                {
+                    self.update_pr_sync_sessions();
+                    self.spawn_initial_pr_refresh();
+                    self.pr_sync_enabled.store(true, Ordering::Relaxed);
+                } else if !self.github_integration_enabled {
+                    self.pr_statuses.clear();
+                    self.pr_sync_enabled.store(false, Ordering::Relaxed);
+                    self.rebuild_left_items();
+                }
+                let state = if self.github_integration_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                self.set_info(format!("GitHub integration {state}."));
                 Ok(())
             }
             "force-redraw" => {
@@ -1332,6 +1431,7 @@ impl App {
     }
 
     pub(crate) fn reload_changed_files(&mut self) {
+        let session_id = self.selected_session().map(|s| s.id.clone());
         let worktree = self
             .selected_session()
             .map(|s| PathBuf::from(&s.worktree_path));
@@ -1345,6 +1445,10 @@ impl App {
         self.staged_files = staged;
         self.unstaged_files = unstaged;
         self.clamp_files_cursor();
+        // Opportunistically check PR status for the newly-selected session.
+        if let Some(sid) = session_id {
+            self.spawn_pr_check_for_session(&sid);
+        }
     }
 
     pub(crate) fn selected_changed_file(&self) -> Option<&ChangedFile> {

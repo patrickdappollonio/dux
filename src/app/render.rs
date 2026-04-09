@@ -450,11 +450,16 @@ impl App {
                             let (d, c) = self.theme.session_dot(&session.status);
                             (d.to_string(), c)
                         };
+                    let label_color = match self.pr_statuses.get(&session.id).map(|pr| &pr.state) {
+                        Some(crate::model::PrState::Merged) => self.theme.pr_merged_label,
+                        Some(crate::model::PrState::Closed) => self.theme.pr_closed_label,
+                        _ => dot_color,
+                    };
                     ListItem::new(Line::from(
                         vec![
                             Span::styled(connector, Style::default().fg(self.theme.project_icon)),
-                            Span::styled(format!("{dot} "), Style::default().fg(dot_color)),
-                            Span::styled(label, Style::default().fg(dot_color)),
+                            Span::styled(format!("{dot} "), Style::default().fg(label_color)),
+                            Span::styled(label, Style::default().fg(label_color)),
                             Span::styled(
                                 format!(" ({})", session.provider.as_str()),
                                 Style::default().fg(self.theme.provider_label_fg),
@@ -535,9 +540,34 @@ impl App {
 
     fn render_center(&mut self, frame: &mut Frame, area: Rect) {
         let focused = self.focus == FocusPane::Center;
+
+        // Determine if a PR banner should be shown above the center pane.
+        let is_input = matches!(
+            (self.input_target, self.session_surface),
+            (InputTarget::Agent, SessionSurface::Agent)
+                | (InputTarget::Terminal, SessionSurface::Terminal)
+        );
+        let pr_info = if !is_input {
+            self.selected_session()
+                .and_then(|s| self.pr_statuses.get(&s.id))
+                .cloned()
+        } else {
+            None
+        };
+        let pr_banner_height: u16 = if pr_info.is_some() { 1 } else { 0 };
+
+        let [pr_area, pane_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(pr_banner_height), Constraint::Min(1)])
+            .areas(area);
+
+        if let Some(ref pr) = pr_info {
+            self.render_pr_banner(frame, pr_area, pr);
+        }
+
         match &self.center_mode {
             CenterMode::Diff { .. } => {
-                self.render_diff(frame, area, focused);
+                self.render_diff(frame, pane_area, focused);
             }
             CenterMode::Agent if !matches!(self.fullscreen_overlay, FullscreenOverlay::None) => {
                 // Skip agent rendering here — fullscreen overlay handles it.
@@ -545,14 +575,14 @@ impl App {
                 // per frame (once to the small pane, once to the overlay).
                 let title = self.center_pane_agent_title();
                 self.themed_block(&title, focused)
-                    .render(area, frame.buffer_mut());
+                    .render(pane_area, frame.buffer_mut());
             }
             CenterMode::Agent => {
                 let title = self.center_pane_agent_title();
                 // Center pane always renders the agent; terminal is an overlay.
                 let saved = self.session_surface;
                 self.session_surface = SessionSurface::Agent;
-                self.render_agent_terminal(frame, area, &title, focused);
+                self.render_agent_terminal(frame, pane_area, &title, focused);
                 self.session_surface = saved;
             }
         }
@@ -1711,6 +1741,52 @@ impl App {
                     },
                     Style::default().fg(self.theme.hint_desc_fg),
                 ),
+            ]));
+        }
+
+        // GitHub integration status.
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "GitHub integration",
+            Style::default()
+                .fg(self.theme.help_section_header_fg)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )));
+        {
+            use crate::model::GhStatus;
+            let (icon, desc) = if !self.github_integration_enabled {
+                (
+                    "○",
+                    "Disabled — enable via command palette (toggle-github-integration)".to_string(),
+                )
+            } else {
+                match self.gh_status {
+                    GhStatus::Unknown => ("◐", "Checking gh CLI availability…".to_string()),
+                    GhStatus::NotInstalled => (
+                        "⚠",
+                        "gh CLI not found — install from https://cli.github.com".to_string(),
+                    ),
+                    GhStatus::NotAuthenticated => (
+                        "⚠",
+                        "gh CLI not authenticated — run: gh auth login".to_string(),
+                    ),
+                    GhStatus::Available => {
+                        let count = self.pr_statuses.len();
+                        let noun = if count == 1 { "session" } else { "sessions" };
+                        ("✓", format!("Active — tracking PRs for {count} {noun}"))
+                    }
+                }
+            };
+            let icon_color = match self.gh_status {
+                GhStatus::Available if self.github_integration_enabled => self.theme.session_active,
+                _ if !self.github_integration_enabled => self.theme.session_exited,
+                _ => self.theme.warning_fg,
+            };
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(icon, Style::default().fg(icon_color)),
+                Span::raw("  "),
+                Span::styled(desc, Style::default().fg(self.theme.hint_desc_fg)),
             ]));
         }
 
@@ -3554,7 +3630,12 @@ impl App {
             Some(session) => {
                 let provider = capitalize(session.provider.as_str());
                 let name = session.title.as_deref().unwrap_or(&session.branch_name);
-                format!(" {provider} agent · {name} ")
+                let pr_suffix = self
+                    .pr_statuses
+                    .get(&session.id)
+                    .map(|pr| format!(" · {}#{}", pr.owner_repo, pr.number))
+                    .unwrap_or_default();
+                format!(" {provider} agent · {name}{pr_suffix} ")
             }
             None => " Agent ".to_string(),
         };
@@ -4088,6 +4169,145 @@ fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {
     let total = total.max(scrolled);
     let noun = if total == 1 { "line" } else { "lines" };
     Some(format!(" {scrolled}/{total} {noun} "))
+}
+
+impl App {
+    /// Render the GitHub PR pill as a single-line pill using Unicode
+    /// half-block characters for the caps and a solid background:
+    /// `▐ owner/repo#1234 │ PR title ellipsized… ▌`
+    ///
+    /// The left cap `▐` (U+2590) paints the right half of the cell in the
+    /// state color; the right cap `▌` (U+258C) paints the left half. This
+    /// creates a pill-like shape without requiring Powerline/Nerd Fonts.
+    /// The `│` divider uses terminal default colors so it blends with the
+    /// user's background.
+    fn render_pr_banner(&self, frame: &mut Frame, area: Rect, pr: &crate::model::PrInfo) {
+        use crate::model::PrState;
+
+        if area.height < 1 || area.width < 6 {
+            return;
+        }
+
+        let bg = match pr.state {
+            PrState::Open => self.theme.pr_open_bg,
+            PrState::Merged => self.theme.pr_merged_bg,
+            PrState::Closed => self.theme.pr_closed_bg,
+        };
+        let fg = self.theme.pr_banner_fg;
+        // Half-block caps: fg is the pill color, bg is terminal default.
+        let cap_style = Style::default().fg(bg);
+        // Inner content: white text on colored background.
+        let text_style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
+        let title_style = Style::default()
+            .fg(fg)
+            .bg(bg)
+            .add_modifier(Modifier::ITALIC);
+        let fill_style = Style::default().fg(fg).bg(bg);
+
+        // Half-block caps (universally supported Unicode).
+        let left_cap = "\u{2590}"; // ▐ — right half block
+        let right_cap = "\u{258c}"; // ▌ — left half block
+
+        // Build the pill content as a single string.
+        // With title:    " ⎇ owner/repo#1234 ▸ PR title here… "
+        // Without title: " ⎇ owner/repo#1234 "
+        let prefix = format!(" \u{2387} {}#{}", pr.owner_repo, pr.number);
+        let title_trimmed = pr.title.trim();
+        let has_title = !title_trimmed.is_empty();
+
+        // Available content width inside the pill (between the two caps).
+        let avail = area.width as usize;
+        let inner_w = avail.saturating_sub(2); // 2 = left cap + right cap
+        if inner_w < 4 {
+            return;
+        }
+
+        let prefix_w = prefix.chars().count();
+        let buf = frame.buffer_mut();
+        let y = area.y;
+        let sx = area.x;
+        let mut x = sx;
+
+        // Left cap.
+        set_cell(buf, x, y, left_cap, cap_style);
+        x += 1;
+
+        if !has_title || inner_w <= prefix_w + 4 {
+            // No title or not enough room — render just the prefix, padded.
+            // " ⎇ owner/repo#1234 "
+            let content = format!("{prefix} ");
+            for ch in content.chars() {
+                if (x - sx) as usize > inner_w {
+                    break;
+                }
+                set_cell(buf, x, y, &ch.to_string(), text_style);
+                x += 1;
+            }
+            // Fill remaining space.
+            while (x - sx) as usize <= inner_w {
+                set_cell(buf, x, y, " ", fill_style);
+                x += 1;
+            }
+        } else {
+            // Render prefix + arrow + title.
+            // " ⎇ owner/repo#1234 ▸ PR title here "
+            let arrow = " \u{2192} "; // " ▸ "
+            let arrow_w = arrow.chars().count();
+
+            // Write prefix.
+            for ch in prefix.chars() {
+                set_cell(buf, x, y, &ch.to_string(), text_style);
+                x += 1;
+            }
+
+            // Write arrow separator.
+            for ch in arrow.chars() {
+                set_cell(buf, x, y, &ch.to_string(), fill_style);
+                x += 1;
+            }
+
+            // Remaining space for the title + trailing space.
+            let used = prefix_w + arrow_w;
+            let title_budget = inner_w.saturating_sub(used + 1); // +1 for trailing space
+
+            // Write title, ellipsized if needed.
+            let title_w = title_trimmed.chars().count();
+            if title_w > title_budget {
+                for (i, ch) in title_trimmed.chars().enumerate() {
+                    if i + 1 >= title_budget {
+                        set_cell(buf, x, y, "…", title_style);
+                        x += 1;
+                        break;
+                    }
+                    set_cell(buf, x, y, &ch.to_string(), title_style);
+                    x += 1;
+                }
+            } else {
+                for ch in title_trimmed.chars() {
+                    set_cell(buf, x, y, &ch.to_string(), title_style);
+                    x += 1;
+                }
+            }
+
+            // Fill remaining space to the right cap.
+            while (x - sx) as usize <= inner_w {
+                set_cell(buf, x, y, " ", fill_style);
+                x += 1;
+            }
+        }
+
+        // Right cap.
+        set_cell(buf, x, y, right_cap, cap_style);
+    }
+}
+
+/// Set a single cell in the buffer, bounds-checked.
+fn set_cell(buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, symbol: &str, style: Style) {
+    let area = buf.area();
+    if x >= area.x + area.width || y >= area.y + area.height {
+        return;
+    }
+    buf[(x, y)].set_symbol(symbol).set_style(style);
 }
 
 #[cfg(test)]

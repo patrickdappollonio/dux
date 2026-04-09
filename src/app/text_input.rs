@@ -1,5 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+/// Function signature for the optional character mapper on `TextInput`.
+type CharMapFn = fn(&str, usize, char) -> Option<char>;
+
 /// Reusable text input with cursor tracking and optional multiline support.
 ///
 /// Handles character-level and word-level editing, cursor movement, and
@@ -25,7 +28,7 @@ pub struct TextInput {
     /// the current text, the cursor byte-offset where the character would be
     /// inserted, and the candidate character. Return `Some(c)` to insert `c`
     /// (which may differ from the input), or `None` to silently reject.
-    char_map: Option<fn(&str, usize, char) -> Option<char>>,
+    char_map: Option<CharMapFn>,
 }
 
 #[derive(Clone, Debug)]

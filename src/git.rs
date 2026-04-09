@@ -699,6 +699,53 @@ pub fn agent_name_char_map(text: &str, cursor: usize, ch: char) -> Option<char> 
     Some(ch)
 }
 
+/// Returns `"owner/repo"` parsed from the `origin` remote URL, or `None` if
+/// the remote doesn't point to GitHub or the command fails.
+pub fn remote_owner_repo(worktree_path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            worktree_path.to_string_lossy().as_ref(),
+            "remote",
+            "get-url",
+            "origin",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    parse_github_owner_repo(&url)
+}
+
+/// Extracts `"owner/repo"` from a GitHub remote URL.
+///
+/// Supports SSH (`git@github.com:owner/repo.git`), HTTPS
+/// (`https://github.com/owner/repo.git`), and bare
+/// (`github.com/owner/repo`) forms.
+fn parse_github_owner_repo(url: &str) -> Option<String> {
+    // SSH: git@github.com:owner/repo.git
+    if let Some(rest) = url.strip_prefix("git@github.com:") {
+        let rest = rest.strip_suffix(".git").unwrap_or(rest);
+        if rest.contains('/') {
+            return Some(rest.to_string());
+        }
+    }
+    // HTTPS / plain: https://github.com/owner/repo.git or github.com/owner/repo
+    let needle = "github.com/";
+    if let Some(idx) = url.find(needle) {
+        let rest = &url[idx + needle.len()..];
+        let rest = rest.strip_suffix(".git").unwrap_or(rest);
+        // Expect exactly "owner/repo"
+        let parts: Vec<&str> = rest.splitn(3, '/').collect();
+        if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+            return Some(format!("{}/{}", parts[0], parts[1]));
+        }
+    }
+    None
+}
+
 fn sync_directory_contents(source: &Path, destination: &Path) -> Result<()> {
     let mut source_entries = Vec::new();
     for entry in fs::read_dir(source)? {
@@ -1333,5 +1380,54 @@ mod tests {
         assert_eq!(agent_name_char_map("a/b", 1, '/'), None);
         // Inserting '/' where no adjacent slash exists
         assert_eq!(agent_name_char_map("ab", 1, '/'), Some('/'));
+    }
+
+    #[test]
+    fn parse_github_ssh_url() {
+        assert_eq!(
+            parse_github_owner_repo("git@github.com:octocat/Hello-World.git"),
+            Some("octocat/Hello-World".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_github_ssh_url_no_git_suffix() {
+        assert_eq!(
+            parse_github_owner_repo("git@github.com:octocat/Hello-World"),
+            Some("octocat/Hello-World".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_github_https_url() {
+        assert_eq!(
+            parse_github_owner_repo("https://github.com/octocat/Hello-World.git"),
+            Some("octocat/Hello-World".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_github_https_url_no_git_suffix() {
+        assert_eq!(
+            parse_github_owner_repo("https://github.com/octocat/Hello-World"),
+            Some("octocat/Hello-World".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_github_url_non_github() {
+        assert_eq!(
+            parse_github_owner_repo("git@gitlab.com:owner/repo.git"),
+            None,
+        );
+    }
+
+    #[test]
+    fn parse_github_url_strips_extra_path() {
+        // URLs with extra path segments after owner/repo
+        assert_eq!(
+            parse_github_owner_repo("https://github.com/octocat/Hello-World/tree/main"),
+            Some("octocat/Hello-World".to_string()),
+        );
     }
 }

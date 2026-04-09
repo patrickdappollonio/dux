@@ -80,6 +80,7 @@ pub enum Action {
     DebugInput,
     ToggleDiffLineNumbers,
     ResourceMonitor,
+    ToggleGithubIntegration,
 }
 
 /// Where a binding's key combo is matched.
@@ -239,6 +240,7 @@ impl Action {
             Action::DebugInput => "debug_input",
             Action::ToggleDiffLineNumbers => "toggle_diff_line_numbers",
             Action::ResourceMonitor => "resource_monitor",
+            Action::ToggleGithubIntegration => "toggle_github_integration",
         }
     }
 
@@ -320,6 +322,7 @@ impl Action {
             Action::DebugInput => "Open input event debugger to inspect keyboard and mouse events.",
             Action::ToggleDiffLineNumbers => "Toggle line numbers in diff view.",
             Action::ResourceMonitor => "Show CPU and memory usage for dux and all running agents.",
+            Action::ToggleGithubIntegration => "Toggle GitHub PR integration.",
         }
     }
 
@@ -391,7 +394,8 @@ impl Action {
             | Action::EditMacros
             | Action::DebugInput
             | Action::ToggleDiffLineNumbers
-            | Action::ResourceMonitor => None,
+            | Action::ResourceMonitor
+            | Action::ToggleGithubIntegration => None,
         }
     }
 }
@@ -1306,6 +1310,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "resource-monitor",
             description: "Show CPU and memory usage for dux and all running agents",
+        }),
+    },
+    BindingDef {
+        action: Action::ToggleGithubIntegration,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "toggle-github-integration",
+            description: "Toggle GitHub PR integration",
         }),
     },
 ];
