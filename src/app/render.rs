@@ -450,11 +450,16 @@ impl App {
                             let (d, c) = self.theme.session_dot(&session.status);
                             (d.to_string(), c)
                         };
+                    let label_color = match self.pr_statuses.get(&session.id).map(|pr| &pr.state) {
+                        Some(crate::model::PrState::Merged) => self.theme.pr_merged_label,
+                        Some(crate::model::PrState::Closed) => self.theme.pr_closed_label,
+                        _ => dot_color,
+                    };
                     ListItem::new(Line::from(
                         vec![
                             Span::styled(connector, Style::default().fg(self.theme.project_icon)),
                             Span::styled(format!("{dot} "), Style::default().fg(dot_color)),
-                            Span::styled(label, Style::default().fg(dot_color)),
+                            Span::styled(label, Style::default().fg(label_color)),
                             Span::styled(
                                 format!(" ({})", session.provider.as_str()),
                                 Style::default().fg(self.theme.provider_label_fg),
@@ -572,12 +577,27 @@ impl App {
             return;
         }
 
+        // PR banner in diff view.
+        let pr_info = self
+            .selected_session()
+            .and_then(|s| self.pr_statuses.get(&s.id))
+            .cloned();
+        let pr_banner_height: u16 = if pr_info.is_some() { 3 } else { 0 };
+
         let hint_height = 2;
-        let [content_area, hint_area] = Layout::default()
+        let [pr_area, content_area, hint_area] = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
+            .constraints([
+                Constraint::Length(pr_banner_height),
+                Constraint::Min(1),
+                Constraint::Length(hint_height),
+            ])
             .areas(inner);
         self.mouse_layout.agent_term = Some(content_area);
+
+        if let Some(ref pr) = pr_info {
+            self.render_pr_banner(frame, pr_area, pr);
+        }
 
         self.last_diff_height = content_area.height;
 
@@ -806,13 +826,31 @@ impl App {
         let mut scrollback_offset: usize = 0;
         let mut rendered_content = false;
 
+        // Determine if a PR banner should be shown.
+        let pr_info = if !is_input {
+            self.selected_session()
+                .and_then(|s| self.pr_statuses.get(&s.id))
+                .cloned()
+        } else {
+            None
+        };
+        let pr_banner_height: u16 = if pr_info.is_some() { 3 } else { 0 };
+
         // Reserve 2 lines at the bottom for the hint bar (top border + text).
         let hint_height = 2;
-        let [term_area, hint_area] = Layout::default()
+        let [pr_area, term_area, hint_area] = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
+            .constraints([
+                Constraint::Length(pr_banner_height),
+                Constraint::Min(1),
+                Constraint::Length(hint_height),
+            ])
             .areas(inner);
         self.mouse_layout.agent_term = Some(term_area);
+
+        if let Some(ref pr) = pr_info {
+            self.render_pr_banner(frame, pr_area, pr);
+        }
 
         // Get the selected session's PTY screen.
         let session_id = self.selected_session().map(|s| s.id.clone());
@@ -1711,6 +1749,52 @@ impl App {
                     },
                     Style::default().fg(self.theme.hint_desc_fg),
                 ),
+            ]));
+        }
+
+        // GitHub integration status.
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "GitHub integration",
+            Style::default()
+                .fg(self.theme.help_section_header_fg)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )));
+        {
+            use crate::model::GhStatus;
+            let (icon, desc) = if !self.github_integration_enabled {
+                (
+                    "○",
+                    "Disabled — enable via command palette (toggle-github-integration)".to_string(),
+                )
+            } else {
+                match self.gh_status {
+                    GhStatus::Unknown => ("◐", "Checking gh CLI availability…".to_string()),
+                    GhStatus::NotInstalled => (
+                        "⚠",
+                        "gh CLI not found — install from https://cli.github.com".to_string(),
+                    ),
+                    GhStatus::NotAuthenticated => (
+                        "⚠",
+                        "gh CLI not authenticated — run: gh auth login".to_string(),
+                    ),
+                    GhStatus::Available => {
+                        let count = self.pr_statuses.len();
+                        let noun = if count == 1 { "session" } else { "sessions" };
+                        ("✓", format!("Active — tracking PRs for {count} {noun}"))
+                    }
+                }
+            };
+            let icon_color = match self.gh_status {
+                GhStatus::Available if self.github_integration_enabled => self.theme.session_active,
+                _ if !self.github_integration_enabled => self.theme.session_exited,
+                _ => self.theme.warning_fg,
+            };
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(icon, Style::default().fg(icon_color)),
+                Span::raw("  "),
+                Span::styled(desc, Style::default().fg(self.theme.hint_desc_fg)),
             ]));
         }
 
@@ -4092,6 +4176,198 @@ fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {
     let total = total.max(scrolled);
     let noun = if total == 1 { "line" } else { "lines" };
     Some(format!(" {scrolled}/{total} {noun} "))
+}
+
+impl App {
+    /// Render the GitHub PR banner as a double-pill inside `area` (3 rows).
+    ///
+    /// Layout: `╭─left─╮╭─right─╮` / `│ text ││ text  │` / `╰──────╯╰───────╯`
+    fn render_pr_banner(&self, frame: &mut Frame, area: Rect, pr: &crate::model::PrInfo) {
+        use crate::model::PrState;
+
+        if area.height < 3 || area.width < 6 {
+            return;
+        }
+
+        let bg = match pr.state {
+            PrState::Open => self.theme.pr_open_bg,
+            PrState::Merged => self.theme.pr_merged_bg,
+            PrState::Closed => self.theme.pr_closed_bg,
+        };
+        let fg = self.theme.pr_banner_fg;
+        let border_style = Style::default().fg(fg).bg(bg);
+        let text_style = Style::default().fg(fg).bg(bg);
+        let dim_border_style = Style::default().fg(Color::Rgb(255, 255, 255)).bg(bg);
+
+        let left_text = format!(" {}#{} ", pr.owner_repo, pr.number);
+        let left_w = left_text.len();
+
+        let avail = area.width as usize;
+        let buf = frame.buffer_mut();
+
+        if avail < left_w + 4 {
+            // Too narrow for full pill — render single centered pill with just #N.
+            let short = format!(" #{} ", pr.number);
+            let short_w = short.len();
+            let pill_w = short_w + 2; // + │ on each side
+            let start_x = area.x + (area.width.saturating_sub(pill_w as u16)) / 2;
+            if area.height >= 3 && pill_w <= avail {
+                // Top
+                let y = area.y;
+                set_cell(buf, start_x, y, "╭", border_style);
+                for dx in 1..=(pill_w as u16 - 2) {
+                    set_cell(buf, start_x + dx, y, "─", border_style);
+                }
+                set_cell(buf, start_x + pill_w as u16 - 1, y, "╮", border_style);
+                // Middle
+                let y = area.y + 1;
+                set_cell(buf, start_x, y, "│", border_style);
+                for (i, ch) in short.chars().enumerate() {
+                    set_cell(buf, start_x + 1 + i as u16, y, &ch.to_string(), text_style);
+                }
+                set_cell(buf, start_x + pill_w as u16 - 1, y, "│", border_style);
+                // Bottom
+                let y = area.y + 2;
+                set_cell(buf, start_x, y, "╰", border_style);
+                for dx in 1..=(pill_w as u16 - 2) {
+                    set_cell(buf, start_x + dx, y, "─", border_style);
+                }
+                set_cell(buf, start_x + pill_w as u16 - 1, y, "╯", border_style);
+            }
+            return;
+        }
+
+        // Double-pill layout.
+        let left_pill_w = left_w + 2; // │ + text + │
+        let right_pill_w = avail.saturating_sub(left_pill_w + 1); // +1 for the ╮╭ join
+        let has_right = right_pill_w >= 5; // minimum useful width
+
+        let right_inner_w = if has_right {
+            right_pill_w.saturating_sub(2)
+        } else {
+            0
+        };
+
+        let right_text = if has_right {
+            let t = format!(" {} ", pr.title);
+            if t.len() > right_inner_w {
+                let mut truncated = String::new();
+                let mut width = 0;
+                for ch in t.chars() {
+                    if width + 1 >= right_inner_w {
+                        truncated.push('…');
+                        break;
+                    }
+                    truncated.push(ch);
+                    width += 1;
+                }
+                truncated
+            } else {
+                t
+            }
+        } else {
+            String::new()
+        };
+
+        let total_w = if has_right {
+            left_pill_w + right_pill_w
+        } else {
+            left_pill_w
+        };
+        let start_x = area.x + (area.width.saturating_sub(total_w as u16)) / 2;
+
+        // -- Row 0: top borders --
+        let y = area.y;
+        let mut x = start_x;
+        // Left pill top
+        set_cell(buf, x, y, "╭", border_style);
+        x += 1;
+        for _ in 0..left_w {
+            set_cell(buf, x, y, "─", border_style);
+            x += 1;
+        }
+        if has_right {
+            set_cell(buf, x, y, "╮", border_style);
+            x += 1;
+            // Right pill top
+            set_cell(buf, x, y, "╭", dim_border_style);
+            x += 1;
+            for _ in 0..right_inner_w {
+                set_cell(buf, x, y, "─", dim_border_style);
+                x += 1;
+            }
+            set_cell(buf, x, y, "╮", dim_border_style);
+        } else {
+            set_cell(buf, x, y, "╮", border_style);
+        }
+
+        // -- Row 1: content --
+        let y = area.y + 1;
+        x = start_x;
+        set_cell(buf, x, y, "│", border_style);
+        x += 1;
+        for ch in left_text.chars() {
+            set_cell(buf, x, y, &ch.to_string(), text_style);
+            x += 1;
+        }
+        if has_right {
+            set_cell(buf, x, y, "│", border_style);
+            x += 1;
+            set_cell(buf, x, y, "│", dim_border_style);
+            x += 1;
+            let right_style = Style::default().fg(Color::Rgb(220, 220, 220)).bg(bg);
+            let mut chars_written = 0;
+            for ch in right_text.chars() {
+                if chars_written >= right_inner_w {
+                    break;
+                }
+                set_cell(buf, x, y, &ch.to_string(), right_style);
+                x += 1;
+                chars_written += 1;
+            }
+            // Pad remaining space.
+            while chars_written < right_inner_w {
+                set_cell(buf, x, y, " ", right_style);
+                x += 1;
+                chars_written += 1;
+            }
+            set_cell(buf, x, y, "│", dim_border_style);
+        } else {
+            set_cell(buf, x, y, "│", border_style);
+        }
+
+        // -- Row 2: bottom borders --
+        let y = area.y + 2;
+        x = start_x;
+        set_cell(buf, x, y, "╰", border_style);
+        x += 1;
+        for _ in 0..left_w {
+            set_cell(buf, x, y, "─", border_style);
+            x += 1;
+        }
+        if has_right {
+            set_cell(buf, x, y, "╯", border_style);
+            x += 1;
+            set_cell(buf, x, y, "╰", dim_border_style);
+            x += 1;
+            for _ in 0..right_inner_w {
+                set_cell(buf, x, y, "─", dim_border_style);
+                x += 1;
+            }
+            set_cell(buf, x, y, "╯", dim_border_style);
+        } else {
+            set_cell(buf, x, y, "╯", border_style);
+        }
+    }
+}
+
+/// Set a single cell in the buffer, bounds-checked.
+fn set_cell(buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, symbol: &str, style: Style) {
+    let area = buf.area();
+    if x >= area.x + area.width || y >= area.y + area.height {
+        return;
+    }
+    buf[(x, y)].set_symbol(symbol).set_style(style);
 }
 
 #[cfg(test)]

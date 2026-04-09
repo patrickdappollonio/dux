@@ -1,5 +1,36 @@
 use chrono::{DateTime, Utc};
 
+/// GitHub CLI availability status, checked once at startup.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GhStatus {
+    /// Not yet checked.
+    #[default]
+    Unknown,
+    /// `gh` binary not found on PATH.
+    NotInstalled,
+    /// `gh` found but `gh auth status` failed.
+    NotAuthenticated,
+    /// `gh` installed and authenticated.
+    Available,
+}
+
+/// State of a GitHub pull request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrState {
+    Open,
+    Merged,
+    Closed,
+}
+
+/// Cached information about a GitHub pull request associated with a session.
+#[derive(Clone, Debug)]
+pub struct PrInfo {
+    pub number: u64,
+    pub state: PrState,
+    pub title: String,
+    pub owner_repo: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderKind(String);
 

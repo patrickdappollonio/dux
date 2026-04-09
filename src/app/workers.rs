@@ -147,6 +147,45 @@ impl App {
                         self.rebuild_left_items();
                     }
                 }
+                WorkerEvent::GhStatusChecked(status) => {
+                    self.gh_status = status;
+                    if matches!(status, crate::model::GhStatus::Available)
+                        && self.github_integration_enabled
+                    {
+                        logger::info("[gh-integration] gh CLI is available and authenticated");
+                        self.update_pr_sync_sessions();
+                        self.spawn_pr_sync_worker();
+                        self.spawn_initial_pr_refresh();
+                        self.spawn_refs_watcher();
+                    } else {
+                        logger::info(&format!(
+                            "[gh-integration] gh status: {:?}, integration enabled: {}",
+                            status, self.github_integration_enabled,
+                        ));
+                    }
+                }
+                WorkerEvent::PrStatusReady(results) => {
+                    let now = Instant::now();
+                    for (session_id, maybe_pr) in results {
+                        self.pr_last_checked.insert(session_id.clone(), now);
+                        match maybe_pr {
+                            Some(pr) => {
+                                self.pr_statuses.insert(session_id, pr);
+                            }
+                            None => {
+                                self.pr_statuses.remove(&session_id);
+                            }
+                        }
+                    }
+                    self.rebuild_left_items();
+                }
+                WorkerEvent::RefsChanged(session_id) => {
+                    logger::debug(&format!(
+                        "[gh-integration] refs watcher: triggering PR check for session {}",
+                        session_id,
+                    ));
+                    self.spawn_pr_check_for_session(&session_id);
+                }
                 WorkerEvent::BrowserEntriesReady { dir, entries } => {
                     if let PromptState::BrowseProjects {
                         current_dir,
@@ -263,6 +302,12 @@ impl App {
                     ));
                 }
             }
+            // Trigger PR status check for exited agents.
+            for sid in &exited {
+                if !retried.contains(sid) {
+                    self.spawn_pr_check_for_session(sid);
+                }
+            }
         }
 
         let mut exited_terminal_ids = Vec::new();
@@ -357,6 +402,284 @@ impl App {
                     break; // receiver dropped, app is shutting down
                 }
             }
+        });
+    }
+
+    // -- Git refs watcher for push detection --
+
+    pub(crate) fn spawn_refs_watcher(&mut self) {
+        use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
+
+        let tx = self.worker_tx.clone();
+        // Build a reverse map of watched paths for event routing.
+        let path_to_session: Arc<Mutex<HashMap<PathBuf, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let path_map = Arc::clone(&path_to_session);
+        let debounce_map: Arc<Mutex<HashMap<String, Instant>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let debounce = Arc::clone(&debounce_map);
+
+        let watcher_result = RecommendedWatcher::new(
+            move |res: Result<notify::Event, notify::Error>| {
+                let Ok(event) = res else { return };
+                // We only care about data modifications (ref file updates).
+                if !event.kind.is_modify() && !event.kind.is_create() {
+                    return;
+                }
+                let map = match path_map.lock() {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                let mut debounce_guard = match debounce.lock() {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                for event_path in &event.paths {
+                    // Walk up from the event path to find a watched parent dir.
+                    for (watched, session_id) in map.iter() {
+                        if event_path.starts_with(watched) {
+                            // Debounce: skip if we already sent an event within the last 5s.
+                            let now = Instant::now();
+                            if let Some(last) = debounce_guard.get(session_id) {
+                                if now.duration_since(*last) < Duration::from_secs(5) {
+                                    continue;
+                                }
+                            }
+                            debounce_guard.insert(session_id.clone(), now);
+                            logger::debug(&format!(
+                                "[gh-integration] refs watcher: detected change at {}, debouncing for session {}",
+                                event_path.display(),
+                                session_id,
+                            ));
+                            let _ = tx.send(WorkerEvent::RefsChanged(session_id.clone()));
+                        }
+                    }
+                }
+            },
+            NotifyConfig::default(),
+        );
+
+        match watcher_result {
+            Ok(watcher) => {
+                self.refs_watcher = Some(Arc::new(Mutex::new(watcher)));
+                self.refs_watch_paths.clear();
+                // Populate the path map and start watching existing sessions.
+                let mut paths = HashMap::new();
+                for session in &self.sessions {
+                    let refs_dir = PathBuf::from(&session.worktree_path)
+                        .join(".git")
+                        .join("refs")
+                        .join("heads");
+                    if refs_dir.is_dir() {
+                        if let Some(ref watcher_arc) = self.refs_watcher {
+                            if let Ok(mut w) = watcher_arc.lock() {
+                                match w.watch(&refs_dir, RecursiveMode::NonRecursive) {
+                                    Ok(()) => {
+                                        logger::debug(&format!(
+                                            "[gh-integration] refs watcher: watching {} for session {}",
+                                            refs_dir.display(),
+                                            session.id,
+                                        ));
+                                        paths.insert(refs_dir.clone(), session.id.clone());
+                                    }
+                                    Err(e) => {
+                                        logger::debug(&format!(
+                                            "[gh-integration] refs watcher: failed to watch {}: {}",
+                                            refs_dir.display(),
+                                            e,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                self.refs_watch_paths = paths.clone();
+                // Populate the closure's path map so events can route to sessions.
+                if let Ok(mut map) = path_to_session.lock() {
+                    *map = paths;
+                }
+                logger::info(&format!(
+                    "[gh-integration] refs watcher: initialized, watching {} session(s)",
+                    self.refs_watch_paths.len(),
+                ));
+            }
+            Err(e) => {
+                logger::warn(&format!(
+                    "[gh-integration] refs watcher: failed to create watcher (falling back to poll-only): {}",
+                    e,
+                ));
+            }
+        }
+    }
+
+    /// Add a new session's refs directory to the watcher.
+    pub(crate) fn watch_session_refs(&mut self, session_id: &str, worktree_path: &str) {
+        use notify::Watcher;
+        let Some(ref watcher_arc) = self.refs_watcher else {
+            return;
+        };
+        let refs_dir = PathBuf::from(worktree_path)
+            .join(".git")
+            .join("refs")
+            .join("heads");
+        if !refs_dir.is_dir() {
+            return;
+        }
+        if let Ok(mut w) = watcher_arc.lock() {
+            match w.watch(&refs_dir, notify::RecursiveMode::NonRecursive) {
+                Ok(()) => {
+                    logger::debug(&format!(
+                        "[gh-integration] refs watcher: watching {} for session {}",
+                        refs_dir.display(),
+                        session_id,
+                    ));
+                    self.refs_watch_paths
+                        .insert(refs_dir, session_id.to_string());
+                }
+                Err(e) => {
+                    logger::debug(&format!(
+                        "[gh-integration] refs watcher: failed to watch {}: {}",
+                        refs_dir.display(),
+                        e,
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Remove a session's refs directory from the watcher.
+    pub(crate) fn unwatch_session_refs(&mut self, worktree_path: &str) {
+        use notify::Watcher;
+        let Some(ref watcher_arc) = self.refs_watcher else {
+            return;
+        };
+        let refs_dir = PathBuf::from(worktree_path)
+            .join(".git")
+            .join("refs")
+            .join("heads");
+        if self.refs_watch_paths.remove(&refs_dir).is_some() {
+            if let Ok(mut w) = watcher_arc.lock() {
+                let _ = w.unwatch(&refs_dir);
+                logger::debug(&format!(
+                    "[gh-integration] refs watcher: unwatching {}",
+                    refs_dir.display(),
+                ));
+            }
+        }
+    }
+
+    // -- GitHub PR integration workers --
+
+    pub(crate) fn spawn_gh_status_check(&self) {
+        if !self.github_integration_enabled {
+            return;
+        }
+        let tx = self.worker_tx.clone();
+        thread::spawn(move || {
+            use crate::model::GhStatus;
+            // Step 1: Is `gh` on PATH?
+            let on_path = std::process::Command::new("which")
+                .arg("gh")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !on_path {
+                logger::info("[gh-integration] gh CLI not found on PATH");
+                let _ = tx.send(WorkerEvent::GhStatusChecked(GhStatus::NotInstalled));
+                return;
+            }
+            // Step 2: Is `gh` authenticated?
+            let authed = std::process::Command::new("gh")
+                .args(["auth", "status"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !authed {
+                logger::info("[gh-integration] gh CLI found but not authenticated");
+                let _ = tx.send(WorkerEvent::GhStatusChecked(GhStatus::NotAuthenticated));
+                return;
+            }
+            logger::info("[gh-integration] gh CLI available and authenticated");
+            let _ = tx.send(WorkerEvent::GhStatusChecked(GhStatus::Available));
+        });
+    }
+
+    pub(crate) fn update_pr_sync_sessions(&self) {
+        if let Ok(mut guard) = self.pr_sync_sessions.lock() {
+            *guard = self
+                .sessions
+                .iter()
+                .map(|s| PrSyncEntry {
+                    session_id: s.id.clone(),
+                    branch_name: s.branch_name.clone(),
+                    worktree_path: s.worktree_path.clone(),
+                })
+                .collect();
+        }
+    }
+
+    pub(crate) fn spawn_pr_sync_worker(&self) {
+        let tx = self.worker_tx.clone();
+        let sessions = Arc::clone(&self.pr_sync_sessions);
+        let enabled = Arc::clone(&self.pr_sync_enabled);
+        enabled.store(true, Ordering::Relaxed);
+        thread::spawn(move || {
+            let interval = Duration::from_secs(45);
+            loop {
+                thread::sleep(interval);
+                if !enabled.load(Ordering::Relaxed) {
+                    break;
+                }
+                let results = run_pr_sync(&sessions);
+                if !results.is_empty() && tx.send(WorkerEvent::PrStatusReady(results)).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    pub(crate) fn spawn_initial_pr_refresh(&self) {
+        let tx = self.worker_tx.clone();
+        let sessions = Arc::clone(&self.pr_sync_sessions);
+        thread::spawn(move || {
+            let results = run_pr_sync(&sessions);
+            if !results.is_empty() {
+                let _ = tx.send(WorkerEvent::PrStatusReady(results));
+            }
+        });
+    }
+
+    /// Trigger a one-shot PR check for a single session, unless it was checked
+    /// recently (within 10 seconds).
+    pub(crate) fn spawn_pr_check_for_session(&mut self, session_id: &str) {
+        if !self.github_integration_enabled
+            || !matches!(self.gh_status, crate::model::GhStatus::Available)
+        {
+            return;
+        }
+        // Rate-limit: skip if checked within the last 10 seconds.
+        if let Some(last) = self.pr_last_checked.get(session_id) {
+            if last.elapsed() < Duration::from_secs(10) {
+                return;
+            }
+        }
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
+            return;
+        };
+        let entry = PrSyncEntry {
+            session_id: session.id.clone(),
+            branch_name: session.branch_name.clone(),
+            worktree_path: session.worktree_path.clone(),
+        };
+        let tx = self.worker_tx.clone();
+        thread::spawn(move || {
+            let result = check_pr_for_entry(&entry);
+            let _ = tx.send(WorkerEvent::PrStatusReady(vec![(entry.session_id, result)]));
         });
     }
 
@@ -624,4 +947,78 @@ pub(crate) fn browser_entries(dir: &Path) -> Vec<BrowserEntry> {
         );
     }
     entries
+}
+
+// -- GitHub PR sync helpers (run on background threads) --
+
+fn run_pr_sync(
+    sessions: &Arc<Mutex<Vec<PrSyncEntry>>>,
+) -> Vec<(String, Option<crate::model::PrInfo>)> {
+    let snapshot = match sessions.lock() {
+        Ok(guard) => guard.clone(),
+        Err(_) => return Vec::new(),
+    };
+    snapshot
+        .iter()
+        .map(|entry| {
+            let result = check_pr_for_entry(entry);
+            (entry.session_id.clone(), result)
+        })
+        .collect()
+}
+
+fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<crate::model::PrInfo> {
+    use crate::model::{PrInfo, PrState};
+
+    let owner_repo = git::remote_owner_repo(Path::new(&entry.worktree_path))?;
+
+    let output = std::process::Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--head",
+            &entry.branch_name,
+            "--repo",
+            &owner_repo,
+            "--json",
+            "number,state,title",
+            "--limit",
+            "1",
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        logger::debug(&format!(
+            "[gh-integration] gh pr list failed for {}: {}",
+            entry.session_id,
+            String::from_utf8_lossy(&output.stderr).trim(),
+        ));
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let arr: Vec<serde_json::Value> = serde_json::from_str(text.trim()).ok()?;
+    let obj = arr.first()?;
+
+    let number = obj.get("number")?.as_u64()?;
+    let state_str = obj.get("state")?.as_str()?;
+    let title = obj
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let state = match state_str {
+        "OPEN" => PrState::Open,
+        "MERGED" => PrState::Merged,
+        "CLOSED" => PrState::Closed,
+        _ => return None,
+    };
+
+    Some(PrInfo {
+        number,
+        state,
+        title,
+        owner_repo,
+    })
 }

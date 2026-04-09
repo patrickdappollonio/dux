@@ -192,6 +192,7 @@ pub struct UiConfig {
     pub agent_scrollback_lines: usize,
     pub branch_sync_interval: u16,
     pub show_diff_line_numbers: bool,
+    pub github_integration: bool,
 }
 
 impl Default for Config {
@@ -214,6 +215,7 @@ impl Default for Config {
                 agent_scrollback_lines: 10_000,
                 branch_sync_interval: 30,
                 show_diff_line_numbers: false,
+                github_integration: true,
             },
             editor: EditorConfig::default(),
             keys: KeysConfig::default(),
@@ -334,6 +336,7 @@ impl Default for UiConfig {
             agent_scrollback_lines: 10_000,
             branch_sync_interval: 30,
             show_diff_line_numbers: false,
+            github_integration: true,
         }
     }
 }
@@ -595,6 +598,13 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             )),
             value_fn: |c| FieldValue::Bool(c.ui.show_diff_line_numbers),
         },
+        ConfigEntry::Field {
+            key: "github_integration",
+            comment: Some(CommentSource::Static(
+                "# Enable GitHub PR tracking for agent sessions.\n# Requires the `gh` CLI installed and authenticated (`gh auth login`).\n# When enabled, a PR pill is shown in the agent pane for branches with\n# an open, merged, or closed pull request. Toggle at runtime from the\n# command palette.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.ui.github_integration),
+        },
         ConfigEntry::Blank,
         ConfigEntry::Section("editor"),
         ConfigEntry::Field {
@@ -776,6 +786,12 @@ pub fn save_config(
         "ui",
         "show_diff_line_numbers",
         config.ui.show_diff_line_numbers,
+    );
+    patch_table_bool(
+        &mut doc,
+        "ui",
+        "github_integration",
+        config.ui.github_integration,
     );
 
     // --- [editor] ---
@@ -2173,6 +2189,7 @@ commit_pane_height_pct = 40
 agent_scrollback_lines = 10000
 branch_sync_interval = 30
 show_diff_line_numbers = false
+github_integration = true
 
 [logging]
 level = \"info\"
