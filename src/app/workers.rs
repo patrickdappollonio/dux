@@ -74,15 +74,45 @@ impl App {
                     ),
                     Err(e) => self.set_error(format!("Push to remote failed: {e}")),
                 },
-                WorkerEvent::PullCompleted(result) => match result {
-                    Ok(()) => {
-                        self.set_info(
-                            "Pulled latest changes from remote successfully. Local branch is up to date.",
-                        );
-                        self.reload_changed_files();
+                WorkerEvent::PullCompleted {
+                    repo_path,
+                    target,
+                    result,
+                } => {
+                    self.pulls_in_flight.remove(&repo_path);
+                    match target {
+                        PullTarget::Project {
+                            project_id,
+                            project_name,
+                        } => match result {
+                            Ok(branch_name) => {
+                                if let Some(existing) = self
+                                    .projects
+                                    .iter_mut()
+                                    .find(|candidate| candidate.id == project_id)
+                                    && let Some(branch_name) = branch_name
+                                {
+                                    existing.current_branch = branch_name;
+                                }
+                                self.set_info(format!(
+                                    "Refreshed project \"{}\". Local branch is up to date with remote.",
+                                    project_name,
+                                ));
+                            }
+                            Err(e) => self
+                                .set_error(format!("Project refresh failed for \"{}\": {e}", project_name)),
+                        },
+                        PullTarget::Session => match result {
+                            Ok(_) => {
+                                self.set_info(
+                                    "Pulled latest changes from remote successfully. Local branch is up to date.",
+                                );
+                                self.reload_changed_files();
+                            }
+                            Err(e) => self.set_error(format!("Pull from remote failed: {e}")),
+                        },
                     }
-                    Err(e) => self.set_error(format!("Pull from remote failed: {e}")),
-                },
+                }
                 WorkerEvent::ClipboardCopyCompleted { path, result } => match result {
                     Ok(()) => {
                         self.set_info(format!("Copied path to clipboard: \"{path}\""))
