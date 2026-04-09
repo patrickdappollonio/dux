@@ -1177,12 +1177,15 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     BindingDef {
         action: Action::RenameSession,
         default_keys: &[key!(e)],
-        scopes: &[BindingScope::Left],
+        scopes: &[BindingScope::Left, BindingScope::Center],
         help: Some(HelpEntry {
             section: "Projects pane",
             description: "Rename the selected agent session",
         }),
-        hint_contexts: &[(HintContext::LeftSession, "Rename")],
+        hint_contexts: &[
+            (HintContext::LeftSession, "Rename"),
+            (HintContext::Center, "Rename"),
+        ],
         palette: Some(PaletteEntry {
             name: "rename-agent",
             description: "Rename the selected agent session",
@@ -1855,6 +1858,20 @@ mod tests {
             Some(Action::MoveDown)
         );
         assert_eq!(bindings.lookup(&key, BindingScope::Center), None);
+    }
+
+    #[test]
+    fn rename_session_available_in_left_and_center() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Left),
+            Some(Action::RenameSession)
+        );
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Center),
+            Some(Action::RenameSession)
+        );
     }
 
     #[test]
