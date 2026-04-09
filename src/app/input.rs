@@ -2156,11 +2156,16 @@ impl App {
 
     fn mouse_target(&self, column: u16, row: u16) -> Option<MouseTarget> {
         if !matches!(self.fullscreen_overlay, FullscreenOverlay::None) {
-            return self
+            if self
                 .mouse_layout
                 .agent_term
-                .filter(|rect| contains_point(*rect, column, row))
-                .map(|_| MouseTarget::Center);
+                .is_some_and(|rect| contains_point(rect, column, row))
+            {
+                return Some(MouseTarget::Center);
+            }
+            // Click landed outside the fullscreen overlay — fall through to
+            // normal pane hit-testing so the existing handlers can exit
+            // fullscreen and route focus to the clicked pane.
         }
 
         if contains_point(self.mouse_layout.left_list, column, row) {
