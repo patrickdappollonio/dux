@@ -79,6 +79,7 @@ pub enum Action {
     EditMacros,
     DebugInput,
     ToggleDiffLineNumbers,
+    ResourceMonitor,
 }
 
 /// Where a binding's key combo is matched.
@@ -237,6 +238,7 @@ impl Action {
             Action::EditMacros => "edit_macros",
             Action::DebugInput => "debug_input",
             Action::ToggleDiffLineNumbers => "toggle_diff_line_numbers",
+            Action::ResourceMonitor => "resource_monitor",
         }
     }
 
@@ -317,6 +319,7 @@ impl Action {
             Action::EditMacros => "Open the text macros editor.",
             Action::DebugInput => "Open input event debugger to inspect keyboard and mouse events.",
             Action::ToggleDiffLineNumbers => "Toggle line numbers in diff view.",
+            Action::ResourceMonitor => "Show CPU and memory usage for dux and all running agents.",
         }
     }
 
@@ -387,7 +390,8 @@ impl Action {
             | Action::SortAgentsByName
             | Action::EditMacros
             | Action::DebugInput
-            | Action::ToggleDiffLineNumbers => None,
+            | Action::ToggleDiffLineNumbers
+            | Action::ResourceMonitor => None,
         }
     }
 }
@@ -1293,6 +1297,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Toggle line numbers in diff view",
         }),
     },
+    BindingDef {
+        action: Action::ResourceMonitor,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "resource-monitor",
+            description: "Show CPU and memory usage for dux and all running agents",
+        }),
+    },
 ];
 
 const HELP_SECTION_ORDER: &[&str] = &[
@@ -2007,6 +2022,22 @@ mod tests {
             .filter_map(|binding| binding.palette_name)
             .collect::<Vec<_>>();
         assert!(names.contains(&"kill-running"));
+    }
+
+    #[test]
+    fn filtered_palette_includes_resource_monitor_command() {
+        let bindings = default_bindings();
+        let results = bindings.filtered_palette("resource");
+        let names = results
+            .iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"resource-monitor"));
+    }
+
+    #[test]
+    fn resource_monitor_config_name_round_trip() {
+        assert_eq!(Action::ResourceMonitor.config_name(), "resource_monitor");
     }
 
     #[test]
