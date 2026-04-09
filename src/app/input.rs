@@ -2416,17 +2416,26 @@ impl App {
         }
     }
 
-    fn register_mouse_click(&mut self, target: MouseClickTarget) -> bool {
+    fn register_mouse_click(
+        &mut self,
+        target: MouseClickTarget,
+        item_index: Option<usize>,
+    ) -> bool {
         let now = Instant::now();
         if let Some(last) = self.last_mouse_click
             && last.target == target
+            && last.item_index == item_index
             && now.duration_since(last.at) <= DOUBLE_CLICK_THRESHOLD
         {
             self.last_mouse_click = None;
             return true;
         }
 
-        self.last_mouse_click = Some(RecentMouseClick { target, at: now });
+        self.last_mouse_click = Some(RecentMouseClick {
+            target,
+            item_index,
+            at: now,
+        });
         false
     }
 
@@ -2938,7 +2947,8 @@ impl App {
                 self.set_command_palette_cursor_from_mouse(mouse.column);
             }
             PromptMouseTarget::CommandItem(index) => {
-                let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette);
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
                 self.set_command_palette_selection(index);
                 if double_click {
                     self.execute_selected_command_palette();
@@ -2948,14 +2958,16 @@ impl App {
                 self.set_browser_input_cursor_from_mouse(mouse.column);
             }
             PromptMouseTarget::BrowseProjectItem(index) => {
-                let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette);
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
                 self.set_browser_selection(index);
                 if double_click {
                     self.open_selected_browser_entry();
                 }
             }
             PromptMouseTarget::PickEditorItem(index) => {
-                let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette);
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
                 self.set_pick_editor_selection(index);
                 if double_click {
                     self.open_selected_pick_editor();
@@ -3348,7 +3360,8 @@ impl App {
                         self.fullscreen_overlay = FullscreenOverlay::None;
                     }
                     Some(MouseTarget::LeftRow(index)) => {
-                        let double_click = self.register_mouse_click(MouseClickTarget::LeftPane);
+                        let double_click =
+                            self.register_mouse_click(MouseClickTarget::LeftPane, Some(index));
                         self.left_section = LeftSection::Projects;
                         self.set_left_selection(index);
                         if double_click {
@@ -3356,7 +3369,8 @@ impl App {
                         }
                     }
                     Some(MouseTarget::TerminalRow(index)) => {
-                        let double_click = self.register_mouse_click(MouseClickTarget::LeftPane);
+                        let double_click =
+                            self.register_mouse_click(MouseClickTarget::LeftPane, Some(index));
                         self.focus = FocusPane::Left;
                         self.left_section = LeftSection::Terminals;
                         self.selected_terminal_index = index;
@@ -3373,7 +3387,8 @@ impl App {
                         self.fullscreen_overlay = FullscreenOverlay::None;
                     }
                     Some(MouseTarget::Center) => {
-                        let double_click = self.register_mouse_click(MouseClickTarget::CenterPane);
+                        let double_click =
+                            self.register_mouse_click(MouseClickTarget::CenterPane, None);
                         self.focus = FocusPane::Center;
                         if double_click {
                             self.activate_center_agent_from_mouse();
@@ -3388,7 +3403,7 @@ impl App {
                         self.set_file_selection(RightSection::Unstaged, index);
                         if index.is_some() {
                             let double_click =
-                                self.register_mouse_click(MouseClickTarget::UnstagedPane);
+                                self.register_mouse_click(MouseClickTarget::UnstagedPane, index);
                             if double_click {
                                 self.open_selected_file_diff_from_mouse();
                             }
@@ -3398,7 +3413,7 @@ impl App {
                         self.set_file_selection(RightSection::Staged, index);
                         if index.is_some() {
                             let double_click =
-                                self.register_mouse_click(MouseClickTarget::StagedPane);
+                                self.register_mouse_click(MouseClickTarget::StagedPane, index);
                             if double_click {
                                 self.open_selected_file_diff_from_mouse();
                             }
@@ -3482,10 +3497,11 @@ mod tests {
     use crate::app::{
         App, CenterMode, ConfirmKillRunningPrompt, FocusPane, FullscreenOverlay, InputTarget,
         KillRunningAction, KillRunningFocus, KillRunningFooterAction, KillRunningPrompt,
-        KillableRuntime, KillableRuntimeKind, LeftSection, MouseLayoutState, OverlayMouseLayout,
-        OverlayMouseLayoutState, PromptState, PullTarget, RightSection, RuntimeTargetId, TextInput,
-        WorkerEvent,
+        KillableRuntime, KillableRuntimeKind, LeftSection, MouseClickTarget, MouseLayoutState,
+        OverlayMouseLayout, OverlayMouseLayoutState, PromptState, PullTarget, RightSection,
+        RuntimeTargetId, TextInput, WorkerEvent,
     };
+    use super::DOUBLE_CLICK_THRESHOLD;
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
     use crate::editor::{DetectedEditor, EditorKind};
@@ -6644,6 +6660,108 @@ mod tests {
             app.fullscreen_overlay,
             FullscreenOverlay::None,
             "clicking outside overlay must dismiss fullscreen even when scrolled back"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Double-click detection: item-scoped
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn double_click_same_pane_same_item() {
+        let bindings = default_bindings();
+        let mut app = test_app(bindings);
+
+        let first = app.register_mouse_click(MouseClickTarget::LeftPane, Some(2));
+        assert!(!first, "first click must not be a double-click");
+
+        let second = app.register_mouse_click(MouseClickTarget::LeftPane, Some(2));
+        assert!(
+            second,
+            "second click on the same item within threshold must be a double-click"
+        );
+    }
+
+    #[test]
+    fn no_double_click_same_pane_different_item() {
+        let bindings = default_bindings();
+        let mut app = test_app(bindings);
+
+        let first = app.register_mouse_click(MouseClickTarget::LeftPane, Some(2));
+        assert!(!first);
+
+        let second = app.register_mouse_click(MouseClickTarget::LeftPane, Some(5));
+        assert!(
+            !second,
+            "clicking a different item in the same pane must NOT be a double-click"
+        );
+    }
+
+    #[test]
+    fn no_double_click_same_item_after_timeout() {
+        let bindings = default_bindings();
+        let mut app = test_app(bindings);
+
+        let first = app.register_mouse_click(MouseClickTarget::LeftPane, Some(2));
+        assert!(!first);
+
+        // Simulate timeout by back-dating the stored click.
+        if let Some(ref mut last) = app.last_mouse_click {
+            last.at -= DOUBLE_CLICK_THRESHOLD + std::time::Duration::from_millis(1);
+        }
+
+        let second = app.register_mouse_click(MouseClickTarget::LeftPane, Some(2));
+        assert!(
+            !second,
+            "clicking the same item after the threshold must NOT be a double-click"
+        );
+    }
+
+    #[test]
+    fn no_double_click_different_pane_same_index() {
+        let bindings = default_bindings();
+        let mut app = test_app(bindings);
+
+        let first = app.register_mouse_click(MouseClickTarget::LeftPane, Some(0));
+        assert!(!first);
+
+        let second = app.register_mouse_click(MouseClickTarget::UnstagedPane, Some(0));
+        assert!(
+            !second,
+            "clicking the same index in a different pane must NOT be a double-click"
+        );
+    }
+
+    #[test]
+    fn double_click_resets_after_trigger() {
+        let bindings = default_bindings();
+        let mut app = test_app(bindings);
+
+        // First pair: triggers double-click.
+        app.register_mouse_click(MouseClickTarget::LeftPane, Some(1));
+        let triggered = app.register_mouse_click(MouseClickTarget::LeftPane, Some(1));
+        assert!(triggered);
+
+        // The state should be cleared — the next click starts a fresh sequence.
+        let after = app.register_mouse_click(MouseClickTarget::LeftPane, Some(1));
+        assert!(
+            !after,
+            "after a double-click triggers, the next click must start a new sequence"
+        );
+    }
+
+    #[test]
+    fn double_click_center_pane_no_item_index() {
+        let bindings = default_bindings();
+        let mut app = test_app(bindings);
+
+        let first = app.register_mouse_click(MouseClickTarget::CenterPane, None);
+        assert!(!first);
+
+        let second = app.register_mouse_click(MouseClickTarget::CenterPane, None);
+        assert!(
+            second,
+            "double-click on center pane (no item index) must work"
         );
     }
 }
