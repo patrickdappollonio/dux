@@ -4171,8 +4171,9 @@ fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {
 }
 
 impl App {
-    /// Render the GitHub PR pill as a single inline row:
-    /// `╭ owner/repo#1234 │ PR title ellipsized… ╮`
+    /// Render the GitHub PR pill as a single-line rounded pill using
+    /// Powerline half-circle glyphs for the caps and a solid background:
+    /// ` owner/repo#1234 │ PR title ellipsized… `
     fn render_pr_banner(&self, frame: &mut Frame, area: Rect, pr: &crate::model::PrInfo) {
         use crate::model::PrState;
 
@@ -4180,23 +4181,30 @@ impl App {
             return;
         }
 
-        let state_fg = match pr.state {
-            PrState::Open => self.theme.pr_open_fg,
-            PrState::Merged => self.theme.pr_merged_fg,
-            PrState::Closed => self.theme.pr_closed_fg,
+        let bg = match pr.state {
+            PrState::Open => self.theme.pr_open_bg,
+            PrState::Merged => self.theme.pr_merged_bg,
+            PrState::Closed => self.theme.pr_closed_bg,
         };
-        let border_style = Style::default().fg(state_fg);
-        let text_style = Style::default().fg(state_fg).add_modifier(Modifier::BOLD);
-        let title_style = Style::default().fg(state_fg);
+        let fg = self.theme.pr_banner_fg;
+        // Half-circle caps: foreground is the pill color, background is terminal default.
+        let cap_style = Style::default().fg(bg);
+        // Inner content: white text on colored background.
+        let text_style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
+        let title_style = Style::default().fg(fg).bg(bg);
+        let divider_style = Style::default().fg(fg).bg(bg);
+
+        // Powerline rounded glyphs.
+        let left_cap = "\u{e0b6}"; //
+        let right_cap = "\u{e0b4}"; //
 
         let left_text = format!(" {}#{} ", pr.owner_repo, pr.number);
         let left_w = left_text.len();
         let avail = area.width as usize;
         let buf = frame.buffer_mut();
 
-        // Minimum: ╭ + left_text + ╮
+        // Minimum:  + left_text +
         if avail < left_w + 2 {
-            // Too narrow — just show #N.
             let short = format!(" #{} ", pr.number);
             let pill_w = short.len() + 2;
             if pill_w > avail {
@@ -4204,16 +4212,16 @@ impl App {
             }
             let sx = area.x + (area.width.saturating_sub(pill_w as u16)) / 2;
             let y = area.y;
-            set_cell(buf, sx, y, "╭", border_style);
+            set_cell(buf, sx, y, left_cap, cap_style);
             for (i, ch) in short.chars().enumerate() {
                 set_cell(buf, sx + 1 + i as u16, y, &ch.to_string(), text_style);
             }
-            set_cell(buf, sx + pill_w as u16 - 1, y, "╮", border_style);
+            set_cell(buf, sx + pill_w as u16 - 1, y, right_cap, cap_style);
             return;
         }
 
-        // Right side: remaining space after ╭ left_text │ ... ╮
-        let right_inner_w = avail.saturating_sub(left_w + 3); // 3 = ╭ + │ + ╮
+        // Right side: remaining space after  left_text │ ...
+        let right_inner_w = avail.saturating_sub(left_w + 3); // 3 =  + │ +
         let has_right = right_inner_w >= 4;
 
         let right_text = if has_right {
@@ -4238,23 +4246,23 @@ impl App {
         };
 
         let total_w = if has_right {
-            left_w + right_inner_w + 3 // ╭ + left + │ + right + ╮
+            left_w + right_inner_w + 3
         } else {
-            left_w + 2 // ╭ + left + ╮
+            left_w + 2
         };
         let sx = area.x + (area.width.saturating_sub(total_w as u16)) / 2;
 
         let y = area.y;
         let mut x = sx;
 
-        set_cell(buf, x, y, "╭", border_style);
+        set_cell(buf, x, y, left_cap, cap_style);
         x += 1;
         for ch in left_text.chars() {
             set_cell(buf, x, y, &ch.to_string(), text_style);
             x += 1;
         }
         if has_right {
-            set_cell(buf, x, y, "│", border_style);
+            set_cell(buf, x, y, "│", divider_style);
             x += 1;
             let mut cw = 0;
             for ch in right_text.chars() {
@@ -4271,7 +4279,7 @@ impl App {
                 cw += 1;
             }
         }
-        set_cell(buf, x, y, "╮", border_style);
+        set_cell(buf, x, y, right_cap, cap_style);
     }
 }
 
