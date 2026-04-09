@@ -1413,9 +1413,10 @@ impl App {
             .set_visible_lines(text_area.height as usize);
 
         if let Some(overlay) = self.commit_input.overlay() {
-            // Overlay (e.g. "Generating commit message…") with animated dots.
-            let dots = ".".repeat((self.start_time.elapsed().as_millis() as usize / 500) % 4);
-            let text = format!("{overlay}{dots}");
+            // Overlay (e.g. "Generating commit message…") with spinner prefix.
+            let idx = self.spinner_frame_index();
+            let spinner = crate::theme::SPINNER_FRAMES[idx];
+            let text = format!("{spinner} {overlay}");
             Paragraph::new(text)
                 .style(Style::default().fg(self.theme.hint_desc_fg))
                 .render(text_area, frame.buffer_mut());
