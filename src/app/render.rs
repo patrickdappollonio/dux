@@ -4206,111 +4206,102 @@ impl App {
             .fg(fg)
             .bg(bg)
             .add_modifier(Modifier::ITALIC);
+        let fill_style = Style::default().fg(fg).bg(bg);
 
         // Half-block caps (universally supported Unicode).
         let left_cap = "\u{2590}"; // ▐ — right half block
         let right_cap = "\u{258c}"; // ▌ — left half block
 
-        let left_text = format!(" \u{2387} {}#{} ", pr.owner_repo, pr.number);
-        let left_w = left_text.chars().count();
-        let avail = area.width as usize;
-        let buf = frame.buffer_mut();
+        // Build the pill content as a single string.
+        // With title:    " ⎇ owner/repo#1234 ▸ PR title here… "
+        // Without title: " ⎇ owner/repo#1234 "
+        let prefix = format!(" \u{2387} {}#{}", pr.owner_repo, pr.number);
+        let title_trimmed = pr.title.trim();
+        let has_title = !title_trimmed.is_empty();
 
-        // Minimum: ▐ + left_text + ▌
-        if avail < left_w + 2 {
-            let short = format!(" \u{2387} #{} ", pr.number);
-            let pill_w = short.chars().count() + 2;
-            if pill_w > avail {
-                return;
-            }
-            let sx = area.x;
-            let y = area.y;
-            set_cell(buf, sx, y, left_cap, cap_style);
-            for (i, ch) in short.chars().enumerate() {
-                set_cell(buf, sx + 1 + i as u16, y, &ch.to_string(), text_style);
-            }
-            set_cell(buf, sx + pill_w as u16 - 1, y, right_cap, cap_style);
+        // Available content width inside the pill (between the two caps).
+        let avail = area.width as usize;
+        let inner_w = avail.saturating_sub(2); // 2 = left cap + right cap
+        if inner_w < 4 {
             return;
         }
 
-        // Layout: ▐left▌ ▐right▌ — left pill is fitted, right pill fills remaining.
-        // Overhead: 2 caps for left + 1 gap + 2 caps for right = 5.
-        // Skip the right pill entirely if there's no title to show (e.g. PR
-        // state was reconstructed from the database without a stored title).
-        let title_available = !pr.title.trim().is_empty();
-        let right_inner_w = avail.saturating_sub(left_w + 5);
-        let has_right = title_available && right_inner_w >= 4;
-
-        let right_text = if has_right {
-            let content = format!("\u{a7} {}", pr.title.trim());
-            let trimmed = content.as_str();
-            let trimmed_w = trimmed.chars().count();
-            if trimmed_w > right_inner_w {
-                // Ellipsize: fill available width, end with '…'.
-                let mut truncated = String::new();
-                // Leave 1 char for the ellipsis.
-                for (width, ch) in trimmed.chars().enumerate() {
-                    if width + 1 >= right_inner_w {
-                        truncated.push('…');
-                        break;
-                    }
-                    truncated.push(ch);
-                }
-                truncated
-            } else {
-                // Center: pad both sides equally.
-                let padding = right_inner_w.saturating_sub(trimmed_w);
-                let left_pad = padding / 2;
-                let right_pad = padding - left_pad;
-                format!(
-                    "{}{}{}",
-                    " ".repeat(left_pad),
-                    trimmed,
-                    " ".repeat(right_pad),
-                )
-            }
-        } else {
-            String::new()
-        };
-
-        // Left-align with the pane below so the pills sit flush against the border.
-        let sx = area.x;
-
+        let prefix_w = prefix.chars().count();
+        let buf = frame.buffer_mut();
         let y = area.y;
+        let sx = area.x;
         let mut x = sx;
 
-        // Left pill: ▐ left_text ▌
+        // Left cap.
         set_cell(buf, x, y, left_cap, cap_style);
         x += 1;
-        for ch in left_text.chars() {
-            set_cell(buf, x, y, &ch.to_string(), text_style);
-            x += 1;
-        }
-        set_cell(buf, x, y, right_cap, cap_style);
-        x += 1;
 
-        if has_right {
-            // Gap (terminal default — just skip the cell).
-            x += 1;
-            // Right pill: ▐ title_text ▌
-            set_cell(buf, x, y, left_cap, cap_style);
-            x += 1;
-            let mut cw = 0;
-            for ch in right_text.chars() {
-                if cw >= right_inner_w {
+        if !has_title || inner_w <= prefix_w + 4 {
+            // No title or not enough room — render just the prefix, padded.
+            // " ⎇ owner/repo#1234 "
+            let content = format!("{prefix} ");
+            for ch in content.chars() {
+                if (x - sx) as usize > inner_w {
                     break;
                 }
-                set_cell(buf, x, y, &ch.to_string(), title_style);
+                set_cell(buf, x, y, &ch.to_string(), text_style);
                 x += 1;
-                cw += 1;
             }
-            while cw < right_inner_w {
-                set_cell(buf, x, y, " ", title_style);
+            // Fill remaining space.
+            while (x - sx) as usize <= inner_w {
+                set_cell(buf, x, y, " ", fill_style);
                 x += 1;
-                cw += 1;
             }
-            set_cell(buf, x, y, right_cap, cap_style);
+        } else {
+            // Render prefix + arrow + title.
+            // " ⎇ owner/repo#1234 ▸ PR title here "
+            let arrow = " \u{25b8} "; // " ▸ "
+            let arrow_w = arrow.chars().count();
+
+            // Write prefix.
+            for ch in prefix.chars() {
+                set_cell(buf, x, y, &ch.to_string(), text_style);
+                x += 1;
+            }
+
+            // Write arrow separator.
+            for ch in arrow.chars() {
+                set_cell(buf, x, y, &ch.to_string(), fill_style);
+                x += 1;
+            }
+
+            // Remaining space for the title + trailing space.
+            let used = prefix_w + arrow_w;
+            let title_budget = inner_w.saturating_sub(used + 1); // +1 for trailing space
+
+            // Write title, ellipsized if needed.
+            let title_w = title_trimmed.chars().count();
+            if title_w > title_budget {
+                for (i, ch) in title_trimmed.chars().enumerate() {
+                    if i + 1 >= title_budget {
+                        set_cell(buf, x, y, "…", title_style);
+                        x += 1;
+                        break;
+                    }
+                    set_cell(buf, x, y, &ch.to_string(), title_style);
+                    x += 1;
+                }
+            } else {
+                for ch in title_trimmed.chars() {
+                    set_cell(buf, x, y, &ch.to_string(), title_style);
+                    x += 1;
+                }
+            }
+
+            // Fill remaining space to the right cap.
+            while (x - sx) as usize <= inner_w {
+                set_cell(buf, x, y, " ", fill_style);
+                x += 1;
+            }
         }
+
+        // Right cap.
+        set_cell(buf, x, y, right_cap, cap_style);
     }
 }
 
