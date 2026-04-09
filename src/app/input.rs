@@ -861,18 +861,56 @@ impl App {
         Ok(())
     }
 
+    pub(crate) fn start_pull(
+        &mut self,
+        repo_path: PathBuf,
+        target: PullTarget,
+        busy_message: impl Into<String>,
+        already_running_message: impl Into<String>,
+    ) {
+        let repo_key = repo_path.to_string_lossy().into_owned();
+        if !self.pulls_in_flight.insert(repo_key.clone()) {
+            self.set_warning(already_running_message);
+            return;
+        }
+
+        let tx = self.worker_tx.clone();
+        self.set_busy(busy_message);
+        thread::spawn(move || {
+            let result = match &target {
+                PullTarget::Project { .. } => match git::is_dirty(&repo_path) {
+                    Ok(true) => Err(
+                        "Refresh blocked because the source checkout has uncommitted changes."
+                            .to_string(),
+                    ),
+                    Ok(false) => git::pull_current_branch(&repo_path)
+                        .map(|_| git::current_branch(&repo_path).ok())
+                        .map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                },
+                PullTarget::Session => git::pull_current_branch(&repo_path)
+                    .map(|_| None)
+                    .map_err(|e| e.to_string()),
+            };
+            let _ = tx.send(WorkerEvent::PullCompleted {
+                repo_path: repo_key,
+                target,
+                result,
+            });
+        });
+    }
+
     fn pull_from_remote(&mut self) -> Result<()> {
         let Some(session) = self.selected_session() else {
             self.set_error("Select a session first.");
             return Ok(());
         };
-        let worktree = PathBuf::from(&session.worktree_path);
-        let tx = self.worker_tx.clone();
-        self.set_busy("Pulling latest changes from remote…");
-        thread::spawn(move || {
-            let result = git::pull_current_branch(&worktree).map_err(|e| e.to_string());
-            let _ = tx.send(WorkerEvent::PullCompleted(result));
-        });
+        self.start_pull(
+            PathBuf::from(&session.worktree_path),
+            PullTarget::Session,
+            "Pulling latest changes from remote…",
+            "Pull already in progress for this worktree. Wait for the current pull to finish.",
+        );
         Ok(())
     }
 
@@ -3441,7 +3479,8 @@ mod tests {
         App, CenterMode, ConfirmKillRunningPrompt, FocusPane, FullscreenOverlay, InputTarget,
         KillRunningAction, KillRunningFocus, KillRunningFooterAction, KillRunningPrompt,
         KillableRuntime, KillableRuntimeKind, LeftSection, MouseLayoutState, OverlayMouseLayout,
-        OverlayMouseLayoutState, PromptState, RightSection, RuntimeTargetId, TextInput,
+        OverlayMouseLayoutState, PromptState, PullTarget, RightSection, RuntimeTargetId, TextInput,
+        WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
@@ -3580,6 +3619,7 @@ mod tests {
             terminal_return_to_list: false,
             terminal_counter: 0,
             create_agent_in_flight: false,
+            pulls_in_flight: std::collections::HashSet::new(),
             resource_stats_in_flight: false,
             last_pty_size: (0, 0),
             last_pty_activity: std::collections::HashMap::new(),
@@ -3776,6 +3816,61 @@ mod tests {
             .expect("git commit");
 
         std::fs::write(&file_path, updated).expect("write updated");
+    }
+
+    #[test]
+    fn refresh_selected_project_blocks_repeat_presses_while_pull_is_running() {
+        let mut app = test_app(default_bindings());
+        app.selected_left = 0;
+
+        app.refresh_selected_project()
+            .expect("start project refresh");
+        app.refresh_selected_project()
+            .expect("repeat refresh should not error");
+
+        let repo_path = app.projects[0].path.clone();
+        assert!(app.pulls_in_flight.contains(&repo_path));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
+        assert!(app.status.text().contains("already in progress"));
+    }
+
+    #[test]
+    fn project_pull_completion_clears_in_flight_guard() {
+        let mut app = test_app(default_bindings());
+        let repo_path = app.projects[0].path.clone();
+        app.pulls_in_flight.insert(repo_path.clone());
+
+        app.worker_tx
+            .send(WorkerEvent::PullCompleted {
+                repo_path,
+                target: PullTarget::Project {
+                    project_id: app.projects[0].id.clone(),
+                    project_name: app.projects[0].name.clone(),
+                },
+                result: Ok(Some("feature/demo".to_string())),
+            })
+            .expect("queue worker event");
+
+        app.drain_events();
+
+        assert!(app.pulls_in_flight.is_empty());
+        assert_eq!(app.projects[0].current_branch, "feature/demo");
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
+    }
+
+    #[test]
+    fn pull_from_remote_blocks_repeat_presses_while_pull_is_running() {
+        let mut app = test_app(default_bindings());
+        app.selected_left = 1;
+
+        app.pull_from_remote().expect("start session pull");
+        app.pull_from_remote()
+            .expect("repeat pull should not error");
+
+        let repo_path = app.sessions[0].worktree_path.clone();
+        assert!(app.pulls_in_flight.contains(&repo_path));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
+        assert!(app.status.text().contains("already in progress"));
     }
 
     #[test]

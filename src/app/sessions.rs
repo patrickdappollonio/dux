@@ -426,24 +426,18 @@ impl App {
             return Ok(());
         };
         logger::info(&format!("refreshing project {}", project.path));
-        let path = Path::new(&project.path);
-        if git::is_dirty(path)? {
-            self.set_error("Refresh blocked because the source checkout has uncommitted changes.");
-            return Ok(());
-        }
-        git::pull_current_branch(path)?;
-        if let Some(existing) = self
-            .projects
-            .iter_mut()
-            .find(|candidate| candidate.id == project.id)
-        {
-            existing.current_branch =
-                git::current_branch(path).unwrap_or_else(|_| existing.current_branch.clone());
-        }
-        self.set_info(format!(
-            "Refreshed project \"{}\" — local branch is up to date with remote.",
-            project.name,
-        ));
+        self.start_pull(
+            PathBuf::from(&project.path),
+            PullTarget::Project {
+                project_id: project.id,
+                project_name: project.name.clone(),
+            },
+            format!("Refreshing project \"{}\" from remote…", project.name),
+            format!(
+                "Project refresh already in progress for \"{}\". Wait for the current pull to finish.",
+                project.name,
+            ),
+        );
         Ok(())
     }
 

@@ -95,6 +95,7 @@ pub struct App {
     pub(crate) terminal_return_to_list: bool,
     pub(crate) terminal_counter: usize,
     pub(crate) create_agent_in_flight: bool,
+    pub(crate) pulls_in_flight: HashSet<String>,
     pub(crate) resource_stats_in_flight: bool,
     pub(crate) last_pty_size: (u16, u16),
     /// Tracks when each agent last received PTY data, for the streaming
@@ -636,7 +637,11 @@ pub(crate) enum WorkerEvent {
     CommitMessageGenerated(String),
     CommitMessageFailed(String),
     PushCompleted(Result<(), String>),
-    PullCompleted(Result<(), String>),
+    PullCompleted {
+        repo_path: String,
+        target: PullTarget,
+        result: Result<Option<String>, String>,
+    },
     BrowserEntriesReady {
         dir: PathBuf,
         entries: Vec<BrowserEntry>,
@@ -653,6 +658,15 @@ pub(crate) enum WorkerEvent {
         result: Result<(), String>,
     },
     ResourceStatsReady(Vec<ResourceStats>),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum PullTarget {
+    Project {
+        project_id: String,
+        project_name: String,
+    },
+    Session,
 }
 
 mod input;
@@ -743,6 +757,7 @@ impl App {
             terminal_return_to_list: false,
             terminal_counter: 0,
             create_agent_in_flight: false,
+            pulls_in_flight: HashSet::new(),
             resource_stats_in_flight: false,
             last_pty_size: (0, 0),
             last_pty_activity: HashMap::new(),
