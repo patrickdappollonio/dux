@@ -442,7 +442,7 @@ impl App {
                             && self.is_agent_streaming(&session.id)
                         {
                             let idx =
-                                (self.tick_count as usize / 2) % crate::theme::SPINNER_FRAMES.len();
+                                (self.tick_count as usize) % crate::theme::SPINNER_FRAMES.len();
                             (
                                 crate::theme::SPINNER_FRAMES[idx].to_string(),
                                 self.theme.session_active,
