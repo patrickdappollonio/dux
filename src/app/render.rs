@@ -540,9 +540,34 @@ impl App {
 
     fn render_center(&mut self, frame: &mut Frame, area: Rect) {
         let focused = self.focus == FocusPane::Center;
+
+        // Determine if a PR banner should be shown above the center pane.
+        let is_input = matches!(
+            (self.input_target, self.session_surface),
+            (InputTarget::Agent, SessionSurface::Agent)
+                | (InputTarget::Terminal, SessionSurface::Terminal)
+        );
+        let pr_info = if !is_input {
+            self.selected_session()
+                .and_then(|s| self.pr_statuses.get(&s.id))
+                .cloned()
+        } else {
+            None
+        };
+        let pr_banner_height: u16 = if pr_info.is_some() { 3 } else { 0 };
+
+        let [pr_area, pane_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(pr_banner_height), Constraint::Min(1)])
+            .areas(area);
+
+        if let Some(ref pr) = pr_info {
+            self.render_pr_banner(frame, pr_area, pr);
+        }
+
         match &self.center_mode {
             CenterMode::Diff { .. } => {
-                self.render_diff(frame, area, focused);
+                self.render_diff(frame, pane_area, focused);
             }
             CenterMode::Agent if !matches!(self.fullscreen_overlay, FullscreenOverlay::None) => {
                 // Skip agent rendering here — fullscreen overlay handles it.
@@ -550,14 +575,14 @@ impl App {
                 // per frame (once to the small pane, once to the overlay).
                 let title = self.center_pane_agent_title();
                 self.themed_block(&title, focused)
-                    .render(area, frame.buffer_mut());
+                    .render(pane_area, frame.buffer_mut());
             }
             CenterMode::Agent => {
                 let title = self.center_pane_agent_title();
                 // Center pane always renders the agent; terminal is an overlay.
                 let saved = self.session_surface;
                 self.session_surface = SessionSurface::Agent;
-                self.render_agent_terminal(frame, area, &title, focused);
+                self.render_agent_terminal(frame, pane_area, &title, focused);
                 self.session_surface = saved;
             }
         }
@@ -577,27 +602,12 @@ impl App {
             return;
         }
 
-        // PR banner in diff view.
-        let pr_info = self
-            .selected_session()
-            .and_then(|s| self.pr_statuses.get(&s.id))
-            .cloned();
-        let pr_banner_height: u16 = if pr_info.is_some() { 3 } else { 0 };
-
         let hint_height = 2;
-        let [pr_area, content_area, hint_area] = Layout::default()
+        let [content_area, hint_area] = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(pr_banner_height),
-                Constraint::Min(1),
-                Constraint::Length(hint_height),
-            ])
+            .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
             .areas(inner);
         self.mouse_layout.agent_term = Some(content_area);
-
-        if let Some(ref pr) = pr_info {
-            self.render_pr_banner(frame, pr_area, pr);
-        }
 
         self.last_diff_height = content_area.height;
 
@@ -826,31 +836,13 @@ impl App {
         let mut scrollback_offset: usize = 0;
         let mut rendered_content = false;
 
-        // Determine if a PR banner should be shown.
-        let pr_info = if !is_input {
-            self.selected_session()
-                .and_then(|s| self.pr_statuses.get(&s.id))
-                .cloned()
-        } else {
-            None
-        };
-        let pr_banner_height: u16 = if pr_info.is_some() { 3 } else { 0 };
-
         // Reserve 2 lines at the bottom for the hint bar (top border + text).
         let hint_height = 2;
-        let [pr_area, term_area, hint_area] = Layout::default()
+        let [term_area, hint_area] = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(pr_banner_height),
-                Constraint::Min(1),
-                Constraint::Length(hint_height),
-            ])
+            .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
             .areas(inner);
         self.mouse_layout.agent_term = Some(term_area);
-
-        if let Some(ref pr) = pr_info {
-            self.render_pr_banner(frame, pr_area, pr);
-        }
 
         // Get the selected session's PTY screen.
         let session_id = self.selected_session().map(|s| s.id.clone());
@@ -4189,15 +4181,16 @@ impl App {
             return;
         }
 
-        let bg = match pr.state {
-            PrState::Open => self.theme.pr_open_bg,
-            PrState::Merged => self.theme.pr_merged_bg,
-            PrState::Closed => self.theme.pr_closed_bg,
+        // State color used as foreground for borders and text (no background).
+        let state_fg = match pr.state {
+            PrState::Open => self.theme.pr_open_fg,
+            PrState::Merged => self.theme.pr_merged_fg,
+            PrState::Closed => self.theme.pr_closed_fg,
         };
-        let fg = self.theme.pr_banner_fg;
-        let border_style = Style::default().fg(fg).bg(bg);
-        let text_style = Style::default().fg(fg).bg(bg);
-        let dim_border_style = Style::default().fg(self.theme.pr_pill_border_fg).bg(bg);
+        let border_style = Style::default().fg(state_fg);
+        let text_style = Style::default().fg(state_fg).add_modifier(Modifier::BOLD);
+        let dim_border_style = Style::default().fg(self.theme.pr_pill_border_fg);
+        let right_text_style = Style::default().fg(self.theme.pr_pill_secondary_fg);
 
         let left_text = format!(" {}#{} ", pr.owner_repo, pr.number);
         let left_w = left_text.len();
@@ -4279,7 +4272,6 @@ impl App {
         // -- Row 0: top borders --
         let y = area.y;
         let mut x = start_x;
-        // Left pill top
         set_cell(buf, x, y, "╭", border_style);
         x += 1;
         for _ in 0..left_w {
@@ -4289,7 +4281,6 @@ impl App {
         if has_right {
             set_cell(buf, x, y, "╮", border_style);
             x += 1;
-            // Right pill top
             set_cell(buf, x, y, "╭", dim_border_style);
             x += 1;
             for _ in 0..right_inner_w {
@@ -4315,19 +4306,18 @@ impl App {
             x += 1;
             set_cell(buf, x, y, "│", dim_border_style);
             x += 1;
-            let right_style = Style::default().fg(self.theme.pr_pill_secondary_fg).bg(bg);
             let mut chars_written = 0;
             for ch in right_text.chars() {
                 if chars_written >= right_inner_w {
                     break;
                 }
-                set_cell(buf, x, y, &ch.to_string(), right_style);
+                set_cell(buf, x, y, &ch.to_string(), right_text_style);
                 x += 1;
                 chars_written += 1;
             }
             // Pad remaining space.
             while chars_written < right_inner_w {
-                set_cell(buf, x, y, " ", right_style);
+                set_cell(buf, x, y, " ", right_text_style);
                 x += 1;
                 chars_written += 1;
             }
