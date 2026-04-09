@@ -1231,18 +1231,6 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4] {
             },
         ),
         (
-            "opencode",
-            ProviderCommandConfig {
-                command: "opencode".to_string(),
-                args: Vec::new(),
-                resume_args: Some(vec!["--continue".to_string()]),
-                oneshot_args: vec!["run".to_string(), "{prompt}".to_string()],
-                oneshot_output: OneshotOutput::Stdout,
-                install_hint: Some("npm install -g opencode-ai".to_string()),
-                forward_scroll: true,
-            },
-        ),
-        (
             "gemini",
             ProviderCommandConfig {
                 command: "gemini".to_string(),
@@ -1252,6 +1240,18 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4] {
                 oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("npm install -g @google/gemini-cli".to_string()),
                 forward_scroll: false,
+            },
+        ),
+        (
+            "opencode",
+            ProviderCommandConfig {
+                command: "opencode".to_string(),
+                args: Vec::new(),
+                resume_args: Some(vec!["--continue".to_string()]),
+                oneshot_args: vec!["run".to_string(), "{prompt}".to_string()],
+                oneshot_output: OneshotOutput::Stdout,
+                install_hint: Some("npm install -g opencode-ai".to_string()),
+                forward_scroll: true,
             },
         ),
     ]

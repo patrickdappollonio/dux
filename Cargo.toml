@@ -10,23 +10,23 @@ chrono = { version = "0.4.41", features = ["serde"] }
 content_inspector = "0.2.4"
 crossterm = "0.29.0"
 home = "0.5.11"
-ratatui = "0.29.0"
-rusqlite = { version = "0.37.0", features = ["bundled", "chrono"] }
+ratatui = "0.30.0"
+rusqlite = { version = "0.39.0", features = ["bundled", "chrono"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
-toml = "0.8.20"
-toml_edit = "0.22"
+toml = "1.1.2"
+toml_edit = "0.25"
 uuid = { version = "1.17.0", features = ["v4"] }
 portable-pty = "0.9"
 rustix = { version = "1.1", features = ["termios", "process", "event", "stdio"] }
-signal-hook = "0.3"
-alacritty_terminal = "0.25.1"
+signal-hook = "0.4"
+alacritty_terminal = "0.26.0"
 petname = { version = "2.0.2", default-features = false, features = ["default-rng", "default-words"] }
-similar = "2"
+similar = "3"
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }
 crokey = "1.4.0"
 indexmap = { version = "2.13.0", features = ["serde"] }
-compact_str = "0.8"
+compact_str = "0.9"
 
 [dev-dependencies]
 tempfile = "3.20.0"
