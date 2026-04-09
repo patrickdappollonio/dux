@@ -4203,14 +4203,14 @@ impl App {
         let left_cap = "\u{2590}"; // ▐ — right half block
         let right_cap = "\u{258c}"; // ▌ — left half block
 
-        let left_text = format!(" {}#{} ", pr.owner_repo, pr.number);
+        let left_text = format!(" \u{2387} {}#{} ", pr.owner_repo, pr.number);
         let left_w = left_text.len();
         let avail = area.width as usize;
         let buf = frame.buffer_mut();
 
-        // Minimum:  + left_text +
+        // Minimum: ▐ + left_text + ▌
         if avail < left_w + 2 {
-            let short = format!(" #{} ", pr.number);
+            let short = format!(" \u{2387} #{} ", pr.number);
             let pill_w = short.len() + 2;
             if pill_w > avail {
                 return;
@@ -4230,11 +4230,13 @@ impl App {
         let has_right = right_inner_w >= 4;
 
         let right_text = if has_right {
-            let t = format!(" {} ", pr.title);
-            if t.len() > right_inner_w {
+            let trimmed = pr.title.trim();
+            if trimmed.len() > right_inner_w {
+                // Ellipsize: fill available width, end with '…'.
                 let mut truncated = String::new();
                 let mut width = 0;
-                for ch in t.chars() {
+                // Leave 1 char for the ellipsis.
+                for ch in trimmed.chars() {
                     if width + 1 >= right_inner_w {
                         truncated.push('…');
                         break;
@@ -4244,7 +4246,16 @@ impl App {
                 }
                 truncated
             } else {
-                t
+                // Center: pad both sides equally.
+                let padding = right_inner_w.saturating_sub(trimmed.len());
+                let left_pad = padding / 2;
+                let right_pad = padding - left_pad;
+                format!(
+                    "{}{}{}",
+                    " ".repeat(left_pad),
+                    trimmed,
+                    " ".repeat(right_pad),
+                )
             }
         } else {
             String::new()
