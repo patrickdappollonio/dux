@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -77,6 +78,9 @@ pub struct PtyClient {
     /// `take_received_data` — used to detect streaming activity without
     /// interfering with the snapshot dirty flag.
     received_data: Arc<AtomicBool>,
+    /// Records the last resize so `take_received_data` can suppress the
+    /// redraw burst that follows a `SIGWINCH`.
+    last_resize_at: Mutex<Option<Instant>>,
 }
 
 impl PtyClient {
@@ -157,6 +161,7 @@ impl PtyClient {
             has_output,
             dirty,
             received_data,
+            last_resize_at: Mutex::new(None),
         })
     }
 
@@ -271,6 +276,9 @@ impl PtyClient {
             terminal.resize(rows, cols);
             self.dirty.store(true, Ordering::Release);
         }
+        if let Ok(mut ts) = self.last_resize_at.lock() {
+            *ts = Some(Instant::now());
+        }
         Ok(())
     }
 
@@ -292,8 +300,21 @@ impl PtyClient {
     /// Returns `true` if the PTY received data since the last call, then
     /// clears the flag. Used to detect streaming activity for UI indicators
     /// without interfering with the snapshot dirty flag.
+    ///
+    /// Suppresses the signal briefly after a resize to avoid counting the
+    /// child process's redraw burst as streaming activity.
     pub fn take_received_data(&self) -> bool {
-        self.received_data.swap(false, Ordering::AcqRel)
+        if !self.received_data.swap(false, Ordering::AcqRel) {
+            return false;
+        }
+        // Ignore data that arrived within 500ms of a resize — it's almost
+        // certainly the child redrawing in response to SIGWINCH.
+        if let Ok(ts) = self.last_resize_at.lock() {
+            if ts.is_some_and(|t| t.elapsed().as_millis() < 500) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Whether the child process has enabled any mouse tracking mode
