@@ -1089,9 +1089,11 @@ impl App {
                         } else if self.handle_mouse(mouse_ev) {
                             return Ok(true);
                         }
-                    } else if !is_scrolled_back {
+                    } else {
                         // If the click landed outside the fullscreen overlay,
                         // exit interactive mode instead of forwarding to the PTY.
+                        // This check runs regardless of scroll state so the user
+                        // can always click outside to dismiss the overlay.
                         let outside_overlay =
                             matches!(mouse_ev.kind, MouseEventKind::Down(MouseButton::Left))
                                 && !self.mouse_layout.agent_term.is_some_and(|rect| {
@@ -1114,18 +1116,20 @@ impl App {
                             return Ok(false);
                         }
 
-                        // Non-scroll events (clicks, drags, moves,
-                        // releases): only forward when the child process
-                        // has opted into mouse tracking (e.g. vim, htop).
-                        // Otherwise drop — the child would echo the raw
-                        // SGR bytes as garbage text.
-                        let child_wants_mouse = self
-                            .selected_terminal_surface_client()
-                            .is_some_and(|p| p.has_mouse_mode());
-                        if child_wants_mouse
-                            && let Some(provider) = self.selected_terminal_surface_client()
-                        {
-                            let _ = provider.write_bytes(&raw);
+                        if !is_scrolled_back {
+                            // Non-scroll events (clicks, drags, moves,
+                            // releases): only forward when the child process
+                            // has opted into mouse tracking (e.g. vim, htop).
+                            // Otherwise drop — the child would echo the raw
+                            // SGR bytes as garbage text.
+                            let child_wants_mouse = self
+                                .selected_terminal_surface_client()
+                                .is_some_and(|p| p.has_mouse_mode());
+                            if child_wants_mouse
+                                && let Some(provider) = self.selected_terminal_surface_client()
+                            {
+                                let _ = provider.write_bytes(&raw);
+                            }
                         }
                     }
                 }
@@ -6456,6 +6460,38 @@ mod tests {
             app.focus,
             FocusPane::Left,
             "focus should move to left pane when terminal_return_to_list is set"
+        );
+    }
+
+    #[test]
+    fn scrolled_back_allows_click_outside_exit() {
+        // Use the scrolled-back helper (which prints enough lines to create
+        // history) and install a mouse layout so click-outside detection works.
+        let mut app = app_with_scrolled_back_pty();
+        install_mouse_layout(&mut app);
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+        assert!(
+            app.selected_terminal_surface_client()
+                .unwrap()
+                .scrollback_offset()
+                > 0,
+            "test setup: should be scrolled back"
+        );
+
+        // Click outside agent_term while scrolled back — overlay must close.
+        let bytes = sgr_mouse_down(2, 2);
+        let result = app.process_raw_input_bytes(&bytes).unwrap();
+        assert!(!result);
+        assert_eq!(
+            app.input_target,
+            InputTarget::None,
+            "clicking outside overlay must exit interactive mode even when scrolled back"
+        );
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "clicking outside overlay must dismiss fullscreen even when scrolled back"
         );
     }
 }
