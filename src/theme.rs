@@ -3,6 +3,10 @@
 use ratatui::prelude::{Color, Modifier, Style};
 use ratatui::text::Span;
 
+/// Braille dot-pattern frames for spinner animations. Shared by the loading
+/// card, status line, and left-pane streaming indicator.
+pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
 pub struct Theme {
     pub header_fg: Color,
     pub header_bg: Color,

@@ -96,12 +96,19 @@ pub struct App {
     pub(crate) terminal_counter: usize,
     pub(crate) create_agent_in_flight: bool,
     pub(crate) last_pty_size: (u16, u16),
+    /// Tracks when each agent last received PTY data, for the streaming
+    /// activity spinner in the left pane.
+    pub(crate) last_pty_activity: HashMap<String, Instant>,
     pub(crate) prev_scrollback_offset: usize,
     pub(crate) show_diff_line_numbers: bool,
     pub(crate) last_diff_height: u16,
     pub(crate) last_diff_visual_lines: u16,
     pub(crate) theme: Theme,
     pub(crate) tick_count: u64,
+    /// Wall-clock reference for time-based animations (spinners). Using
+    /// elapsed time instead of `tick_count` keeps animation speed constant
+    /// regardless of how fast the event loop is running.
+    pub(crate) start_time: Instant,
     pub(crate) readonly_nudge_tick: Option<u64>,
     pub(crate) watched_worktree: Arc<Mutex<Option<PathBuf>>>,
     pub(crate) has_active_processes: Arc<AtomicBool>,
@@ -720,11 +727,13 @@ impl App {
             terminal_counter: 0,
             create_agent_in_flight: false,
             last_pty_size: (0, 0),
+            last_pty_activity: HashMap::new(),
             prev_scrollback_offset: 0,
             last_diff_height: 0,
             last_diff_visual_lines: 0,
             theme: Theme::default_dark(),
             tick_count: 0,
+            start_time: Instant::now(),
             readonly_nudge_tick: None,
             watched_worktree: Arc::clone(&watched_worktree),
             has_active_processes: Arc::new(AtomicBool::new(false)),
@@ -767,6 +776,7 @@ impl App {
         let result: Result<()> = {
             loop {
                 self.drain_events();
+                self.poll_pty_activity();
                 self.tick_count = self.tick_count.wrapping_add(1);
 
                 // Check SIGWINCH — needed when bypassing crossterm's event
@@ -957,6 +967,33 @@ impl App {
             return true;
         }
         false
+    }
+
+    /// Returns the current braille spinner frame index based on wall-clock
+    /// time (80ms per frame). Unlike `tick_count`, this stays constant-speed
+    /// regardless of event loop frequency.
+    pub(crate) fn spinner_frame_index(&self) -> usize {
+        ((self.start_time.elapsed().as_millis() / 80) as usize)
+            % crate::theme::SPINNER_FRAMES.len()
+    }
+
+    /// Poll each PTY provider for recent data and update the per-agent
+    /// activity timestamp used by the left-pane streaming indicator.
+    fn poll_pty_activity(&mut self) {
+        let now = Instant::now();
+        for (session_id, provider) in &self.providers {
+            if provider.take_received_data() {
+                self.last_pty_activity.insert(session_id.clone(), now);
+            }
+        }
+    }
+
+    /// Returns `true` if the given agent received PTY data within the last
+    /// second, indicating it is actively streaming output.
+    pub(crate) fn is_agent_streaming(&self, session_id: &str) -> bool {
+        self.last_pty_activity
+            .get(session_id)
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(1))
     }
 
     pub(crate) fn set_info(&mut self, message: impl Into<String>) {
