@@ -183,25 +183,8 @@ impl App {
                                     pr.number,
                                     &pr.owner_repo,
                                     state_str,
+                                    &pr.title,
                                 );
-                                // Preserve existing title if the incoming one is empty
-                                // (happens for reconstructed terminal-state PRs).
-                                let pr = if pr.title.is_empty() {
-                                    if let Some(existing) = self.pr_statuses.get(&session_id) {
-                                        if existing.number == pr.number {
-                                            crate::model::PrInfo {
-                                                title: existing.title.clone(),
-                                                ..pr
-                                            }
-                                        } else {
-                                            pr
-                                        }
-                                    } else {
-                                        pr
-                                    }
-                                } else {
-                                    pr
-                                };
                                 self.pr_statuses.insert(session_id, pr);
                                 changed = true;
                             }
@@ -594,9 +577,9 @@ impl App {
         // Load known PRs from the database so the worker can use `gh pr view`
         // for sessions that already have a persisted PR association.
         let known_prs = self.session_store.load_all_latest_prs().unwrap_or_default();
-        let known_map: HashMap<String, (u64, String, String)> = known_prs
+        let known_map: HashMap<String, crate::storage::StoredPr> = known_prs
             .into_iter()
-            .map(|(sid, num, repo, state)| (sid, (num, repo, state)))
+            .map(|pr| (pr.session_id.clone(), pr))
             .collect();
 
         if let Ok(mut guard) = self.pr_sync_sessions.lock() {
@@ -981,32 +964,32 @@ fn run_pr_sync(
 /// to O(active_sessions) for repos with many completed agents.
 fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<crate::model::PrInfo> {
     let owner_repo = git::remote_owner_repo(Path::new(&entry.worktree_path))
-        .or_else(|| entry.known_pr.as_ref().map(|(_, repo, _)| repo.clone()))?;
+        .or_else(|| entry.known_pr.as_ref().map(|pr| pr.owner_repo.clone()))?;
 
-    if let Some((known_number, ref known_repo, ref known_state)) = entry.known_pr {
-        let is_terminal = known_state == "MERGED" || known_state == "CLOSED";
+    if let Some(ref known) = entry.known_pr {
+        let is_terminal = known.state == "MERGED" || known.state == "CLOSED";
 
         if is_terminal {
             if entry.agent_exited {
                 // Terminal PR + exited agent = zero network calls.
                 // The agent process is gone and the PR is already merged/closed,
                 // so no new commits or PRs will appear on this branch.
-                return reconstruct_from_stored(known_number, known_repo, known_state);
+                return reconstruct_from_stored(known);
             }
 
             // Terminal PR but agent is still running — it might push new commits
             // and open a follow-up PR, so we still check for newer PRs.
             if let Some(newer) =
                 discover_pr_by_branch(&entry.branch_name, &owner_repo, &entry.session_id)
-                && newer.number > known_number
+                && newer.number > known.pr_number
             {
                 return Some(newer);
             }
-            return reconstruct_from_stored(known_number, known_repo, known_state);
+            return reconstruct_from_stored(known);
         }
 
         // Open PR: refresh its current state via `gh pr view`.
-        if let Some(pr) = view_pr_by_number(known_number, known_repo, &entry.session_id) {
+        if let Some(pr) = view_pr_by_number(known.pr_number, &known.owner_repo, &entry.session_id) {
             // Also check if a newer PR was opened.
             if let Some(newer) =
                 discover_pr_by_branch(&entry.branch_name, &owner_repo, &entry.session_id)
@@ -1024,26 +1007,19 @@ fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<crate::model::PrInfo> {
 
 /// Reconstruct a PrInfo from stored data without a network call.
 /// Used for terminal states (merged/closed) that don't need refreshing.
-fn reconstruct_from_stored(
-    number: u64,
-    owner_repo: &str,
-    state_str: &str,
-) -> Option<crate::model::PrInfo> {
+fn reconstruct_from_stored(stored: &crate::storage::StoredPr) -> Option<crate::model::PrInfo> {
     use crate::model::{PrInfo, PrState};
-    let state = match state_str {
+    let state = match stored.state.as_str() {
         "MERGED" => PrState::Merged,
         "CLOSED" => PrState::Closed,
         "OPEN" => PrState::Open,
         _ => return None,
     };
-    // We don't have the title stored, but the in-memory PrInfo from the
-    // previous check should still be in pr_statuses. Return a placeholder
-    // title that will be overridden if the in-memory version exists.
     Some(PrInfo {
-        number,
+        number: stored.pr_number,
         state,
-        title: String::new(),
-        owner_repo: owner_repo.to_string(),
+        title: stored.title.clone(),
+        owner_repo: stored.owner_repo.clone(),
     })
 }
 

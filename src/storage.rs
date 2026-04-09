@@ -4,6 +4,16 @@ use rusqlite::{Connection, params};
 
 use crate::model::{AgentSession, SessionStatus};
 
+/// A stored PR association loaded from the database.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredPr {
+    pub session_id: String,
+    pub pr_number: u64,
+    pub owner_repo: String,
+    pub state: String,
+    pub title: String,
+}
+
 pub struct SessionStore {
     conn: Connection,
 }
@@ -55,43 +65,56 @@ impl SessionStore {
             "state",
             "text not null default 'OPEN'",
         )?;
+        ensure_column(
+            &self.conn,
+            "session_prs",
+            "title",
+            "text not null default ''",
+        )?;
         Ok(())
     }
 
-    /// Insert a PR association or update its state if it already exists.
+    /// Insert a PR association or update its state and title if it already exists.
     pub fn upsert_pr(
         &self,
         session_id: &str,
         pr_number: u64,
         owner_repo: &str,
         state: &str,
+        title: &str,
     ) -> Result<()> {
         self.conn.execute(
             r#"
-            insert into session_prs (session_id, pr_number, owner_repo, state)
-            values (?1, ?2, ?3, ?4)
-            on conflict(session_id, pr_number) do update set state=excluded.state
+            insert into session_prs (session_id, pr_number, owner_repo, state, title)
+            values (?1, ?2, ?3, ?4, ?5)
+            on conflict(session_id, pr_number) do update set
+                state=excluded.state,
+                title=excluded.title
             "#,
-            params![session_id, pr_number as i64, owner_repo, state],
+            params![session_id, pr_number as i64, owner_repo, state, title],
         )?;
         Ok(())
     }
 
     /// Load all known PRs for a session, ordered by pr_number descending (latest first).
-    pub fn load_prs(&self, session_id: &str) -> Result<Vec<(u64, String, String)>> {
+    pub fn load_prs(&self, session_id: &str) -> Result<Vec<StoredPr>> {
         let mut stmt = self.conn.prepare(
             r#"
-            select pr_number, owner_repo, state
+            select pr_number, owner_repo, state, title
             from session_prs
             where session_id = ?1
             order by pr_number desc
             "#,
         )?;
+        let sid = session_id.to_string();
         let rows = stmt.query_map(params![session_id], |row| {
-            let number: i64 = row.get(0)?;
-            let owner_repo: String = row.get(1)?;
-            let state: String = row.get(2)?;
-            Ok((number as u64, owner_repo, state))
+            Ok(StoredPr {
+                session_id: sid.clone(),
+                pr_number: row.get::<_, i64>(0)? as u64,
+                owner_repo: row.get(1)?,
+                state: row.get(2)?,
+                title: row.get(3)?,
+            })
         })?;
         let mut prs = Vec::new();
         for row in rows {
@@ -101,11 +124,10 @@ impl SessionStore {
     }
 
     /// Load the latest (highest-numbered) PR for each session that has at least one.
-    /// Returns `(session_id, pr_number, owner_repo, state)`.
-    pub fn load_all_latest_prs(&self) -> Result<Vec<(String, u64, String, String)>> {
+    pub fn load_all_latest_prs(&self) -> Result<Vec<StoredPr>> {
         let mut stmt = self.conn.prepare(
             r#"
-            select session_id, pr_number, owner_repo, state
+            select session_id, pr_number, owner_repo, state, title
             from session_prs
             where (session_id, pr_number) in (
                 select session_id, max(pr_number) from session_prs group by session_id
@@ -113,11 +135,13 @@ impl SessionStore {
             "#,
         )?;
         let rows = stmt.query_map([], |row| {
-            let session_id: String = row.get(0)?;
-            let number: i64 = row.get(1)?;
-            let owner_repo: String = row.get(2)?;
-            let state: String = row.get(3)?;
-            Ok((session_id, number as u64, owner_repo, state))
+            Ok(StoredPr {
+                session_id: row.get(0)?,
+                pr_number: row.get::<_, i64>(1)? as u64,
+                owner_repo: row.get(2)?,
+                state: row.get(3)?,
+                title: row.get(4)?,
+            })
         })?;
         let mut result = Vec::new();
         for row in rows {
@@ -288,6 +312,16 @@ mod pr_tests {
     use super::*;
     use chrono::Duration;
 
+    fn spr(sid: &str, num: u64, repo: &str, state: &str, title: &str) -> StoredPr {
+        StoredPr {
+            session_id: sid.to_string(),
+            pr_number: num,
+            owner_repo: repo.to_string(),
+            state: state.to_string(),
+            title: title.to_string(),
+        }
+    }
+
     #[test]
     fn upsert_and_load_prs() {
         let store = test_store();
@@ -295,31 +329,41 @@ mod pr_tests {
         let s = test_session("s1", now, now);
         store.upsert_session(&s).unwrap();
 
-        store.upsert_pr("s1", 10, "owner/repo", "OPEN").unwrap();
-        store.upsert_pr("s1", 20, "owner/repo", "OPEN").unwrap();
-        store.upsert_pr("s1", 15, "owner/repo", "MERGED").unwrap();
+        store
+            .upsert_pr("s1", 10, "owner/repo", "OPEN", "First PR")
+            .unwrap();
+        store
+            .upsert_pr("s1", 20, "owner/repo", "OPEN", "Second PR")
+            .unwrap();
+        store
+            .upsert_pr("s1", 15, "owner/repo", "MERGED", "Middle PR")
+            .unwrap();
 
         let prs = store.load_prs("s1").unwrap();
         assert_eq!(prs.len(), 3);
-        // Ordered by pr_number desc.
-        assert_eq!(prs[0], (20, "owner/repo".to_string(), "OPEN".to_string()));
-        assert_eq!(prs[1], (15, "owner/repo".to_string(), "MERGED".to_string()));
-        assert_eq!(prs[2], (10, "owner/repo".to_string(), "OPEN".to_string()));
+        assert_eq!(prs[0], spr("s1", 20, "owner/repo", "OPEN", "Second PR"));
+        assert_eq!(prs[1], spr("s1", 15, "owner/repo", "MERGED", "Middle PR"));
+        assert_eq!(prs[2], spr("s1", 10, "owner/repo", "OPEN", "First PR"));
     }
 
     #[test]
-    fn upsert_pr_updates_state() {
+    fn upsert_pr_updates_state_and_title() {
         let store = test_store();
         let now = Utc::now();
         let s = test_session("s1", now, now);
         store.upsert_session(&s).unwrap();
 
-        store.upsert_pr("s1", 42, "owner/repo", "OPEN").unwrap();
-        store.upsert_pr("s1", 42, "owner/repo", "MERGED").unwrap();
+        store
+            .upsert_pr("s1", 42, "owner/repo", "OPEN", "My PR")
+            .unwrap();
+        store
+            .upsert_pr("s1", 42, "owner/repo", "MERGED", "My PR (updated)")
+            .unwrap();
 
         let prs = store.load_prs("s1").unwrap();
         assert_eq!(prs.len(), 1);
-        assert_eq!(prs[0].2, "MERGED");
+        assert_eq!(prs[0].state, "MERGED");
+        assert_eq!(prs[0].title, "My PR (updated)");
     }
 
     #[test]
@@ -331,25 +375,20 @@ mod pr_tests {
         store.upsert_session(&s1).unwrap();
         store.upsert_session(&s2).unwrap();
 
-        store.upsert_pr("s1", 10, "owner/repo", "CLOSED").unwrap();
-        store.upsert_pr("s1", 20, "owner/repo", "MERGED").unwrap();
-        store.upsert_pr("s2", 5, "other/repo", "OPEN").unwrap();
+        store
+            .upsert_pr("s1", 10, "owner/repo", "CLOSED", "Old PR")
+            .unwrap();
+        store
+            .upsert_pr("s1", 20, "owner/repo", "MERGED", "Latest PR")
+            .unwrap();
+        store
+            .upsert_pr("s2", 5, "other/repo", "OPEN", "Other PR")
+            .unwrap();
 
         let latest = store.load_all_latest_prs().unwrap();
         assert_eq!(latest.len(), 2);
-        // Should return the highest PR number per session.
-        assert!(latest.contains(&(
-            "s1".to_string(),
-            20,
-            "owner/repo".to_string(),
-            "MERGED".to_string()
-        )));
-        assert!(latest.contains(&(
-            "s2".to_string(),
-            5,
-            "other/repo".to_string(),
-            "OPEN".to_string()
-        )));
+        assert!(latest.contains(&spr("s1", 20, "owner/repo", "MERGED", "Latest PR")));
+        assert!(latest.contains(&spr("s2", 5, "other/repo", "OPEN", "Other PR")));
     }
 }
 

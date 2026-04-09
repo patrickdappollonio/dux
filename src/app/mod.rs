@@ -170,10 +170,9 @@ pub(crate) struct PrSyncEntry {
     pub(crate) session_id: String,
     pub(crate) branch_name: String,
     pub(crate) worktree_path: String,
-    /// If we already know a PR for this session, store the latest number, repo,
-    /// and state so the worker can use `gh pr view` (works even after branch
-    /// deletion) and skip terminal states (merged/closed).
-    pub(crate) known_pr: Option<(u64, String, String)>,
+    /// If we already know a PR for this session, the worker can use `gh pr view`
+    /// (works even after branch deletion) and skip terminal states (merged/closed).
+    pub(crate) known_pr: Option<crate::storage::StoredPr>,
     /// Whether the agent process has exited. Used to skip PR discovery calls
     /// for sessions that are both exited and in a terminal PR state — nobody
     /// is pushing to that branch anymore.
