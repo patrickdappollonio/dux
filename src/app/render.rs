@@ -4255,7 +4255,7 @@ impl App {
         } else {
             // Render prefix + arrow + title.
             // " ⎇ owner/repo#1234 ▸ PR title here "
-            let arrow = " \u{25b8} "; // " ▸ "
+            let arrow = " \u{2192} "; // " ▸ "
             let arrow_w = arrow.chars().count();
 
             // Write prefix.
