@@ -1090,6 +1090,30 @@ impl App {
                             return Ok(true);
                         }
                     } else if !is_scrolled_back {
+                        // If the click landed outside the fullscreen overlay,
+                        // exit interactive mode instead of forwarding to the PTY.
+                        let outside_overlay =
+                            matches!(mouse_ev.kind, MouseEventKind::Down(MouseButton::Left))
+                                && !self.mouse_layout.agent_term.is_some_and(|rect| {
+                                    contains_point(rect, mouse_ev.column, mouse_ev.row)
+                                });
+                        if outside_overlay {
+                            let return_to_terminal_list =
+                                matches!(self.input_target, InputTarget::Terminal)
+                                    && self.terminal_return_to_list;
+                            self.input_target = InputTarget::None;
+                            self.fullscreen_overlay = FullscreenOverlay::None;
+                            self.session_surface = SessionSurface::Agent;
+                            self.raw_input_buf.clear();
+                            if return_to_terminal_list {
+                                self.left_section = LeftSection::Terminals;
+                                self.clamp_terminal_cursor();
+                                self.focus = FocusPane::Left;
+                            }
+                            self.set_info("Exited interactive mode.");
+                            return Ok(false);
+                        }
+
                         // Non-scroll events (clicks, drags, moves,
                         // releases): only forward when the child process
                         // has opted into mouse tracking (e.g. vim, htop).
@@ -2156,16 +2180,11 @@ impl App {
 
     fn mouse_target(&self, column: u16, row: u16) -> Option<MouseTarget> {
         if !matches!(self.fullscreen_overlay, FullscreenOverlay::None) {
-            if self
+            return self
                 .mouse_layout
                 .agent_term
-                .is_some_and(|rect| contains_point(rect, column, row))
-            {
-                return Some(MouseTarget::Center);
-            }
-            // Click landed outside the fullscreen overlay — fall through to
-            // normal pane hit-testing so the existing handlers can exit
-            // fullscreen and route focus to the clicked pane.
+                .filter(|rect| contains_point(*rect, column, row))
+                .map(|_| MouseTarget::Center);
         }
 
         if contains_point(self.mouse_layout.left_list, column, row) {
@@ -6321,6 +6340,122 @@ mod tests {
                 .scrollback_offset(),
             0,
             "'q' should scroll to bottom when scrolled back"
+        );
+    }
+
+    // ── Click-outside-fullscreen tests ──────────────────────────────
+
+    /// Build an SGR mouse left-button-down sequence at 1-based (cx, cy).
+    fn sgr_mouse_down(cx: u16, cy: u16) -> Vec<u8> {
+        format!("\x1b[<0;{cx};{cy}M").into_bytes()
+    }
+
+    /// Helper: set up an App with a live PTY in interactive agent mode
+    /// and a mouse layout so we can test click-outside-overlay behavior.
+    fn app_with_interactive_agent_pty() -> App {
+        let mut app = test_app(default_bindings());
+        let session_id = app.sessions[0].id.clone();
+
+        let args = vec!["-c".to_string(), "sleep 5".to_string()];
+        let client = PtyClient::spawn("sh", &args, std::path::Path::new("."), 5, 40, 100)
+            .expect("spawn pty");
+        app.providers.insert(session_id, client);
+
+        app.input_target = InputTarget::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.last_pty_size = (5, 40);
+        install_mouse_layout(&mut app);
+        app
+    }
+
+    #[test]
+    fn click_outside_fullscreen_agent_exits_interactive_mode() {
+        let mut app = app_with_interactive_agent_pty();
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+
+        // Click at (1,1) which is inside the left pane, outside agent_term
+        // (agent_term starts at x=21). SGR coords are 1-based.
+        let bytes = sgr_mouse_down(2, 2);
+        let result = app.process_raw_input_bytes(&bytes).unwrap();
+        assert!(!result);
+        assert_eq!(
+            app.input_target,
+            InputTarget::None,
+            "clicking outside overlay must exit interactive mode"
+        );
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "clicking outside overlay must dismiss fullscreen"
+        );
+    }
+
+    #[test]
+    fn click_inside_fullscreen_agent_stays_in_interactive_mode() {
+        let mut app = app_with_interactive_agent_pty();
+        assert_eq!(app.input_target, InputTarget::Agent);
+
+        // Click at (30, 5) which is inside agent_term (x=21..76, y=1..17).
+        // SGR coords are 1-based so (31, 6).
+        let bytes = sgr_mouse_down(31, 6);
+        let result = app.process_raw_input_bytes(&bytes).unwrap();
+        assert!(!result);
+        assert_eq!(
+            app.input_target,
+            InputTarget::Agent,
+            "clicking inside overlay must stay in interactive mode"
+        );
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::Agent,
+            "clicking inside overlay must keep fullscreen"
+        );
+    }
+
+    #[test]
+    fn click_outside_fullscreen_terminal_exits_interactive_mode() {
+        let mut app = app_with_interactive_agent_pty();
+        // Switch to terminal interactive mode.
+        app.input_target = InputTarget::Terminal;
+        app.fullscreen_overlay = FullscreenOverlay::Terminal;
+        app.session_surface = SessionSurface::Terminal;
+
+        // Click outside agent_term.
+        let bytes = sgr_mouse_down(2, 2);
+        let result = app.process_raw_input_bytes(&bytes).unwrap();
+        assert!(!result);
+        assert_eq!(
+            app.input_target,
+            InputTarget::None,
+            "clicking outside overlay must exit terminal interactive mode"
+        );
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "clicking outside overlay must dismiss terminal fullscreen"
+        );
+    }
+
+    #[test]
+    fn click_outside_fullscreen_terminal_returns_to_left_pane() {
+        let mut app = app_with_interactive_agent_pty();
+        app.input_target = InputTarget::Terminal;
+        app.fullscreen_overlay = FullscreenOverlay::Terminal;
+        app.session_surface = SessionSurface::Terminal;
+        app.terminal_return_to_list = true;
+        app.focus = FocusPane::Center;
+
+        let bytes = sgr_mouse_down(2, 2);
+        let result = app.process_raw_input_bytes(&bytes).unwrap();
+        assert!(!result);
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+        assert_eq!(
+            app.focus,
+            FocusPane::Left,
+            "focus should move to left pane when terminal_return_to_list is set"
         );
     }
 }
