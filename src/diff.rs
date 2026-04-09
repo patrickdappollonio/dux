@@ -40,6 +40,7 @@ pub fn diff_file(
     rel_path: &str,
     theme: &AppTheme,
     cache: &SyntaxCache,
+    show_line_numbers: bool,
 ) -> Result<DiffOutput> {
     let old_bytes = crate::git::file_bytes_at_head(worktree_path, rel_path)?.unwrap_or_default();
     let abs_path = worktree_path.join(rel_path);
@@ -78,6 +79,27 @@ pub fn diff_file(
     let text_diff = TextDiff::from_lines(&old_text, &new_text);
     let mut lines: Vec<Line<'static>> = Vec::new();
 
+    // Compute gutter width from the maximum line number across all hunks.
+    let ln_width = if show_line_numbers {
+        let mut max_ln: usize = 1;
+        for hunk in text_diff.unified_diff().context_radius(3).iter_hunks() {
+            for change in hunk.iter_changes() {
+                if let Some(idx) = change.old_index() {
+                    max_ln = max_ln.max(idx + 1);
+                }
+                if let Some(idx) = change.new_index() {
+                    max_ln = max_ln.max(idx + 1);
+                }
+            }
+        }
+        max_ln.to_string().len()
+    } else {
+        0
+    };
+
+    let gutter_style = Style::default().fg(theme.diff_line_number_fg);
+    let sep_style = Style::default().fg(theme.diff_line_number_sep);
+
     // File header.
     lines.push(Line::from(Span::styled(
         format!("--- a/{rel_path}"),
@@ -94,10 +116,18 @@ pub fn diff_file(
 
     for hunk in text_diff.unified_diff().context_radius(3).iter_hunks() {
         // Hunk header (@@ ... @@).
-        lines.push(Line::from(Span::styled(
+        let mut hunk_spans: Vec<Span<'static>> = Vec::new();
+        if show_line_numbers {
+            // Blank gutter for hunk headers.
+            let blank = " ".repeat(ln_width);
+            hunk_spans.push(Span::styled(format!("{blank} {blank} "), gutter_style));
+            hunk_spans.push(Span::styled("│ ", sep_style));
+        }
+        hunk_spans.push(Span::styled(
             hunk.header().to_string(),
             Style::default().fg(theme.diff_hunk),
-        )));
+        ));
+        lines.push(Line::from(hunk_spans));
 
         // We maintain two separate highlighters so that removed lines are
         // highlighted in the context of the old file and added/context lines
@@ -123,41 +153,59 @@ pub fn diff_file(
 
             // Attempt syntax highlighting; fall back to plain coloring.
             let content = text.trim_end_matches('\n');
-            let spans = match highlighter.highlight_line(content, &cache.syntax_set) {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+
+            // Line-number gutter.
+            if show_line_numbers {
+                let old_ln = match tag {
+                    ChangeTag::Delete | ChangeTag::Equal => {
+                        format!("{:>w$}", change.old_index().unwrap_or(0) + 1, w = ln_width)
+                    }
+                    ChangeTag::Insert => " ".repeat(ln_width),
+                };
+                let new_ln = match tag {
+                    ChangeTag::Insert | ChangeTag::Equal => {
+                        format!("{:>w$}", change.new_index().unwrap_or(0) + 1, w = ln_width)
+                    }
+                    ChangeTag::Delete => " ".repeat(ln_width),
+                };
+                spans.push(Span::styled(format!("{old_ln} {new_ln} "), gutter_style));
+                spans.push(Span::styled("│", sep_style));
+            }
+
+            match highlighter.highlight_line(content, &cache.syntax_set) {
                 Ok(ranges) if tag == ChangeTag::Equal => {
                     // Context lines: full syntax colors, no background tint.
-                    let mut out = vec![Span::styled(
+                    spans.push(Span::styled(
                         prefix.to_string(),
                         Style::default().fg(base_fg),
-                    )];
-                    out.extend(
+                    ));
+                    spans.extend(
                         ranges
                             .into_iter()
                             .map(|(s, t)| Span::styled(t.to_string(), syntect_to_ratatui(s))),
                     );
-                    out
                 }
                 Ok(ranges) => {
                     // Added/removed lines: syntax colors + tinted background.
-                    let mut out = vec![Span::styled(
+                    spans.push(Span::styled(
                         prefix.to_string(),
                         Style::default().fg(base_fg).bg(bg.unwrap_or(Color::Reset)),
-                    )];
-                    out.extend(ranges.into_iter().map(|(s, t)| {
+                    ));
+                    spans.extend(ranges.into_iter().map(|(s, t)| {
                         let mut style = syntect_to_ratatui(s);
                         if let Some(bg_color) = bg {
                             style = style.bg(bg_color);
                         }
                         Span::styled(t.to_string(), style)
                     }));
-                    out
                 }
                 Err(_) => {
                     // Fallback: no syntax highlighting.
-                    vec![Span::styled(
+                    spans.push(Span::styled(
                         format!("{prefix}{content}"),
                         Style::default().fg(base_fg).bg(bg.unwrap_or(Color::Reset)),
-                    )]
+                    ));
                 }
             };
             lines.push(Line::from(spans));
@@ -276,7 +324,8 @@ mod tests {
         std::fs::write(&file, [0_u8, 159, 146, 151, 152]).unwrap();
 
         let cache = SyntaxCache::new();
-        let output = diff_file(repo, "image.bin", &AppTheme::default_dark(), &cache).unwrap();
+        let output =
+            diff_file(repo, "image.bin", &AppTheme::default_dark(), &cache, false).unwrap();
         let rendered = output
             .lines
             .iter()
@@ -297,6 +346,106 @@ mod tests {
             rendered
                 .iter()
                 .any(|line| line.contains("New size: 5 bytes"))
+        );
+    }
+
+    /// Helper: create a git repo with a committed file and then modify it.
+    fn setup_text_repo(filename: &str, initial: &str, modified: &str) -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        let file = repo.join(filename);
+        std::fs::write(&file, initial).unwrap();
+        Command::new("git")
+            .args(["add", filename])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        std::fs::write(&file, modified).unwrap();
+        dir
+    }
+
+    #[test]
+    fn line_numbers_appear_when_enabled() {
+        let dir = setup_text_repo("hello.txt", "aaa\nbbb\nccc\n", "aaa\nbbb\nXXX\nccc\n");
+        let cache = SyntaxCache::new();
+        let output = diff_file(
+            dir.path(),
+            "hello.txt",
+            &AppTheme::default_dark(),
+            &cache,
+            true,
+        )
+        .unwrap();
+        let rendered: Vec<String> = output.lines.iter().map(|l| l.to_string()).collect();
+
+        // Context line "aaa" should show both old and new line numbers.
+        // Max line is 4, so ln_width is 1 — numbers are right-aligned in 1 char.
+        assert!(
+            rendered
+                .iter()
+                .any(|l| l.contains("1") && l.contains("aaa")),
+            "expected line number 1 for context line 'aaa', got: {rendered:?}"
+        );
+
+        // Inserted line "XXX" should show only the new line number.
+        let insert_line = rendered
+            .iter()
+            .find(|l| l.contains("XXX") && l.contains("+"))
+            .expect("expected an inserted line containing XXX");
+        assert!(
+            insert_line.contains("3"),
+            "expected new line number 3 for inserted line, got: {insert_line}"
+        );
+
+        // Gutter separator should be present.
+        assert!(
+            rendered.iter().any(|l| l.contains('│')),
+            "expected gutter separator │"
+        );
+    }
+
+    #[test]
+    fn line_numbers_absent_when_disabled() {
+        let dir = setup_text_repo("hello.txt", "aaa\n", "aaa\nbbb\n");
+        let cache = SyntaxCache::new();
+        let output = diff_file(
+            dir.path(),
+            "hello.txt",
+            &AppTheme::default_dark(),
+            &cache,
+            false,
+        )
+        .unwrap();
+        let rendered: Vec<String> = output.lines.iter().map(|l| l.to_string()).collect();
+
+        // No gutter separator should be present in any content line.
+        let has_gutter = rendered.iter().any(|l| l.contains('│'));
+        assert!(
+            !has_gutter,
+            "expected no gutter separator when line numbers are disabled"
         );
     }
 }

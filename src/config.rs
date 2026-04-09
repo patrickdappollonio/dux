@@ -191,6 +191,7 @@ pub struct UiConfig {
     pub commit_pane_height_pct: u16,
     pub agent_scrollback_lines: usize,
     pub branch_sync_interval: u16,
+    pub show_diff_line_numbers: bool,
 }
 
 impl Default for Config {
@@ -212,6 +213,7 @@ impl Default for Config {
                 commit_pane_height_pct: 40,
                 agent_scrollback_lines: 10_000,
                 branch_sync_interval: 30,
+                show_diff_line_numbers: false,
             },
             editor: EditorConfig::default(),
             keys: KeysConfig::default(),
@@ -331,6 +333,7 @@ impl Default for UiConfig {
             commit_pane_height_pct: 40,
             agent_scrollback_lines: 10_000,
             branch_sync_interval: 30,
+            show_diff_line_numbers: false,
         }
     }
 }
@@ -585,6 +588,13 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             )),
             value_fn: |c| FieldValue::U16(c.ui.branch_sync_interval),
         },
+        ConfigEntry::Field {
+            key: "show_diff_line_numbers",
+            comment: Some(CommentSource::Static(
+                "# Show old/new line numbers in the diff gutter.\n# Toggle at runtime from the command palette.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.ui.show_diff_line_numbers),
+        },
         ConfigEntry::Blank,
         ConfigEntry::Section("editor"),
         ConfigEntry::Field {
@@ -760,6 +770,12 @@ pub fn save_config(
         "ui",
         "branch_sync_interval",
         config.ui.branch_sync_interval,
+    );
+    patch_table_bool(
+        &mut doc,
+        "ui",
+        "show_diff_line_numbers",
+        config.ui.show_diff_line_numbers,
     );
 
     // --- [editor] ---
@@ -2156,6 +2172,7 @@ staged_pane_height_pct = 50
 commit_pane_height_pct = 40
 agent_scrollback_lines = 10000
 branch_sync_interval = 30
+show_diff_line_numbers = false
 
 [logging]
 level = \"info\"
