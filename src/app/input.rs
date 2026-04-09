@@ -3804,7 +3804,7 @@ mod tests {
         app.prompt = PromptState::RenameSession {
             session_id: "session-1".to_string(),
             input: TextInput::with_text("test".to_string()),
-            rename_branch: false,
+            rename_branch: true,
         };
 
         // Tab toggles the checkbox.
@@ -3813,7 +3813,7 @@ mod tests {
 
         match &app.prompt {
             PromptState::RenameSession { rename_branch, .. } => {
-                assert!(*rename_branch, "Tab should toggle rename_branch to true");
+                assert!(!*rename_branch, "Tab should toggle rename_branch to false");
             }
             other => panic!("expected RenameSession, got {other:?}"),
         }
@@ -3825,8 +3825,8 @@ mod tests {
         match &app.prompt {
             PromptState::RenameSession { rename_branch, .. } => {
                 assert!(
-                    !*rename_branch,
-                    "second Tab should toggle rename_branch back to false"
+                    *rename_branch,
+                    "second Tab should toggle rename_branch back to true"
                 );
             }
             other => panic!("expected RenameSession, got {other:?}"),
@@ -3834,14 +3834,14 @@ mod tests {
     }
 
     #[test]
-    fn open_rename_session_initializes_rename_branch_false() {
+    fn open_rename_session_initializes_rename_branch_true() {
         let mut app = test_app(default_bindings());
 
         app.open_rename_session().unwrap();
 
         match &app.prompt {
             PromptState::RenameSession { rename_branch, .. } => {
-                assert!(!*rename_branch, "rename_branch should default to false");
+                assert!(*rename_branch, "rename_branch should default to true");
             }
             other => panic!("expected RenameSession, got {other:?}"),
         }
