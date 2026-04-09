@@ -554,7 +554,7 @@ impl App {
         } else {
             None
         };
-        let pr_banner_height: u16 = if pr_info.is_some() { 3 } else { 0 };
+        let pr_banner_height: u16 = if pr_info.is_some() { 1 } else { 0 };
 
         let [pr_area, pane_area] = Layout::default()
             .direction(Direction::Vertical)
@@ -4171,20 +4171,15 @@ fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {
 }
 
 impl App {
-    /// Render the GitHub PR banner as a double-pill inside `area` (3 rows).
-    ///
-    /// Layout: `╭─left─╮╭─right─╮` / `│ text ││ text  │` / `╰──────╯╰───────╯`
+    /// Render the GitHub PR pill as a single inline row:
+    /// `╭ owner/repo#1234 │ PR title ellipsized… ╮`
     fn render_pr_banner(&self, frame: &mut Frame, area: Rect, pr: &crate::model::PrInfo) {
         use crate::model::PrState;
 
-        if area.height < 3 || area.width < 6 {
+        if area.height < 1 || area.width < 6 {
             return;
         }
 
-        // Single pill with internal divider — all in the state color:
-        // ╭──────────────────┬──────────────────────────╮
-        // │ owner/repo#1234  │ PR title ellipsized he…  │
-        // ╰──────────────────┴──────────────────────────╯
         let state_fg = match pr.state {
             PrState::Open => self.theme.pr_open_fg,
             PrState::Merged => self.theme.pr_merged_fg,
@@ -4192,43 +4187,33 @@ impl App {
         };
         let border_style = Style::default().fg(state_fg);
         let text_style = Style::default().fg(state_fg).add_modifier(Modifier::BOLD);
-        let title_style = Style::default().fg(self.theme.pr_pill_secondary_fg);
+        let title_style = Style::default().fg(state_fg);
 
         let left_text = format!(" {}#{} ", pr.owner_repo, pr.number);
         let left_w = left_text.len();
         let avail = area.width as usize;
         let buf = frame.buffer_mut();
 
+        // Minimum: ╭ + left_text + ╮
         if avail < left_w + 2 {
-            // Too narrow — render a minimal pill with just #N.
+            // Too narrow — just show #N.
             let short = format!(" #{} ", pr.number);
             let pill_w = short.len() + 2;
             if pill_w > avail {
                 return;
             }
             let sx = area.x + (area.width.saturating_sub(pill_w as u16)) / 2;
-            set_cell(buf, sx, area.y, "╭", border_style);
-            for dx in 1..=(pill_w as u16 - 2) {
-                set_cell(buf, sx + dx, area.y, "─", border_style);
-            }
-            set_cell(buf, sx + pill_w as u16 - 1, area.y, "╮", border_style);
-            let y = area.y + 1;
-            set_cell(buf, sx, y, "│", border_style);
+            let y = area.y;
+            set_cell(buf, sx, y, "╭", border_style);
             for (i, ch) in short.chars().enumerate() {
                 set_cell(buf, sx + 1 + i as u16, y, &ch.to_string(), text_style);
             }
-            set_cell(buf, sx + pill_w as u16 - 1, y, "│", border_style);
-            let y = area.y + 2;
-            set_cell(buf, sx, y, "╰", border_style);
-            for dx in 1..=(pill_w as u16 - 2) {
-                set_cell(buf, sx + dx, y, "─", border_style);
-            }
-            set_cell(buf, sx + pill_w as u16 - 1, y, "╯", border_style);
+            set_cell(buf, sx + pill_w as u16 - 1, y, "╮", border_style);
             return;
         }
 
-        // Right side: remaining space after │ left_text │ ... │
-        let right_inner_w = avail.saturating_sub(left_w + 3); // 3 = outer │ + divider │ + outer │
+        // Right side: remaining space after ╭ left_text │ ... ╮
+        let right_inner_w = avail.saturating_sub(left_w + 3); // 3 = ╭ + │ + ╮
         let has_right = right_inner_w >= 4;
 
         let right_text = if has_right {
@@ -4253,34 +4238,16 @@ impl App {
         };
 
         let total_w = if has_right {
-            left_w + right_inner_w + 3
+            left_w + right_inner_w + 3 // ╭ + left + │ + right + ╮
         } else {
-            left_w + 2
+            left_w + 2 // ╭ + left + ╮
         };
         let sx = area.x + (area.width.saturating_sub(total_w as u16)) / 2;
 
-        // Row 0: top border
+        let y = area.y;
         let mut x = sx;
-        set_cell(buf, x, area.y, "╭", border_style);
-        x += 1;
-        for _ in 0..left_w {
-            set_cell(buf, x, area.y, "─", border_style);
-            x += 1;
-        }
-        if has_right {
-            set_cell(buf, x, area.y, "┬", border_style);
-            x += 1;
-            for _ in 0..right_inner_w {
-                set_cell(buf, x, area.y, "─", border_style);
-                x += 1;
-            }
-        }
-        set_cell(buf, x, area.y, "╮", border_style);
 
-        // Row 1: content
-        let y = area.y + 1;
-        x = sx;
-        set_cell(buf, x, y, "│", border_style);
+        set_cell(buf, x, y, "╭", border_style);
         x += 1;
         for ch in left_text.chars() {
             set_cell(buf, x, y, &ch.to_string(), text_style);
@@ -4304,26 +4271,7 @@ impl App {
                 cw += 1;
             }
         }
-        set_cell(buf, x, y, "│", border_style);
-
-        // Row 2: bottom border
-        let y = area.y + 2;
-        x = sx;
-        set_cell(buf, x, y, "╰", border_style);
-        x += 1;
-        for _ in 0..left_w {
-            set_cell(buf, x, y, "─", border_style);
-            x += 1;
-        }
-        if has_right {
-            set_cell(buf, x, y, "┴", border_style);
-            x += 1;
-            for _ in 0..right_inner_w {
-                set_cell(buf, x, y, "─", border_style);
-                x += 1;
-            }
-        }
-        set_cell(buf, x, y, "╯", border_style);
+        set_cell(buf, x, y, "╮", border_style);
     }
 }
 
