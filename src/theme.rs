@@ -78,6 +78,8 @@ pub struct Theme {
     pub pr_banner_fg: Color,
     pub pr_merged_label: Color,
     pub pr_closed_label: Color,
+    pub pr_pill_border_fg: Color,
+    pub pr_pill_secondary_fg: Color,
 }
 
 impl Theme {
@@ -153,6 +155,8 @@ impl Theme {
             pr_banner_fg: Color::White,
             pr_merged_label: Color::Rgb(170, 100, 220),
             pr_closed_label: Color::Rgb(140, 80, 80),
+            pr_pill_border_fg: Color::White,
+            pr_pill_secondary_fg: Color::Rgb(220, 220, 220),
         }
     }
 

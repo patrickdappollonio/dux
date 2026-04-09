@@ -4197,7 +4197,7 @@ impl App {
         let fg = self.theme.pr_banner_fg;
         let border_style = Style::default().fg(fg).bg(bg);
         let text_style = Style::default().fg(fg).bg(bg);
-        let dim_border_style = Style::default().fg(Color::Rgb(255, 255, 255)).bg(bg);
+        let dim_border_style = Style::default().fg(self.theme.pr_pill_border_fg).bg(bg);
 
         let left_text = format!(" {}#{} ", pr.owner_repo, pr.number);
         let left_w = left_text.len();
@@ -4315,7 +4315,7 @@ impl App {
             x += 1;
             set_cell(buf, x, y, "│", dim_border_style);
             x += 1;
-            let right_style = Style::default().fg(Color::Rgb(220, 220, 220)).bg(bg);
+            let right_style = Style::default().fg(self.theme.pr_pill_secondary_fg).bg(bg);
             let mut chars_written = 0;
             for ch in right_text.chars() {
                 if chars_written >= right_inner_w {
