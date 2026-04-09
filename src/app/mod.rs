@@ -96,6 +96,9 @@ pub struct App {
     pub(crate) terminal_counter: usize,
     pub(crate) create_agent_in_flight: bool,
     pub(crate) last_pty_size: (u16, u16),
+    /// Tracks when each agent last received PTY data, for the streaming
+    /// activity spinner in the left pane.
+    pub(crate) last_pty_activity: HashMap<String, Instant>,
     pub(crate) prev_scrollback_offset: usize,
     pub(crate) show_diff_line_numbers: bool,
     pub(crate) last_diff_height: u16,
@@ -720,6 +723,7 @@ impl App {
             terminal_counter: 0,
             create_agent_in_flight: false,
             last_pty_size: (0, 0),
+            last_pty_activity: HashMap::new(),
             prev_scrollback_offset: 0,
             last_diff_height: 0,
             last_diff_visual_lines: 0,
@@ -767,6 +771,7 @@ impl App {
         let result: Result<()> = {
             loop {
                 self.drain_events();
+                self.poll_pty_activity();
                 self.tick_count = self.tick_count.wrapping_add(1);
 
                 // Check SIGWINCH — needed when bypassing crossterm's event
@@ -957,6 +962,25 @@ impl App {
             return true;
         }
         false
+    }
+
+    /// Poll each PTY provider for recent data and update the per-agent
+    /// activity timestamp used by the left-pane streaming indicator.
+    fn poll_pty_activity(&mut self) {
+        let now = Instant::now();
+        for (session_id, provider) in &self.providers {
+            if provider.take_received_data() {
+                self.last_pty_activity.insert(session_id.clone(), now);
+            }
+        }
+    }
+
+    /// Returns `true` if the given agent received PTY data within the last
+    /// second, indicating it is actively streaming output.
+    pub(crate) fn is_agent_streaming(&self, session_id: &str) -> bool {
+        self.last_pty_activity
+            .get(session_id)
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(1))
     }
 
     pub(crate) fn set_info(&mut self, message: impl Into<String>) {

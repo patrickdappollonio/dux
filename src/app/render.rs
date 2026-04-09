@@ -437,7 +437,20 @@ impl App {
                         .title
                         .clone()
                         .unwrap_or_else(|| session.branch_name.clone());
-                    let (dot, dot_color) = self.theme.session_dot(&session.status);
+                    let (dot, dot_color) =
+                        if matches!(session.status, crate::model::SessionStatus::Active)
+                            && self.is_agent_streaming(&session.id)
+                        {
+                            let idx =
+                                (self.tick_count as usize / 2) % crate::theme::SPINNER_FRAMES.len();
+                            (
+                                crate::theme::SPINNER_FRAMES[idx].to_string(),
+                                self.theme.session_active,
+                            )
+                        } else {
+                            let (d, c) = self.theme.session_dot(&session.status);
+                            (d.to_string(), c)
+                        };
                     ListItem::new(Line::from(
                         vec![
                             Span::styled(connector, Style::default().fg(self.theme.project_icon)),
@@ -840,9 +853,8 @@ impl App {
 
             if !provider.has_output() {
                 // Show a centered loading card until the PTY produces output.
-                let spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-                let idx = (self.tick_count as usize) % spinner_chars.len();
-                let spinner = spinner_chars[idx];
+                let idx = (self.tick_count as usize) % crate::theme::SPINNER_FRAMES.len();
+                let spinner = crate::theme::SPINNER_FRAMES[idx];
                 let (label_spans, label_len) = match session_provider_name.as_deref() {
                     Some(name) => {
                         let prefix = match active_surface {

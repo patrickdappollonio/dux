@@ -73,6 +73,10 @@ pub struct PtyClient {
     /// Set by the reader thread or scroll/resize methods when the terminal
     /// state changes. Cleared by `snapshot_into` after rebuilding the buffer.
     dirty: Arc<AtomicBool>,
+    /// Set by the reader thread when new data arrives. Cleared by
+    /// `take_received_data` — used to detect streaming activity without
+    /// interfering with the snapshot dirty flag.
+    received_data: Arc<AtomicBool>,
 }
 
 impl PtyClient {
@@ -124,12 +128,14 @@ impl PtyClient {
         let exited = Arc::new(AtomicBool::new(false));
         let has_output = Arc::new(AtomicBool::new(false));
         let dirty = Arc::new(AtomicBool::new(true));
+        let received_data = Arc::new(AtomicBool::new(false));
 
         let terminal_ref = Arc::clone(&terminal);
         let writer_ref = Arc::clone(&writer);
         let exited_ref = Arc::clone(&exited);
         let has_output_ref = Arc::clone(&has_output);
         let dirty_ref = Arc::clone(&dirty);
+        let received_data_ref = Arc::clone(&received_data);
         thread::spawn(move || {
             Self::reader_loop(
                 reader,
@@ -138,6 +144,7 @@ impl PtyClient {
                 exited_ref,
                 has_output_ref,
                 dirty_ref,
+                received_data_ref,
             );
         });
 
@@ -149,6 +156,7 @@ impl PtyClient {
             exited,
             has_output,
             dirty,
+            received_data,
         })
     }
 
@@ -159,6 +167,7 @@ impl PtyClient {
         exited: Arc<AtomicBool>,
         has_output: Arc<AtomicBool>,
         dirty: Arc<AtomicBool>,
+        received_data: Arc<AtomicBool>,
     ) {
         let mut buf = [0u8; 4096];
         loop {
@@ -172,6 +181,7 @@ impl PtyClient {
                     if let Ok(mut terminal) = terminal.lock() {
                         let replies = terminal.process(data);
                         dirty.store(true, Ordering::Release);
+                        received_data.store(true, Ordering::Release);
                         if !replies.is_empty()
                             && let Ok(mut w) = writer.lock()
                         {
@@ -277,6 +287,13 @@ impl PtyClient {
     /// Check whether the PTY has received any output from the child process.
     pub fn has_output(&self) -> bool {
         self.has_output.load(Ordering::Acquire)
+    }
+
+    /// Returns `true` if the PTY received data since the last call, then
+    /// clears the flag. Used to detect streaming activity for UI indicators
+    /// without interfering with the snapshot dirty flag.
+    pub fn take_received_data(&self) -> bool {
+        self.received_data.swap(false, Ordering::AcqRel)
     }
 
     /// Whether the child process has enabled any mouse tracking mode

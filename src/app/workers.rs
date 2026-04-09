@@ -192,6 +192,7 @@ impl App {
                 continue;
             };
             self.providers.remove(session_id);
+            self.last_pty_activity.remove(session_id);
             logger::info(&format!(
                 "resume args exited without output for agent \"{}\", retrying with regular args",
                 session.branch_name
@@ -224,6 +225,7 @@ impl App {
                 continue;
             }
             self.providers.remove(session_id);
+            self.last_pty_activity.remove(session_id);
             self.mark_session_status(session_id, SessionStatus::Detached);
         }
         if !exited.is_empty() {

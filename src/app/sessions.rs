@@ -482,6 +482,7 @@ impl App {
             &session.branch_name,
         )?;
         self.providers.remove(&session.id);
+        self.last_pty_activity.remove(&session.id);
         self.clear_companion_terminals_for_session(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
         self.session_store.delete_session(&session.id)?;
@@ -1037,6 +1038,7 @@ impl App {
             match target_id {
                 RuntimeTargetId::Agent(session_id) => {
                     if self.providers.remove(session_id).is_some() {
+                        self.last_pty_activity.remove(session_id);
                         self.mark_session_status(session_id, SessionStatus::Detached);
                         killed_agents += 1;
                         if selected_session_id.as_deref() == Some(session_id.as_str()) {
