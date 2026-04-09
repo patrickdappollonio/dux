@@ -3832,23 +3832,19 @@ impl App {
         StatefulWidget::render(table, inner, frame.buffer_mut(), &mut table_state);
 
         // Footer hint.
-        let hint = Line::from(vec![
-            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" close  "),
-            Span::styled("Scroll", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" navigate  "),
-            Span::styled(
-                "refreshes every ~2s",
-                Style::default().add_modifier(Modifier::DIM),
-            ),
-        ]);
-        let hint_para = Paragraph::new(hint)
-            .alignment(ratatui::layout::Alignment::Center)
-            .style(
-                Style::default()
-                    .fg(self.theme.hint_desc_fg)
-                    .add_modifier(Modifier::DIM),
-            );
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        let desc_style = Style::default().fg(self.theme.hint_desc_fg);
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(self.theme.key_badge_default(&close_key));
+        spans.push(Span::styled(" close  ", desc_style));
+        spans.extend(self.theme.key_badge_default("Scroll"));
+        spans.push(Span::styled(" navigate  ", desc_style));
+        spans.push(Span::styled(
+            "refreshes every ~2s",
+            Style::default().fg(self.theme.hint_dim_desc_fg),
+        ));
+        let hint_para =
+            Paragraph::new(Line::from(spans)).alignment(ratatui::layout::Alignment::Center);
         hint_para.render(hint_area, frame.buffer_mut());
     }
 
