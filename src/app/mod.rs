@@ -1387,8 +1387,8 @@ impl App {
             self.prompt = PromptState::RenameSession {
                 session_id: session.id,
                 input: TextInput::with_text(current_name)
-                    .with_char_filter(crate::git::agent_name_char_filter),
-                rename_branch: false,
+                    .with_char_map(crate::git::agent_name_char_map),
+                rename_branch: true,
             };
         } else {
             self.set_error("No agent session selected.");

@@ -21,11 +21,11 @@ pub struct TextInput {
     /// are applied normally — when the overlay is dismissed the current text
     /// is shown.
     overlay: Option<String>,
-    /// Optional filter consulted before each character insertion. Receives
+    /// Optional mapper consulted before each character insertion. Receives
     /// the current text, the cursor byte-offset where the character would be
-    /// inserted, and the candidate character. Return `true` to allow, `false`
-    /// to silently reject.
-    char_filter: Option<fn(&str, usize, char) -> bool>,
+    /// inserted, and the candidate character. Return `Some(c)` to insert `c`
+    /// (which may differ from the input), or `None` to silently reject.
+    char_map: Option<fn(&str, usize, char) -> Option<char>>,
 }
 
 #[derive(Clone, Debug)]
@@ -52,7 +52,7 @@ impl TextInput {
             multiline: None,
             placeholder: None,
             overlay: None,
-            char_filter: None,
+            char_map: None,
         }
     }
 
@@ -64,7 +64,7 @@ impl TextInput {
             multiline: None,
             placeholder: None,
             overlay: None,
-            char_filter: None,
+            char_map: None,
         }
     }
 
@@ -96,11 +96,12 @@ impl TextInput {
         self.overlay.as_deref()
     }
 
-    /// Set a character filter that is consulted before each insertion.
-    /// The filter receives the current text, cursor byte-offset, and candidate
-    /// character. Return `true` to allow, `false` to silently reject.
-    pub fn with_char_filter(mut self, filter: fn(&str, usize, char) -> bool) -> Self {
-        self.char_filter = Some(filter);
+    /// Set a character mapper that is consulted before each insertion.
+    /// The mapper receives the current text, cursor byte-offset, and candidate
+    /// character. Return `Some(c)` to insert `c` (which may differ from the
+    /// input for transparent substitution), or `None` to silently reject.
+    pub fn with_char_map(mut self, map: fn(&str, usize, char) -> Option<char>) -> Self {
+        self.char_map = Some(map);
         self
     }
 
@@ -142,11 +143,14 @@ impl TextInput {
 
     pub fn insert_char(&mut self, ch: char) {
         let index = clamp_cursor(&self.text, self.cursor);
-        if let Some(filter) = self.char_filter
-            && !filter(&self.text, index, ch)
-        {
-            return;
-        }
+        let ch = if let Some(map) = self.char_map {
+            match map(&self.text, index, ch) {
+                Some(c) => c,
+                None => return,
+            }
+        } else {
+            ch
+        };
         self.text.insert(index, ch);
         self.cursor = index + ch.len_utf8();
     }
@@ -1734,16 +1738,16 @@ mod tests {
         }
     }
 
-    // ── char_filter tests ─────────────────────────────────────────
+    // ── char_map tests ─────────────────────────────────────────────
 
-    /// A filter that rejects the character 'x'.
-    fn reject_x(_text: &str, _cursor: usize, ch: char) -> bool {
-        ch != 'x'
+    /// A mapper that rejects the character 'x'.
+    fn reject_x(_text: &str, _cursor: usize, ch: char) -> Option<char> {
+        if ch == 'x' { None } else { Some(ch) }
     }
 
     #[test]
-    fn filter_rejects_char() {
-        let mut input = TextInput::new().with_char_filter(reject_x);
+    fn map_rejects_char() {
+        let mut input = TextInput::new().with_char_map(reject_x);
         input.handle_key(key(KeyCode::Char('a')));
         input.handle_key(key(KeyCode::Char('x')));
         input.handle_key(key(KeyCode::Char('b')));
@@ -1751,7 +1755,7 @@ mod tests {
     }
 
     #[test]
-    fn no_filter_allows_all() {
+    fn no_map_allows_all() {
         let mut input = TextInput::new();
         input.handle_key(key(KeyCode::Char('a')));
         input.handle_key(key(KeyCode::Char('x')));
@@ -1759,14 +1763,14 @@ mod tests {
         assert_eq!(input.text, "axb");
     }
 
-    /// A filter that enforces a max length of 3 characters.
-    fn max_three(text: &str, _cursor: usize, _ch: char) -> bool {
-        text.len() < 3
+    /// A mapper that enforces a max length of 3 characters.
+    fn max_three(text: &str, _cursor: usize, ch: char) -> Option<char> {
+        if text.len() < 3 { Some(ch) } else { None }
     }
 
     #[test]
-    fn filter_receives_current_text() {
-        let mut input = TextInput::new().with_char_filter(max_three);
+    fn map_receives_current_text() {
+        let mut input = TextInput::new().with_char_map(max_three);
         for ch in "abcde".chars() {
             input.handle_key(key(KeyCode::Char(ch)));
         }
@@ -1774,10 +1778,24 @@ mod tests {
     }
 
     #[test]
-    fn filter_applies_to_insert_char_directly() {
-        let mut input = TextInput::new().with_char_filter(reject_x);
+    fn map_applies_to_insert_char_directly() {
+        let mut input = TextInput::new().with_char_map(reject_x);
         input.insert_char('x');
         input.insert_char('y');
         assert_eq!(input.text, "y");
+    }
+
+    /// A mapper that converts 'a' to 'A'.
+    fn upcase_a(_text: &str, _cursor: usize, ch: char) -> Option<char> {
+        if ch == 'a' { Some('A') } else { Some(ch) }
+    }
+
+    #[test]
+    fn map_transforms_char() {
+        let mut input = TextInput::new().with_char_map(upcase_a);
+        input.handle_key(key(KeyCode::Char('a')));
+        input.handle_key(key(KeyCode::Char('b')));
+        input.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(input.text, "AbA");
     }
 }
