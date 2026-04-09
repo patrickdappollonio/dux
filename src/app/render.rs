@@ -4198,8 +4198,6 @@ impl App {
         // Inner content: white text on colored background.
         let text_style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
         let title_style = Style::default().fg(fg).bg(bg);
-        // Divider uses terminal defaults so it blends with the background.
-        let divider_style = Style::default();
 
         // Half-block caps (universally supported Unicode).
         let left_cap = "\u{2590}"; // ▐ — right half block
@@ -4227,8 +4225,8 @@ impl App {
             return;
         }
 
-        // Right side: remaining space after  left_text │ ...
-        let right_inner_w = avail.saturating_sub(left_w + 3); // 3 =  + │ +
+        // Right side: ▐left▌ ▐right▌ — 5 chars overhead (2 caps + gap + 2 caps).
+        let right_inner_w = avail.saturating_sub(left_w + 5);
         let has_right = right_inner_w >= 4;
 
         let right_text = if has_right {
@@ -4253,23 +4251,30 @@ impl App {
         };
 
         let total_w = if has_right {
-            left_w + right_inner_w + 3
+            left_w + right_inner_w + 5 // ▐ + left + ▌ + gap + ▐ + right + ▌
         } else {
-            left_w + 2
+            left_w + 2 // ▐ + left + ▌
         };
         let sx = area.x + (area.width.saturating_sub(total_w as u16)) / 2;
 
         let y = area.y;
         let mut x = sx;
 
+        // Left pill: ▐ left_text ▌
         set_cell(buf, x, y, left_cap, cap_style);
         x += 1;
         for ch in left_text.chars() {
             set_cell(buf, x, y, &ch.to_string(), text_style);
             x += 1;
         }
+        set_cell(buf, x, y, right_cap, cap_style);
+        x += 1;
+
         if has_right {
-            set_cell(buf, x, y, "│", divider_style);
+            // Gap (terminal default — just skip the cell).
+            x += 1;
+            // Right pill: ▐ title_text ▌
+            set_cell(buf, x, y, left_cap, cap_style);
             x += 1;
             let mut cw = 0;
             for ch in right_text.chars() {
@@ -4285,8 +4290,8 @@ impl App {
                 x += 1;
                 cw += 1;
             }
+            set_cell(buf, x, y, right_cap, cap_style);
         }
-        set_cell(buf, x, y, right_cap, cap_style);
     }
 }
 
