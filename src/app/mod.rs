@@ -174,6 +174,10 @@ pub(crate) struct PrSyncEntry {
     /// + state so the worker can use `gh pr view` (works even after branch
     /// deletion) and skip terminal states (merged/closed).
     pub(crate) known_pr: Option<(u64, String, String)>,
+    /// Whether the agent process has exited. Used to skip PR discovery calls
+    /// for sessions that are both exited and in a terminal PR state — nobody
+    /// is pushing to that branch anymore.
+    pub(crate) agent_exited: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

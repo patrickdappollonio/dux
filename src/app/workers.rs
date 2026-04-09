@@ -666,6 +666,7 @@ impl App {
                     branch_name: s.branch_name.clone(),
                     worktree_path: s.worktree_path.clone(),
                     known_pr: known_map.get(&s.id).cloned(),
+                    agent_exited: !self.providers.contains_key(&s.id),
                 })
                 .collect();
         }
@@ -729,6 +730,7 @@ impl App {
             branch_name: session.branch_name.clone(),
             worktree_path: session.worktree_path.clone(),
             known_pr,
+            agent_exited: !self.providers.contains_key(session_id),
         };
         let tx = self.worker_tx.clone();
         thread::spawn(move || {
@@ -1021,6 +1023,20 @@ fn run_pr_sync(
         .collect()
 }
 
+/// Determine the current PR state for a session. The check strategy depends on
+/// what we already know and whether the agent is still running:
+///
+/// | Known PR state | Agent running? | Action                                |
+/// |----------------|---------------|---------------------------------------|
+/// | None           | any           | `gh pr list --head` to discover       |
+/// | OPEN           | any           | `gh pr view` + discover newer         |
+/// | MERGED/CLOSED  | yes           | discover newer (agent may push again) |
+/// | MERGED/CLOSED  | no            | **zero calls** — nothing will change  |
+///
+/// The last row is the key optimization: once a PR is in a terminal state and
+/// the agent has exited, nobody is pushing to that branch anymore, so there is
+/// no reason to check for newer PRs. This reduces API calls from O(sessions)
+/// to O(active_sessions) for repos with many completed agents.
 fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<crate::model::PrInfo> {
     let owner_repo = git::remote_owner_repo(Path::new(&entry.worktree_path))
         .or_else(|| entry.known_pr.as_ref().map(|(_, repo, _)| repo.clone()))?;
@@ -1029,8 +1045,15 @@ fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<crate::model::PrInfo> {
         let is_terminal = known_state == "MERGED" || known_state == "CLOSED";
 
         if is_terminal {
-            // Terminal state: skip `gh pr view` — the PR won't change back.
-            // Only try to discover a *newer* PR via branch listing.
+            if entry.agent_exited {
+                // Terminal PR + exited agent = zero network calls.
+                // The agent process is gone and the PR is already merged/closed,
+                // so no new commits or PRs will appear on this branch.
+                return reconstruct_from_stored(known_number, known_repo, known_state);
+            }
+
+            // Terminal PR but agent is still running — it might push new commits
+            // and open a follow-up PR, so we still check for newer PRs.
             if let Some(newer) =
                 discover_pr_by_branch(&entry.branch_name, &owner_repo, &entry.session_id)
             {
@@ -1038,8 +1061,6 @@ fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<crate::model::PrInfo> {
                     return Some(newer);
                 }
             }
-            // No newer PR found — reconstruct from stored data so the UI still
-            // shows the merged/closed state without hitting the network.
             return reconstruct_from_stored(known_number, known_repo, known_state);
         }
 
