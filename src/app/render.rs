@@ -3630,7 +3630,12 @@ impl App {
             Some(session) => {
                 let provider = capitalize(session.provider.as_str());
                 let name = session.title.as_deref().unwrap_or(&session.branch_name);
-                format!(" {provider} agent · {name} ")
+                let pr_suffix = self
+                    .pr_statuses
+                    .get(&session.id)
+                    .map(|pr| format!(" · {}#{}", pr.owner_repo, pr.number))
+                    .unwrap_or_default();
+                format!(" {provider} agent · {name}{pr_suffix} ")
             }
             None => " Agent ".to_string(),
         };
