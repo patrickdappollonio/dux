@@ -820,6 +820,7 @@ impl App {
             last_snapshot_id: None,
         };
         app.restore_sessions();
+        app.seed_pr_statuses_from_db();
         app.rebuild_left_items();
         app.reload_changed_files();
         app.update_branch_sync_sessions();
@@ -989,6 +990,39 @@ impl App {
             } else {
                 self.mark_session_status(&id, SessionStatus::Exited);
             }
+        }
+    }
+
+    /// Populate the in-memory PR status map from the database so the UI shows
+    /// PR state immediately on startup, before the first background poll.
+    fn seed_pr_statuses_from_db(&mut self) {
+        if !self.github_integration_enabled {
+            return;
+        }
+        let stored = self.session_store.load_all_latest_prs().unwrap_or_default();
+        for pr in stored {
+            use crate::model::{PrInfo, PrState};
+            let state = match pr.state.as_str() {
+                "OPEN" => PrState::Open,
+                "MERGED" => PrState::Merged,
+                "CLOSED" => PrState::Closed,
+                _ => continue,
+            };
+            self.pr_statuses.insert(
+                pr.session_id,
+                PrInfo {
+                    number: pr.pr_number,
+                    state,
+                    title: pr.title,
+                    owner_repo: pr.owner_repo,
+                },
+            );
+        }
+        if !self.pr_statuses.is_empty() {
+            logger::info(&format!(
+                "[gh-integration] seeded {} PR statuses from database",
+                self.pr_statuses.len(),
+            ));
         }
     }
 
