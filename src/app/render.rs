@@ -458,7 +458,7 @@ impl App {
                     ListItem::new(Line::from(
                         vec![
                             Span::styled(connector, Style::default().fg(self.theme.project_icon)),
-                            Span::styled(format!("{dot} "), Style::default().fg(dot_color)),
+                            Span::styled(format!("{dot} "), Style::default().fg(label_color)),
                             Span::styled(label, Style::default().fg(label_color)),
                             Span::styled(
                                 format!(" ({})", session.provider.as_str()),
