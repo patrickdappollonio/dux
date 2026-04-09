@@ -4230,7 +4230,8 @@ impl App {
         let has_right = right_inner_w >= 4;
 
         let right_text = if has_right {
-            let trimmed = pr.title.trim();
+            let content = format!("\u{00b6} {}", pr.title.trim());
+            let trimmed = content.as_str();
             if trimmed.len() > right_inner_w {
                 // Ellipsize: fill available width, end with '…'.
                 let mut truncated = String::new();
