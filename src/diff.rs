@@ -92,8 +92,7 @@ pub fn diff_file(
                 }
             }
         }
-        // Minimum 4 chars per side for visual consistency.
-        (max_ln.to_string().len()).max(4)
+        max_ln.to_string().len()
     } else {
         0
     };
@@ -403,10 +402,11 @@ mod tests {
         let rendered: Vec<String> = output.lines.iter().map(|l| l.to_string()).collect();
 
         // Context line "aaa" should show both old and new line numbers.
+        // Max line is 4, so ln_width is 1 — numbers are right-aligned in 1 char.
         assert!(
             rendered
                 .iter()
-                .any(|l| l.contains("   1") && l.contains("aaa")),
+                .any(|l| l.contains("1") && l.contains("aaa")),
             "expected line number 1 for context line 'aaa', got: {rendered:?}"
         );
 
@@ -416,7 +416,7 @@ mod tests {
             .find(|l| l.contains("XXX") && l.contains("+"))
             .expect("expected an inserted line containing XXX");
         assert!(
-            insert_line.contains("   3"),
+            insert_line.contains("3"),
             "expected new line number 3 for inserted line, got: {insert_line}"
         );
 
