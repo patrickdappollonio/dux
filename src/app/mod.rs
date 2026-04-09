@@ -612,6 +612,7 @@ pub(crate) enum MouseClickTarget {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RecentMouseClick {
     pub(crate) target: MouseClickTarget,
+    pub(crate) item_index: Option<usize>,
     pub(crate) at: Instant,
 }
 
