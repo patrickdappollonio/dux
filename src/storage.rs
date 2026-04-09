@@ -37,6 +37,84 @@ impl SessionStore {
         )?;
         ensure_column(&self.conn, "agent_sessions", "title", "text")?;
         ensure_column(&self.conn, "agent_sessions", "project_path", "text")?;
+        self.conn.execute_batch(
+            r#"
+            create table if not exists session_prs (
+                session_id text not null,
+                pr_number integer not null,
+                owner_repo text not null,
+                primary key (session_id, pr_number),
+                foreign key (session_id) references agent_sessions(id) on delete cascade
+            );
+            "#,
+        )?;
+        Ok(())
+    }
+
+    /// Insert or ignore a PR association for a session.
+    pub fn upsert_pr(&self, session_id: &str, pr_number: u64, owner_repo: &str) -> Result<()> {
+        self.conn.execute(
+            r#"
+            insert or ignore into session_prs (session_id, pr_number, owner_repo)
+            values (?1, ?2, ?3)
+            "#,
+            params![session_id, pr_number as i64, owner_repo],
+        )?;
+        Ok(())
+    }
+
+    /// Load all known PRs for a session, ordered by pr_number descending (latest first).
+    pub fn load_prs(&self, session_id: &str) -> Result<Vec<(u64, String)>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            select pr_number, owner_repo
+            from session_prs
+            where session_id = ?1
+            order by pr_number desc
+            "#,
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            let number: i64 = row.get(0)?;
+            let owner_repo: String = row.get(1)?;
+            Ok((number as u64, owner_repo))
+        })?;
+        let mut prs = Vec::new();
+        for row in rows {
+            prs.push(row?);
+        }
+        Ok(prs)
+    }
+
+    /// Load the latest (highest-numbered) PR for each session that has at least one.
+    pub fn load_all_latest_prs(&self) -> Result<Vec<(String, u64, String)>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            select session_id, pr_number, owner_repo
+            from session_prs
+            where (session_id, pr_number) in (
+                select session_id, max(pr_number) from session_prs group by session_id
+            )
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let session_id: String = row.get(0)?;
+            let number: i64 = row.get(1)?;
+            let owner_repo: String = row.get(2)?;
+            Ok((session_id, number as u64, owner_repo))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+
+    /// Delete all PR associations for a session.
+    pub fn delete_prs(&self, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "delete from session_prs where session_id = ?1",
+            params![session_id],
+        )?;
         Ok(())
     }
 
@@ -194,6 +272,80 @@ mod tests {
 
         // Order unchanged: s2 still has the more recent updated_at.
         assert_eq!(ids, vec!["b", "a"]);
+    }
+}
+
+#[cfg(test)]
+mod pr_tests {
+    use super::*;
+    use chrono::Duration;
+
+    #[test]
+    fn upsert_and_load_prs() {
+        let store = test_store();
+        let now = Utc::now();
+        let s = test_session("s1", now, now);
+        store.upsert_session(&s).unwrap();
+
+        store.upsert_pr("s1", 10, "owner/repo").unwrap();
+        store.upsert_pr("s1", 20, "owner/repo").unwrap();
+        store.upsert_pr("s1", 15, "owner/repo").unwrap();
+
+        let prs = store.load_prs("s1").unwrap();
+        assert_eq!(prs.len(), 3);
+        // Ordered by pr_number desc.
+        assert_eq!(prs[0], (20, "owner/repo".to_string()));
+        assert_eq!(prs[1], (15, "owner/repo".to_string()));
+        assert_eq!(prs[2], (10, "owner/repo".to_string()));
+    }
+
+    #[test]
+    fn upsert_pr_is_idempotent() {
+        let store = test_store();
+        let now = Utc::now();
+        let s = test_session("s1", now, now);
+        store.upsert_session(&s).unwrap();
+
+        store.upsert_pr("s1", 42, "owner/repo").unwrap();
+        store.upsert_pr("s1", 42, "owner/repo").unwrap();
+
+        let prs = store.load_prs("s1").unwrap();
+        assert_eq!(prs.len(), 1);
+    }
+
+    #[test]
+    fn load_all_latest_prs() {
+        let store = test_store();
+        let now = Utc::now();
+        let s1 = test_session("s1", now, now);
+        let s2 = test_session("s2", now - Duration::hours(1), now - Duration::hours(1));
+        store.upsert_session(&s1).unwrap();
+        store.upsert_session(&s2).unwrap();
+
+        store.upsert_pr("s1", 10, "owner/repo").unwrap();
+        store.upsert_pr("s1", 20, "owner/repo").unwrap();
+        store.upsert_pr("s2", 5, "other/repo").unwrap();
+
+        let latest = store.load_all_latest_prs().unwrap();
+        assert_eq!(latest.len(), 2);
+        // Should return the highest PR number per session.
+        assert!(latest.contains(&("s1".to_string(), 20, "owner/repo".to_string())));
+        assert!(latest.contains(&("s2".to_string(), 5, "other/repo".to_string())));
+    }
+
+    #[test]
+    fn delete_prs() {
+        let store = test_store();
+        let now = Utc::now();
+        let s = test_session("s1", now, now);
+        store.upsert_session(&s).unwrap();
+
+        store.upsert_pr("s1", 10, "owner/repo").unwrap();
+        store.upsert_pr("s1", 20, "owner/repo").unwrap();
+        store.delete_prs("s1").unwrap();
+
+        let prs = store.load_prs("s1").unwrap();
+        assert!(prs.is_empty());
     }
 }
 

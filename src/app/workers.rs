@@ -166,18 +166,33 @@ impl App {
                 }
                 WorkerEvent::PrStatusReady(results) => {
                     let now = Instant::now();
+                    let mut changed = false;
                     for (session_id, maybe_pr) in results {
                         self.pr_last_checked.insert(session_id.clone(), now);
                         match maybe_pr {
                             Some(pr) => {
+                                // Persist the PR association so it survives restarts
+                                // and squash-merge branch deletions.
+                                let _ = self.session_store.upsert_pr(
+                                    &session_id,
+                                    pr.number,
+                                    &pr.owner_repo,
+                                );
                                 self.pr_statuses.insert(session_id, pr);
+                                changed = true;
                             }
                             None => {
-                                self.pr_statuses.remove(&session_id);
+                                if self.pr_statuses.remove(&session_id).is_some() {
+                                    changed = true;
+                                }
                             }
                         }
                     }
-                    self.rebuild_left_items();
+                    if changed {
+                        // Refresh the sync entries so the worker has updated known_pr data.
+                        self.update_pr_sync_sessions();
+                        self.rebuild_left_items();
+                    }
                 }
                 WorkerEvent::RefsChanged(session_id) => {
                     logger::debug(&format!(
@@ -610,6 +625,14 @@ impl App {
     }
 
     pub(crate) fn update_pr_sync_sessions(&self) {
+        // Load known PRs from the database so the worker can use `gh pr view`
+        // for sessions that already have a persisted PR association.
+        let known_prs = self.session_store.load_all_latest_prs().unwrap_or_default();
+        let known_map: HashMap<String, (u64, String)> = known_prs
+            .into_iter()
+            .map(|(sid, num, repo)| (sid, (num, repo)))
+            .collect();
+
         if let Ok(mut guard) = self.pr_sync_sessions.lock() {
             *guard = self
                 .sessions
@@ -618,6 +641,7 @@ impl App {
                     session_id: s.id.clone(),
                     branch_name: s.branch_name.clone(),
                     worktree_path: s.worktree_path.clone(),
+                    known_pr: known_map.get(&s.id).cloned(),
                 })
                 .collect();
         }
@@ -671,10 +695,16 @@ impl App {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
             return;
         };
+        let known_pr = self
+            .session_store
+            .load_prs(session_id)
+            .ok()
+            .and_then(|prs| prs.into_iter().next());
         let entry = PrSyncEntry {
             session_id: session.id.clone(),
             branch_name: session.branch_name.clone(),
             worktree_path: session.worktree_path.clone(),
+            known_pr,
         };
         let tx = self.worker_tx.clone();
         thread::spawn(move || {
@@ -970,16 +1000,78 @@ fn run_pr_sync(
 fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<crate::model::PrInfo> {
     use crate::model::{PrInfo, PrState};
 
-    let owner_repo = git::remote_owner_repo(Path::new(&entry.worktree_path))?;
+    let owner_repo = git::remote_owner_repo(Path::new(&entry.worktree_path))
+        .or_else(|| entry.known_pr.as_ref().map(|(_, repo)| repo.clone()))?;
 
+    // Strategy 1: if we already know a PR, check it by number using `gh pr view`.
+    // This works even after the branch is deleted (e.g. squash merge).
+    if let Some((known_number, ref known_repo)) = entry.known_pr {
+        if let Some(pr) = view_pr_by_number(known_number, known_repo, &entry.session_id) {
+            // Also try to discover a newer PR via list (there might be a new one).
+            if let Some(newer) =
+                discover_pr_by_branch(&entry.branch_name, &owner_repo, &entry.session_id)
+            {
+                if newer.number > pr.number {
+                    return Some(newer);
+                }
+            }
+            return Some(pr);
+        }
+    }
+
+    // Strategy 2: discover PR by branch name (catches new PRs).
+    discover_pr_by_branch(&entry.branch_name, &owner_repo, &entry.session_id)
+}
+
+/// Check a known PR by number using `gh pr view`.
+fn view_pr_by_number(
+    number: u64,
+    owner_repo: &str,
+    session_id: &str,
+) -> Option<crate::model::PrInfo> {
+    use crate::model::{PrInfo, PrState};
+
+    let output = std::process::Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &number.to_string(),
+            "--repo",
+            owner_repo,
+            "--json",
+            "number,state,title",
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        logger::debug(&format!(
+            "[gh-integration] gh pr view #{number} failed for {session_id}: {}",
+            String::from_utf8_lossy(&output.stderr).trim(),
+        ));
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_pr_json_object(text.trim(), owner_repo)
+}
+
+/// Discover a PR by branch name using `gh pr list --state all`.
+fn discover_pr_by_branch(
+    branch: &str,
+    owner_repo: &str,
+    session_id: &str,
+) -> Option<crate::model::PrInfo> {
     let output = std::process::Command::new("gh")
         .args([
             "pr",
             "list",
             "--head",
-            &entry.branch_name,
+            branch,
             "--repo",
-            &owner_repo,
+            owner_repo,
+            "--state",
+            "all",
             "--json",
             "number,state,title",
             "--limit",
@@ -990,8 +1082,7 @@ fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<crate::model::PrInfo> {
 
     if !output.status.success() {
         logger::debug(&format!(
-            "[gh-integration] gh pr list failed for {}: {}",
-            entry.session_id,
+            "[gh-integration] gh pr list failed for {session_id}: {}",
             String::from_utf8_lossy(&output.stderr).trim(),
         ));
         return None;
@@ -1000,6 +1091,18 @@ fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<crate::model::PrInfo> {
     let text = String::from_utf8_lossy(&output.stdout);
     let arr: Vec<serde_json::Value> = serde_json::from_str(text.trim()).ok()?;
     let obj = arr.first()?;
+    parse_pr_json_value(obj, owner_repo)
+}
+
+/// Parse a single PR JSON object (from `gh pr view` output).
+fn parse_pr_json_object(json: &str, owner_repo: &str) -> Option<crate::model::PrInfo> {
+    let obj: serde_json::Value = serde_json::from_str(json).ok()?;
+    parse_pr_json_value(&obj, owner_repo)
+}
+
+/// Extract PrInfo from a serde_json::Value.
+fn parse_pr_json_value(obj: &serde_json::Value, owner_repo: &str) -> Option<crate::model::PrInfo> {
+    use crate::model::{PrInfo, PrState};
 
     let number = obj.get("number")?.as_u64()?;
     let state_str = obj.get("state")?.as_str()?;
@@ -1019,6 +1122,6 @@ fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<crate::model::PrInfo> {
         number,
         state,
         title,
-        owner_repo,
+        owner_repo: owner_repo.to_string(),
     })
 }
