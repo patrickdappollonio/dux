@@ -1058,6 +1058,8 @@ impl App {
             }
             "toggle-diff-line-numbers" => {
                 self.show_diff_line_numbers = !self.show_diff_line_numbers;
+                self.config.ui.show_diff_line_numbers = self.show_diff_line_numbers;
+                let _ = save_config(&self.paths.config_path, &self.config, &self.bindings);
                 let _ = self.refresh_current_diff();
                 let state = if self.show_diff_line_numbers {
                     "enabled"
