@@ -126,15 +126,6 @@ impl SessionStore {
         Ok(result)
     }
 
-    /// Delete all PR associations for a session.
-    pub fn delete_prs(&self, session_id: &str) -> Result<()> {
-        self.conn.execute(
-            "delete from session_prs where session_id = ?1",
-            params![session_id],
-        )?;
-        Ok(())
-    }
-
     pub fn upsert_session(&self, session: &AgentSession) -> Result<()> {
         self.conn.execute(
             r#"
@@ -359,21 +350,6 @@ mod pr_tests {
             "other/repo".to_string(),
             "OPEN".to_string()
         )));
-    }
-
-    #[test]
-    fn delete_prs() {
-        let store = test_store();
-        let now = Utc::now();
-        let s = test_session("s1", now, now);
-        store.upsert_session(&s).unwrap();
-
-        store.upsert_pr("s1", 10, "owner/repo", "OPEN").unwrap();
-        store.upsert_pr("s1", 20, "owner/repo", "MERGED").unwrap();
-        store.delete_prs("s1").unwrap();
-
-        let prs = store.load_prs("s1").unwrap();
-        assert!(prs.is_empty());
     }
 }
 

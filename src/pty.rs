@@ -309,10 +309,10 @@ impl PtyClient {
         }
         // Ignore data that arrived within 500ms of a resize — it's almost
         // certainly the child redrawing in response to SIGWINCH.
-        if let Ok(ts) = self.last_resize_at.lock() {
-            if ts.is_some_and(|t| t.elapsed().as_millis() < 500) {
-                return false;
-            }
+        if let Ok(ts) = self.last_resize_at.lock()
+            && ts.is_some_and(|t| t.elapsed().as_millis() < 500)
+        {
+            return false;
         }
         true
     }

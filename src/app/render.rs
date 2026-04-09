@@ -4242,15 +4242,13 @@ impl App {
             if trimmed_w > right_inner_w {
                 // Ellipsize: fill available width, end with '…'.
                 let mut truncated = String::new();
-                let mut width = 0;
                 // Leave 1 char for the ellipsis.
-                for ch in trimmed.chars() {
+                for (width, ch) in trimmed.chars().enumerate() {
                     if width + 1 >= right_inner_w {
                         truncated.push('…');
                         break;
                     }
                     truncated.push(ch);
-                    width += 1;
                 }
                 truncated
             } else {

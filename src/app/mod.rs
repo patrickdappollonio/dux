@@ -170,8 +170,8 @@ pub(crate) struct PrSyncEntry {
     pub(crate) session_id: String,
     pub(crate) branch_name: String,
     pub(crate) worktree_path: String,
-    /// If we already know a PR for this session, store the latest number + repo
-    /// + state so the worker can use `gh pr view` (works even after branch
+    /// If we already know a PR for this session, store the latest number, repo,
+    /// and state so the worker can use `gh pr view` (works even after branch
     /// deletion) and skip terminal states (merged/closed).
     pub(crate) known_pr: Option<(u64, String, String)>,
     /// Whether the agent process has exited. Used to skip PR discovery calls
@@ -1100,12 +1100,12 @@ impl App {
     fn resource_monitor_targets(&self) -> Vec<(String, u32)> {
         let mut targets = Vec::new();
         for session in &self.sessions {
-            if let Some(pty) = self.providers.get(&session.id) {
-                if let Some(pid) = pty.child_process_id() {
-                    let title = session.title.as_deref().unwrap_or(&session.branch_name);
-                    let provider = session.provider.as_str();
-                    targets.push((format!("Agent ({provider}): {title}"), pid));
-                }
+            if let Some(pty) = self.providers.get(&session.id)
+                && let Some(pid) = pty.child_process_id()
+            {
+                let title = session.title.as_deref().unwrap_or(&session.branch_name);
+                let provider = session.provider.as_str();
+                targets.push((format!("Agent ({provider}): {title}"), pid));
             }
         }
         for terminal in self.companion_terminals.values() {

@@ -386,10 +386,9 @@ impl App {
         if let PromptState::ResourceMonitor {
             ref last_refresh, ..
         } = self.prompt
+            && last_refresh.elapsed() >= Duration::from_secs(2)
         {
-            if last_refresh.elapsed() >= Duration::from_secs(2) {
-                self.spawn_resource_stats_worker();
-            }
+            self.spawn_resource_stats_worker();
         }
 
         // Keep the poller's interval flag in sync with whether any runtime PTY is alive.
@@ -479,10 +478,10 @@ impl App {
                         if event_path.starts_with(watched) {
                             // Debounce: skip if we already sent an event within the last 5s.
                             let now = Instant::now();
-                            if let Some(last) = debounce_guard.get(session_id) {
-                                if now.duration_since(*last) < Duration::from_secs(5) {
-                                    continue;
-                                }
+                            if let Some(last) = debounce_guard.get(session_id)
+                                && now.duration_since(*last) < Duration::from_secs(5)
+                            {
+                                continue;
                             }
                             debounce_guard.insert(session_id.clone(), now);
                             logger::debug(&format!(
@@ -509,26 +508,25 @@ impl App {
                         .join(".git")
                         .join("refs")
                         .join("heads");
-                    if refs_dir.is_dir() {
-                        if let Some(ref watcher_arc) = self.refs_watcher {
-                            if let Ok(mut w) = watcher_arc.lock() {
-                                match w.watch(&refs_dir, RecursiveMode::NonRecursive) {
-                                    Ok(()) => {
-                                        logger::debug(&format!(
-                                            "[gh-integration] refs watcher: watching {} for session {}",
-                                            refs_dir.display(),
-                                            session.id,
-                                        ));
-                                        paths.insert(refs_dir.clone(), session.id.clone());
-                                    }
-                                    Err(e) => {
-                                        logger::debug(&format!(
-                                            "[gh-integration] refs watcher: failed to watch {}: {}",
-                                            refs_dir.display(),
-                                            e,
-                                        ));
-                                    }
-                                }
+                    if refs_dir.is_dir()
+                        && let Some(ref watcher_arc) = self.refs_watcher
+                        && let Ok(mut w) = watcher_arc.lock()
+                    {
+                        match w.watch(&refs_dir, RecursiveMode::NonRecursive) {
+                            Ok(()) => {
+                                logger::debug(&format!(
+                                    "[gh-integration] refs watcher: watching {} for session {}",
+                                    refs_dir.display(),
+                                    session.id,
+                                ));
+                                paths.insert(refs_dir.clone(), session.id.clone());
+                            }
+                            Err(e) => {
+                                logger::debug(&format!(
+                                    "[gh-integration] refs watcher: failed to watch {}: {}",
+                                    refs_dir.display(),
+                                    e,
+                                ));
                             }
                         }
                     }
@@ -547,62 +545,6 @@ impl App {
                 logger::warn(&format!(
                     "[gh-integration] refs watcher: failed to create watcher (falling back to poll-only): {}",
                     e,
-                ));
-            }
-        }
-    }
-
-    /// Add a new session's refs directory to the watcher.
-    pub(crate) fn watch_session_refs(&mut self, session_id: &str, worktree_path: &str) {
-        use notify::Watcher;
-        let Some(ref watcher_arc) = self.refs_watcher else {
-            return;
-        };
-        let refs_dir = PathBuf::from(worktree_path)
-            .join(".git")
-            .join("refs")
-            .join("heads");
-        if !refs_dir.is_dir() {
-            return;
-        }
-        if let Ok(mut w) = watcher_arc.lock() {
-            match w.watch(&refs_dir, notify::RecursiveMode::NonRecursive) {
-                Ok(()) => {
-                    logger::debug(&format!(
-                        "[gh-integration] refs watcher: watching {} for session {}",
-                        refs_dir.display(),
-                        session_id,
-                    ));
-                    self.refs_watch_paths
-                        .insert(refs_dir, session_id.to_string());
-                }
-                Err(e) => {
-                    logger::debug(&format!(
-                        "[gh-integration] refs watcher: failed to watch {}: {}",
-                        refs_dir.display(),
-                        e,
-                    ));
-                }
-            }
-        }
-    }
-
-    /// Remove a session's refs directory from the watcher.
-    pub(crate) fn unwatch_session_refs(&mut self, worktree_path: &str) {
-        use notify::Watcher;
-        let Some(ref watcher_arc) = self.refs_watcher else {
-            return;
-        };
-        let refs_dir = PathBuf::from(worktree_path)
-            .join(".git")
-            .join("refs")
-            .join("heads");
-        if self.refs_watch_paths.remove(&refs_dir).is_some() {
-            if let Ok(mut w) = watcher_arc.lock() {
-                let _ = w.unwatch(&refs_dir);
-                logger::debug(&format!(
-                    "[gh-integration] refs watcher: unwatching {}",
-                    refs_dir.display(),
                 ));
             }
         }
@@ -712,10 +654,10 @@ impl App {
             return;
         }
         // Rate-limit: skip if checked within the last 10 seconds.
-        if let Some(last) = self.pr_last_checked.get(session_id) {
-            if last.elapsed() < Duration::from_secs(10) {
-                return;
-            }
+        if let Some(last) = self.pr_last_checked.get(session_id)
+            && last.elapsed() < Duration::from_secs(10)
+        {
+            return;
         }
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
             return;
@@ -1056,10 +998,9 @@ fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<crate::model::PrInfo> {
             // and open a follow-up PR, so we still check for newer PRs.
             if let Some(newer) =
                 discover_pr_by_branch(&entry.branch_name, &owner_repo, &entry.session_id)
+                && newer.number > known_number
             {
-                if newer.number > known_number {
-                    return Some(newer);
-                }
+                return Some(newer);
             }
             return reconstruct_from_stored(known_number, known_repo, known_state);
         }
@@ -1069,10 +1010,9 @@ fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<crate::model::PrInfo> {
             // Also check if a newer PR was opened.
             if let Some(newer) =
                 discover_pr_by_branch(&entry.branch_name, &owner_repo, &entry.session_id)
+                && newer.number > pr.number
             {
-                if newer.number > pr.number {
-                    return Some(newer);
-                }
+                return Some(newer);
             }
             return Some(pr);
         }
@@ -1113,8 +1053,6 @@ fn view_pr_by_number(
     owner_repo: &str,
     session_id: &str,
 ) -> Option<crate::model::PrInfo> {
-    use crate::model::{PrInfo, PrState};
-
     let output = std::process::Command::new("gh")
         .args([
             "pr",
