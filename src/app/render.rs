@@ -4209,14 +4209,14 @@ impl App {
         let right_cap = "\u{258c}"; // ▌ — left half block
 
         let left_text = format!(" \u{2387} {}#{} ", pr.owner_repo, pr.number);
-        let left_w = left_text.len();
+        let left_w = left_text.chars().count();
         let avail = area.width as usize;
         let buf = frame.buffer_mut();
 
         // Minimum: ▐ + left_text + ▌
         if avail < left_w + 2 {
             let short = format!(" \u{2387} #{} ", pr.number);
-            let pill_w = short.len() + 2;
+            let pill_w = short.chars().count() + 2;
             if pill_w > avail {
                 return;
             }
@@ -4238,7 +4238,8 @@ impl App {
         let right_text = if has_right {
             let content = format!("\u{270e} {}", pr.title.trim());
             let trimmed = content.as_str();
-            if trimmed.len() > right_inner_w {
+            let trimmed_w = trimmed.chars().count();
+            if trimmed_w > right_inner_w {
                 // Ellipsize: fill available width, end with '…'.
                 let mut truncated = String::new();
                 let mut width = 0;
@@ -4254,7 +4255,7 @@ impl App {
                 truncated
             } else {
                 // Center: pad both sides equally.
-                let padding = right_inner_w.saturating_sub(trimmed.len());
+                let padding = right_inner_w.saturating_sub(trimmed_w);
                 let left_pad = padding / 2;
                 let right_pad = padding - left_pad;
                 format!(
