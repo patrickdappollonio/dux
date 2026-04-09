@@ -66,6 +66,8 @@ pub struct Theme {
     pub tip_pill_bg: Color,
     pub tip_text_fg: Color,
     pub tip_highlight_fg: Color,
+    pub diff_line_number_fg: Color,
+    pub diff_line_number_sep: Color,
 }
 
 impl Theme {
@@ -133,6 +135,8 @@ impl Theme {
             tip_pill_bg: Color::Rgb(70, 50, 120),
             tip_text_fg: Color::Rgb(90, 90, 90),
             tip_highlight_fg: Color::Rgb(0, 120, 120),
+            diff_line_number_fg: Color::Rgb(90, 90, 110),
+            diff_line_number_sep: Color::Rgb(60, 60, 70),
         }
     }
 

@@ -3478,6 +3478,7 @@ mod tests {
             commit_input: TextInput::new()
                 .with_multiline(4)
                 .with_placeholder("Type your commit message\u{2026}"),
+            show_diff_line_numbers: false,
             left_width_pct: 20,
             right_width_pct: 23,
             terminal_pane_height_pct: 35,
@@ -4835,6 +4836,8 @@ mod tests {
                 Line::from("three"),
             ]),
             scroll: 0,
+            worktree_path: String::new(),
+            rel_path: String::new(),
         };
         app.last_diff_height = 2;
         app.last_diff_visual_lines = 10;

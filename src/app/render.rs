@@ -548,7 +548,7 @@ impl App {
 
     fn render_diff(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
         let (lines, scroll) = match &self.center_mode {
-            CenterMode::Diff { lines, scroll } => (Arc::clone(lines), *scroll),
+            CenterMode::Diff { lines, scroll, .. } => (Arc::clone(lines), *scroll),
             _ => return,
         };
 

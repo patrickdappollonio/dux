@@ -678,17 +678,49 @@ impl App {
         let Some(file) = self.selected_changed_file() else {
             return Ok(());
         };
+        let worktree_path = session.worktree_path.clone();
+        let rel_path = file.path.clone();
         let output = crate::diff::diff_file(
-            Path::new(&session.worktree_path),
-            &file.path,
+            Path::new(&worktree_path),
+            &rel_path,
             &self.theme,
             &self.syntax_cache,
+            self.show_diff_line_numbers,
         )?;
         self.center_mode = CenterMode::Diff {
             lines: Arc::new(output.lines),
             scroll: 0,
+            worktree_path,
+            rel_path,
         };
         self.focus = FocusPane::Center;
+        Ok(())
+    }
+
+    /// Re-generate the currently displayed diff (e.g. after toggling line numbers).
+    pub(crate) fn refresh_current_diff(&mut self) -> Result<()> {
+        let (worktree_path, rel_path, scroll) = match &self.center_mode {
+            CenterMode::Diff {
+                worktree_path,
+                rel_path,
+                scroll,
+                ..
+            } => (worktree_path.clone(), rel_path.clone(), *scroll),
+            _ => return Ok(()),
+        };
+        let output = crate::diff::diff_file(
+            Path::new(&worktree_path),
+            &rel_path,
+            &self.theme,
+            &self.syntax_cache,
+            self.show_diff_line_numbers,
+        )?;
+        self.center_mode = CenterMode::Diff {
+            lines: Arc::new(output.lines),
+            scroll,
+            worktree_path,
+            rel_path,
+        };
         Ok(())
     }
 

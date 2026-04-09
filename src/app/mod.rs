@@ -97,6 +97,7 @@ pub struct App {
     pub(crate) create_agent_in_flight: bool,
     pub(crate) last_pty_size: (u16, u16),
     pub(crate) prev_scrollback_offset: usize,
+    pub(crate) show_diff_line_numbers: bool,
     pub(crate) last_diff_height: u16,
     pub(crate) last_diff_visual_lines: u16,
     pub(crate) theme: Theme,
@@ -221,6 +222,9 @@ pub(crate) enum CenterMode {
     Diff {
         lines: Arc<Vec<Line<'static>>>,
         scroll: u16,
+        /// Source paths for re-generating the diff on setting changes.
+        worktree_path: String,
+        rel_path: String,
     },
 }
 
@@ -668,6 +672,7 @@ impl App {
             bindings.label_for(Action::ToggleHelp),
         );
         let mut app = Self {
+            show_diff_line_numbers: config.ui.show_diff_line_numbers,
             left_width_pct: config.ui.left_width_pct,
             right_width_pct: config.ui.right_width_pct,
             terminal_pane_height_pct: config.ui.terminal_pane_height_pct,
@@ -1049,6 +1054,20 @@ impl App {
                     lines: Vec::new(),
                     scroll_offset: 0,
                 };
+                Ok(())
+            }
+            "toggle-diff-line-numbers" => {
+                self.show_diff_line_numbers = !self.show_diff_line_numbers;
+                let _ = self.refresh_current_diff();
+                let state = if self.show_diff_line_numbers {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                let palette_key = self.bindings.label_for(Action::OpenPalette);
+                self.set_info(format!(
+                    "Diff line numbers {state}. Press {palette_key} to open the palette and toggle back."
+                ));
                 Ok(())
             }
             "force-redraw" => {

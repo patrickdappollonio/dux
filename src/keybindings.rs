@@ -78,6 +78,7 @@ pub enum Action {
     RemoveGitPane,
     EditMacros,
     DebugInput,
+    ToggleDiffLineNumbers,
 }
 
 /// Where a binding's key combo is matched.
@@ -235,6 +236,7 @@ impl Action {
             Action::RemoveGitPane => "remove_git_pane",
             Action::EditMacros => "edit_macros",
             Action::DebugInput => "debug_input",
+            Action::ToggleDiffLineNumbers => "toggle_diff_line_numbers",
         }
     }
 
@@ -314,6 +316,7 @@ impl Action {
             Action::RemoveGitPane => "Remove or restore the git pane.",
             Action::EditMacros => "Open the text macros editor.",
             Action::DebugInput => "Open input event debugger to inspect keyboard and mouse events.",
+            Action::ToggleDiffLineNumbers => "Toggle line numbers in diff view.",
         }
     }
 
@@ -383,7 +386,8 @@ impl Action {
             | Action::SortAgentsByCreated
             | Action::SortAgentsByName
             | Action::EditMacros
-            | Action::DebugInput => None,
+            | Action::DebugInput
+            | Action::ToggleDiffLineNumbers => None,
         }
     }
 }
@@ -1273,6 +1277,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "input-debugging",
             description: "Open input event debugger to inspect keyboard and mouse events",
+        }),
+    },
+    BindingDef {
+        action: Action::ToggleDiffLineNumbers,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "toggle-diff-line-numbers",
+            description: "Toggle line numbers in diff view",
         }),
     },
 ];
