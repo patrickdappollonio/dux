@@ -4220,7 +4220,7 @@ impl App {
             if pill_w > avail {
                 return;
             }
-            let sx = area.x + (area.width.saturating_sub(pill_w as u16)) / 2;
+            let sx = area.x;
             let y = area.y;
             set_cell(buf, sx, y, left_cap, cap_style);
             for (i, ch) in short.chars().enumerate() {
@@ -4230,7 +4230,8 @@ impl App {
             return;
         }
 
-        // Right side: ▐left▌ ▐right▌ — 5 chars overhead (2 caps + gap + 2 caps).
+        // Layout: ▐left▌ ▐right▌ — left pill is fitted, right pill fills remaining.
+        // Overhead: 2 caps for left + 1 gap + 2 caps for right = 5.
         let right_inner_w = avail.saturating_sub(left_w + 5);
         let has_right = right_inner_w >= 4;
 
@@ -4267,12 +4268,8 @@ impl App {
             String::new()
         };
 
-        let total_w = if has_right {
-            left_w + right_inner_w + 5 // ▐ + left + ▌ + gap + ▐ + right + ▌
-        } else {
-            left_w + 2 // ▐ + left + ▌
-        };
-        let sx = area.x + (area.width.saturating_sub(total_w as u16)) / 2;
+        // Left-align with the pane below so the pills sit flush against the border.
+        let sx = area.x;
 
         let y = area.y;
         let mut x = sx;
