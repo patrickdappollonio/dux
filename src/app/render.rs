@@ -4236,7 +4236,7 @@ impl App {
         let has_right = right_inner_w >= 4;
 
         let right_text = if has_right {
-            let content = format!("\u{270e} {}", pr.title.trim());
+            let content = format!("\u{a7} {}", pr.title.trim());
             let trimmed = content.as_str();
             let trimmed_w = trimmed.chars().count();
             if trimmed_w > right_inner_w {
