@@ -4202,7 +4202,10 @@ impl App {
         let cap_style = Style::default().fg(bg);
         // Inner content: white text on colored background.
         let text_style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
-        let title_style = Style::default().fg(fg).bg(bg);
+        let title_style = Style::default()
+            .fg(fg)
+            .bg(bg)
+            .add_modifier(Modifier::ITALIC);
 
         // Half-block caps (universally supported Unicode).
         let left_cap = "\u{2590}"; // ▐ — right half block
