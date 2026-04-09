@@ -4235,8 +4235,11 @@ impl App {
 
         // Layout: ▐left▌ ▐right▌ — left pill is fitted, right pill fills remaining.
         // Overhead: 2 caps for left + 1 gap + 2 caps for right = 5.
+        // Skip the right pill entirely if there's no title to show (e.g. PR
+        // state was reconstructed from the database without a stored title).
+        let title_available = !pr.title.trim().is_empty();
         let right_inner_w = avail.saturating_sub(left_w + 5);
-        let has_right = right_inner_w >= 4;
+        let has_right = title_available && right_inner_w >= 4;
 
         let right_text = if has_right {
             let content = format!("\u{a7} {}", pr.title.trim());
