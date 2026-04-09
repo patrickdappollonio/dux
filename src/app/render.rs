@@ -1413,9 +1413,10 @@ impl App {
             .set_visible_lines(text_area.height as usize);
 
         if let Some(overlay) = self.commit_input.overlay() {
-            // Overlay (e.g. "Generating commit message…") with animated dots.
-            let dots = ".".repeat((self.tick_count as usize / 5) % 4);
-            let text = format!("{overlay}{dots}");
+            // Overlay (e.g. "Generating commit message…") with spinner prefix.
+            let idx = self.spinner_frame_index();
+            let spinner = crate::theme::SPINNER_FRAMES[idx];
+            let text = format!("{spinner} {overlay}");
             Paragraph::new(text)
                 .style(Style::default().fg(self.theme.hint_desc_fg))
                 .render(text_area, frame.buffer_mut());
@@ -1893,12 +1894,8 @@ impl App {
                         .collect()
                 };
                 let items = if *loading {
-                    let spinner = match (self.tick_count / 2) % 4 {
-                        0 => "⠋",
-                        1 => "⠙",
-                        2 => "⠹",
-                        _ => "⠸",
-                    };
+                    let idx = self.spinner_frame_index();
+                    let spinner = crate::theme::SPINNER_FRAMES[idx];
                     vec![ListItem::new(Line::from(vec![
                         Span::styled(
                             format!("{spinner} "),
