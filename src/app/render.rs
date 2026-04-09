@@ -4181,7 +4181,10 @@ impl App {
             return;
         }
 
-        // State color used as foreground for borders and text (no background).
+        // Single pill with internal divider — all in the state color:
+        // ╭──────────────────┬──────────────────────────╮
+        // │ owner/repo#1234  │ PR title ellipsized he…  │
+        // ╰──────────────────┴──────────────────────────╯
         let state_fg = match pr.state {
             PrState::Open => self.theme.pr_open_fg,
             PrState::Merged => self.theme.pr_merged_fg,
@@ -4189,57 +4192,44 @@ impl App {
         };
         let border_style = Style::default().fg(state_fg);
         let text_style = Style::default().fg(state_fg).add_modifier(Modifier::BOLD);
-        let dim_border_style = Style::default().fg(self.theme.pr_pill_border_fg);
-        let right_text_style = Style::default().fg(self.theme.pr_pill_secondary_fg);
+        let title_style = Style::default().fg(self.theme.pr_pill_secondary_fg);
 
         let left_text = format!(" {}#{} ", pr.owner_repo, pr.number);
         let left_w = left_text.len();
-
         let avail = area.width as usize;
         let buf = frame.buffer_mut();
 
-        if avail < left_w + 4 {
-            // Too narrow for full pill — render single centered pill with just #N.
+        if avail < left_w + 2 {
+            // Too narrow — render a minimal pill with just #N.
             let short = format!(" #{} ", pr.number);
-            let short_w = short.len();
-            let pill_w = short_w + 2; // + │ on each side
-            let start_x = area.x + (area.width.saturating_sub(pill_w as u16)) / 2;
-            if area.height >= 3 && pill_w <= avail {
-                // Top
-                let y = area.y;
-                set_cell(buf, start_x, y, "╭", border_style);
-                for dx in 1..=(pill_w as u16 - 2) {
-                    set_cell(buf, start_x + dx, y, "─", border_style);
-                }
-                set_cell(buf, start_x + pill_w as u16 - 1, y, "╮", border_style);
-                // Middle
-                let y = area.y + 1;
-                set_cell(buf, start_x, y, "│", border_style);
-                for (i, ch) in short.chars().enumerate() {
-                    set_cell(buf, start_x + 1 + i as u16, y, &ch.to_string(), text_style);
-                }
-                set_cell(buf, start_x + pill_w as u16 - 1, y, "│", border_style);
-                // Bottom
-                let y = area.y + 2;
-                set_cell(buf, start_x, y, "╰", border_style);
-                for dx in 1..=(pill_w as u16 - 2) {
-                    set_cell(buf, start_x + dx, y, "─", border_style);
-                }
-                set_cell(buf, start_x + pill_w as u16 - 1, y, "╯", border_style);
+            let pill_w = short.len() + 2;
+            if pill_w > avail {
+                return;
             }
+            let sx = area.x + (area.width.saturating_sub(pill_w as u16)) / 2;
+            set_cell(buf, sx, area.y, "╭", border_style);
+            for dx in 1..=(pill_w as u16 - 2) {
+                set_cell(buf, sx + dx, area.y, "─", border_style);
+            }
+            set_cell(buf, sx + pill_w as u16 - 1, area.y, "╮", border_style);
+            let y = area.y + 1;
+            set_cell(buf, sx, y, "│", border_style);
+            for (i, ch) in short.chars().enumerate() {
+                set_cell(buf, sx + 1 + i as u16, y, &ch.to_string(), text_style);
+            }
+            set_cell(buf, sx + pill_w as u16 - 1, y, "│", border_style);
+            let y = area.y + 2;
+            set_cell(buf, sx, y, "╰", border_style);
+            for dx in 1..=(pill_w as u16 - 2) {
+                set_cell(buf, sx + dx, y, "─", border_style);
+            }
+            set_cell(buf, sx + pill_w as u16 - 1, y, "╯", border_style);
             return;
         }
 
-        // Double-pill layout.
-        let left_pill_w = left_w + 2; // │ + text + │
-        let right_pill_w = avail.saturating_sub(left_pill_w + 1); // +1 for the ╮╭ join
-        let has_right = right_pill_w >= 5; // minimum useful width
-
-        let right_inner_w = if has_right {
-            right_pill_w.saturating_sub(2)
-        } else {
-            0
-        };
+        // Right side: remaining space after │ left_text │ ... │
+        let right_inner_w = avail.saturating_sub(left_w + 3); // 3 = outer │ + divider │ + outer │
+        let has_right = right_inner_w >= 4;
 
         let right_text = if has_right {
             let t = format!(" {} ", pr.title);
@@ -4263,38 +4253,33 @@ impl App {
         };
 
         let total_w = if has_right {
-            left_pill_w + right_pill_w
+            left_w + right_inner_w + 3
         } else {
-            left_pill_w
+            left_w + 2
         };
-        let start_x = area.x + (area.width.saturating_sub(total_w as u16)) / 2;
+        let sx = area.x + (area.width.saturating_sub(total_w as u16)) / 2;
 
-        // -- Row 0: top borders --
-        let y = area.y;
-        let mut x = start_x;
-        set_cell(buf, x, y, "╭", border_style);
+        // Row 0: top border
+        let mut x = sx;
+        set_cell(buf, x, area.y, "╭", border_style);
         x += 1;
         for _ in 0..left_w {
-            set_cell(buf, x, y, "─", border_style);
+            set_cell(buf, x, area.y, "─", border_style);
             x += 1;
         }
         if has_right {
-            set_cell(buf, x, y, "╮", border_style);
-            x += 1;
-            set_cell(buf, x, y, "╭", dim_border_style);
+            set_cell(buf, x, area.y, "┬", border_style);
             x += 1;
             for _ in 0..right_inner_w {
-                set_cell(buf, x, y, "─", dim_border_style);
+                set_cell(buf, x, area.y, "─", border_style);
                 x += 1;
             }
-            set_cell(buf, x, y, "╮", dim_border_style);
-        } else {
-            set_cell(buf, x, y, "╮", border_style);
         }
+        set_cell(buf, x, area.y, "╮", border_style);
 
-        // -- Row 1: content --
+        // Row 1: content
         let y = area.y + 1;
-        x = start_x;
+        x = sx;
         set_cell(buf, x, y, "│", border_style);
         x += 1;
         for ch in left_text.chars() {
@@ -4304,31 +4289,26 @@ impl App {
         if has_right {
             set_cell(buf, x, y, "│", border_style);
             x += 1;
-            set_cell(buf, x, y, "│", dim_border_style);
-            x += 1;
-            let mut chars_written = 0;
+            let mut cw = 0;
             for ch in right_text.chars() {
-                if chars_written >= right_inner_w {
+                if cw >= right_inner_w {
                     break;
                 }
-                set_cell(buf, x, y, &ch.to_string(), right_text_style);
+                set_cell(buf, x, y, &ch.to_string(), title_style);
                 x += 1;
-                chars_written += 1;
+                cw += 1;
             }
-            // Pad remaining space.
-            while chars_written < right_inner_w {
-                set_cell(buf, x, y, " ", right_text_style);
+            while cw < right_inner_w {
+                set_cell(buf, x, y, " ", title_style);
                 x += 1;
-                chars_written += 1;
+                cw += 1;
             }
-            set_cell(buf, x, y, "│", dim_border_style);
-        } else {
-            set_cell(buf, x, y, "│", border_style);
         }
+        set_cell(buf, x, y, "│", border_style);
 
-        // -- Row 2: bottom borders --
+        // Row 2: bottom border
         let y = area.y + 2;
-        x = start_x;
+        x = sx;
         set_cell(buf, x, y, "╰", border_style);
         x += 1;
         for _ in 0..left_w {
@@ -4336,18 +4316,14 @@ impl App {
             x += 1;
         }
         if has_right {
-            set_cell(buf, x, y, "╯", border_style);
-            x += 1;
-            set_cell(buf, x, y, "╰", dim_border_style);
+            set_cell(buf, x, y, "┴", border_style);
             x += 1;
             for _ in 0..right_inner_w {
-                set_cell(buf, x, y, "─", dim_border_style);
+                set_cell(buf, x, y, "─", border_style);
                 x += 1;
             }
-            set_cell(buf, x, y, "╯", dim_border_style);
-        } else {
-            set_cell(buf, x, y, "╯", border_style);
         }
+        set_cell(buf, x, y, "╯", border_style);
     }
 }
 
