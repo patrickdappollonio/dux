@@ -1225,6 +1225,8 @@ impl App {
     fn handle_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
         if let PromptState::ResourceMonitor {
             scroll_offset,
+            selected_row,
+            expanded,
             rows,
             ..
         } = &mut self.prompt
@@ -1233,28 +1235,43 @@ impl App {
                 self.prompt = PromptState::None;
                 return Ok(false);
             }
-            let max_offset = rows.len().saturating_sub(1) as u16;
+            let visual = build_visual_rows(rows, expanded);
+            let max_row = visual.len().saturating_sub(1);
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    *scroll_offset = scroll_offset.saturating_sub(1);
+                    *selected_row = selected_row.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    *scroll_offset = (*scroll_offset + 1).min(max_offset);
+                    *selected_row = (*selected_row + 1).min(max_row);
                 }
                 KeyCode::PageUp => {
-                    *scroll_offset = scroll_offset.saturating_sub(10);
+                    *selected_row = selected_row.saturating_sub(10);
                 }
                 KeyCode::PageDown => {
-                    *scroll_offset = (*scroll_offset + 10).min(max_offset);
+                    *selected_row = (*selected_row + 10).min(max_row);
                 }
                 KeyCode::Home => {
-                    *scroll_offset = 0;
+                    *selected_row = 0;
                 }
                 KeyCode::End => {
-                    *scroll_offset = max_offset;
+                    *selected_row = max_row;
+                }
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    if let Some(VisualRow::Parent(idx)) = visual.get(*selected_row) {
+                        let stat = &rows[*idx];
+                        if let Some(pid) = stat.pid {
+                            if !stat.children.is_empty() {
+                                if !expanded.remove(&pid) {
+                                    expanded.insert(pid);
+                                }
+                            }
+                        }
+                    }
                 }
                 _ => {}
             }
+            // Keep scroll_offset tracking the cursor.
+            *scroll_offset = (*selected_row).saturating_sub(5) as u16;
             return Ok(false);
         }
 
@@ -2981,20 +2998,24 @@ impl App {
     fn handle_prompt_mouse(&mut self, mouse: MouseEvent) -> bool {
         if let PromptState::ResourceMonitor {
             scroll_offset,
+            selected_row,
+            expanded,
             rows,
             ..
         } = &mut self.prompt
         {
-            let max_offset = rows.len().saturating_sub(1) as u16;
+            let visual = build_visual_rows(rows, expanded);
+            let max_row = visual.len().saturating_sub(1);
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
-                    *scroll_offset = scroll_offset.saturating_sub(3);
+                    *selected_row = selected_row.saturating_sub(3);
                 }
                 MouseEventKind::ScrollDown => {
-                    *scroll_offset = (*scroll_offset + 3).min(max_offset);
+                    *selected_row = (*selected_row + 3).min(max_row);
                 }
                 _ => {}
             }
+            *scroll_offset = (*selected_row).saturating_sub(5) as u16;
             return false;
         }
 

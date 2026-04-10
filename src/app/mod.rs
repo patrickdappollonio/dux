@@ -447,6 +447,8 @@ pub(crate) enum PromptState {
     ResourceMonitor {
         rows: Vec<ResourceStats>,
         scroll_offset: u16,
+        selected_row: usize,
+        expanded: HashSet<u32>,
         last_refresh: Instant,
         first_sample: bool,
     },
@@ -461,12 +463,44 @@ pub(crate) enum BranchWarningKind {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct ProcessInfo {
+    pub(crate) name: String,
+    pub(crate) pid: u32,
+    pub(crate) cpu_percent: f32,
+    pub(crate) rss_bytes: u64,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct ResourceStats {
     pub(crate) label: String,
     pub(crate) pid: Option<u32>,
     pub(crate) cpu_percent: f32,
     pub(crate) rss_bytes: u64,
     pub(crate) process_count: usize,
+    pub(crate) children: Vec<ProcessInfo>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum VisualRow {
+    /// Index into the `ResourceStats` rows vec.
+    Parent(usize),
+    /// (parent row index, child index within that parent's `children`).
+    Child(usize, usize),
+}
+
+pub(crate) fn build_visual_rows(rows: &[ResourceStats], expanded: &HashSet<u32>) -> Vec<VisualRow> {
+    let mut visual = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        visual.push(VisualRow::Parent(i));
+        if let Some(pid) = row.pid {
+            if expanded.contains(&pid) {
+                for (j, _) in row.children.iter().enumerate() {
+                    visual.push(VisualRow::Child(i, j));
+                }
+            }
+        }
+    }
+    visual
 }
 
 #[derive(Clone, Debug)]
@@ -1215,6 +1249,8 @@ impl App {
         self.prompt = PromptState::ResourceMonitor {
             rows: Vec::new(),
             scroll_offset: 0,
+            selected_row: 0,
+            expanded: HashSet::new(),
             last_refresh: Instant::now(),
             first_sample: true,
         };
@@ -1964,18 +2000,20 @@ fn collect_resource_stats(targets: Vec<(String, u32)>) -> Vec<ResourceStats> {
             cpu_percent: proc_info.cpu_usage(),
             rss_bytes: proc_info.memory(),
             process_count: 1,
+            children: Vec::new(),
         });
     }
 
     // Rows: each labeled target (agents and companion terminals).
     for (label, root_pid) in &targets {
-        let (cpu, rss, count) = aggregate_tree(&sys, Pid::from_u32(*root_pid));
+        let (cpu, rss, count, children) = aggregate_tree(&sys, Pid::from_u32(*root_pid));
         rows.push(ResourceStats {
             label: label.clone(),
             pid: Some(*root_pid),
             cpu_percent: cpu,
             rss_bytes: rss,
             process_count: count,
+            children,
         });
     }
 
@@ -1989,6 +2027,7 @@ fn collect_resource_stats(targets: Vec<(String, u32)>) -> Vec<ResourceStats> {
         cpu_percent: total_cpu,
         rss_bytes: total_rss,
         process_count: total_procs,
+        children: Vec::new(),
     });
 
     rows
@@ -2023,18 +2062,32 @@ fn is_descendant_of(sys: &sysinfo::System, pid: sysinfo::Pid, ancestor: sysinfo:
 }
 
 /// Aggregate CPU% and RSS across a root PID and all its descendants.
-fn aggregate_tree(sys: &sysinfo::System, root: sysinfo::Pid) -> (f32, u64, usize) {
+/// Returns `(total_cpu, total_rss, process_count, top_children)` where
+/// `top_children` contains the top 10 individual processes by RSS.
+fn aggregate_tree(
+    sys: &sysinfo::System,
+    root: sysinfo::Pid,
+) -> (f32, u64, usize, Vec<ProcessInfo>) {
     let mut cpu = 0.0f32;
     let mut rss = 0u64;
     let mut count = 0usize;
+    let mut children = Vec::new();
     for (pid, proc_info) in sys.processes() {
         if *pid == root || is_descendant_of(sys, *pid, root) {
             cpu += proc_info.cpu_usage();
             rss += proc_info.memory();
             count += 1;
+            children.push(ProcessInfo {
+                name: proc_info.name().to_string_lossy().into_owned(),
+                pid: pid.as_u32(),
+                cpu_percent: proc_info.cpu_usage(),
+                rss_bytes: proc_info.memory(),
+            });
         }
     }
-    (cpu, rss, count)
+    children.sort_by(|a, b| b.rss_bytes.cmp(&a.rss_bytes));
+    children.truncate(10);
+    (cpu, rss, count, children)
 }
 
 pub(crate) fn provider_config(config: &Config, provider: &ProviderKind) -> ProviderCommandConfig {
@@ -2081,7 +2134,7 @@ mod tests {
             ProcessRefreshKind::nothing().with_memory(),
         );
         let self_pid = Pid::from_u32(std::process::id());
-        let (_cpu, rss, count) = aggregate_tree(&sys, self_pid);
+        let (_cpu, rss, count, _children) = aggregate_tree(&sys, self_pid);
         assert!(count >= 1, "should include at least the root process");
         assert!(rss > 0, "current process should have nonzero RSS");
     }
@@ -2100,6 +2153,70 @@ mod tests {
         let self_pid = Pid::from_u32(std::process::id());
         let init_pid = Pid::from_u32(1);
         assert!(!is_descendant_of(&sys, init_pid, self_pid));
+    }
+
+    #[test]
+    fn build_visual_rows_respects_expansion() {
+        let rows = vec![
+            ResourceStats {
+                label: "dux".into(),
+                pid: Some(1),
+                cpu_percent: 0.0,
+                rss_bytes: 0,
+                process_count: 1,
+                children: Vec::new(),
+            },
+            ResourceStats {
+                label: "Agent".into(),
+                pid: Some(100),
+                cpu_percent: 5.0,
+                rss_bytes: 1024,
+                process_count: 3,
+                children: vec![
+                    ProcessInfo {
+                        name: "node".into(),
+                        pid: 101,
+                        cpu_percent: 3.0,
+                        rss_bytes: 512,
+                    },
+                    ProcessInfo {
+                        name: "claude".into(),
+                        pid: 102,
+                        cpu_percent: 2.0,
+                        rss_bytes: 256,
+                    },
+                ],
+            },
+            ResourceStats {
+                label: "TOTAL".into(),
+                pid: None,
+                cpu_percent: 5.0,
+                rss_bytes: 1024,
+                process_count: 4,
+                children: Vec::new(),
+            },
+        ];
+
+        // Nothing expanded: 3 visual rows (one per parent).
+        let visual = build_visual_rows(&rows, &HashSet::new());
+        assert_eq!(visual.len(), 3);
+
+        // Expand PID 100: 3 parents + 2 children = 5 visual rows.
+        let mut expanded = HashSet::new();
+        expanded.insert(100);
+        let visual = build_visual_rows(&rows, &expanded);
+        assert_eq!(visual.len(), 5);
+        assert!(matches!(visual[0], VisualRow::Parent(0)));
+        assert!(matches!(visual[1], VisualRow::Parent(1)));
+        assert!(matches!(visual[2], VisualRow::Child(1, 0)));
+        assert!(matches!(visual[3], VisualRow::Child(1, 1)));
+        assert!(matches!(visual[4], VisualRow::Parent(2)));
+
+        // Expanding a PID that doesn't match any row: no effect.
+        let mut expanded = HashSet::new();
+        expanded.insert(999);
+        let visual = build_visual_rows(&rows, &expanded);
+        assert_eq!(visual.len(), 3);
     }
 
     #[test]
