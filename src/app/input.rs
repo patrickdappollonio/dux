@@ -5268,6 +5268,7 @@ mod tests {
                 Line::from("three"),
             ]),
             scroll: 0,
+            gutter_width: 0,
             worktree_path: String::new(),
             rel_path: String::new(),
         };

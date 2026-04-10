@@ -263,6 +263,8 @@ pub(crate) enum CenterMode {
     Diff {
         lines: Arc<Vec<Line<'static>>>,
         scroll: u16,
+        /// Display-column width of the gutter (0 when line numbers are off).
+        gutter_width: usize,
         /// Source paths for re-generating the diff on setting changes.
         worktree_path: String,
         rel_path: String,

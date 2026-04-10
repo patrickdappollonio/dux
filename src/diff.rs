@@ -29,6 +29,9 @@ impl SyntaxCache {
 /// Pre-rendered diff ready for display.
 pub struct DiffOutput {
     pub lines: Vec<Line<'static>>,
+    /// Display-column width of the gutter (line numbers + separator + prefix).
+    /// Zero when line numbers are disabled.
+    pub gutter_width: usize,
 }
 
 /// Compute a syntax-highlighted, unified diff for a single file.
@@ -50,6 +53,7 @@ pub fn diff_file(
     if old_bytes == new_bytes {
         return Ok(DiffOutput {
             lines: vec![Line::from("No changes.")],
+            gutter_width: 0,
         });
     }
 
@@ -218,7 +222,18 @@ pub fn diff_file(
         lines.push(Line::from("No text diff available."));
     }
 
-    Ok(DiffOutput { lines })
+    // Gutter width includes line numbers, separator, and the +/-/space prefix.
+    // Layout: "{old_ln} {new_ln} │{prefix}" = 2*ln_width + 2 + 1 + 1 = 2*ln_width + 4.
+    let gutter_width = if show_line_numbers {
+        2 * ln_width + 4
+    } else {
+        0
+    };
+
+    Ok(DiffOutput {
+        lines,
+        gutter_width,
+    })
 }
 
 fn is_renderable_text(bytes: &[u8]) -> bool {
@@ -250,6 +265,7 @@ fn binary_diff_output(
             Line::from(format!("New size: {new_size} bytes")),
             Line::from("No text diff available for binary or non-UTF-8 content."),
         ],
+        gutter_width: 0,
     }
 }
 
@@ -303,6 +319,107 @@ fn expand_tabs(line: &str, tab_width: u16) -> String {
             col += 1;
         }
     }
+    out
+}
+
+/// Split a list of spans at a display-column boundary.
+///
+/// Returns `(left, right)` where `left` contains the first `col` display
+/// columns and `right` contains the remainder. Spans are split mid-span if
+/// the boundary falls inside one. Uses character iteration rather than byte
+/// slicing to handle multi-byte UTF-8 safely.
+fn split_spans_at(spans: &[Span<'static>], col: usize) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
+    let mut left: Vec<Span<'static>> = Vec::new();
+    let mut right: Vec<Span<'static>> = Vec::new();
+    let mut consumed: usize = 0;
+    let mut past_split = false;
+
+    for span in spans {
+        if past_split {
+            right.push(span.clone());
+            continue;
+        }
+
+        let span_width = span.content.chars().count();
+        if consumed + span_width <= col {
+            // Entire span fits in the left side.
+            left.push(span.clone());
+            consumed += span_width;
+            if consumed == col {
+                past_split = true;
+            }
+        } else {
+            // Split within this span.
+            let take = col - consumed;
+            let left_text: String = span.content.chars().take(take).collect();
+            let right_text: String = span.content.chars().skip(take).collect();
+            if !left_text.is_empty() {
+                left.push(Span::styled(left_text, span.style));
+            }
+            if !right_text.is_empty() {
+                right.push(Span::styled(right_text, span.style));
+            }
+            past_split = true;
+            consumed = col;
+        }
+    }
+
+    (left, right)
+}
+
+/// Wrap pre-rendered diff lines so that continuation lines are indented to
+/// align with the content column (past the gutter).
+///
+/// When `gutter_width` is 0 this is a no-op — the caller should fall back to
+/// `Paragraph::wrap()`.
+pub fn wrap_diff_lines(
+    lines: &[Line<'static>],
+    total_width: usize,
+    gutter_width: usize,
+) -> Vec<Line<'static>> {
+    if gutter_width == 0 || total_width <= gutter_width {
+        return lines.to_vec();
+    }
+
+    let content_width = total_width - gutter_width;
+    let blank_gutter: String = " ".repeat(gutter_width);
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(lines.len());
+
+    for line in lines {
+        let line_width = line.width();
+        if line_width <= total_width {
+            out.push(line.clone());
+            continue;
+        }
+
+        // Separate gutter spans from content spans.
+        let (gutter_spans, content_spans) = split_spans_at(&line.spans, gutter_width);
+
+        // Split content into chunks of content_width.
+        let mut remaining = content_spans;
+        let mut first = true;
+        loop {
+            let remaining_width: usize = remaining.iter().map(|s| s.content.chars().count()).sum();
+            if remaining_width == 0 {
+                break;
+            }
+
+            let take = remaining_width.min(content_width);
+            let (chunk, rest) = split_spans_at(&remaining, take);
+
+            let mut row_spans: Vec<Span<'static>> = if first {
+                gutter_spans.clone()
+            } else {
+                vec![Span::raw(blank_gutter.clone())]
+            };
+            row_spans.extend(chunk);
+            out.push(Line::from(row_spans));
+
+            remaining = rest;
+            first = false;
+        }
+    }
+
     out
 }
 
@@ -525,5 +642,126 @@ mod tests {
             !insert_line.contains('\t'),
             "tab characters must not appear in rendered output"
         );
+    }
+
+    #[test]
+    fn split_spans_at_boundary() {
+        let spans = vec![Span::raw("abc"), Span::raw("defgh")];
+
+        // Split at span boundary (col 3).
+        let (left, right) = split_spans_at(&spans, 3);
+        let left_text: String = left.iter().map(|s| s.content.as_ref()).collect();
+        let right_text: String = right.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(left_text, "abc");
+        assert_eq!(right_text, "defgh");
+    }
+
+    #[test]
+    fn split_spans_at_mid_span() {
+        let spans = vec![Span::raw("abcdefgh")];
+
+        // Split in the middle (col 5).
+        let (left, right) = split_spans_at(&spans, 5);
+        let left_text: String = left.iter().map(|s| s.content.as_ref()).collect();
+        let right_text: String = right.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(left_text, "abcde");
+        assert_eq!(right_text, "fgh");
+    }
+
+    #[test]
+    fn split_spans_preserves_style() {
+        let style = Style::default().fg(Color::Red);
+        let spans = vec![Span::styled("abcdef", style)];
+
+        let (left, right) = split_spans_at(&spans, 3);
+        assert_eq!(left[0].style, style);
+        assert_eq!(right[0].style, style);
+        assert_eq!(left[0].content.as_ref(), "abc");
+        assert_eq!(right[0].content.as_ref(), "def");
+    }
+
+    #[test]
+    fn split_spans_with_multibyte_chars() {
+        // │ is U+2502 (3 bytes, 1 display column when counted by chars).
+        let spans = vec![Span::raw("a│b")];
+
+        let (left, right) = split_spans_at(&spans, 2);
+        let left_text: String = left.iter().map(|s| s.content.as_ref()).collect();
+        let right_text: String = right.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(left_text, "a│");
+        assert_eq!(right_text, "b");
+    }
+
+    #[test]
+    fn wrap_diff_lines_no_wrap_needed() {
+        let lines = vec![Line::from(vec![
+            Span::raw("123 "),
+            Span::raw("│"),
+            Span::raw(" content"),
+        ])];
+        // Total width is "123 │ content" = 14 chars. Width of 20 means no wrap.
+        let wrapped = wrap_diff_lines(&lines, 20, 5);
+        assert_eq!(wrapped.len(), 1);
+        assert_eq!(wrapped[0].to_string(), "123 │ content");
+    }
+
+    #[test]
+    fn wrap_diff_lines_wraps_with_gutter_indent() {
+        // Gutter = "12 " (3 cols), content = "abcdefghij" (10 cols), total = 13
+        let lines = vec![Line::from(vec![Span::raw("12 "), Span::raw("abcdefghij")])];
+        // Total width 8, gutter 3 → content width 5 → "abcde" + "fghij"
+        let wrapped = wrap_diff_lines(&lines, 8, 3);
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[0].to_string(), "12 abcde");
+        assert_eq!(wrapped[1].to_string(), "   fghij");
+    }
+
+    #[test]
+    fn wrap_diff_lines_multiple_wraps() {
+        // Gutter = "G" (1 col), content = "abcdefghijkl" (12 cols)
+        let lines = vec![Line::from(vec![Span::raw("G"), Span::raw("abcdefghijkl")])];
+        // Total width 5, gutter 1 → content width 4 → 3 visual lines
+        let wrapped = wrap_diff_lines(&lines, 5, 1);
+        assert_eq!(wrapped.len(), 3);
+        assert_eq!(wrapped[0].to_string(), "Gabcd");
+        assert_eq!(wrapped[1].to_string(), " efgh");
+        assert_eq!(wrapped[2].to_string(), " ijkl");
+    }
+
+    #[test]
+    fn wrap_diff_lines_zero_gutter_is_noop() {
+        let lines = vec![Line::from("a long line that should not be touched")];
+        let wrapped = wrap_diff_lines(&lines, 10, 0);
+        assert_eq!(wrapped.len(), 1);
+        assert_eq!(wrapped[0].to_string(), lines[0].to_string());
+    }
+
+    #[test]
+    fn gutter_width_matches_line_numbers() {
+        let dir = setup_text_repo("gw.txt", "aaa\n", "aaa\nbbb\n");
+        let cache = SyntaxCache::new();
+
+        let with_ln = diff_file(
+            dir.path(),
+            "gw.txt",
+            &AppTheme::default_dark(),
+            &cache,
+            true,
+            4,
+        )
+        .unwrap();
+        // Max line is 2, so ln_width = 1. gutter_width = 2*1 + 4 = 6.
+        assert_eq!(with_ln.gutter_width, 6);
+
+        let without_ln = diff_file(
+            dir.path(),
+            "gw.txt",
+            &AppTheme::default_dark(),
+            &cache,
+            false,
+            4,
+        )
+        .unwrap();
+        assert_eq!(without_ln.gutter_width, 0);
     }
 }

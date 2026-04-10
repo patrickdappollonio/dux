@@ -686,6 +686,7 @@ impl App {
         self.center_mode = CenterMode::Diff {
             lines: Arc::new(output.lines),
             scroll: 0,
+            gutter_width: output.gutter_width,
             worktree_path,
             rel_path,
         };
@@ -715,6 +716,7 @@ impl App {
         self.center_mode = CenterMode::Diff {
             lines: Arc::new(output.lines),
             scroll,
+            gutter_width: output.gutter_width,
             worktree_path,
             rel_path,
         };
