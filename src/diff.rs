@@ -389,6 +389,27 @@ fn blank_gutter_keeping_separator(gutter_spans: &[Span<'static>]) -> Vec<Span<'s
     out
 }
 
+/// Find the best soft-break position within the first `max_col` characters of
+/// `spans`. Returns the column *after* the last space found, so the space stays
+/// on the current visual line and the next line starts with the following word.
+/// Returns `None` if no space exists within the window.
+fn find_soft_break(spans: &[Span<'static>], max_col: usize) -> Option<usize> {
+    let mut last_space_end: Option<usize> = None;
+    let mut col: usize = 0;
+    for span in spans {
+        for ch in span.content.chars() {
+            if col >= max_col {
+                return last_space_end;
+            }
+            if ch == ' ' {
+                last_space_end = Some(col + 1);
+            }
+            col += 1;
+        }
+    }
+    last_space_end
+}
+
 /// Wrap pre-rendered diff lines so that continuation lines are indented to
 /// align with the content column (past the gutter).
 ///
@@ -429,7 +450,12 @@ pub fn wrap_diff_lines(
                 break;
             }
 
-            let take = remaining_width.min(content_width);
+            let take = if remaining_width > content_width {
+                // Prefer breaking at a word boundary (after the last space).
+                find_soft_break(&remaining, content_width).unwrap_or(content_width)
+            } else {
+                remaining_width
+            };
             let (chunk, rest) = split_spans_at(&remaining, take);
 
             let mut row_spans: Vec<Span<'static>> = if first {
@@ -670,6 +696,63 @@ mod tests {
     }
 
     #[test]
+    fn find_soft_break_returns_none_without_spaces() {
+        let spans = vec![Span::raw("abcdefgh")];
+        assert_eq!(find_soft_break(&spans, 5), None);
+    }
+
+    #[test]
+    fn find_soft_break_returns_position_after_last_space() {
+        let spans = vec![Span::raw("ab cd ef")];
+        // max_col = 7 → chars 0..6: "ab cd e"
+        // Spaces at col 2 and 5. Last space at col 5, so return 6.
+        assert_eq!(find_soft_break(&spans, 7), Some(6));
+    }
+
+    #[test]
+    fn find_soft_break_space_at_end_of_window() {
+        let spans = vec![Span::raw("abcde fgh")];
+        // max_col = 6 → chars 0..5: "abcde " — space at col 5, return 6.
+        assert_eq!(find_soft_break(&spans, 6), Some(6));
+    }
+
+    #[test]
+    fn find_soft_break_space_at_start() {
+        let spans = vec![Span::raw(" abcdefgh")];
+        // max_col = 5 → chars 0..4: " abcd" — space at col 0, return 1.
+        assert_eq!(find_soft_break(&spans, 5), Some(1));
+    }
+
+    #[test]
+    fn find_soft_break_across_multiple_spans() {
+        let spans = vec![Span::raw("ab "), Span::raw("cd "), Span::raw("efgh")];
+        // Combined: "ab cd efgh". max_col = 8 → chars 0..7: "ab cd ef"
+        // Spaces at col 2, 5. Return 6.
+        assert_eq!(find_soft_break(&spans, 8), Some(6));
+    }
+
+    #[test]
+    fn find_soft_break_only_spaces() {
+        let spans = vec![Span::raw("     ")];
+        // max_col = 3 → chars 0..2: "   " — last space at col 2, return 3.
+        assert_eq!(find_soft_break(&spans, 3), Some(3));
+    }
+
+    #[test]
+    fn find_soft_break_space_just_outside_window() {
+        // Space at col 5, but max_col = 5 means we only see cols 0..4.
+        let spans = vec![Span::raw("abcde fgh")];
+        assert_eq!(find_soft_break(&spans, 5), None);
+    }
+
+    #[test]
+    fn find_soft_break_with_multibyte_chars() {
+        // "a│b cd" — │ is 1 char. Positions: a=0, │=1, b=2, ' '=3, c=4, d=5
+        let spans = vec![Span::raw("a│b cd")];
+        assert_eq!(find_soft_break(&spans, 5), Some(4));
+    }
+
+    #[test]
     fn split_spans_at_boundary() {
         let spans = vec![Span::raw("abc"), Span::raw("defgh")];
 
@@ -774,6 +857,52 @@ mod tests {
         let cont_spans = &wrapped[1].spans;
         let sep_span = cont_spans.iter().find(|s| s.content.contains('│')).unwrap();
         assert_eq!(sep_span.style, sep_style);
+    }
+
+    #[test]
+    fn wrap_diff_lines_soft_wraps_at_spaces() {
+        // Gutter = "G│" (2 cols), content = "+hello world foobar" (19 cols)
+        let lines = vec![Line::from(vec![
+            Span::raw("G"),
+            Span::raw("│"),
+            Span::raw("+hello world foobar"),
+        ])];
+        // total_width = 14, gutter = 2, content_width = 12
+        // First 12 chars of content: "+hello world" — last space is at col 6,
+        // so soft break after it (col 7): "+hello " on first line,
+        // "world foobar" (12 chars, fits) on continuation.
+        let wrapped = wrap_diff_lines(&lines, 14, 2);
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[0].to_string(), "G│+hello ");
+        assert_eq!(wrapped[1].to_string(), " │world foobar");
+    }
+
+    #[test]
+    fn wrap_diff_lines_soft_wraps_with_multibyte() {
+        // Content has multi-byte │ mixed with spaces.
+        // Gutter = "G" (1 col), content = "a│b cdef ghij" (13 chars)
+        let lines = vec![Line::from(vec![Span::raw("G"), Span::raw("a│b cdef ghij")])];
+        // total_width = 8, gutter = 1, content_width = 7
+        // First 7 chars: "a│b cde" — space at col 3, soft break → take 4
+        // "a│b " on first line, remaining "cdef ghij" (9 chars)
+        // Next 7 chars: "cdef gh" — space at col 4, soft break → take 5
+        // "cdef " second line, remaining "ghij" (4 chars, fits)
+        let wrapped = wrap_diff_lines(&lines, 8, 1);
+        assert_eq!(wrapped.len(), 3);
+        assert_eq!(wrapped[0].to_string(), "Ga│b ");
+        assert_eq!(wrapped[1].to_string(), " cdef ");
+        assert_eq!(wrapped[2].to_string(), " ghij");
+    }
+
+    #[test]
+    fn wrap_diff_lines_hard_breaks_without_spaces() {
+        // No spaces in content → must hard-break.
+        let lines = vec![Line::from(vec![Span::raw("G"), Span::raw("abcdefghijkl")])];
+        let wrapped = wrap_diff_lines(&lines, 5, 1);
+        assert_eq!(wrapped.len(), 3);
+        assert_eq!(wrapped[0].to_string(), "Gabcd");
+        assert_eq!(wrapped[1].to_string(), " efgh");
+        assert_eq!(wrapped[2].to_string(), " ijkl");
     }
 
     #[test]
