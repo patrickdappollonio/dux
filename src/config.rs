@@ -743,6 +743,12 @@ pub fn save_config(
         "commit_prompt",
         config.defaults.commit_prompt.as_deref(),
     );
+    patch_table_bool(
+        &mut doc,
+        "defaults",
+        "prompt_for_name",
+        config.defaults.prompt_for_name,
+    );
 
     // --- [logging] ---
     patch_table_str(&mut doc, "logging", "level", &config.logging.level);

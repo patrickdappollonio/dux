@@ -81,6 +81,7 @@ pub enum Action {
     ToggleDiffLineNumbers,
     ResourceMonitor,
     ToggleGithubIntegration,
+    TogglePromptForName,
 }
 
 /// Where a binding's key combo is matched.
@@ -241,6 +242,7 @@ impl Action {
             Action::ToggleDiffLineNumbers => "toggle_diff_line_numbers",
             Action::ResourceMonitor => "resource_monitor",
             Action::ToggleGithubIntegration => "toggle_github_integration",
+            Action::TogglePromptForName => "toggle_prompt_for_name",
         }
     }
 
@@ -323,6 +325,7 @@ impl Action {
             Action::ToggleDiffLineNumbers => "Toggle line numbers in diff view.",
             Action::ResourceMonitor => "Show CPU and memory usage for dux and all running agents.",
             Action::ToggleGithubIntegration => "Toggle GitHub PR integration.",
+            Action::TogglePromptForName => "Toggle prompting for agent name before creation.",
         }
     }
 
@@ -395,7 +398,8 @@ impl Action {
             | Action::DebugInput
             | Action::ToggleDiffLineNumbers
             | Action::ResourceMonitor
-            | Action::ToggleGithubIntegration => None,
+            | Action::ToggleGithubIntegration
+            | Action::TogglePromptForName => None,
         }
     }
 }
@@ -1321,6 +1325,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "toggle-github-integration",
             description: "Toggle GitHub PR integration",
+        }),
+    },
+    BindingDef {
+        action: Action::TogglePromptForName,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "toggle-prompt-for-name",
+            description: "Toggle prompting for agent name before creation",
         }),
     },
 ];

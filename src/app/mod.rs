@@ -1348,6 +1348,20 @@ impl App {
                 self.set_info(format!("GitHub integration {state}."));
                 Ok(())
             }
+            "toggle-prompt-for-name" => {
+                self.config.defaults.prompt_for_name = !self.config.defaults.prompt_for_name;
+                let _ = save_config(&self.paths.config_path, &self.config, &self.bindings);
+                let state = if self.config.defaults.prompt_for_name {
+                    "enabled — you'll be prompted for a name"
+                } else {
+                    "disabled — random names will be generated"
+                };
+                let palette_key = self.bindings.label_for(Action::OpenPalette);
+                self.set_info(format!(
+                    "Prompt for agent name {state}. Press {palette_key} to toggle back."
+                ));
+                Ok(())
+            }
             "force-redraw" => {
                 self.force_redraw = true;
                 self.set_info("Interface redrawn. All screen contents have been repainted.");
