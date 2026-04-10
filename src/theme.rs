@@ -95,7 +95,7 @@ impl Theme {
             selection_fg: Color::Black,
             selection_bg: Color::Cyan,
             project_icon: Color::Rgb(100, 149, 237),
-            session_active: Color::Rgb(190, 190, 190),
+            session_active: Color::Rgb(210, 210, 210),
             session_detached: Color::Yellow,
             session_exited: Color::Rgb(100, 100, 100),
             status_info_fg: Color::Rgb(100, 100, 100),
