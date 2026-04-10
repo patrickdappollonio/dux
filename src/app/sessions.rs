@@ -681,6 +681,7 @@ impl App {
             &self.theme,
             &self.syntax_cache,
             self.show_diff_line_numbers,
+            self.config.ui.diff_tab_width,
         )?;
         self.center_mode = CenterMode::Diff {
             lines: Arc::new(output.lines),
@@ -709,6 +710,7 @@ impl App {
             &self.theme,
             &self.syntax_cache,
             self.show_diff_line_numbers,
+            self.config.ui.diff_tab_width,
         )?;
         self.center_mode = CenterMode::Diff {
             lines: Arc::new(output.lines),

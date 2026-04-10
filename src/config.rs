@@ -192,6 +192,7 @@ pub struct UiConfig {
     pub agent_scrollback_lines: usize,
     pub branch_sync_interval: u16,
     pub show_diff_line_numbers: bool,
+    pub diff_tab_width: u16,
     pub github_integration: bool,
 }
 
@@ -215,6 +216,7 @@ impl Default for Config {
                 agent_scrollback_lines: 10_000,
                 branch_sync_interval: 30,
                 show_diff_line_numbers: false,
+                diff_tab_width: 4,
                 github_integration: true,
             },
             editor: EditorConfig::default(),
@@ -336,6 +338,7 @@ impl Default for UiConfig {
             agent_scrollback_lines: 10_000,
             branch_sync_interval: 30,
             show_diff_line_numbers: false,
+            diff_tab_width: 4,
             github_integration: true,
         }
     }
@@ -599,6 +602,13 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.ui.show_diff_line_numbers),
         },
         ConfigEntry::Field {
+            key: "diff_tab_width",
+            comment: Some(CommentSource::Static(
+                "# Number of spaces used to render tab characters in diffs.\n# Set to 0 to leave tabs as-is (they may render as zero-width).",
+            )),
+            value_fn: |c| FieldValue::U16(c.ui.diff_tab_width),
+        },
+        ConfigEntry::Field {
             key: "github_integration",
             comment: Some(CommentSource::Static(
                 "# Enable GitHub PR tracking for agent sessions.\n# Requires the `gh` CLI installed and authenticated (`gh auth login`).\n# When enabled, a PR pill is shown in the agent pane for branches with\n# an open, merged, or closed pull request. Toggle at runtime from the\n# command palette.",
@@ -793,6 +803,7 @@ pub fn save_config(
         "show_diff_line_numbers",
         config.ui.show_diff_line_numbers,
     );
+    patch_table_u16(&mut doc, "ui", "diff_tab_width", config.ui.diff_tab_width);
     patch_table_bool(
         &mut doc,
         "ui",

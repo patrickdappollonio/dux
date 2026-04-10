@@ -41,6 +41,7 @@ pub fn diff_file(
     theme: &AppTheme,
     cache: &SyntaxCache,
     show_line_numbers: bool,
+    diff_tab_width: u16,
 ) -> Result<DiffOutput> {
     let old_bytes = crate::git::file_bytes_at_head(worktree_path, rel_path)?.unwrap_or_default();
     let abs_path = worktree_path.join(rel_path);
@@ -152,7 +153,7 @@ pub fn diff_file(
             };
 
             // Attempt syntax highlighting; fall back to plain coloring.
-            let content = text.trim_end_matches('\n');
+            let content = expand_tabs(text.trim_end_matches('\n'), diff_tab_width);
             let mut spans: Vec<Span<'static>> = Vec::new();
 
             // Line-number gutter.
@@ -173,7 +174,7 @@ pub fn diff_file(
                 spans.push(Span::styled("│", sep_style));
             }
 
-            match highlighter.highlight_line(content, &cache.syntax_set) {
+            match highlighter.highlight_line(&content, &cache.syntax_set) {
                 Ok(ranges) if tag == ChangeTag::Equal => {
                     // Context lines: full syntax colors, no background tint.
                     spans.push(Span::styled(
@@ -281,6 +282,30 @@ fn syntect_color(c: SynColor) -> Option<Color> {
     }
 }
 
+/// Expand tab characters to spaces, aligning to tab stops of the given width.
+/// If `tab_width` is 0, tabs are left as-is.
+fn expand_tabs(line: &str, tab_width: u16) -> String {
+    if tab_width == 0 || !line.contains('\t') {
+        return line.to_string();
+    }
+    let tw = tab_width as usize;
+    let mut out = String::with_capacity(line.len());
+    let mut col: usize = 0;
+    for ch in line.chars() {
+        if ch == '\t' {
+            let spaces = tw - (col % tw);
+            for _ in 0..spaces {
+                out.push(' ');
+            }
+            col += spaces;
+        } else {
+            out.push(ch);
+            col += 1;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,8 +349,15 @@ mod tests {
         std::fs::write(&file, [0_u8, 159, 146, 151, 152]).unwrap();
 
         let cache = SyntaxCache::new();
-        let output =
-            diff_file(repo, "image.bin", &AppTheme::default_dark(), &cache, false).unwrap();
+        let output = diff_file(
+            repo,
+            "image.bin",
+            &AppTheme::default_dark(),
+            &cache,
+            false,
+            4,
+        )
+        .unwrap();
         let rendered = output
             .lines
             .iter()
@@ -397,6 +429,7 @@ mod tests {
             &AppTheme::default_dark(),
             &cache,
             true,
+            4,
         )
         .unwrap();
         let rendered: Vec<String> = output.lines.iter().map(|l| l.to_string()).collect();
@@ -437,6 +470,7 @@ mod tests {
             &AppTheme::default_dark(),
             &cache,
             false,
+            4,
         )
         .unwrap();
         let rendered: Vec<String> = output.lines.iter().map(|l| l.to_string()).collect();
@@ -446,6 +480,50 @@ mod tests {
         assert!(
             !has_gutter,
             "expected no gutter separator when line numbers are disabled"
+        );
+    }
+
+    #[test]
+    fn expand_tabs_column_aware() {
+        assert_eq!(expand_tabs("a\tb", 4), "a   b");
+        assert_eq!(expand_tabs("\t\t", 4), "        ");
+        assert_eq!(expand_tabs("ab\tc", 4), "ab  c");
+        assert_eq!(expand_tabs("abcd\te", 4), "abcd    e");
+        assert_eq!(expand_tabs("no tabs", 4), "no tabs");
+        assert_eq!(expand_tabs("\t", 0), "\t");
+    }
+
+    #[test]
+    fn tabs_expanded_to_spaces_in_diff() {
+        let dir = setup_text_repo(
+            "indent.rs",
+            "fn main() {\n}\n",
+            "fn main() {\n\t\tlet x = 1;\n}\n",
+        );
+        let cache = SyntaxCache::new();
+        let output = diff_file(
+            dir.path(),
+            "indent.rs",
+            &AppTheme::default_dark(),
+            &cache,
+            false,
+            4,
+        )
+        .unwrap();
+        let rendered: Vec<String> = output.lines.iter().map(|l| l.to_string()).collect();
+
+        let insert_line = rendered
+            .iter()
+            .find(|l| l.contains("let x"))
+            .expect("expected an inserted line containing 'let x'");
+        // Two tabs at width 4 = 8 leading spaces.
+        assert!(
+            insert_line.contains("        let x"),
+            "expected tabs expanded to 8 spaces, got: {insert_line}"
+        );
+        assert!(
+            !insert_line.contains('\t'),
+            "tab characters must not appear in rendered output"
         );
     }
 }
