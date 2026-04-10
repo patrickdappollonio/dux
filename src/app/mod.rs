@@ -133,6 +133,7 @@ pub struct App {
     pub(crate) branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,
     pub(crate) gh_status: crate::model::GhStatus,
     pub(crate) github_integration_enabled: bool,
+    pub(crate) pr_banner_at_bottom: bool,
     pub(crate) pr_statuses: HashMap<String, crate::model::PrInfo>,
     pub(crate) pr_sync_sessions: Arc<Mutex<Vec<PrSyncEntry>>>,
     pub(crate) pr_sync_enabled: Arc<AtomicBool>,
@@ -796,6 +797,7 @@ impl App {
             bindings.label_for(Action::ToggleHelp),
         );
         let gh_integration_val = config.ui.github_integration;
+        let pr_banner_at_bottom = config.ui.pr_banner_position == "bottom";
         let mut app = Self {
             show_diff_line_numbers: config.ui.show_diff_line_numbers,
             left_width_pct: config.ui.left_width_pct,
@@ -877,6 +879,7 @@ impl App {
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             gh_status: crate::model::GhStatus::Unknown,
             github_integration_enabled: gh_integration_val,
+            pr_banner_at_bottom,
             pr_statuses: HashMap::new(),
             pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             pr_sync_enabled: Arc::new(AtomicBool::new(false)),
@@ -1360,6 +1363,18 @@ impl App {
                 self.set_info(format!(
                     "Prompt for agent name {state}. Press {palette_key} to toggle back."
                 ));
+                Ok(())
+            }
+            "toggle-pr-banner-position" => {
+                self.pr_banner_at_bottom = !self.pr_banner_at_bottom;
+                let pos = if self.pr_banner_at_bottom {
+                    "bottom"
+                } else {
+                    "top"
+                };
+                self.config.ui.pr_banner_position = pos.to_string();
+                let _ = save_config(&self.paths.config_path, &self.config, &self.bindings);
+                self.set_info(format!("PR banner moved to {pos} of agent pane."));
                 Ok(())
             }
             "force-redraw" => {

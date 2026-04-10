@@ -82,6 +82,7 @@ pub enum Action {
     ResourceMonitor,
     ToggleGithubIntegration,
     TogglePromptForName,
+    TogglePrBannerPosition,
 }
 
 /// Where a binding's key combo is matched.
@@ -243,6 +244,7 @@ impl Action {
             Action::ResourceMonitor => "resource_monitor",
             Action::ToggleGithubIntegration => "toggle_github_integration",
             Action::TogglePromptForName => "toggle_prompt_for_name",
+            Action::TogglePrBannerPosition => "toggle_pr_banner_position",
         }
     }
 
@@ -326,6 +328,9 @@ impl Action {
             Action::ResourceMonitor => "Show CPU and memory usage for dux and all running agents.",
             Action::ToggleGithubIntegration => "Toggle GitHub PR integration.",
             Action::TogglePromptForName => "Toggle prompting for agent name before creation.",
+            Action::TogglePrBannerPosition => {
+                "Move PR banner between top and bottom of agent pane."
+            }
         }
     }
 
@@ -399,7 +404,8 @@ impl Action {
             | Action::ToggleDiffLineNumbers
             | Action::ResourceMonitor
             | Action::ToggleGithubIntegration
-            | Action::TogglePromptForName => None,
+            | Action::TogglePromptForName
+            | Action::TogglePrBannerPosition => None,
         }
     }
 }
@@ -1336,6 +1342,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "toggle-prompt-for-name",
             description: "Toggle prompting for agent name before creation",
+        }),
+    },
+    BindingDef {
+        action: Action::TogglePrBannerPosition,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "toggle-pr-banner-position",
+            description: "Move PR banner between top and bottom of agent pane",
         }),
     },
 ];

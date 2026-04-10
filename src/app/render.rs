@@ -556,10 +556,19 @@ impl App {
         };
         let pr_banner_height: u16 = if pr_info.is_some() { 1 } else { 0 };
 
-        let [pr_area, pane_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(pr_banner_height), Constraint::Min(1)])
-            .areas(area);
+        let (pr_area, pane_area) = if self.pr_banner_at_bottom {
+            let [pane_area, pr_area] = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(pr_banner_height)])
+                .areas(area);
+            (pr_area, pane_area)
+        } else {
+            let [pr_area, pane_area] = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(pr_banner_height), Constraint::Min(1)])
+                .areas(area);
+            (pr_area, pane_area)
+        };
 
         if let Some(ref pr) = pr_info {
             self.render_pr_banner(frame, pr_area, pr);
