@@ -155,6 +155,8 @@ pub struct App {
     /// ID of the provider that last populated `snapshot_buf`, used to detect
     /// agent switches and force a snapshot rebuild.
     last_snapshot_id: Option<String>,
+    /// Active text selection in the terminal viewport, if any.
+    pub(crate) terminal_selection: Option<TerminalSelection>,
 }
 
 /// Snapshot of session data shared with the branch-sync background worker.
@@ -492,6 +494,56 @@ pub(crate) enum ScrollDirection {
     Down,
 }
 
+/// A position within the terminal grid (0-based row and column).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TermGridPos {
+    pub row: u16,
+    pub col: u16,
+}
+
+/// Active text selection in the terminal viewport.
+#[derive(Clone, Debug)]
+pub(crate) struct TerminalSelection {
+    /// Where the drag started (anchor). Fixed during drag.
+    pub anchor: TermGridPos,
+    /// Current end of selection. Moves during drag.
+    pub end: TermGridPos,
+    /// True while the mouse button is held (still dragging).
+    pub dragging: bool,
+}
+
+impl TerminalSelection {
+    /// Returns (start, end) in reading order (top-left to bottom-right).
+    pub fn ordered(&self) -> (TermGridPos, TermGridPos) {
+        if self.anchor.row < self.end.row
+            || (self.anchor.row == self.end.row && self.anchor.col <= self.end.col)
+        {
+            (self.anchor, self.end)
+        } else {
+            (self.end, self.anchor)
+        }
+    }
+
+    /// Returns true if the given (row, col) is within the selection.
+    /// Uses line-based (not rectangular) selection semantics.
+    pub fn contains(&self, row: u16, col: u16) -> bool {
+        let (start, end) = self.ordered();
+        if row < start.row || row > end.row {
+            return false;
+        }
+        if start.row == end.row {
+            return col >= start.col && col <= end.col;
+        }
+        if row == start.row {
+            return col >= start.col;
+        }
+        if row == end.row {
+            return col <= end.col;
+        }
+        true // middle rows are fully selected
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct MouseLayoutState {
     pub(crate) body: Rect,
@@ -677,7 +729,8 @@ pub(crate) enum WorkerEvent {
         entries: Vec<BrowserEntry>,
     },
     ClipboardCopyCompleted {
-        path: String,
+        /// Human-readable success message shown in the status bar.
+        label: String,
         result: Result<(), String>,
     },
     BranchSyncReady(Vec<(String, String)>),
@@ -834,6 +887,7 @@ impl App {
             syntax_cache: SyntaxCache::new(),
             snapshot_buf: TerminalSnapshot::empty(),
             last_snapshot_id: None,
+            terminal_selection: None,
         };
         app.restore_sessions();
         app.seed_pr_statuses_from_db();
@@ -1795,6 +1849,7 @@ impl App {
             if self.last_snapshot_id.as_deref() != Some(&client_id) {
                 provider.mark_dirty();
                 self.last_snapshot_id = Some(client_id);
+                self.terminal_selection = None;
             }
             provider.snapshot_into(&mut self.snapshot_buf);
             true
@@ -1990,5 +2045,95 @@ mod tests {
         let self_pid = Pid::from_u32(std::process::id());
         let init_pid = Pid::from_u32(1);
         assert!(!is_descendant_of(&sys, init_pid, self_pid));
+    }
+
+    #[test]
+    fn terminal_selection_ordered_forward() {
+        let sel = TerminalSelection {
+            anchor: TermGridPos { row: 2, col: 5 },
+            end: TermGridPos { row: 4, col: 10 },
+            dragging: false,
+        };
+        let (start, end) = sel.ordered();
+        assert_eq!(start, TermGridPos { row: 2, col: 5 });
+        assert_eq!(end, TermGridPos { row: 4, col: 10 });
+    }
+
+    #[test]
+    fn terminal_selection_ordered_reverse() {
+        let sel = TerminalSelection {
+            anchor: TermGridPos { row: 4, col: 10 },
+            end: TermGridPos { row: 2, col: 5 },
+            dragging: false,
+        };
+        let (start, end) = sel.ordered();
+        assert_eq!(start, TermGridPos { row: 2, col: 5 });
+        assert_eq!(end, TermGridPos { row: 4, col: 10 });
+    }
+
+    #[test]
+    fn terminal_selection_ordered_same_row() {
+        let sel = TerminalSelection {
+            anchor: TermGridPos { row: 3, col: 15 },
+            end: TermGridPos { row: 3, col: 5 },
+            dragging: false,
+        };
+        let (start, end) = sel.ordered();
+        assert_eq!(start, TermGridPos { row: 3, col: 5 });
+        assert_eq!(end, TermGridPos { row: 3, col: 15 });
+    }
+
+    #[test]
+    fn terminal_selection_contains_single_row() {
+        let sel = TerminalSelection {
+            anchor: TermGridPos { row: 3, col: 5 },
+            end: TermGridPos { row: 3, col: 10 },
+            dragging: false,
+        };
+        assert!(sel.contains(3, 5));
+        assert!(sel.contains(3, 7));
+        assert!(sel.contains(3, 10));
+        assert!(!sel.contains(3, 4));
+        assert!(!sel.contains(3, 11));
+        assert!(!sel.contains(2, 7));
+        assert!(!sel.contains(4, 7));
+    }
+
+    #[test]
+    fn terminal_selection_contains_multi_row() {
+        let sel = TerminalSelection {
+            anchor: TermGridPos { row: 2, col: 10 },
+            end: TermGridPos { row: 4, col: 5 },
+            dragging: false,
+        };
+        // First row: from anchor col to end of line.
+        assert!(sel.contains(2, 10));
+        assert!(sel.contains(2, 50));
+        assert!(!sel.contains(2, 9));
+        // Middle row: fully selected.
+        assert!(sel.contains(3, 0));
+        assert!(sel.contains(3, 100));
+        // Last row: from start of line to end col.
+        assert!(sel.contains(4, 0));
+        assert!(sel.contains(4, 5));
+        assert!(!sel.contains(4, 6));
+        // Outside rows.
+        assert!(!sel.contains(1, 10));
+        assert!(!sel.contains(5, 0));
+    }
+
+    #[test]
+    fn terminal_selection_contains_reverse_anchor() {
+        // Anchor after end — should still work via ordered().
+        let sel = TerminalSelection {
+            anchor: TermGridPos { row: 4, col: 5 },
+            end: TermGridPos { row: 2, col: 10 },
+            dragging: false,
+        };
+        assert!(sel.contains(2, 10));
+        assert!(sel.contains(3, 0));
+        assert!(sel.contains(4, 5));
+        assert!(!sel.contains(2, 9));
+        assert!(!sel.contains(4, 6));
     }
 }

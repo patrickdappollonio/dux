@@ -129,6 +129,7 @@ When shelling out to git, **always ensure the command output is immune to user-s
 - The canonical config renderer produces a fully commented config on first creation. Subsequent saves preserve user edits via `toml_edit`. Users can run `dux config diff` to see what changed or `dux config regenerate` to get the latest canonical template.
 - When a setting can have a sensible default at first boot (e.g., the user's home directory, platform-specific paths), resolve and store the concrete value in `config.toml` right away — do not leave it commented out or empty. Users should see a working value they can edit, not a placeholder they have to fill in.
 - Preserve safe failure behavior around project refresh and failed agent startup.
+- **Never use byte-based `.len()` or `[..n]` slicing to truncate user-visible strings.** Terminal output, file paths, and UI text can contain multi-byte UTF-8 characters (box-drawing, block elements, CJK, emoji). Always use `.chars().count()` for length and `.chars().take(n).collect()` (or `char_indices().nth()`) for truncation. Byte-based slicing will panic if the index falls inside a multi-byte character.
 
 ## Verification
 

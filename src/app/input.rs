@@ -927,12 +927,14 @@ impl App {
         // Verify we have an active session/provider.
         if self.selected_session().is_none() {
             self.input_target = InputTarget::None;
+            self.terminal_selection = None;
             self.raw_input_buf.clear();
             return Ok(false);
         }
         let surface = self.session_surface;
         if self.selected_terminal_surface_client().is_none() {
             self.input_target = InputTarget::None;
+            self.terminal_selection = None;
             self.raw_input_buf.clear();
             let label = match surface {
                 SessionSurface::Agent => "Agent",
@@ -1045,6 +1047,7 @@ impl App {
                         previous_input_target: prev,
                     });
                     self.input_target = InputTarget::None;
+                    self.terminal_selection = None;
                     self.raw_input_buf.clear();
                     return Ok(false);
                 }
@@ -1055,6 +1058,7 @@ impl App {
                     self.input_target = InputTarget::None;
                     self.fullscreen_overlay = FullscreenOverlay::None;
                     self.session_surface = SessionSurface::Agent;
+                    self.terminal_selection = None;
                     self.raw_input_buf.clear();
                     if return_to_terminal_list {
                         self.left_section = LeftSection::Terminals;
@@ -1113,6 +1117,7 @@ impl App {
                             | MouseEventKind::ScrollRight
                     );
                     if is_scroll {
+                        self.terminal_selection = None;
                         // Check if the provider has forward_scroll enabled
                         // (only applies to agents, not companion terminals).
                         let forward = matches!(self.input_target, InputTarget::Agent)
@@ -1145,6 +1150,7 @@ impl App {
                             self.fullscreen_overlay = FullscreenOverlay::None;
                             self.session_surface = SessionSurface::Agent;
                             self.raw_input_buf.clear();
+                            self.terminal_selection = None;
                             if return_to_terminal_list {
                                 self.left_section = LeftSection::Terminals;
                                 self.clamp_terminal_cursor();
@@ -1154,20 +1160,21 @@ impl App {
                             return Ok(false);
                         }
 
-                        if !is_scrolled_back {
-                            // Non-scroll events (clicks, drags, moves,
-                            // releases): only forward when the child process
-                            // has opted into mouse tracking (e.g. vim, htop).
-                            // Otherwise drop — the child would echo the raw
-                            // SGR bytes as garbage text.
-                            let child_wants_mouse = self
-                                .selected_terminal_surface_client()
-                                .is_some_and(|p| p.has_mouse_mode());
-                            if child_wants_mouse
-                                && let Some(provider) = self.selected_terminal_surface_client()
-                            {
-                                let _ = provider.write_bytes(&raw);
-                            }
+                        let child_wants_mouse = self
+                            .selected_terminal_surface_client()
+                            .is_some_and(|p| p.has_mouse_mode());
+                        let shift_held = mouse_ev
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::SHIFT);
+                        let should_select = !child_wants_mouse || shift_held;
+
+                        if should_select {
+                            self.handle_terminal_selection_mouse(mouse_ev);
+                        } else if child_wants_mouse
+                            && !is_scrolled_back
+                            && let Some(provider) = self.selected_terminal_surface_client()
+                        {
+                            let _ = provider.write_bytes(&raw);
                         }
                     }
                 }
@@ -1175,6 +1182,7 @@ impl App {
                     // Unknown intercepted action or normal forward — send to PTY,
                     // but only when not scrolled back. In scroll mode, all
                     // non-scroll input is suppressed.
+                    self.terminal_selection = None;
                     if !is_scrolled_back
                         && let Some(provider) = self.selected_terminal_surface_client()
                     {
@@ -3486,6 +3494,144 @@ impl App {
         }
         false
     }
+
+    // -- Terminal text selection helpers --
+
+    /// Map screen coordinates to terminal grid position.
+    /// Returns `None` if the point is outside the terminal area.
+    fn screen_to_grid(&self, screen_col: u16, screen_row: u16) -> Option<TermGridPos> {
+        let term_area = self.mouse_layout.agent_term?;
+        if !contains_point(term_area, screen_col, screen_row) {
+            return None;
+        }
+        Some(TermGridPos {
+            row: screen_row - term_area.y,
+            col: screen_col - term_area.x,
+        })
+    }
+
+    /// Map screen coordinates to terminal grid position, clamping to the
+    /// terminal area edges. Used during drag so the selection extends to the
+    /// nearest boundary when the mouse leaves the terminal area.
+    fn screen_to_grid_clamped(&self, screen_col: u16, screen_row: u16) -> Option<TermGridPos> {
+        let term_area = self.mouse_layout.agent_term?;
+        let col = screen_col
+            .max(term_area.x)
+            .min(term_area.x + term_area.width.saturating_sub(1))
+            - term_area.x;
+        let row = screen_row
+            .max(term_area.y)
+            .min(term_area.y + term_area.height.saturating_sub(1))
+            - term_area.y;
+        Some(TermGridPos { row, col })
+    }
+
+    /// Handle a mouse event for terminal text selection (click, drag, release).
+    fn handle_terminal_selection_mouse(&mut self, mouse_ev: MouseEvent) {
+        match mouse_ev.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(pos) = self.screen_to_grid(mouse_ev.column, mouse_ev.row) {
+                    self.terminal_selection = Some(TerminalSelection {
+                        anchor: pos,
+                        end: pos,
+                        dragging: true,
+                    });
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let pos = self.screen_to_grid_clamped(mouse_ev.column, mouse_ev.row);
+                if let Some(sel) = &mut self.terminal_selection {
+                    if sel.dragging {
+                        if let Some(pos) = pos {
+                            sel.end = pos;
+                        }
+                    }
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(sel) = &mut self.terminal_selection {
+                    if sel.dragging {
+                        sel.dragging = false;
+                        if sel.anchor == sel.end {
+                            // Single click, no actual selection.
+                            self.terminal_selection = None;
+                        } else {
+                            self.copy_terminal_selection();
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Extract text from the terminal snapshot within the active selection
+    /// and copy it to the system clipboard.
+    fn copy_terminal_selection(&mut self) {
+        let sel = match self.terminal_selection.clone() {
+            Some(s) => s,
+            None => return,
+        };
+        let (start, end) = sel.ordered();
+
+        // Refresh snapshot to get current content.
+        self.refresh_snapshot_buf();
+
+        let mut lines: Vec<String> = Vec::new();
+        let mut current_row = start.row;
+        let mut current_line = String::new();
+
+        for cell in &self.snapshot_buf.cells {
+            if !sel.contains(cell.row, cell.col) {
+                continue;
+            }
+            if cell.row != current_row {
+                // Flush the previous line (trim trailing whitespace).
+                lines.push(current_line.trim_end().to_string());
+                // Insert empty lines for any gap rows.
+                for _ in (current_row + 1)..cell.row {
+                    lines.push(String::new());
+                }
+                current_line = String::new();
+                current_row = cell.row;
+            }
+            // Pad with spaces if columns are not contiguous (sparse cells).
+            let expected_col = if current_line.is_empty() {
+                start.col.min(cell.col)
+            } else {
+                // Approximate: one char per column.
+                let line_cols = current_line.chars().count() as u16;
+                if cell.row == start.row {
+                    start.col + line_cols
+                } else {
+                    line_cols
+                }
+            };
+            if cell.col > expected_col {
+                for _ in 0..(cell.col - expected_col) {
+                    current_line.push(' ');
+                }
+            }
+            current_line.push_str(&cell.symbol);
+        }
+        // Flush last line.
+        if !current_line.is_empty() || !lines.is_empty() {
+            lines.push(current_line.trim_end().to_string());
+            // Fill gap rows between last populated row and end.
+            for _ in (current_row + 1)..=end.row {
+                lines.push(String::new());
+            }
+        }
+
+        let text = lines.join("\n");
+        if !text.is_empty() {
+            let _ = self.clipboard.copy_text(
+                &text,
+                "Terminal text copied to clipboard.",
+                &self.worker_tx,
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3494,6 +3640,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex, mpsc};
 
+    use super::DOUBLE_CLICK_THRESHOLD;
     use crate::app::{
         App, CenterMode, ConfirmKillRunningPrompt, FocusPane, FullscreenOverlay, InputTarget,
         KillRunningAction, KillRunningFocus, KillRunningFooterAction, KillRunningPrompt,
@@ -3501,7 +3648,6 @@ mod tests {
         OverlayMouseLayout, OverlayMouseLayoutState, PromptState, PullTarget, RightSection,
         RuntimeTargetId, TextInput, WorkerEvent,
     };
-    use super::DOUBLE_CLICK_THRESHOLD;
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
     use crate::editor::{DetectedEditor, EditorKind};
@@ -3681,6 +3827,7 @@ mod tests {
             syntax_cache: crate::diff::SyntaxCache::new(),
             snapshot_buf: crate::pty::TerminalSnapshot::empty(),
             last_snapshot_id: None,
+            terminal_selection: None,
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();
@@ -4445,13 +4592,12 @@ mod tests {
         app.drain_events();
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
-        assert!(app.status.text().contains(&worktree_path));
+        assert_eq!(app.status.text(), "Agent's path copied to clipboard.");
     }
 
     #[test]
     fn copy_path_copies_selected_project_path() {
         let mut app = test_app(default_bindings());
-        let project_path = app.projects[0].path.clone();
         app.selected_left = 0;
         app.clipboard = Clipboard::from_fn(clipboard_ok);
 
@@ -4460,7 +4606,7 @@ mod tests {
         app.drain_events();
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
-        assert!(app.status.text().contains(&project_path));
+        assert_eq!(app.status.text(), "Agent's path copied to clipboard.");
     }
 
     #[test]
@@ -4489,7 +4635,7 @@ mod tests {
         app.drain_events();
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
-        assert!(app.status.text().contains("Copy path failed"));
+        assert!(app.status.text().contains("Clipboard copy failed"));
         assert!(app.status.text().contains("linux clipboard unavailable"));
     }
 

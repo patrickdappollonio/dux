@@ -984,6 +984,13 @@ impl App {
                     let ratatui_cell = &mut buf[(x, y)];
                     ratatui_cell.set_symbol(&cell.symbol);
                     ratatui_cell.set_style(style);
+
+                    // Overlay selection highlight if this cell is selected.
+                    if let Some(sel) = &self.terminal_selection {
+                        if sel.contains(cell.row, cell.col) {
+                            ratatui_cell.set_style(self.theme.selection_style());
+                        }
+                    }
                 }
 
                 // Render cursor if in input mode.
@@ -1577,14 +1584,10 @@ impl App {
             StatusTone::Error => self.theme.status_error_bg,
         };
         let prefix = format!(" {dot} ");
-        let prefix_w = prefix.len();
+        let prefix_w = prefix.chars().count();
         let max_status_chars = (status_area.width as usize) * (status_area.height as usize);
         let available = max_status_chars.saturating_sub(prefix_w);
-        let truncated = if status_text.len() > available && available > 1 {
-            format!("{}…", &status_text[..available - 1])
-        } else {
-            status_text
-        };
+        let truncated = truncate_status_text(&status_text, available);
         let status_line = Line::from(vec![
             Span::styled(prefix, Style::default().fg(dot_color).bg(status_bg)),
             Span::styled(truncated, Style::default().fg(msg_color).bg(status_bg)),
@@ -1873,11 +1876,13 @@ impl App {
                             )];
                             let desc_avail = inner_w.saturating_sub(name_col + gap);
                             let desc = binding.palette_description.unwrap_or("");
-                            let desc_display = if desc.len() > desc_avail && desc_avail > 1 {
-                                format!("  {}\u{2026}", &desc[..desc_avail - 1])
-                            } else {
-                                format!("  {desc:desc_avail$}")
-                            };
+                            let desc_display =
+                                if desc.chars().count() > desc_avail && desc_avail > 1 {
+                                    let end: String = desc.chars().take(desc_avail - 1).collect();
+                                    format!("  {end}\u{2026}")
+                                } else {
+                                    format!("  {desc:desc_avail$}")
+                                };
                             spans.push(Span::styled(
                                 desc_display,
                                 Style::default().fg(self.theme.hint_desc_fg),
@@ -4310,6 +4315,19 @@ fn set_cell(buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, symbol: &str, sty
     buf[(x, y)].set_symbol(symbol).set_style(style);
 }
 
+/// Truncate `text` to at most `available` **characters**, appending `…` when
+/// trimmed. Using char-based counting avoids panics when the text contains
+/// multi-byte UTF-8 (e.g. box-drawing or block characters).
+fn truncate_status_text(text: &str, available: usize) -> String {
+    if text.chars().count() > available && available > 1 {
+        let mut truncated: String = text.chars().take(available - 1).collect();
+        truncated.push('…');
+        truncated
+    } else {
+        text.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4488,5 +4506,55 @@ mod tests {
     fn format_bytes_gib_range() {
         assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GiB");
         assert_eq!(format_bytes(1024 * 1024 * 1024 * 3), "3.0 GiB");
+    }
+
+    #[test]
+    fn truncate_status_text_ascii_short_enough() {
+        assert_eq!(truncate_status_text("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_status_text_ascii_exact_fit() {
+        assert_eq!(truncate_status_text("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_status_text_ascii_truncated() {
+        assert_eq!(truncate_status_text("hello world", 6), "hello…");
+    }
+
+    #[test]
+    fn truncate_status_text_multibyte_no_panic() {
+        // Box-drawing char ─ is 3 bytes but 1 char.
+        let text = "Copied: ─────end";
+        let result = truncate_status_text(text, 10);
+        assert_eq!(result.chars().count(), 10);
+        assert!(result.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_status_text_block_characters() {
+        // Block characters like ██▛▘ are multi-byte; slicing by byte would panic.
+        let text = "██▛▘ Opus 4.6 (1M context) · Claude Max";
+        let result = truncate_status_text(text, 12);
+        assert_eq!(result.chars().count(), 12);
+        assert!(result.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_status_text_available_zero() {
+        // Edge case: zero available should not panic.
+        assert_eq!(truncate_status_text("hello", 0), "hello");
+    }
+
+    #[test]
+    fn truncate_status_text_available_one() {
+        // With only 1 char available, no room for truncation marker.
+        assert_eq!(truncate_status_text("hello", 1), "hello");
+    }
+
+    #[test]
+    fn truncate_status_text_empty_input() {
+        assert_eq!(truncate_status_text("", 10), "");
     }
 }

@@ -113,11 +113,9 @@ impl App {
                         },
                     }
                 }
-                WorkerEvent::ClipboardCopyCompleted { path, result } => match result {
-                    Ok(()) => {
-                        self.set_info(format!("Copied path to clipboard: \"{path}\""))
-                    }
-                    Err(e) => self.set_error(format!("Copy path failed: {e}")),
+                WorkerEvent::ClipboardCopyCompleted { label, result } => match result {
+                    Ok(()) => self.set_info(label),
+                    Err(e) => self.set_error(format!("Clipboard copy failed: {e}")),
                 },
                 WorkerEvent::BranchRenameCompleted {
                     session_id,
