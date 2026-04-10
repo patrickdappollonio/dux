@@ -20,6 +20,7 @@ pub enum Action {
     RefreshProject,
     ReconnectAgent,
     DeleteSession,
+    DeleteTerminal,
     // Agent pane
     InteractAgent,
     ShowTerminal,
@@ -145,6 +146,7 @@ impl BindingScope {
 pub enum HintContext {
     LeftProject,
     LeftSession,
+    LeftTerminal,
     Center,
     Files,
     CommitInput,
@@ -191,6 +193,7 @@ impl Action {
             Action::RefreshProject => "refresh_project",
             Action::ReconnectAgent => "reconnect_agent",
             Action::DeleteSession => "delete_session",
+            Action::DeleteTerminal => "delete_terminal",
             Action::InteractAgent => "interact_agent",
             Action::ShowTerminal => "show_terminal",
             Action::ExitInteractive => "exit_interactive",
@@ -273,6 +276,7 @@ impl Action {
             Action::RefreshProject => "Git pull the selected project checkout.",
             Action::ReconnectAgent => "Restart the CLI for the selected agent.",
             Action::DeleteSession => "Delete the selected session and worktree.",
+            Action::DeleteTerminal => "Delete the selected companion terminal.",
             Action::InteractAgent => "Start a prompt turn for the agent.",
             Action::ShowTerminal => {
                 "Open the first companion terminal for the selected agent, or launch a new one if none exists."
@@ -357,7 +361,8 @@ impl Action {
             | Action::RefreshProject
             | Action::InteractAgent
             | Action::ReconnectAgent
-            | Action::DeleteSession => Some("Projects pane"),
+            | Action::DeleteSession
+            | Action::DeleteTerminal => Some("Projects pane"),
             Action::ExitInteractive
             | Action::OpenMacroBar
             | Action::ToggleFullscreen
@@ -468,6 +473,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[
             (HintContext::LeftProject, "Move"),
             (HintContext::LeftSession, "Move"),
+            (HintContext::LeftTerminal, "Move"),
             (HintContext::Files, "Move"),
         ],
         palette: None,
@@ -540,6 +546,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         }),
         hint_contexts: &[
             (HintContext::LeftSession, "Focus"),
+            (HintContext::LeftTerminal, "Focus"),
             (HintContext::Center, "Interact"),
         ],
         palette: Some(PaletteEntry {
@@ -678,11 +685,23 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         }),
         hint_contexts: &[
             (HintContext::LeftSession, "Delete"),
+            (HintContext::LeftTerminal, "Delete"),
             (HintContext::Center, "Delete"),
         ],
         palette: Some(PaletteEntry {
             name: "delete-agent",
             description: "Delete the selected agent session",
+        }),
+    },
+    BindingDef {
+        action: Action::DeleteTerminal,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "delete-terminal",
+            description: "Delete the selected companion terminal",
         }),
     },
     // ── Agent pane ────────────────────────────────────────────────
@@ -974,6 +993,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[
             (HintContext::LeftProject, "Palette"),
             (HintContext::LeftSession, "Palette"),
+            (HintContext::LeftTerminal, "Palette"),
             (HintContext::Center, "Palette"),
             (HintContext::Files, "Palette"),
         ],
@@ -1038,6 +1058,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[
             (HintContext::LeftProject, "Help"),
             (HintContext::LeftSession, "Help"),
+            (HintContext::LeftTerminal, "Help"),
             (HintContext::Center, "Help"),
             (HintContext::Files, "Help"),
         ],

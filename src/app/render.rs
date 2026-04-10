@@ -1559,6 +1559,9 @@ impl App {
             Some(LeftItem::Session(_))
         );
         let ctx = match self.focus {
+            FocusPane::Left if self.left_section == LeftSection::Terminals => {
+                HintContext::LeftTerminal
+            }
             FocusPane::Left if is_on_project => HintContext::LeftProject,
             FocusPane::Left => HintContext::LeftSession,
             FocusPane::Center => HintContext::Center,
@@ -2904,6 +2907,109 @@ impl App {
                 )
                 .render(delete_area, frame.buffer_mut());
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
+                    cancel_button: cancel_area,
+                    delete_button: delete_area,
+                };
+            }
+            PromptState::ConfirmDeleteTerminal {
+                terminal_label,
+                confirm_selected,
+                ..
+            } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(56, 30, frame.area());
+                Clear.render(area, frame.buffer_mut());
+                let outer = self.themed_overlay_block("Delete Terminal");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                let lines = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw(" Are you sure you want to delete "),
+                        Span::styled(
+                            terminal_label.as_str(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("?"),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " The running process will be killed.",
+                        Style::default().fg(self.theme.warning_fg),
+                    )),
+                ];
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let btn_width = 16u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let delete_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                let (cancel_border, cancel_fg) = if !confirm_selected {
+                    (
+                        self.theme.button_confirm_border,
+                        self.theme.button_active_fg,
+                    )
+                } else {
+                    (self.theme.border_normal, self.theme.hint_desc_fg)
+                };
+                let (delete_border, delete_fg) = if *confirm_selected {
+                    (self.theme.button_danger_border, self.theme.button_active_fg)
+                } else {
+                    (self.theme.border_normal, self.theme.hint_desc_fg)
+                };
+
+                Paragraph::new(Line::from(Span::styled(
+                    "Cancel",
+                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED)
+                        .border_style(Style::default().fg(cancel_border)),
+                )
+                .render(cancel_area, frame.buffer_mut());
+
+                Paragraph::new(Line::from(Span::styled(
+                    "Delete",
+                    Style::default().fg(delete_fg).add_modifier(Modifier::BOLD),
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED)
+                        .border_style(Style::default().fg(delete_border)),
+                )
+                .render(delete_area, frame.buffer_mut());
+                self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteTerminal {
                     cancel_button: cancel_area,
                     delete_button: delete_area,
                 };
