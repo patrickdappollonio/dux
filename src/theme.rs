@@ -78,6 +78,7 @@ pub struct Theme {
     pub pr_banner_fg: Color,
     pub pr_merged_label: Color,
     pub pr_closed_label: Color,
+    pub pr_open_label: Color,
 }
 
 impl Theme {
@@ -94,7 +95,7 @@ impl Theme {
             selection_fg: Color::Black,
             selection_bg: Color::Cyan,
             project_icon: Color::Rgb(100, 149, 237),
-            session_active: Color::Green,
+            session_active: Color::Rgb(66, 135, 245),
             session_detached: Color::Yellow,
             session_exited: Color::Rgb(100, 100, 100),
             status_info_fg: Color::Rgb(100, 100, 100),
@@ -153,6 +154,7 @@ impl Theme {
             pr_merged_label: Color::Rgb(170, 100, 220),
             pr_banner_fg: Color::White,
             pr_closed_label: Color::Rgb(140, 80, 80),
+            pr_open_label: Color::Green,
         }
     }
 

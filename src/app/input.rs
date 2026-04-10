@@ -3494,6 +3494,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex, mpsc};
 
+    use super::DOUBLE_CLICK_THRESHOLD;
     use crate::app::{
         App, CenterMode, ConfirmKillRunningPrompt, FocusPane, FullscreenOverlay, InputTarget,
         KillRunningAction, KillRunningFocus, KillRunningFooterAction, KillRunningPrompt,
@@ -3501,7 +3502,6 @@ mod tests {
         OverlayMouseLayout, OverlayMouseLayoutState, PromptState, PullTarget, RightSection,
         RuntimeTargetId, TextInput, WorkerEvent,
     };
-    use super::DOUBLE_CLICK_THRESHOLD;
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
     use crate::editor::{DetectedEditor, EditorKind};
