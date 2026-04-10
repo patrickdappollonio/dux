@@ -1485,6 +1485,10 @@ impl App {
     pub(crate) fn toggle_collapse_selected_project(&mut self) {
         if let Some(project) = self.selected_project() {
             let id = project.id.clone();
+            let has_sessions = self.sessions.iter().any(|s| s.project_id == id);
+            if !has_sessions {
+                return;
+            }
             if self.collapsed_projects.contains(&id) {
                 self.collapsed_projects.remove(&id);
             } else {

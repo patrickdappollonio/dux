@@ -332,7 +332,9 @@ impl App {
                 .map(|(i, item)| match item {
                     LeftItem::Project(index) => {
                         let project = &self.projects[*index];
-                        let icon = if self.collapsed_projects.contains(&project.id) {
+                        let has_sessions = self.sessions.iter().any(|s| s.project_id == project.id);
+                        let icon = if !has_sessions || self.collapsed_projects.contains(&project.id)
+                        {
                             "▸"
                         } else {
                             "▾"
@@ -410,14 +412,17 @@ impl App {
                 LeftItem::Project(index) => {
                     let project = &self.projects[*index];
                     let count = session_counts.get(&project.id).copied().unwrap_or(0);
-                    let icon = if self.collapsed_projects.contains(&project.id) {
+                    let icon = if count == 0 || self.collapsed_projects.contains(&project.id) {
                         "▸ "
                     } else {
                         "▾ "
                     };
                     let mut spans = vec![
                         Span::styled(icon, Style::default().fg(self.theme.project_icon)),
-                        Span::raw(project.name.clone()),
+                        Span::styled(
+                            project.name.clone(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
                     ];
                     if count > 0 {
                         spans.push(Span::styled(
