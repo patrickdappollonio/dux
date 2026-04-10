@@ -64,8 +64,47 @@ impl App {
             return Ok(());
         }
         let branch = git::current_branch(&path)?;
+
+        // Check whether the current branch matches the remote default branch.
+        // Two-tier warning: confident when origin/HEAD is available, heuristic
+        // when it isn't but the branch name doesn't look like a main branch.
+        let warning_kind = match git::remote_default_branch(&path) {
+            Some(default) if default != branch => Some(BranchWarningKind::Known {
+                default_branch: default,
+            }),
+            Some(_) => None, // on the default branch — no warning
+            None if branch != "main" && branch != "master" => Some(BranchWarningKind::Heuristic),
+            None => None, // looks like main/master — no warning
+        };
+
+        if let Some(kind) = warning_kind {
+            self.prompt = PromptState::ConfirmNonDefaultBranch {
+                path: path.to_string_lossy().to_string(),
+                name,
+                current_branch: branch,
+                kind,
+                confirm_selected: false,
+            };
+            return Ok(());
+        }
+
+        let path_str = path.to_string_lossy().to_string();
+        self.finish_add_project(path_str, name, branch)
+    }
+
+    /// Saves the project to config and adds it to the runtime project list.
+    /// Called directly when no branch warning is needed, or after the user
+    /// confirms "Add Anyway" in the non-default-branch dialog.
+    pub(crate) fn finish_add_project(
+        &mut self,
+        path: String,
+        name: String,
+        branch: String,
+    ) -> Result<()> {
+        let path_buf = PathBuf::from(&path);
         let display_name = if name.trim().is_empty() {
-            path.file_name()
+            path_buf
+                .file_name()
                 .and_then(|part| part.to_str())
                 .unwrap_or("project")
                 .to_string()
@@ -75,7 +114,7 @@ impl App {
         let project_id = Uuid::new_v4().to_string();
         self.config.projects.push(ProjectConfig {
             id: project_id.clone(),
-            path: path.to_string_lossy().to_string(),
+            path: path.clone(),
             name: Some(display_name.clone()),
             default_provider: None,
             commit_prompt: None,
@@ -84,12 +123,12 @@ impl App {
         self.projects.push(Project {
             id: project_id,
             name: display_name.clone(),
-            path: path.to_string_lossy().to_string(),
+            path,
             default_provider: self.config.default_provider(),
             current_branch: branch,
         });
         self.rebuild_left_items();
-        logger::info(&format!("registered project {}", path.display()));
+        logger::info(&format!("registered project {}", path_buf.display()));
         self.set_info(format!("Added project \"{display_name}\" to workspace"));
         Ok(())
     }

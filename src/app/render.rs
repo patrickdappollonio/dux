@@ -3040,6 +3040,131 @@ impl App {
                     discard_button: discard_area,
                 };
             }
+            PromptState::ConfirmNonDefaultBranch {
+                current_branch,
+                kind,
+                confirm_selected,
+                ..
+            } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(60, 30, frame.area());
+                Clear.render(area, frame.buffer_mut());
+                let outer = self.themed_overlay_block("Non-Default Branch");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                let mut lines = vec![Line::from("")];
+                match kind {
+                    BranchWarningKind::Known { default_branch } => {
+                        lines.push(Line::from(vec![
+                            Span::raw(" This repository is on branch "),
+                            Span::styled(
+                                current_branch.as_str(),
+                                Style::default().add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(", but the"),
+                        ]));
+                        lines.push(Line::from(vec![
+                            Span::raw(" remote default branch is "),
+                            Span::styled(
+                                default_branch.as_str(),
+                                Style::default().add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw("."),
+                        ]));
+                    }
+                    BranchWarningKind::Heuristic => {
+                        lines.push(Line::from(vec![
+                            Span::raw(" This repository is on branch "),
+                            Span::styled(
+                                current_branch.as_str(),
+                                Style::default().add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(","),
+                        ]));
+                        lines.push(Line::from(" which doesn't appear to be the main branch."));
+                    }
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!(" New worktrees will branch from \"{current_branch}\"."),
+                    Style::default().fg(self.theme.warning_fg),
+                )));
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let btn_width = 16u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let add_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                let (cancel_border, cancel_fg) = if !confirm_selected {
+                    (
+                        self.theme.button_confirm_border,
+                        self.theme.button_active_fg,
+                    )
+                } else {
+                    (self.theme.border_normal, self.theme.hint_desc_fg)
+                };
+                let (add_border, add_fg) = if *confirm_selected {
+                    (self.theme.button_danger_border, self.theme.button_active_fg)
+                } else {
+                    (self.theme.border_normal, self.theme.hint_desc_fg)
+                };
+
+                Paragraph::new(Line::from(Span::styled(
+                    "Cancel",
+                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED)
+                        .border_style(Style::default().fg(cancel_border)),
+                )
+                .render(cancel_area, frame.buffer_mut());
+
+                Paragraph::new(Line::from(Span::styled(
+                    "Add Anyway",
+                    Style::default().fg(add_fg).add_modifier(Modifier::BOLD),
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED)
+                        .border_style(Style::default().fg(add_border)),
+                )
+                .render(add_area, frame.buffer_mut());
+                self.overlay_layout.active = OverlayMouseLayout::ConfirmNonDefaultBranch {
+                    cancel_button: cancel_area,
+                    add_button: add_area,
+                };
+            }
             PromptState::RenameSession {
                 input,
                 rename_branch,
