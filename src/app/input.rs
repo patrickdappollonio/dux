@@ -142,6 +142,8 @@ impl App {
                         let page = self.last_help_height.max(1);
                         *scroll = scroll.saturating_sub(page);
                     }
+                    Action::ScrollToBottom => *scroll = max_help,
+                    Action::ScrollToTop => *scroll = 0,
                     _ => {}
                 }
             } else if key.code == KeyCode::Char(' ') {
@@ -516,6 +518,13 @@ impl App {
                         self.reset_pty_scrollback();
                     }
                 }
+                Action::ScrollToTop => {
+                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
+                        *scroll = 0;
+                    } else {
+                        self.set_pty_scrollback_max();
+                    }
+                }
                 _ => {}
             }
         } else if !in_diff && self.input_target == InputTarget::None {
@@ -542,6 +551,12 @@ impl App {
     fn reset_pty_scrollback(&self) {
         if let Some(provider) = self.selected_terminal_surface_client() {
             provider.set_scrollback(0);
+        }
+    }
+
+    fn set_pty_scrollback_max(&self) {
+        if let Some(provider) = self.selected_terminal_surface_client() {
+            provider.set_scrollback(usize::MAX);
         }
     }
 
@@ -1108,6 +1123,16 @@ impl App {
                         let _ = provider.write_bytes(&raw);
                     }
                 }
+                SeqAction::Intercept(Action::ScrollToTop, conditional, raw) => {
+                    let has_scrollback = self
+                        .selected_terminal_surface_client()
+                        .is_some_and(|p| p.scrollback_offset() > 0);
+                    if conditional && has_scrollback {
+                        self.set_pty_scrollback_max();
+                    } else if let Some(provider) = self.selected_terminal_surface_client() {
+                        let _ = provider.write_bytes(&raw);
+                    }
+                }
                 SeqAction::Mouse(mouse_ev, raw) => {
                     let is_scroll = matches!(
                         mouse_ev.kind,
@@ -1219,6 +1244,12 @@ impl App {
                 }
                 KeyCode::PageDown => {
                     *scroll_offset = (*scroll_offset + 10).min(max_offset);
+                }
+                KeyCode::Home => {
+                    *scroll_offset = 0;
+                }
+                KeyCode::End => {
+                    *scroll_offset = max_offset;
                 }
                 _ => {}
             }
@@ -4676,6 +4707,46 @@ mod tests {
     }
 
     #[test]
+    fn scroll_to_top_resolves_home_in_interactive_scope() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Interactive),
+            Some(Action::ScrollToTop),
+        );
+    }
+
+    #[test]
+    fn scroll_to_top_resolves_home_in_center_scope() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Center),
+            Some(Action::ScrollToTop),
+        );
+    }
+
+    #[test]
+    fn scroll_to_bottom_resolves_end_in_interactive_scope() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::End, KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Interactive),
+            Some(Action::ScrollToBottom),
+        );
+    }
+
+    #[test]
+    fn scroll_to_bottom_resolves_end_in_center_scope() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::End, KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Center),
+            Some(Action::ScrollToBottom),
+        );
+    }
+
+    #[test]
     fn scroll_line_down_resolves_space_in_interactive_scope() {
         let bindings = default_bindings();
         let key = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
@@ -6674,6 +6745,61 @@ mod tests {
                 .scrollback_offset(),
             0,
             "'q' should scroll to bottom when scrolled back"
+        );
+    }
+
+    #[test]
+    fn scrolled_back_allows_scroll_to_top_via_home() {
+        let mut app = app_with_scrolled_back_pty();
+        // Ensure we're scrolled back.
+        assert!(
+            app.selected_terminal_surface_client()
+                .unwrap()
+                .scrollback_offset()
+                > 0
+        );
+
+        // Remember current offset, then reset to a small offset.
+        app.selected_terminal_surface_client()
+            .unwrap()
+            .set_scrollback(2);
+        let before = app
+            .selected_terminal_surface_client()
+            .unwrap()
+            .scrollback_offset();
+
+        // Feed Home key escape sequence — ScrollToTop should maximize scrollback.
+        let result = app.process_raw_input_bytes(b"\x1b[H").unwrap();
+        assert!(!result);
+        let after = app
+            .selected_terminal_surface_client()
+            .unwrap()
+            .scrollback_offset();
+        assert!(
+            after >= before,
+            "Home should scroll to top of buffer, got offset {after} (was {before})"
+        );
+    }
+
+    #[test]
+    fn scrolled_back_allows_scroll_to_bottom_via_end() {
+        let mut app = app_with_scrolled_back_pty();
+        assert!(
+            app.selected_terminal_surface_client()
+                .unwrap()
+                .scrollback_offset()
+                > 0
+        );
+
+        // Feed End key escape sequence — ScrollToBottom should reset scrollback.
+        let result = app.process_raw_input_bytes(b"\x1b[F").unwrap();
+        assert!(!result);
+        assert_eq!(
+            app.selected_terminal_surface_client()
+                .unwrap()
+                .scrollback_offset(),
+            0,
+            "End should scroll to bottom when scrolled back"
         );
     }
 
