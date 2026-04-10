@@ -453,7 +453,8 @@ impl App {
                     let label_color = match self.pr_statuses.get(&session.id).map(|pr| &pr.state) {
                         Some(crate::model::PrState::Merged) => self.theme.pr_merged_label,
                         Some(crate::model::PrState::Closed) => self.theme.pr_closed_label,
-                        _ => dot_color,
+                        Some(crate::model::PrState::Open) => self.theme.pr_open_label,
+                        None => dot_color,
                     };
                     ListItem::new(Line::from(
                         vec![
