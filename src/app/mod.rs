@@ -1252,6 +1252,7 @@ impl App {
             "rename-agent" => self.open_rename_session(),
             "kill-running" => self.open_kill_running(),
             "reconnect-agent" => self.reconnect_selected_session(),
+            "force-reconnect-agent" => self.force_reconnect_agent(),
             "show-agent" => self.activate_center_agent(),
             "show-terminal" => self.show_or_open_first_terminal(),
             "new-terminal" => self.new_companion_terminal(),

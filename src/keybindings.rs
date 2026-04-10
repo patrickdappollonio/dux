@@ -84,6 +84,7 @@ pub enum Action {
     ToggleGithubIntegration,
     TogglePromptForName,
     TogglePrBannerPosition,
+    ForceReconnectAgent,
 }
 
 /// Where a binding's key combo is matched.
@@ -247,6 +248,7 @@ impl Action {
             Action::ToggleGithubIntegration => "toggle_github_integration",
             Action::TogglePromptForName => "toggle_prompt_for_name",
             Action::TogglePrBannerPosition => "toggle_pr_banner_position",
+            Action::ForceReconnectAgent => "force_reconnect_agent",
         }
     }
 
@@ -334,6 +336,7 @@ impl Action {
             Action::TogglePrBannerPosition => {
                 "Move PR banner between top and bottom of agent pane."
             }
+            Action::ForceReconnectAgent => "Restart the agent without resuming the prior session.",
         }
     }
 
@@ -409,7 +412,8 @@ impl Action {
             | Action::ResourceMonitor
             | Action::ToggleGithubIntegration
             | Action::TogglePromptForName
-            | Action::TogglePrBannerPosition => None,
+            | Action::TogglePrBannerPosition
+            | Action::ForceReconnectAgent => None,
         }
     }
 }
@@ -1376,6 +1380,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "toggle-pr-banner-position",
             description: "Move PR banner between top and bottom of agent pane",
+        }),
+    },
+    BindingDef {
+        action: Action::ForceReconnectAgent,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "force-reconnect-agent",
+            description: "Force-reconnect the agent with a fresh session (no --continue)",
         }),
     },
 ];

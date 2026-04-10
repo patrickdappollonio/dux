@@ -283,12 +283,16 @@ impl App {
             if !self.resume_fallback_candidates.remove(session_id) {
                 continue;
             }
-            let had_output = self
+            // Check whether the exited process produced only minimal output
+            // (no scrollback and ≤5 visible lines). A failed `--continue`
+            // typically prints 1-2 lines of error; a real session produces
+            // far more output and scrollback history.
+            let is_minimal = self
                 .providers
                 .get(session_id)
-                .map(|p| p.has_output())
-                .unwrap_or(false);
-            if had_output {
+                .map(|p| p.has_minimal_output(5))
+                .unwrap_or(true);
+            if !is_minimal {
                 continue;
             }
             let Some(session) = self.sessions.iter().find(|s| s.id == *session_id).cloned() else {
