@@ -1876,11 +1876,13 @@ impl App {
                             )];
                             let desc_avail = inner_w.saturating_sub(name_col + gap);
                             let desc = binding.palette_description.unwrap_or("");
-                            let desc_display = if desc.len() > desc_avail && desc_avail > 1 {
-                                format!("  {}\u{2026}", &desc[..desc_avail - 1])
-                            } else {
-                                format!("  {desc:desc_avail$}")
-                            };
+                            let desc_display =
+                                if desc.chars().count() > desc_avail && desc_avail > 1 {
+                                    let end: String = desc.chars().take(desc_avail - 1).collect();
+                                    format!("  {end}\u{2026}")
+                                } else {
+                                    format!("  {desc:desc_avail$}")
+                                };
                             spans.push(Span::styled(
                                 desc_display,
                                 Style::default().fg(self.theme.hint_desc_fg),

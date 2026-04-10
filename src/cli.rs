@@ -424,8 +424,9 @@ fn diff_providers(changes: &mut Vec<String>, defaults: &Config, current: &Config
 fn truncate_display(s: &str, max: usize) -> String {
     // For multiline values just show first line.
     let first_line = s.lines().next().unwrap_or(s);
-    if first_line.len() > max {
-        format!("{}...", &first_line[..max])
+    if first_line.chars().count() > max {
+        let truncated: String = first_line.chars().take(max).collect();
+        format!("{truncated}...")
     } else if s.contains('\n') {
         format!("{first_line}...")
     } else {
