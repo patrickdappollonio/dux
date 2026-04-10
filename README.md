@@ -1,92 +1,120 @@
 # dux
 
-`dux` is a terminal UI for managing AI coding sessions per git worktree.
+Your AI agents deserve a proper office. dux is a terminal UI that lets you run multiple AI coding agents side by side, each in its own git worktree, with full companion terminals, macros, commit generation, and a command palette that knows more tricks than you do.
 
-## How It Works
+No protocol layers. No adapters. No JSON-RPC. Just real CLIs running in real terminals.
 
-`dux` spawns AI CLI tools (`claude`, `codex`, `opencode`, `gemini`, or any terminal command) directly in a pseudo-terminal (PTY) and renders their output in real time. There is no protocol layer, no adapter binaries, and no JSON-RPC — just the official CLI running exactly as it would in your terminal.
+## Why dux?
 
-This means:
+Most AI coding tools give you one agent in one directory. dux gives you **unlimited agents across unlimited worktrees**, all visible at once. Spawn five agents on five branches and let them work in parallel. Fork a session to try a different approach without losing the original. Open companion terminals next to your agents for builds, tests, or just poking around.
 
-- **Bring any CLI.** Any AI coding tool that runs in a terminal works with dux. Configure the command and args in `config.toml` and you're set.
-- **No banning risks.** You're running the official CLI the way it was designed to be used — the same binary, the same auth, the same API calls.
-- **Full CLI feature support.** Hooks, MCP servers, skills, slash commands, permission dialogs, thinking indicators — everything the CLI supports works out of the box because dux is just hosting the real terminal session.
-- **Crash recovery.** If dux crashes, the agent process dies, but dux can reconnect in the same worktree. Providers with configured `resume_args` (like the built-in Claude, Codex, OpenCode, and Gemini defaults) can resume the CLI conversation for that folder/worktree.
-
-## Features
-
-- Left pane for projects and worktree sessions
-- Fork an existing agent session into a new worktree with the current files copied over
-- Center pane for live agent terminal output or file diffs
-- Right pane for changed files and diffs
-- Resizable panes with keyboard shortcuts and mouse drag
-- Collapsible project sidebar and git pane
-- Command palette with fuzzy search
-- Config written to `~/.config/dux/config.toml` (Linux) or `~/.dux/config.toml` (macOS)
-- Session metadata stored alongside the config directory
-- Per-session git worktrees with Docker-style branch names
+Every agent runs through a PTY — the same pseudo-terminal your shell uses. That means the CLI tool (Claude, Codex, Gemini, OpenCode, or literally anything else) runs exactly like it would in your regular terminal. Your MCP servers, hooks, skills, slash commands, permission dialogs — all of it works. We don't mess with your setup.
 
 ## Install
 
-Download the latest binary for your platform from the [GitHub Releases](https://github.com/patrickdappollonio/dux/releases) page. Extract the archive and place the `dux` binary somewhere on your `PATH` (e.g. `/usr/local/bin`).
+**Homebrew:**
 
-On first launch, `dux` creates the config file with the full default configuration and comments.
-
-## Config Management
-
-`dux config` provides subcommands for inspecting and managing the configuration file:
-
-- `dux config path` — print the config file path.
-- `dux config diff` — show settings that differ from defaults (summary view).
-- `dux config diff --raw` — show a unified diff against the default config.
-- `dux config reset` — remove config and logs so dux can recover from a broken or outdated configuration while keeping saved agents and their worktrees intact.
-- `dux config reset --all` — full factory reset: also remove `sessions.sqlite3` and the managed `worktrees/` directory.
-- `dux config regenerate` — preview a fresh default config (shows diff against current).
-- `dux config regenerate --yes` — overwrite the config file with fresh defaults.
-
-## Provider Setup
-
-The provider commands in `config.toml` point to the CLI tools you want dux to run. By default, `claude`, `codex`, `opencode`, and `gemini` are configured, and new sessions start with `claude` unless you override it per project or in `[defaults]`. dux launches the configured command in a PTY inside the session's worktree directory, so the CLI tool sees the worktree as its working directory.
-
-To use a different CLI tool, set the `command` field in the `[providers.<name>]` section of your config.
-
-If your CLI supports resuming the most recent session for the current repository/folder, add `resume_args` for reconnects after a crash or detached session. If `resume_args` is omitted or empty, dux assumes that CLI does **not** support session resume and will relaunch it normally.
-
-```toml
-[providers.example]
-command = "example-agent"
-args = []
-resume_args = ["resume", "--last"]
+```bash
+brew install patrickdappollonio/tap/dux
 ```
 
-## Logging
+**Binary download:**
 
-`dux` writes runtime logs under the config directory. Log settings live in the `[logging]` section of the config file.
+Grab the latest release for your platform from the [Releases](https://github.com/patrickdappollonio/dux/releases) page. Extract it, drop the `dux` binary somewhere on your `PATH`, and run it. On first launch, dux creates a fully commented config file — that file *is* the documentation.
 
-- `level = "error" | "info" | "debug"`
-- `path = "dux.log"` uses a path relative to the config directory
-- absolute paths also work if you want the log elsewhere
+## How It Works
+
+dux organizes work around **projects** (git repos) and **agents** (worktree sessions). When you create an agent, dux branches off a new git worktree so the agent has its own isolated copy of the code. No conflicts with your main checkout, no stepping on other agents' changes.
+
+The interface has three panes:
+
+- **Left** — your projects and agent sessions
+- **Center** — the agent's live terminal output (or a file diff)
+- **Right** — changed files, staging, and diffs
+
+Tab between panes. Resize them with keyboard or mouse. Collapse the sidebar or git pane when you want more room. Go fullscreen with interactive mode. It's your layout.
+
+## Bring Any CLI
+
+Any terminal command can be a provider. The four defaults — Claude, Codex, Gemini, and OpenCode — are pre-configured, but adding your own is a config-only change:
+
+```toml
+[providers.my-agent]
+command = "my-cool-agent"
+args = ["--some-flag"]
+resume_args = ["--continue"]
+```
+
+Set `resume_args` and dux can reconnect to detached or crashed sessions. Omit it if your CLI doesn't support resuming — dux will just relaunch it.
+
+Cycle through providers on the fly with a single keypress, or set a default per-project.
+
+## Macros
+
+Tired of typing the same prompt over and over? Turn it into a macro. Macros are reusable text snippets you trigger from a quick-select bar — search by name, hit enter, and the text gets pasted into the active pane.
+
+```toml
+[macros]
+"Review" = { text = "review this code for bugs and security issues", surface = "agent" }
+"Build" = { text = "cargo build --release 2>&1", surface = "terminal" }
+"Ship it" = { text = "run all tests, fix failures, then commit", surface = "agent" }
+```
+
+Each macro can be scoped to the agent pane, the companion terminal, or both.
+
+## Git Integration
+
+The right pane is a full git staging area. Stage and unstage files, view syntax-highlighted diffs, write commit messages, push, and pull — all without leaving dux.
+
+**AI commit messages:** Stage your changes, hit a key, and dux sends the diff to your provider in oneshot mode. It drafts a commit message using Conventional Commits, you tweak it (or don't), and commit. The prompt is fully customizable per-project.
+
+**PR tracking:** With the `gh` CLI installed, dux tracks pull requests for your agent branches and shows status pills right in the interface.
+
+## Companion Terminals
+
+Each agent gets its own companion terminal — a separate shell session in the same worktree. Use it for builds, tests, git operations, or anything else you'd normally do in a terminal. You can spawn multiple companion terminals per agent.
+
+## Forking Sessions
+
+See an agent going down the wrong path? Fork it. dux creates a new worktree with the current files copied over so you can try a different approach without losing the original session. It's branching, but for your AI conversations.
+
+## Command Palette
+
+Press the palette key and you get fuzzy-searchable access to every action in dux — including features that don't have dedicated keybindings. Sort agents, toggle UI elements, open the resource monitor, rename sessions, edit macros, and more. If you forget a keybinding, just open the palette.
+
+## Configuration
+
+The config file at `~/.config/dux/config.toml` (Linux) or `~/.dux/config.toml` (macOS) is exhaustively commented. Every setting is explained inline — you should never need to leave the file to understand an option. Every keybinding is rebindable. Every pane width, scrollback limit, and default provider is configurable.
+
+```bash
+dux config path          # Print the config file path
+dux config diff          # Show what you've changed from defaults
+dux config diff --raw    # Unified diff against the default config
+dux config reset         # Remove config and logs (keeps agents)
+dux config reset --all   # Full factory reset
+dux config regenerate    # Preview a fresh default config
+```
+
+Override the config directory with the `DUX_HOME` environment variable.
 
 ## Keybindings
 
-All keybindings are configured in the `[keys]` section of `config.toml`. On first launch, every binding is written out with its default value and a description comment.
-
-Key format: single characters (`"j"`), special names (`"enter"`, `"space"`, `"pageup"`, `"shift-tab"`, `"esc"`), or modifier combos (`"ctrl-d"`, `"ctrl-p"`).
-
-Each action maps to an array of key combos. For example, to rebind quit from `q`/`ctrl-c` to just `ctrl-q`:
+All keybindings live in the `[keys]` section of the config. Key format supports single characters (`"j"`), special names (`"enter"`, `"pageup"`, `"shift-tab"`), and modifier combos (`"ctrl-d"`, `"ctrl-p"`). Each action takes an array of key combos:
 
 ```toml
 [keys]
 quit = ["ctrl-q"]
+open_palette = ["ctrl-k"]
 ```
 
-The `show_terminal_keys` option controls whether hints for terminal-native keys (like `ctrl-j` for newline) appear in the UI. These keys work regardless of this setting — dux documents them but does not control them.
+Press `?` in the app for the full keybinding reference. The help overlay is the authoritative source — this README intentionally doesn't list individual bindings because they're yours to change.
+
+## Logging
+
+Logs go to `dux.log` in the config directory. Control the level in your config:
 
 ```toml
-[keys]
-show_terminal_keys = false
+[logging]
+level = "info"   # "error", "info", or "debug"
+path = "dux.log" # relative to config dir, or use an absolute path
 ```
-
-Text input keys (Backspace, typing characters, Enter in the commit editor) and PTY passthrough keys in interactive mode are not rebindable.
-
-Invalid key strings cause the app to refuse to start with a clear error pointing to the broken entry.
