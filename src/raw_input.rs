@@ -1,4 +1,4 @@
-use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 /// Returns `true` if the byte sequence is an SGR mouse event (`\x1b[<…M` or
 /// `\x1b[<…m`).
@@ -38,6 +38,18 @@ pub fn parse_sgr_mouse(seq: &[u8]) -> Option<MouseEvent> {
     let is_motion = cb & 32 != 0;
     let button_bits = cb & 0b11000011; // mask out motion bit (bit 5) and modifier bits (4,3)
 
+    // Extract modifier keys from SGR button byte (bits 2, 3, 4).
+    let mut modifiers = KeyModifiers::empty();
+    if cb & 4 != 0 {
+        modifiers |= KeyModifiers::SHIFT;
+    }
+    if cb & 8 != 0 {
+        modifiers |= KeyModifiers::ALT;
+    }
+    if cb & 16 != 0 {
+        modifiers |= KeyModifiers::CONTROL;
+    }
+
     let kind = if cb & 64 != 0 {
         // Scroll events.
         match button_bits & 0x03 {
@@ -65,7 +77,7 @@ pub fn parse_sgr_mouse(seq: &[u8]) -> Option<MouseEvent> {
                     kind: MouseEventKind::Moved,
                     column,
                     row,
-                    modifiers: crossterm::event::KeyModifiers::empty(),
+                    modifiers,
                 });
             }
             _ => return None,
@@ -85,7 +97,7 @@ pub fn parse_sgr_mouse(seq: &[u8]) -> Option<MouseEvent> {
         kind,
         column,
         row,
-        modifiers: crossterm::event::KeyModifiers::empty(),
+        modifiers,
     })
 }
 
@@ -532,5 +544,66 @@ mod tests {
         assert!(!is_sgr_mouse(b"\x1b[A"));
         assert!(!is_sgr_mouse(b"\x1b[5~"));
         assert!(parse_sgr_mouse(b"\x1b[A").is_none());
+    }
+
+    #[test]
+    fn parse_sgr_mouse_no_modifiers() {
+        // Left click at (50,10): ESC [ < 0 ; 50 ; 10 M
+        let seq = b"\x1b[<0;50;10M";
+        let ev = parse_sgr_mouse(seq).unwrap();
+        assert_eq!(ev.kind, MouseEventKind::Down(MouseButton::Left));
+        assert_eq!(ev.column, 49);
+        assert_eq!(ev.row, 9);
+        assert!(ev.modifiers.is_empty());
+    }
+
+    #[test]
+    fn parse_sgr_mouse_shift_modifier() {
+        // Shift+left click: cb = 0 | 4 = 4
+        let seq = b"\x1b[<4;10;5M";
+        let ev = parse_sgr_mouse(seq).unwrap();
+        assert_eq!(ev.kind, MouseEventKind::Down(MouseButton::Left));
+        assert!(ev.modifiers.contains(KeyModifiers::SHIFT));
+        assert!(!ev.modifiers.contains(KeyModifiers::ALT));
+        assert!(!ev.modifiers.contains(KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn parse_sgr_mouse_ctrl_modifier() {
+        // Ctrl+left click: cb = 0 | 16 = 16
+        let seq = b"\x1b[<16;10;5M";
+        let ev = parse_sgr_mouse(seq).unwrap();
+        assert_eq!(ev.kind, MouseEventKind::Down(MouseButton::Left));
+        assert!(!ev.modifiers.contains(KeyModifiers::SHIFT));
+        assert!(ev.modifiers.contains(KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn parse_sgr_mouse_shift_alt_ctrl() {
+        // All modifiers: cb = 0 | 4 | 8 | 16 = 28
+        let seq = b"\x1b[<28;10;5M";
+        let ev = parse_sgr_mouse(seq).unwrap();
+        assert_eq!(ev.kind, MouseEventKind::Down(MouseButton::Left));
+        assert!(ev.modifiers.contains(KeyModifiers::SHIFT));
+        assert!(ev.modifiers.contains(KeyModifiers::ALT));
+        assert!(ev.modifiers.contains(KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn parse_sgr_mouse_shift_drag() {
+        // Shift+left drag: cb = 32 (motion) | 4 (shift) = 36
+        let seq = b"\x1b[<36;20;10M";
+        let ev = parse_sgr_mouse(seq).unwrap();
+        assert_eq!(ev.kind, MouseEventKind::Drag(MouseButton::Left));
+        assert!(ev.modifiers.contains(KeyModifiers::SHIFT));
+    }
+
+    #[test]
+    fn parse_sgr_mouse_shift_release() {
+        // Shift+left release: cb = 4, final byte = 'm'
+        let seq = b"\x1b[<4;10;5m";
+        let ev = parse_sgr_mouse(seq).unwrap();
+        assert_eq!(ev.kind, MouseEventKind::Up(MouseButton::Left));
+        assert!(ev.modifiers.contains(KeyModifiers::SHIFT));
     }
 }

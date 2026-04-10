@@ -984,6 +984,13 @@ impl App {
                     let ratatui_cell = &mut buf[(x, y)];
                     ratatui_cell.set_symbol(&cell.symbol);
                     ratatui_cell.set_style(style);
+
+                    // Overlay selection highlight if this cell is selected.
+                    if let Some(sel) = &self.terminal_selection {
+                        if sel.contains(cell.row, cell.col) {
+                            ratatui_cell.set_style(self.theme.selection_style());
+                        }
+                    }
                 }
 
                 // Render cursor if in input mode.
