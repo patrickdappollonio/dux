@@ -367,6 +367,28 @@ fn split_spans_at(spans: &[Span<'static>], col: usize) -> (Vec<Span<'static>>, V
     (left, right)
 }
 
+/// Build a continuation gutter from real gutter spans: replace every character
+/// with a space except `│`, which is kept with its original style. This keeps
+/// the gutter separator visually connected on wrapped lines.
+fn blank_gutter_keeping_separator(gutter_spans: &[Span<'static>]) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(gutter_spans.len());
+    for span in gutter_spans {
+        if span.content.contains('│') {
+            // Rebuild the span: spaces for every character except │.
+            let text: String = span
+                .content
+                .chars()
+                .map(|c| if c == '│' { '│' } else { ' ' })
+                .collect();
+            out.push(Span::styled(text, span.style));
+        } else {
+            let blanked: String = " ".repeat(span.content.chars().count());
+            out.push(Span::styled(blanked, span.style));
+        }
+    }
+    out
+}
+
 /// Wrap pre-rendered diff lines so that continuation lines are indented to
 /// align with the content column (past the gutter).
 ///
@@ -382,7 +404,6 @@ pub fn wrap_diff_lines(
     }
 
     let content_width = total_width - gutter_width;
-    let blank_gutter: String = " ".repeat(gutter_width);
     let mut out: Vec<Line<'static>> = Vec::with_capacity(lines.len());
 
     for line in lines {
@@ -394,6 +415,10 @@ pub fn wrap_diff_lines(
 
         // Separate gutter spans from content spans.
         let (gutter_spans, content_spans) = split_spans_at(&line.spans, gutter_width);
+
+        // Build continuation gutter: blank out all characters except the │
+        // separator so the gutter column stays visually connected.
+        let continuation_gutter = blank_gutter_keeping_separator(&gutter_spans);
 
         // Split content into chunks of content_width.
         let mut remaining = content_spans;
@@ -410,7 +435,7 @@ pub fn wrap_diff_lines(
             let mut row_spans: Vec<Span<'static>> = if first {
                 gutter_spans.clone()
             } else {
-                vec![Span::raw(blank_gutter.clone())]
+                continuation_gutter.clone()
             };
             row_spans.extend(chunk);
             out.push(Line::from(row_spans));
@@ -726,6 +751,29 @@ mod tests {
         assert_eq!(wrapped[0].to_string(), "Gabcd");
         assert_eq!(wrapped[1].to_string(), " efgh");
         assert_eq!(wrapped[2].to_string(), " ijkl");
+    }
+
+    #[test]
+    fn wrap_diff_lines_preserves_separator_on_continuation() {
+        // Realistic gutter: "1 2 " (numbers) + "│" (sep) + "+content_that_is_long"
+        let gutter_style = Style::default().fg(Color::Gray);
+        let sep_style = Style::default().fg(Color::DarkGray);
+        let lines = vec![Line::from(vec![
+            Span::styled("1 2 ", gutter_style),
+            Span::styled("│", sep_style),
+            Span::raw("+abcdefghijklmno"),
+        ])];
+        // gutter_width = 6 (4 for numbers + 1 for │ + 1 for prefix)
+        // total_width = 16, content_width = 10
+        let wrapped = wrap_diff_lines(&lines, 16, 6);
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[0].to_string(), "1 2 │+abcdefghij");
+        // Continuation: blanked numbers, │ preserved, space for prefix
+        assert_eq!(wrapped[1].to_string(), "    │ klmno");
+        // Verify the │ span kept its style.
+        let cont_spans = &wrapped[1].spans;
+        let sep_span = cont_spans.iter().find(|s| s.content.contains('│')).unwrap();
+        assert_eq!(sep_span.style, sep_style);
     }
 
     #[test]
