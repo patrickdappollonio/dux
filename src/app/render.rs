@@ -1656,12 +1656,59 @@ impl App {
 
         // Build help content lines.
         let mut lines: Vec<Line> = Vec::new();
+        let content_width = content_area.width as usize;
 
-        // Config banner
+        let banner_style = Style::default()
+            .fg(self.theme.help_banner_fg)
+            .bg(self.theme.help_banner_bg)
+            .add_modifier(Modifier::BOLD);
+        let body_style = Style::default().fg(self.theme.help_body_fg);
+
+        // Helper: push a full-width banner line.
+        let push_banner = |lines: &mut Vec<Line>, title: &str, width: usize| {
+            let padding = width.saturating_sub(title.chars().count() + 3);
+            let text = format!(" {title}{}", " ".repeat(padding));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(text, banner_style)));
+            lines.push(Line::from(""));
+        };
+
+        // ── About dux ──────────────────────────────────────────
+        push_banner(&mut lines, "About dux", content_width);
+        lines.push(Line::from(Span::styled(
+            "dux is a terminal UI for orchestrating AI coding agents.",
+            body_style,
+        )));
+        lines.push(Line::from(Span::styled(
+            "Each project maps to a git worktree, and you can spawn",
+            body_style,
+        )));
+        lines.push(Line::from(Span::styled(
+            "unlimited agents — and unlimited companion terminals for",
+            body_style,
+        )));
+        lines.push(Line::from(Span::styled(
+            "each agent — all running side by side.",
+            body_style,
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Any CLI tool can be a provider: Claude, Codex, Gemini,",
+            body_style,
+        )));
+        lines.push(Line::from(Span::styled(
+            "OpenCode, or anything else you configure.",
+            body_style,
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Every keybinding shown below is fully rebindable.",
+            body_style,
+        )));
         lines.push(Line::from(vec![
             Span::styled(
-                "All keybindings are configurable. See ",
-                Style::default().fg(self.theme.hint_desc_fg),
+                "Your config file is self-documented — open it and explore: ",
+                body_style,
             ),
             Span::styled(
                 self.paths.config_path.display().to_string(),
@@ -1671,9 +1718,14 @@ impl App {
             ),
         ]));
 
+        // ── Keybindings ─────────────────────────────────────────
+        push_banner(&mut lines, "Keybindings", content_width);
+
         let help_bindings = self.bindings.help_sections();
-        for (section, bindings) in &help_bindings {
-            lines.push(Line::from(""));
+        for (i, (section, bindings)) in help_bindings.iter().enumerate() {
+            if i > 0 {
+                lines.push(Line::from(""));
+            }
             lines.push(Line::from(Span::styled(
                 section.to_string(),
                 Style::default()
@@ -1692,8 +1744,11 @@ impl App {
                 lines.push(Line::from(spans));
             }
         }
+
+        // ── Reference ───────────────────────────────────────────
+        push_banner(&mut lines, "Reference", content_width);
+
         // Key notation legend
-        lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Key notation",
             Style::default()
