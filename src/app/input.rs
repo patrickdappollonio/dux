@@ -3626,7 +3626,7 @@ impl App {
         let text = lines.join("\n");
         if !text.is_empty() {
             let _ = self.clipboard.copy_text(&text, &self.worker_tx);
-            self.set_info("Copied selection to clipboard.");
+            self.set_info("Terminal text copied to clipboard.");
         }
     }
 }
@@ -4589,13 +4589,12 @@ mod tests {
         app.drain_events();
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
-        assert!(app.status.text().contains(&worktree_path));
+        assert_eq!(app.status.text(), "Agent's path copied to clipboard.");
     }
 
     #[test]
     fn copy_path_copies_selected_project_path() {
         let mut app = test_app(default_bindings());
-        let project_path = app.projects[0].path.clone();
         app.selected_left = 0;
         app.clipboard = Clipboard::from_fn(clipboard_ok);
 
@@ -4604,7 +4603,7 @@ mod tests {
         app.drain_events();
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
-        assert!(app.status.text().contains(&project_path));
+        assert_eq!(app.status.text(), "Agent's path copied to clipboard.");
     }
 
     #[test]
