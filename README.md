@@ -8,7 +8,7 @@ No protocol layers. No adapters. No JSON-RPC. Just real CLIs running in real ter
 
 Most AI coding tools give you one agent in one directory. dux gives you **unlimited agents across unlimited worktrees**, all visible at once. Spawn five agents on five branches and let them work in parallel. Fork a session to try a different approach without losing the original. Open companion terminals next to your agents for builds, tests, or just poking around.
 
-Every agent runs through a PTY — the same pseudo-terminal your shell uses. That means the CLI tool (Claude, Codex, Gemini, OpenCode, or literally anything else) runs exactly like it would in your regular terminal. Your MCP servers, hooks, skills, slash commands, permission dialogs — all of it works. We don't mess with your setup.
+Every agent runs through a PTY, the same pseudo-terminal your shell uses. That means the CLI tool (Claude, Codex, Gemini, OpenCode, or literally anything else) runs exactly like it would in your regular terminal. Your MCP servers, hooks, skills, slash commands, and permission dialogs all work. We don't mess with your setup.
 
 ## Install
 
@@ -20,7 +20,7 @@ brew install patrickdappollonio/tap/dux
 
 **Binary download:**
 
-Grab the latest release for your platform from the [Releases](https://github.com/patrickdappollonio/dux/releases) page. Extract it, drop the `dux` binary somewhere on your `PATH`, and run it. On first launch, dux creates a fully commented config file — that file *is* the documentation.
+Grab the latest release for your platform from the [Releases](https://github.com/patrickdappollonio/dux/releases) page. Extract it, drop the `dux` binary somewhere on your `PATH`, and run it. On first launch, dux creates a fully commented config file. That file *is* the documentation.
 
 ## How It Works
 
@@ -28,15 +28,15 @@ dux organizes work around **projects** (git repos) and **agents** (worktree sess
 
 The interface has three panes:
 
-- **Left** — your projects and agent sessions
-- **Center** — the agent's live terminal output (or a file diff)
-- **Right** — changed files, staging, and diffs
+- **Left:** your projects and agent sessions
+- **Center:** the agent's live terminal output (or a file diff)
+- **Right:** changed files, staging, and diffs
 
 Tab between panes. Resize them with keyboard or mouse. Collapse the sidebar or git pane when you want more room. Go fullscreen with interactive mode. It's your layout.
 
 ## Bring Any CLI
 
-Any terminal command can be a provider. The four defaults — Claude, Codex, Gemini, and OpenCode — are pre-configured, but adding your own is a config-only change:
+Any terminal command can be a provider. The four defaults (Claude, Codex, Gemini, and OpenCode) are pre-configured, but adding your own is a config-only change:
 
 ```toml
 [providers.my-agent]
@@ -45,13 +45,13 @@ args = ["--some-flag"]
 resume_args = ["--continue"]
 ```
 
-Set `resume_args` and dux can reconnect to detached or crashed sessions. Omit it if your CLI doesn't support resuming — dux will just relaunch it.
+Set `resume_args` and dux can reconnect to detached or crashed sessions. Omit it if your CLI doesn't support resuming; dux will just relaunch it.
 
 Cycle through providers on the fly with a single keypress, or set a default per-project.
 
 ## Macros
 
-Tired of typing the same prompt over and over? Turn it into a macro. Macros are reusable text snippets you trigger from a quick-select bar — search by name, hit enter, and the text gets pasted into the active pane.
+Tired of typing the same prompt over and over? Turn it into a macro. Macros are reusable text snippets you trigger from a quick-select bar. Search by name, hit enter, and the text gets pasted into the active pane.
 
 ```toml
 [macros]
@@ -64,7 +64,7 @@ Each macro can be scoped to the agent pane, the companion terminal, or both.
 
 ## Git Integration
 
-The right pane is a full git staging area. Stage and unstage files, view syntax-highlighted diffs, write commit messages, push, and pull — all without leaving dux.
+The right pane is a full git staging area. Stage and unstage files, view syntax-highlighted diffs, write commit messages, push, and pull, all without leaving dux.
 
 **AI commit messages:** Stage your changes, hit a key, and dux sends the diff to your provider in oneshot mode. It drafts a commit message using Conventional Commits, you tweak it (or don't), and commit. The prompt is fully customizable per-project.
 
@@ -72,7 +72,7 @@ The right pane is a full git staging area. Stage and unstage files, view syntax-
 
 ## Companion Terminals
 
-Each agent gets its own companion terminal — a separate shell session in the same worktree. Use it for builds, tests, git operations, or anything else you'd normally do in a terminal. You can spawn multiple companion terminals per agent.
+Each agent gets its own companion terminal: a separate shell session in the same worktree. Use it for builds, tests, git operations, or anything else you'd normally do in a terminal. You can spawn multiple companion terminals per agent.
 
 ## Forking Sessions
 
@@ -80,11 +80,11 @@ See an agent going down the wrong path? Fork it. dux creates a new worktree with
 
 ## Command Palette
 
-Press the palette key and you get fuzzy-searchable access to every action in dux — including features that don't have dedicated keybindings. Sort agents, toggle UI elements, open the resource monitor, rename sessions, edit macros, and more. If you forget a keybinding, just open the palette.
+Press the palette key and you get fuzzy-searchable access to every action in dux, including features that don't have dedicated keybindings. Sort agents, toggle UI elements, open the resource monitor, rename sessions, edit macros, and more. If you forget a keybinding, just open the palette.
 
 ## Configuration
 
-The config file at `~/.config/dux/config.toml` (Linux) or `~/.dux/config.toml` (macOS) is exhaustively commented. Every setting is explained inline — you should never need to leave the file to understand an option. Every keybinding is rebindable. Every pane width, scrollback limit, and default provider is configurable.
+The config file at `~/.config/dux/config.toml` (Linux) or `~/.dux/config.toml` (macOS) is exhaustively commented. Every setting is explained inline, so you should never need to leave the file to understand an option. Every keybinding is rebindable. Every pane width, scrollback limit, and default provider is configurable.
 
 ```bash
 dux config path          # Print the config file path
@@ -107,7 +107,7 @@ quit = ["ctrl-q"]
 open_palette = ["ctrl-k"]
 ```
 
-Press `?` in the app for the full keybinding reference. The help overlay is the authoritative source — this README intentionally doesn't list individual bindings because they're yours to change.
+Press `?` in the app for the full keybinding reference. The help overlay is the authoritative source. This README intentionally doesn't list individual bindings because they're yours to change.
 
 ## Logging
 
