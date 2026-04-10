@@ -1741,6 +1741,10 @@ impl App {
                     let confirm = confirm_prompt.confirm_selected;
                     return Ok(self.resolve_confirm_kill_running(confirm));
                 }
+                _ if key.code == KeyCode::Char(' ') => {
+                    let confirm = confirm_prompt.confirm_selected;
+                    return Ok(self.resolve_confirm_kill_running(confirm));
+                }
                 _ => {}
             }
             return Ok(false);
@@ -1756,6 +1760,10 @@ impl App {
                     *confirm_selected = !*confirm_selected;
                 }
                 Some(Action::Confirm) => {
+                    let confirm = *confirm_selected;
+                    return Ok(self.resolve_confirm_delete_agent(confirm));
+                }
+                _ if key.code == KeyCode::Char(' ') => {
                     let confirm = *confirm_selected;
                     return Ok(self.resolve_confirm_delete_agent(confirm));
                 }
@@ -1776,6 +1784,10 @@ impl App {
                     let confirm = *confirm_selected;
                     return Ok(self.resolve_confirm_quit(confirm));
                 }
+                _ if key.code == KeyCode::Char(' ') => {
+                    let confirm = *confirm_selected;
+                    return Ok(self.resolve_confirm_quit(confirm));
+                }
                 _ => {}
             }
         }
@@ -1790,6 +1802,10 @@ impl App {
                     *confirm_selected = !*confirm_selected;
                 }
                 Some(Action::Confirm) => {
+                    let confirm = *confirm_selected;
+                    return Ok(self.resolve_confirm_discard_file(confirm));
+                }
+                _ if key.code == KeyCode::Char(' ') => {
                     let confirm = *confirm_selected;
                     return Ok(self.resolve_confirm_discard_file(confirm));
                 }
