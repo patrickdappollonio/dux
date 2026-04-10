@@ -729,7 +729,8 @@ pub(crate) enum WorkerEvent {
         entries: Vec<BrowserEntry>,
     },
     ClipboardCopyCompleted {
-        path: String,
+        /// Human-readable success message shown in the status bar.
+        label: String,
         result: Result<(), String>,
     },
     BranchSyncReady(Vec<(String, String)>),

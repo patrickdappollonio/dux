@@ -3625,8 +3625,11 @@ impl App {
 
         let text = lines.join("\n");
         if !text.is_empty() {
-            let _ = self.clipboard.copy_text(&text, &self.worker_tx);
-            self.set_info("Terminal text copied to clipboard.");
+            let _ = self.clipboard.copy_text(
+                &text,
+                "Terminal text copied to clipboard.",
+                &self.worker_tx,
+            );
         }
     }
 }
@@ -4632,7 +4635,7 @@ mod tests {
         app.drain_events();
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
-        assert!(app.status.text().contains("Copy path failed"));
+        assert!(app.status.text().contains("Clipboard copy failed"));
         assert!(app.status.text().contains("linux clipboard unavailable"));
     }
 

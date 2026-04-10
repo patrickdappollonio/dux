@@ -7,6 +7,7 @@ use crate::app::WorkerEvent;
 /// Request sent from the main thread to the clipboard worker.
 struct CopyRequest {
     text: String,
+    label: String,
     worker_tx: mpsc::Sender<WorkerEvent>,
 }
 
@@ -34,14 +35,19 @@ impl Clipboard {
 
     /// Send a clipboard copy request. Returns immediately — the result will
     /// arrive later as a `WorkerEvent::ClipboardCopyCompleted`.
+    ///
+    /// `label` is the human-readable success message shown in the status bar
+    /// when the copy completes.
     pub(crate) fn copy_text(
         &self,
         text: &str,
+        label: &str,
         worker_tx: &mpsc::Sender<WorkerEvent>,
     ) -> Result<()> {
         self.tx
             .send(CopyRequest {
                 text: text.to_string(),
+                label: label.to_string(),
                 worker_tx: worker_tx.clone(),
             })
             .map_err(|_| anyhow!("Clipboard worker thread is not running"))?;
@@ -58,7 +64,7 @@ impl Clipboard {
                 while let Ok(req) = rx.recv() {
                     let result = (copy_text_fn)(&req.text).map_err(|e| e.to_string());
                     let _ = req.worker_tx.send(WorkerEvent::ClipboardCopyCompleted {
-                        path: req.text,
+                        label: req.label,
                         result,
                     });
                 }
@@ -78,7 +84,7 @@ fn clipboard_worker(rx: mpsc::Receiver<CopyRequest>) {
             let msg = format!("Failed to access clipboard: {e}");
             for req in rx {
                 let _ = req.worker_tx.send(WorkerEvent::ClipboardCopyCompleted {
-                    path: req.text,
+                    label: req.label,
                     result: Err(msg.clone()),
                 });
             }
@@ -91,7 +97,7 @@ fn clipboard_worker(rx: mpsc::Receiver<CopyRequest>) {
             .set_text(&req.text)
             .map_err(|e| format!("Failed to copy to clipboard: {e}"));
         let _ = req.worker_tx.send(WorkerEvent::ClipboardCopyCompleted {
-            path: req.text,
+            label: req.label,
             result,
         });
     }
@@ -105,12 +111,12 @@ mod tests {
     fn clipboard_from_fn_sends_and_receives() {
         let (worker_tx, worker_rx) = mpsc::channel();
         let clipboard = Clipboard::from_fn(|_| Ok(()));
-        clipboard.copy_text("hello", &worker_tx).unwrap();
+        clipboard.copy_text("hello", "Copied.", &worker_tx).unwrap();
 
         let event = worker_rx.recv().unwrap();
         match event {
-            WorkerEvent::ClipboardCopyCompleted { path, result } => {
-                assert_eq!(path, "hello");
+            WorkerEvent::ClipboardCopyCompleted { label, result } => {
+                assert_eq!(label, "Copied.");
                 assert!(result.is_ok());
             }
             _ => panic!("unexpected event"),
@@ -121,12 +127,12 @@ mod tests {
     fn clipboard_from_fn_reports_errors() {
         let (worker_tx, worker_rx) = mpsc::channel();
         let clipboard = Clipboard::from_fn(|_| Err(anyhow!("test error")));
-        clipboard.copy_text("hello", &worker_tx).unwrap();
+        clipboard.copy_text("hello", "Copied.", &worker_tx).unwrap();
 
         let event = worker_rx.recv().unwrap();
         match event {
-            WorkerEvent::ClipboardCopyCompleted { path, result } => {
-                assert_eq!(path, "hello");
+            WorkerEvent::ClipboardCopyCompleted { label, result } => {
+                assert_eq!(label, "Copied.");
                 assert!(result.unwrap_err().contains("test error"));
             }
             _ => panic!("unexpected event"),

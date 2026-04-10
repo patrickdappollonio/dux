@@ -729,7 +729,11 @@ impl App {
         };
         match path {
             Some(p) => {
-                match self.clipboard.copy_text(&p, &self.worker_tx) {
+                match self.clipboard.copy_text(
+                    &p,
+                    "Agent's path copied to clipboard.",
+                    &self.worker_tx,
+                ) {
                     Ok(()) => self.set_busy("Copying path to clipboard…"),
                     Err(e) => self.set_error(format!("Copy path failed: {e}")),
                 }
