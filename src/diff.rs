@@ -29,6 +29,9 @@ impl SyntaxCache {
 /// Pre-rendered diff ready for display.
 pub struct DiffOutput {
     pub lines: Vec<Line<'static>>,
+    /// Display-column width of the gutter (line numbers + separator + prefix).
+    /// Zero when line numbers are disabled.
+    pub gutter_width: usize,
 }
 
 /// Compute a syntax-highlighted, unified diff for a single file.
@@ -50,6 +53,7 @@ pub fn diff_file(
     if old_bytes == new_bytes {
         return Ok(DiffOutput {
             lines: vec![Line::from("No changes.")],
+            gutter_width: 0,
         });
     }
 
@@ -218,7 +222,18 @@ pub fn diff_file(
         lines.push(Line::from("No text diff available."));
     }
 
-    Ok(DiffOutput { lines })
+    // Gutter width includes line numbers, separator, and the +/-/space prefix.
+    // Layout: "{old_ln} {new_ln} │{prefix}" = 2*ln_width + 2 + 1 + 1 = 2*ln_width + 4.
+    let gutter_width = if show_line_numbers {
+        2 * ln_width + 4
+    } else {
+        0
+    };
+
+    Ok(DiffOutput {
+        lines,
+        gutter_width,
+    })
 }
 
 fn is_renderable_text(bytes: &[u8]) -> bool {
@@ -250,6 +265,7 @@ fn binary_diff_output(
             Line::from(format!("New size: {new_size} bytes")),
             Line::from("No text diff available for binary or non-UTF-8 content."),
         ],
+        gutter_width: 0,
     }
 }
 
@@ -303,6 +319,158 @@ fn expand_tabs(line: &str, tab_width: u16) -> String {
             col += 1;
         }
     }
+    out
+}
+
+/// Split a list of spans at a display-column boundary.
+///
+/// Returns `(left, right)` where `left` contains the first `col` display
+/// columns and `right` contains the remainder. Spans are split mid-span if
+/// the boundary falls inside one. Uses character iteration rather than byte
+/// slicing to handle multi-byte UTF-8 safely.
+fn split_spans_at(spans: &[Span<'static>], col: usize) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
+    let mut left: Vec<Span<'static>> = Vec::new();
+    let mut right: Vec<Span<'static>> = Vec::new();
+    let mut consumed: usize = 0;
+    let mut past_split = false;
+
+    for span in spans {
+        if past_split {
+            right.push(span.clone());
+            continue;
+        }
+
+        let span_width = span.content.chars().count();
+        if consumed + span_width <= col {
+            // Entire span fits in the left side.
+            left.push(span.clone());
+            consumed += span_width;
+            if consumed == col {
+                past_split = true;
+            }
+        } else {
+            // Split within this span.
+            let take = col - consumed;
+            let left_text: String = span.content.chars().take(take).collect();
+            let right_text: String = span.content.chars().skip(take).collect();
+            if !left_text.is_empty() {
+                left.push(Span::styled(left_text, span.style));
+            }
+            if !right_text.is_empty() {
+                right.push(Span::styled(right_text, span.style));
+            }
+            past_split = true;
+            consumed = col;
+        }
+    }
+
+    (left, right)
+}
+
+/// Build a continuation gutter from real gutter spans: replace every character
+/// with a space except `│`, which is kept with its original style. This keeps
+/// the gutter separator visually connected on wrapped lines.
+fn blank_gutter_keeping_separator(gutter_spans: &[Span<'static>]) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(gutter_spans.len());
+    for span in gutter_spans {
+        if span.content.contains('│') {
+            // Rebuild the span: spaces for every character except │.
+            let text: String = span
+                .content
+                .chars()
+                .map(|c| if c == '│' { '│' } else { ' ' })
+                .collect();
+            out.push(Span::styled(text, span.style));
+        } else {
+            let blanked: String = " ".repeat(span.content.chars().count());
+            out.push(Span::styled(blanked, span.style));
+        }
+    }
+    out
+}
+
+/// Find the best soft-break position within the first `max_col` characters of
+/// `spans`. Returns the column *after* the last space found, so the space stays
+/// on the current visual line and the next line starts with the following word.
+/// Returns `None` if no space exists within the window.
+fn find_soft_break(spans: &[Span<'static>], max_col: usize) -> Option<usize> {
+    let mut last_space_end: Option<usize> = None;
+    let mut col: usize = 0;
+    for span in spans {
+        for ch in span.content.chars() {
+            if col >= max_col {
+                return last_space_end;
+            }
+            if ch == ' ' {
+                last_space_end = Some(col + 1);
+            }
+            col += 1;
+        }
+    }
+    last_space_end
+}
+
+/// Wrap pre-rendered diff lines so that continuation lines are indented to
+/// align with the content column (past the gutter).
+///
+/// When `gutter_width` is 0 this is a no-op — the caller should fall back to
+/// `Paragraph::wrap()`.
+pub fn wrap_diff_lines(
+    lines: &[Line<'static>],
+    total_width: usize,
+    gutter_width: usize,
+) -> Vec<Line<'static>> {
+    if gutter_width == 0 || total_width <= gutter_width {
+        return lines.to_vec();
+    }
+
+    let content_width = total_width - gutter_width;
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(lines.len());
+
+    for line in lines {
+        let line_width = line.width();
+        if line_width <= total_width {
+            out.push(line.clone());
+            continue;
+        }
+
+        // Separate gutter spans from content spans.
+        let (gutter_spans, content_spans) = split_spans_at(&line.spans, gutter_width);
+
+        // Build continuation gutter: blank out all characters except the │
+        // separator so the gutter column stays visually connected.
+        let continuation_gutter = blank_gutter_keeping_separator(&gutter_spans);
+
+        // Split content into chunks of content_width.
+        let mut remaining = content_spans;
+        let mut first = true;
+        loop {
+            let remaining_width: usize = remaining.iter().map(|s| s.content.chars().count()).sum();
+            if remaining_width == 0 {
+                break;
+            }
+
+            let take = if remaining_width > content_width {
+                // Prefer breaking at a word boundary (after the last space).
+                find_soft_break(&remaining, content_width).unwrap_or(content_width)
+            } else {
+                remaining_width
+            };
+            let (chunk, rest) = split_spans_at(&remaining, take);
+
+            let mut row_spans: Vec<Span<'static>> = if first {
+                gutter_spans.clone()
+            } else {
+                continuation_gutter.clone()
+            };
+            row_spans.extend(chunk);
+            out.push(Line::from(row_spans));
+
+            remaining = rest;
+            first = false;
+        }
+    }
+
     out
 }
 
@@ -525,5 +693,252 @@ mod tests {
             !insert_line.contains('\t'),
             "tab characters must not appear in rendered output"
         );
+    }
+
+    #[test]
+    fn find_soft_break_returns_none_without_spaces() {
+        let spans = vec![Span::raw("abcdefgh")];
+        assert_eq!(find_soft_break(&spans, 5), None);
+    }
+
+    #[test]
+    fn find_soft_break_returns_position_after_last_space() {
+        let spans = vec![Span::raw("ab cd ef")];
+        // max_col = 7 → chars 0..6: "ab cd e"
+        // Spaces at col 2 and 5. Last space at col 5, so return 6.
+        assert_eq!(find_soft_break(&spans, 7), Some(6));
+    }
+
+    #[test]
+    fn find_soft_break_space_at_end_of_window() {
+        let spans = vec![Span::raw("abcde fgh")];
+        // max_col = 6 → chars 0..5: "abcde " — space at col 5, return 6.
+        assert_eq!(find_soft_break(&spans, 6), Some(6));
+    }
+
+    #[test]
+    fn find_soft_break_space_at_start() {
+        let spans = vec![Span::raw(" abcdefgh")];
+        // max_col = 5 → chars 0..4: " abcd" — space at col 0, return 1.
+        assert_eq!(find_soft_break(&spans, 5), Some(1));
+    }
+
+    #[test]
+    fn find_soft_break_across_multiple_spans() {
+        let spans = vec![Span::raw("ab "), Span::raw("cd "), Span::raw("efgh")];
+        // Combined: "ab cd efgh". max_col = 8 → chars 0..7: "ab cd ef"
+        // Spaces at col 2, 5. Return 6.
+        assert_eq!(find_soft_break(&spans, 8), Some(6));
+    }
+
+    #[test]
+    fn find_soft_break_only_spaces() {
+        let spans = vec![Span::raw("     ")];
+        // max_col = 3 → chars 0..2: "   " — last space at col 2, return 3.
+        assert_eq!(find_soft_break(&spans, 3), Some(3));
+    }
+
+    #[test]
+    fn find_soft_break_space_just_outside_window() {
+        // Space at col 5, but max_col = 5 means we only see cols 0..4.
+        let spans = vec![Span::raw("abcde fgh")];
+        assert_eq!(find_soft_break(&spans, 5), None);
+    }
+
+    #[test]
+    fn find_soft_break_with_multibyte_chars() {
+        // "a│b cd" — │ is 1 char. Positions: a=0, │=1, b=2, ' '=3, c=4, d=5
+        let spans = vec![Span::raw("a│b cd")];
+        assert_eq!(find_soft_break(&spans, 5), Some(4));
+    }
+
+    #[test]
+    fn split_spans_at_boundary() {
+        let spans = vec![Span::raw("abc"), Span::raw("defgh")];
+
+        // Split at span boundary (col 3).
+        let (left, right) = split_spans_at(&spans, 3);
+        let left_text: String = left.iter().map(|s| s.content.as_ref()).collect();
+        let right_text: String = right.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(left_text, "abc");
+        assert_eq!(right_text, "defgh");
+    }
+
+    #[test]
+    fn split_spans_at_mid_span() {
+        let spans = vec![Span::raw("abcdefgh")];
+
+        // Split in the middle (col 5).
+        let (left, right) = split_spans_at(&spans, 5);
+        let left_text: String = left.iter().map(|s| s.content.as_ref()).collect();
+        let right_text: String = right.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(left_text, "abcde");
+        assert_eq!(right_text, "fgh");
+    }
+
+    #[test]
+    fn split_spans_preserves_style() {
+        let style = Style::default().fg(Color::Red);
+        let spans = vec![Span::styled("abcdef", style)];
+
+        let (left, right) = split_spans_at(&spans, 3);
+        assert_eq!(left[0].style, style);
+        assert_eq!(right[0].style, style);
+        assert_eq!(left[0].content.as_ref(), "abc");
+        assert_eq!(right[0].content.as_ref(), "def");
+    }
+
+    #[test]
+    fn split_spans_with_multibyte_chars() {
+        // │ is U+2502 (3 bytes, 1 display column when counted by chars).
+        let spans = vec![Span::raw("a│b")];
+
+        let (left, right) = split_spans_at(&spans, 2);
+        let left_text: String = left.iter().map(|s| s.content.as_ref()).collect();
+        let right_text: String = right.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(left_text, "a│");
+        assert_eq!(right_text, "b");
+    }
+
+    #[test]
+    fn wrap_diff_lines_no_wrap_needed() {
+        let lines = vec![Line::from(vec![
+            Span::raw("123 "),
+            Span::raw("│"),
+            Span::raw(" content"),
+        ])];
+        // Total width is "123 │ content" = 14 chars. Width of 20 means no wrap.
+        let wrapped = wrap_diff_lines(&lines, 20, 5);
+        assert_eq!(wrapped.len(), 1);
+        assert_eq!(wrapped[0].to_string(), "123 │ content");
+    }
+
+    #[test]
+    fn wrap_diff_lines_wraps_with_gutter_indent() {
+        // Gutter = "12 " (3 cols), content = "abcdefghij" (10 cols), total = 13
+        let lines = vec![Line::from(vec![Span::raw("12 "), Span::raw("abcdefghij")])];
+        // Total width 8, gutter 3 → content width 5 → "abcde" + "fghij"
+        let wrapped = wrap_diff_lines(&lines, 8, 3);
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[0].to_string(), "12 abcde");
+        assert_eq!(wrapped[1].to_string(), "   fghij");
+    }
+
+    #[test]
+    fn wrap_diff_lines_multiple_wraps() {
+        // Gutter = "G" (1 col), content = "abcdefghijkl" (12 cols)
+        let lines = vec![Line::from(vec![Span::raw("G"), Span::raw("abcdefghijkl")])];
+        // Total width 5, gutter 1 → content width 4 → 3 visual lines
+        let wrapped = wrap_diff_lines(&lines, 5, 1);
+        assert_eq!(wrapped.len(), 3);
+        assert_eq!(wrapped[0].to_string(), "Gabcd");
+        assert_eq!(wrapped[1].to_string(), " efgh");
+        assert_eq!(wrapped[2].to_string(), " ijkl");
+    }
+
+    #[test]
+    fn wrap_diff_lines_preserves_separator_on_continuation() {
+        // Realistic gutter: "1 2 " (numbers) + "│" (sep) + "+content_that_is_long"
+        let gutter_style = Style::default().fg(Color::Gray);
+        let sep_style = Style::default().fg(Color::DarkGray);
+        let lines = vec![Line::from(vec![
+            Span::styled("1 2 ", gutter_style),
+            Span::styled("│", sep_style),
+            Span::raw("+abcdefghijklmno"),
+        ])];
+        // gutter_width = 6 (4 for numbers + 1 for │ + 1 for prefix)
+        // total_width = 16, content_width = 10
+        let wrapped = wrap_diff_lines(&lines, 16, 6);
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[0].to_string(), "1 2 │+abcdefghij");
+        // Continuation: blanked numbers, │ preserved, space for prefix
+        assert_eq!(wrapped[1].to_string(), "    │ klmno");
+        // Verify the │ span kept its style.
+        let cont_spans = &wrapped[1].spans;
+        let sep_span = cont_spans.iter().find(|s| s.content.contains('│')).unwrap();
+        assert_eq!(sep_span.style, sep_style);
+    }
+
+    #[test]
+    fn wrap_diff_lines_soft_wraps_at_spaces() {
+        // Gutter = "G│" (2 cols), content = "+hello world foobar" (19 cols)
+        let lines = vec![Line::from(vec![
+            Span::raw("G"),
+            Span::raw("│"),
+            Span::raw("+hello world foobar"),
+        ])];
+        // total_width = 14, gutter = 2, content_width = 12
+        // First 12 chars of content: "+hello world" — last space is at col 6,
+        // so soft break after it (col 7): "+hello " on first line,
+        // "world foobar" (12 chars, fits) on continuation.
+        let wrapped = wrap_diff_lines(&lines, 14, 2);
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[0].to_string(), "G│+hello ");
+        assert_eq!(wrapped[1].to_string(), " │world foobar");
+    }
+
+    #[test]
+    fn wrap_diff_lines_soft_wraps_with_multibyte() {
+        // Content has multi-byte │ mixed with spaces.
+        // Gutter = "G" (1 col), content = "a│b cdef ghij" (13 chars)
+        let lines = vec![Line::from(vec![Span::raw("G"), Span::raw("a│b cdef ghij")])];
+        // total_width = 8, gutter = 1, content_width = 7
+        // First 7 chars: "a│b cde" — space at col 3, soft break → take 4
+        // "a│b " on first line, remaining "cdef ghij" (9 chars)
+        // Next 7 chars: "cdef gh" — space at col 4, soft break → take 5
+        // "cdef " second line, remaining "ghij" (4 chars, fits)
+        let wrapped = wrap_diff_lines(&lines, 8, 1);
+        assert_eq!(wrapped.len(), 3);
+        assert_eq!(wrapped[0].to_string(), "Ga│b ");
+        assert_eq!(wrapped[1].to_string(), " cdef ");
+        assert_eq!(wrapped[2].to_string(), " ghij");
+    }
+
+    #[test]
+    fn wrap_diff_lines_hard_breaks_without_spaces() {
+        // No spaces in content → must hard-break.
+        let lines = vec![Line::from(vec![Span::raw("G"), Span::raw("abcdefghijkl")])];
+        let wrapped = wrap_diff_lines(&lines, 5, 1);
+        assert_eq!(wrapped.len(), 3);
+        assert_eq!(wrapped[0].to_string(), "Gabcd");
+        assert_eq!(wrapped[1].to_string(), " efgh");
+        assert_eq!(wrapped[2].to_string(), " ijkl");
+    }
+
+    #[test]
+    fn wrap_diff_lines_zero_gutter_is_noop() {
+        let lines = vec![Line::from("a long line that should not be touched")];
+        let wrapped = wrap_diff_lines(&lines, 10, 0);
+        assert_eq!(wrapped.len(), 1);
+        assert_eq!(wrapped[0].to_string(), lines[0].to_string());
+    }
+
+    #[test]
+    fn gutter_width_matches_line_numbers() {
+        let dir = setup_text_repo("gw.txt", "aaa\n", "aaa\nbbb\n");
+        let cache = SyntaxCache::new();
+
+        let with_ln = diff_file(
+            dir.path(),
+            "gw.txt",
+            &AppTheme::default_dark(),
+            &cache,
+            true,
+            4,
+        )
+        .unwrap();
+        // Max line is 2, so ln_width = 1. gutter_width = 2*1 + 4 = 6.
+        assert_eq!(with_ln.gutter_width, 6);
+
+        let without_ln = diff_file(
+            dir.path(),
+            "gw.txt",
+            &AppTheme::default_dark(),
+            &cache,
+            false,
+            4,
+        )
+        .unwrap();
+        assert_eq!(without_ln.gutter_width, 0);
     }
 }

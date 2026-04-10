@@ -604,8 +604,13 @@ impl App {
     }
 
     fn render_diff(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
-        let (lines, scroll) = match &self.center_mode {
-            CenterMode::Diff { lines, scroll, .. } => (Arc::clone(lines), *scroll),
+        let (lines, scroll, gutter_width) = match &self.center_mode {
+            CenterMode::Diff {
+                lines,
+                scroll,
+                gutter_width,
+                ..
+            } => (Arc::clone(lines), *scroll, *gutter_width),
             _ => return,
         };
 
@@ -626,26 +631,42 @@ impl App {
 
         self.last_diff_height = content_area.height;
 
-        // Compute visual line count accounting for wrapping.
         let w = content_area.width.max(1) as usize;
-        self.last_diff_visual_lines = lines
-            .iter()
-            .map(|l| {
-                let lw = l.width();
-                if lw <= w { 1u16 } else { lw.div_ceil(w) as u16 }
-            })
-            .sum();
 
-        // Clamp scroll so content never overflows past the last visual line.
-        let max_scroll = self
-            .last_diff_visual_lines
-            .saturating_sub(content_area.height);
-        let scroll = scroll.min(max_scroll);
+        if gutter_width > 0 {
+            // Gutter-aware wrapping: continuation lines are indented to align
+            // with the content column past the gutter.
+            let wrapped = crate::diff::wrap_diff_lines(&lines, w, gutter_width);
+            self.last_diff_visual_lines = wrapped.len() as u16;
 
-        Paragraph::new((*lines).clone())
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0))
-            .render(content_area, frame.buffer_mut());
+            let max_scroll = self
+                .last_diff_visual_lines
+                .saturating_sub(content_area.height);
+            let scroll = scroll.min(max_scroll);
+
+            Paragraph::new(wrapped)
+                .scroll((scroll, 0))
+                .render(content_area, frame.buffer_mut());
+        } else {
+            // No gutter — fall back to ratatui's built-in wrapping.
+            self.last_diff_visual_lines = lines
+                .iter()
+                .map(|l| {
+                    let lw = l.width();
+                    if lw <= w { 1u16 } else { lw.div_ceil(w) as u16 }
+                })
+                .sum();
+
+            let max_scroll = self
+                .last_diff_visual_lines
+                .saturating_sub(content_area.height);
+            let scroll = scroll.min(max_scroll);
+
+            Paragraph::new((*lines).clone())
+                .wrap(Wrap { trim: false })
+                .scroll((scroll, 0))
+                .render(content_area, frame.buffer_mut());
+        }
 
         // Hint bar with top border (same style as agent terminal).
         if hint_area.height > 0 {
