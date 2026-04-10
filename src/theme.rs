@@ -79,6 +79,9 @@ pub struct Theme {
     pub pr_merged_label: Color,
     pub pr_closed_label: Color,
     pub pr_open_label: Color,
+    pub help_banner_fg: Color,
+    pub help_banner_bg: Color,
+    pub help_body_fg: Color,
 }
 
 impl Theme {
@@ -155,6 +158,9 @@ impl Theme {
             pr_banner_fg: Color::White,
             pr_closed_label: Color::Rgb(140, 80, 80),
             pr_open_label: Color::Green,
+            help_banner_fg: Color::Rgb(20, 20, 20),
+            help_banner_bg: Color::Cyan,
+            help_body_fg: Color::Rgb(180, 180, 180),
         }
     }
 
