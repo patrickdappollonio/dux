@@ -44,6 +44,33 @@ pub fn current_branch(repo_path: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Returns the default branch name for the `origin` remote by reading
+/// `refs/remotes/origin/HEAD`.  This ref is set automatically by `git clone`;
+/// repos created with `git init` + manual remote typically lack it.
+///
+/// Returns `None` when the ref doesn't exist or the command fails — callers
+/// should fall back to a heuristic (e.g. checking if the current branch is
+/// `main` or `master`).
+pub fn remote_default_branch(repo_path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let full_ref = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // e.g. "refs/remotes/origin/main" → "main"
+    full_ref
+        .strip_prefix("refs/remotes/origin/")
+        .map(|s| s.to_string())
+}
+
 pub fn is_git_repo(path: &Path) -> bool {
     Command::new("git")
         .args([
@@ -1429,5 +1456,52 @@ mod tests {
             parse_github_owner_repo("https://github.com/octocat/Hello-World/tree/main"),
             Some("octocat/Hello-World".to_string()),
         );
+    }
+
+    // ── remote_default_branch tests ──────────────────────────────
+
+    #[test]
+    fn remote_default_branch_returns_none_for_local_only_repo() {
+        let repo = init_test_repo();
+        // A repo created with `git init` has no remotes, so origin/HEAD
+        // doesn't exist and the function should return None.
+        assert_eq!(remote_default_branch(repo.path()), None);
+    }
+
+    #[test]
+    fn remote_default_branch_returns_branch_from_cloned_repo() {
+        // Set up a "remote" bare repo and clone it, which auto-sets origin/HEAD.
+        let bare_dir = tempfile::tempdir().unwrap();
+        let bare = bare_dir.path();
+        let run = |cwd: &Path, args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(bare, &["init", "--bare", "-b", "main"]);
+
+        // Create a temporary non-bare repo, add a commit, push to the bare.
+        let staging_dir = tempfile::tempdir().unwrap();
+        let staging = staging_dir.path();
+        run(staging, &["clone", bare.to_str().unwrap(), "."]);
+        run(staging, &["config", "user.name", "test"]);
+        run(staging, &["config", "user.email", "t@t"]);
+        run(staging, &["commit", "--allow-empty", "-m", "init"]);
+        run(staging, &["push", "origin", "main"]);
+
+        // Now clone the bare repo — this sets origin/HEAD automatically.
+        let clone_dir = tempfile::tempdir().unwrap();
+        let clone = clone_dir.path();
+        run(clone, &["clone", bare.to_str().unwrap(), "."]);
+
+        assert_eq!(remote_default_branch(clone), Some("main".to_string()),);
     }
 }

@@ -433,6 +433,13 @@ pub(crate) enum PromptState {
         selected: usize,
         editing: Option<MacroEditState>,
     },
+    ConfirmNonDefaultBranch {
+        path: String,
+        name: String,
+        current_branch: String,
+        kind: BranchWarningKind,
+        confirm_selected: bool, // false = Cancel (default), true = Add Anyway
+    },
     DebugInput {
         lines: Vec<Line<'static>>,
         scroll_offset: u16,
@@ -443,6 +450,14 @@ pub(crate) enum PromptState {
         last_refresh: Instant,
         first_sample: bool,
     },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum BranchWarningKind {
+    /// We resolved `origin/HEAD` and know the default branch for certain.
+    Known { default_branch: String },
+    /// `origin/HEAD` unavailable; current branch is not `main` or `master`.
+    Heuristic,
 }
 
 #[derive(Clone, Debug)]
@@ -636,6 +651,10 @@ pub(crate) enum OverlayMouseLayout {
     ConfirmDiscardFile {
         cancel_button: Rect,
         discard_button: Rect,
+    },
+    ConfirmNonDefaultBranch {
+        cancel_button: Rect,
+        add_button: Rect,
     },
     RenameSession {
         input: Rect,

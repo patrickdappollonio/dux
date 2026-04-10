@@ -43,6 +43,8 @@ enum PromptMouseTarget {
     ConfirmQuitConfirm,
     ConfirmDiscardCancel,
     ConfirmDiscardConfirm,
+    ConfirmNonDefaultBranchCancel,
+    ConfirmNonDefaultBranchAdd,
     RenameInput,
     NameNewAgentInput,
 }
@@ -1845,6 +1847,28 @@ impl App {
             return Ok(false);
         }
 
+        if let PromptState::ConfirmNonDefaultBranch {
+            confirm_selected, ..
+        } = &mut self.prompt
+        {
+            match self.bindings.lookup(&key, BindingScope::Dialog) {
+                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+                Some(Action::ToggleSelection) => {
+                    *confirm_selected = !*confirm_selected;
+                }
+                Some(Action::Confirm) => {
+                    let confirm = *confirm_selected;
+                    return Ok(self.resolve_confirm_non_default_branch(confirm));
+                }
+                _ if key.code == KeyCode::Char(' ') => {
+                    let confirm = *confirm_selected;
+                    return Ok(self.resolve_confirm_non_default_branch(confirm));
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+
         if matches!(self.prompt, PromptState::EditMacros { .. }) {
             self.handle_edit_macros_key(key)?;
             return Ok(false);
@@ -2291,6 +2315,18 @@ impl App {
                     Some(PromptMouseTarget::ConfirmDiscardCancel)
                 } else if contains_point(discard_button, column, row) {
                     Some(PromptMouseTarget::ConfirmDiscardConfirm)
+                } else {
+                    None
+                }
+            }
+            OverlayMouseLayout::ConfirmNonDefaultBranch {
+                cancel_button,
+                add_button,
+            } => {
+                if contains_point(cancel_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmNonDefaultBranchCancel)
+                } else if contains_point(add_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmNonDefaultBranchAdd)
                 } else {
                     None
                 }
@@ -2903,6 +2939,25 @@ impl App {
         false
     }
 
+    fn resolve_confirm_non_default_branch(&mut self, confirm: bool) -> bool {
+        let (path, name, branch) = match &self.prompt {
+            PromptState::ConfirmNonDefaultBranch {
+                path,
+                name,
+                current_branch,
+                ..
+            } => (path.clone(), name.clone(), current_branch.clone()),
+            _ => return false,
+        };
+        self.prompt = PromptState::None;
+        if confirm {
+            if let Err(e) = self.finish_add_project(path, name, branch) {
+                self.set_error(format!("{e:#}"));
+            }
+        }
+        false
+    }
+
     fn set_rename_cursor_from_mouse(&mut self, column: u16) {
         let input_area = match self.overlay_layout.active {
             OverlayMouseLayout::RenameSession { input } => input,
@@ -3082,6 +3137,12 @@ impl App {
             }
             PromptMouseTarget::ConfirmDiscardConfirm => {
                 return self.resolve_confirm_discard_file(true);
+            }
+            PromptMouseTarget::ConfirmNonDefaultBranchCancel => {
+                return self.resolve_confirm_non_default_branch(false);
+            }
+            PromptMouseTarget::ConfirmNonDefaultBranchAdd => {
+                return self.resolve_confirm_non_default_branch(true);
             }
             PromptMouseTarget::RenameInput => {
                 self.set_rename_cursor_from_mouse(mouse.column);
