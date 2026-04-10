@@ -31,6 +31,7 @@ pub enum Action {
     ScrollLineUp,
     ScrollLineDown,
     ScrollToBottom,
+    ScrollToTop,
     // Files pane (git staging)
     OpenDiff,
     StageUnstage,
@@ -197,6 +198,7 @@ impl Action {
             Action::ScrollLineUp => "scroll_line_up",
             Action::ScrollLineDown => "scroll_line_down",
             Action::ScrollToBottom => "scroll_to_bottom",
+            Action::ScrollToTop => "scroll_to_top",
             Action::OpenDiff => "open_diff",
             Action::StageUnstage => "stage_unstage",
             Action::CommitChanges => "commit_changes",
@@ -278,6 +280,7 @@ impl Action {
             Action::ScrollLineUp => "Scroll up one line in any scrollable view.",
             Action::ScrollLineDown => "Scroll down one line in any scrollable view.",
             Action::ScrollToBottom => "Exit scroll mode and jump to the latest output.",
+            Action::ScrollToTop => "Jump to the top of the scrollback buffer.",
             Action::OpenDiff => "Open the selected file's diff.",
             Action::StageUnstage => "Stage or unstage the selected file.",
             Action::CommitChanges => "Commit staged changes.",
@@ -350,9 +353,10 @@ impl Action {
             | Action::ScrollPageUp
             | Action::ScrollPageDown
             | Action::ShowTerminal => Some("Agent pane"),
-            Action::ScrollLineUp | Action::ScrollLineDown | Action::ScrollToBottom => {
-                Some("Scrolling")
-            }
+            Action::ScrollLineUp
+            | Action::ScrollLineDown
+            | Action::ScrollToBottom
+            | Action::ScrollToTop => Some("Scrolling"),
             Action::OpenDiff
             | Action::StageUnstage
             | Action::CommitChanges
@@ -767,11 +771,30 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     },
     BindingDef {
         action: Action::ScrollToBottom,
-        default_keys: &[key!(q)],
-        scopes: &[BindingScope::Interactive, BindingScope::Center],
+        default_keys: &[key!(q), key!(end)],
+        scopes: &[
+            BindingScope::Interactive,
+            BindingScope::Center,
+            BindingScope::Help,
+        ],
         help: Some(HelpEntry {
             section: "Scrolling",
             description: "Exit scroll mode and jump to latest output",
+        }),
+        hint_contexts: &[],
+        palette: None,
+    },
+    BindingDef {
+        action: Action::ScrollToTop,
+        default_keys: &[key!(home)],
+        scopes: &[
+            BindingScope::Interactive,
+            BindingScope::Center,
+            BindingScope::Help,
+        ],
+        help: Some(HelpEntry {
+            section: "Scrolling",
+            description: "Jump to top of scrollback",
         }),
         hint_contexts: &[],
         palette: None,
@@ -1761,6 +1784,7 @@ impl RuntimeBindings {
             Action::ScrollLineUp,
             Action::ScrollLineDown,
             Action::ScrollToBottom,
+            Action::ScrollToTop,
         ];
         let mut bindings = Vec::new();
         for rb in &self.bindings {
