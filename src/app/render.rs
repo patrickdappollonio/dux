@@ -986,10 +986,10 @@ impl App {
                     ratatui_cell.set_style(style);
 
                     // Overlay selection highlight if this cell is selected.
-                    if let Some(sel) = &self.terminal_selection {
-                        if sel.contains(cell.row, cell.col) {
-                            ratatui_cell.set_style(self.theme.selection_style());
-                        }
+                    if let Some(sel) = &self.terminal_selection
+                        && sel.contains(cell.row, cell.col)
+                    {
+                        ratatui_cell.set_style(self.theme.selection_style());
                     }
                 }
 
@@ -3956,11 +3956,64 @@ impl App {
     }
 }
 
+/// Convert a [`Color`] to its grayscale equivalent using ITU-R BT.601
+/// luminance weights (0.299 R + 0.587 G + 0.114 B).
+///
+/// - `Color::Rgb` values are converted directly.
+/// - `Color::Indexed` values are resolved through the standard xterm-256
+///   palette before conversion.
+/// - All other variants (`Reset`, named ANSI colors, etc.) are returned as-is.
+fn to_grayscale(color: Color) -> Color {
+    match color {
+        Color::Rgb(r, g, b) => {
+            let l = (0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64).round() as u8;
+            Color::Rgb(l, l, l)
+        }
+        Color::Indexed(idx) => {
+            let (r, g, b) = xterm256_to_rgb(idx);
+            let l = (0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64).round() as u8;
+            Color::Rgb(l, l, l)
+        }
+        other => other,
+    }
+}
+
+/// Resolve a xterm-256 palette index to (R, G, B).
+fn xterm256_to_rgb(idx: u8) -> (u8, u8, u8) {
+    #[rustfmt::skip]
+    const BASIC: [(u8, u8, u8); 16] = [
+        (0,0,0),       (128,0,0),     (0,128,0),     (128,128,0),
+        (0,0,128),     (128,0,128),   (0,128,128),   (192,192,192),
+        (128,128,128), (255,0,0),     (0,255,0),     (255,255,0),
+        (0,0,255),     (255,0,255),   (0,255,255),   (255,255,255),
+    ];
+
+    match idx {
+        0..=15 => BASIC[idx as usize],
+        16..=231 => {
+            let val = idx - 16;
+            let r_idx = val / 36;
+            let g_idx = (val % 36) / 6;
+            let b_idx = val % 6;
+            let to_level = |i: u8| if i == 0 { 0 } else { 55 + 40 * i };
+            (to_level(r_idx), to_level(g_idx), to_level(b_idx))
+        }
+        232..=255 => {
+            let level = 8 + 10 * (idx - 232);
+            (level, level, level)
+        }
+    }
+}
+
 /// Choose foreground/background colors for a PTY cell.
 ///
 /// In interactive mode (`is_input == true`) the cell's original colors are
-/// returned. In non-interactive mode the theme's dim overlay colors are used
-/// instead, giving the pane a muted appearance that signals it is read-only.
+/// returned. In non-interactive mode the foreground is replaced with the
+/// theme's dim color and the background is converted to grayscale, giving
+/// the pane a muted appearance that signals it is read-only.
+///
+/// `Color::Reset` (no explicit background) is always preserved so cells
+/// without a background never turn black.
 fn pty_cell_colors(fg: Color, bg: Color, is_input: bool, theme: &Theme) -> (Color, Color) {
     if is_input {
         (fg, bg)
@@ -3968,7 +4021,7 @@ fn pty_cell_colors(fg: Color, bg: Color, is_input: bool, theme: &Theme) -> (Colo
         let dimmed_bg = if bg == Color::Reset {
             bg
         } else {
-            theme.overlay_dim_bg
+            to_grayscale(bg)
         };
         (theme.overlay_dim_fg, dimmed_bg)
     }
@@ -4465,10 +4518,13 @@ mod tests {
         let theme = Theme::default_dark();
         let fg = Color::Rgb(200, 100, 50);
         let bg = Color::Rgb(10, 20, 30);
-        assert_eq!(
-            pty_cell_colors(fg, bg, false, &theme),
-            (theme.overlay_dim_fg, theme.overlay_dim_bg)
-        );
+        let (result_fg, result_bg) = pty_cell_colors(fg, bg, false, &theme);
+        assert_eq!(result_fg, theme.overlay_dim_fg);
+        // Background should be the grayscale equivalent, not the fixed dim color.
+        assert_eq!(result_bg, to_grayscale(bg));
+        // Sanity: the grayscale value is a uniform grey, not near-black.
+        let expected_l = (0.299 * 10.0_f64 + 0.587 * 20.0 + 0.114 * 30.0).round() as u8;
+        assert_eq!(result_bg, Color::Rgb(expected_l, expected_l, expected_l));
     }
 
     #[test]
@@ -4479,6 +4535,61 @@ mod tests {
             pty_cell_colors(fg, Color::Reset, false, &theme),
             (theme.overlay_dim_fg, Color::Reset)
         );
+    }
+
+    // ── Unit tests for to_grayscale / xterm256_to_rgb ──────────────
+
+    #[test]
+    fn to_grayscale_rgb() {
+        // Pure red (255,0,0) → luminance ≈ 76
+        assert_eq!(to_grayscale(Color::Rgb(255, 0, 0)), Color::Rgb(76, 76, 76));
+        // Pure green (0,255,0) → luminance ≈ 150
+        assert_eq!(
+            to_grayscale(Color::Rgb(0, 255, 0)),
+            Color::Rgb(150, 150, 150)
+        );
+        // Pure white → stays white
+        assert_eq!(
+            to_grayscale(Color::Rgb(255, 255, 255)),
+            Color::Rgb(255, 255, 255)
+        );
+        // Pure black → stays black
+        assert_eq!(to_grayscale(Color::Rgb(0, 0, 0)), Color::Rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn to_grayscale_indexed() {
+        // Index 1 = red (128,0,0) → luminance ≈ 38
+        let result = to_grayscale(Color::Indexed(1));
+        assert_eq!(result, Color::Rgb(38, 38, 38));
+        // Index 244 = grayscale ramp entry → 8 + 10*(244-232) = 128
+        assert_eq!(to_grayscale(Color::Indexed(244)), Color::Rgb(128, 128, 128));
+    }
+
+    #[test]
+    fn to_grayscale_reset_passthrough() {
+        assert_eq!(to_grayscale(Color::Reset), Color::Reset);
+    }
+
+    #[test]
+    fn xterm256_basic_colors() {
+        assert_eq!(xterm256_to_rgb(0), (0, 0, 0));
+        assert_eq!(xterm256_to_rgb(7), (192, 192, 192));
+        assert_eq!(xterm256_to_rgb(15), (255, 255, 255));
+    }
+
+    #[test]
+    fn xterm256_cube_colors() {
+        // Index 16 = (0,0,0)
+        assert_eq!(xterm256_to_rgb(16), (0, 0, 0));
+        // Index 196 = (255,0,0): (196-16)=180, r=180/36=5, g=0, b=0 → (255,0,0)
+        assert_eq!(xterm256_to_rgb(196), (255, 0, 0));
+    }
+
+    #[test]
+    fn xterm256_grayscale_ramp() {
+        assert_eq!(xterm256_to_rgb(232), (8, 8, 8));
+        assert_eq!(xterm256_to_rgb(255), (238, 238, 238));
     }
 
     #[test]
