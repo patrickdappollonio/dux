@@ -1733,6 +1733,10 @@ impl App {
                     let confirm = confirm_prompt.confirm_selected;
                     return Ok(self.resolve_confirm_kill_running(confirm));
                 }
+                _ if key.code == KeyCode::Char(' ') => {
+                    let confirm = confirm_prompt.confirm_selected;
+                    return Ok(self.resolve_confirm_kill_running(confirm));
+                }
                 _ => {}
             }
             return Ok(false);
@@ -1748,6 +1752,10 @@ impl App {
                     *confirm_selected = !*confirm_selected;
                 }
                 Some(Action::Confirm) => {
+                    let confirm = *confirm_selected;
+                    return Ok(self.resolve_confirm_delete_agent(confirm));
+                }
+                _ if key.code == KeyCode::Char(' ') => {
                     let confirm = *confirm_selected;
                     return Ok(self.resolve_confirm_delete_agent(confirm));
                 }
@@ -1768,6 +1776,10 @@ impl App {
                     let confirm = *confirm_selected;
                     return Ok(self.resolve_confirm_quit(confirm));
                 }
+                _ if key.code == KeyCode::Char(' ') => {
+                    let confirm = *confirm_selected;
+                    return Ok(self.resolve_confirm_quit(confirm));
+                }
                 _ => {}
             }
         }
@@ -1782,6 +1794,10 @@ impl App {
                     *confirm_selected = !*confirm_selected;
                 }
                 Some(Action::Confirm) => {
+                    let confirm = *confirm_selected;
+                    return Ok(self.resolve_confirm_discard_file(confirm));
+                }
+                _ if key.code == KeyCode::Char(' ') => {
                     let confirm = *confirm_selected;
                     return Ok(self.resolve_confirm_discard_file(confirm));
                 }
@@ -3494,6 +3510,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex, mpsc};
 
+    use super::DOUBLE_CLICK_THRESHOLD;
     use crate::app::{
         App, CenterMode, ConfirmKillRunningPrompt, FocusPane, FullscreenOverlay, InputTarget,
         KillRunningAction, KillRunningFocus, KillRunningFooterAction, KillRunningPrompt,
@@ -3501,7 +3518,6 @@ mod tests {
         OverlayMouseLayout, OverlayMouseLayoutState, PromptState, PullTarget, RightSection,
         RuntimeTargetId, TextInput, WorkerEvent,
     };
-    use super::DOUBLE_CLICK_THRESHOLD;
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
     use crate::editor::{DetectedEditor, EditorKind};
