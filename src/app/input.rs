@@ -6592,12 +6592,13 @@ mod tests {
     }
 
     #[test]
-    fn resume_fallback_skipped_when_pty_had_output() {
+    fn resume_fallback_skipped_when_pty_had_substantial_output() {
         let mut app = test_app(default_bindings());
         let session_id = app.sessions[0].id.clone();
         let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
-        // Spawn a process that produces output before exiting.
-        let args = vec!["-c".to_string(), "echo hello".to_string()];
+        // Spawn a process that produces many lines of output before exiting.
+        // This simulates a real agent session that ran and then exited normally.
+        let args = vec!["-c".to_string(), "seq 1 30".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn with output");
         app.providers.insert(session_id.clone(), client);
@@ -6610,12 +6611,50 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
         app.drain_events();
 
-        // Since the PTY had output, the fallback should NOT have triggered.
-        // The session should be detached (normal exit behavior).
+        // Since the PTY had substantial output (>5 lines), the fallback
+        // should NOT have triggered. The session should be detached.
         assert_eq!(app.sessions[0].status, SessionStatus::Detached);
         assert!(
             !app.resume_fallback_candidates.contains(&session_id),
             "candidate should have been removed even when skipped"
+        );
+    }
+
+    #[test]
+    fn resume_fallback_triggers_on_one_liner_output() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        // Spawn a process that prints a single line (like a failed --continue)
+        // and then exits. The fallback should still trigger because the output
+        // is minimal (≤5 lines with no scrollback).
+        let args = vec![
+            "-c".to_string(),
+            "echo 'No session found to resume'".to_string(),
+        ];
+        let client =
+            PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn one-liner");
+        app.providers.insert(session_id.clone(), client);
+        app.mark_session_status(&session_id, SessionStatus::Active);
+        app.resume_fallback_candidates.insert(session_id.clone());
+        app.selected_left = 1;
+        app.session_surface = SessionSurface::Agent;
+
+        // Wait for the process to produce its one line and exit.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.drain_events();
+
+        // Despite having output, the fallback should trigger because the
+        // output is minimal (one line, no scrollback).
+        assert!(
+            app.providers.contains_key(&session_id),
+            "provider should still be present after fallback retry"
+        );
+        assert_eq!(app.sessions[0].status, SessionStatus::Active);
+        assert!(
+            app.status.text().contains("No prior session to resume"),
+            "status should inform user about fallback: {:?}",
+            app.status.text()
         );
     }
 

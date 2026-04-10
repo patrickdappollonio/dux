@@ -654,6 +654,54 @@ impl App {
         Ok(())
     }
 
+    /// Restart the selected agent with a fresh session, bypassing `--continue`
+    /// or equivalent resume args. Works on both active and detached agents.
+    pub(crate) fn force_reconnect_agent(&mut self) -> Result<()> {
+        let Some(session) = self.selected_session().cloned() else {
+            self.set_error("Select an agent first.");
+            return Ok(());
+        };
+        if !Path::new(&session.worktree_path).exists() {
+            self.set_error(format!(
+                "Worktree for agent \"{}\" no longer exists. Delete and re-create the agent.",
+                session.branch_name
+            ));
+            return Ok(());
+        }
+        // Kill existing PTY if the agent is still active.
+        self.providers.remove(&session.id);
+        self.last_pty_activity.remove(&session.id);
+        self.resume_fallback_candidates.remove(&session.id);
+
+        logger::info(&format!(
+            "restarting agent \"{}\" with fresh session (no resume args)",
+            session.branch_name
+        ));
+        match self.spawn_pty_for_session(&session, false) {
+            Ok(client) => {
+                self.providers.insert(session.id.clone(), client);
+                self.mark_session_status(&session.id, SessionStatus::Active);
+                self.show_agent_surface();
+                self.input_target = InputTarget::Agent;
+                self.fullscreen_overlay = FullscreenOverlay::Agent;
+                let proj_name = self.project_name_for_session(&session);
+                self.set_info(format!(
+                    "Started fresh {} session for agent \"{}\" in project \"{}\". Use /sessions inside the agent to restore a prior conversation.",
+                    session.provider.as_str(),
+                    session.branch_name,
+                    proj_name,
+                ));
+            }
+            Err(err) => {
+                self.set_error(format!(
+                    "Fresh restart failed for agent \"{}\": {err}",
+                    session.branch_name
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn reconnect_selected_session(&mut self) -> Result<()> {
         let Some(session) = self.selected_session().cloned() else {
             self.set_error("Select a stopped agent first to reconnect.");

@@ -297,6 +297,16 @@ impl PtyClient {
         self.has_output.load(Ordering::Acquire)
     }
 
+    /// Returns `true` if the terminal has only minimal output (no scrollback
+    /// and at most `threshold` visible lines). Used to detect failed resume
+    /// attempts that print a short error and exit.
+    pub fn has_minimal_output(&self, threshold: usize) -> bool {
+        self.terminal
+            .lock()
+            .map(|t| t.has_minimal_output(threshold))
+            .unwrap_or(true)
+    }
+
     /// Returns `true` if the PTY received data since the last call, then
     /// clears the flag. Used to detect streaming activity for UI indicators
     /// without interfering with the snapshot dirty flag.
@@ -441,6 +451,25 @@ impl TerminalState {
             .renderable_content()
             .display_iter
             .any(|indexed| !indexed.cell.c.is_whitespace())
+    }
+
+    /// Count the number of distinct viewport rows that contain at least one
+    /// non-whitespace character.
+    fn visible_line_count(&self) -> usize {
+        let mut seen_rows = std::collections::HashSet::new();
+        for indexed in self.term.renderable_content().display_iter {
+            if !indexed.cell.c.is_whitespace() {
+                seen_rows.insert(indexed.point.line.0);
+            }
+        }
+        seen_rows.len()
+    }
+
+    /// Returns `true` if the terminal contains only a small amount of output:
+    /// no scrollback history AND at most `threshold` visible lines with content.
+    /// Used to detect failed `--continue` exits that print a short error message.
+    fn has_minimal_output(&self, threshold: usize) -> bool {
+        self.term.grid().history_size() == 0 && self.visible_line_count() <= threshold
     }
 
     /// Whether the child process has enabled any mouse tracking mode
