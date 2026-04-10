@@ -986,10 +986,10 @@ impl App {
                     ratatui_cell.set_style(style);
 
                     // Overlay selection highlight if this cell is selected.
-                    if let Some(sel) = &self.terminal_selection {
-                        if sel.contains(cell.row, cell.col) {
-                            ratatui_cell.set_style(self.theme.selection_style());
-                        }
+                    if let Some(sel) = &self.terminal_selection
+                        && sel.contains(cell.row, cell.col)
+                    {
+                        ratatui_cell.set_style(self.theme.selection_style());
                     }
                 }
 

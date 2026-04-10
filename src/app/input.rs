@@ -3540,24 +3540,23 @@ impl App {
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 let pos = self.screen_to_grid_clamped(mouse_ev.column, mouse_ev.row);
-                if let Some(sel) = &mut self.terminal_selection {
-                    if sel.dragging {
-                        if let Some(pos) = pos {
-                            sel.end = pos;
-                        }
-                    }
+                if let Some(sel) = &mut self.terminal_selection
+                    && sel.dragging
+                    && let Some(pos) = pos
+                {
+                    sel.end = pos;
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                if let Some(sel) = &mut self.terminal_selection {
-                    if sel.dragging {
-                        sel.dragging = false;
-                        if sel.anchor == sel.end {
-                            // Single click, no actual selection.
-                            self.terminal_selection = None;
-                        } else {
-                            self.copy_terminal_selection();
-                        }
+                if let Some(sel) = &mut self.terminal_selection
+                    && sel.dragging
+                {
+                    sel.dragging = false;
+                    if sel.anchor == sel.end {
+                        // Single click, no actual selection.
+                        self.terminal_selection = None;
+                    } else {
+                        self.copy_terminal_selection();
                     }
                 }
             }
