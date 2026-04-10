@@ -3816,6 +3816,7 @@ mod tests {
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             gh_status: crate::model::GhStatus::Unknown,
             github_integration_enabled: false,
+            pr_banner_at_bottom: true,
             pr_statuses: std::collections::HashMap::new(),
             pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             pr_sync_enabled: Arc::new(AtomicBool::new(false)),

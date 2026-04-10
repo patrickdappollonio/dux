@@ -194,6 +194,7 @@ pub struct UiConfig {
     pub show_diff_line_numbers: bool,
     pub diff_tab_width: u16,
     pub github_integration: bool,
+    pub pr_banner_position: String,
 }
 
 impl Default for Config {
@@ -218,6 +219,7 @@ impl Default for Config {
                 show_diff_line_numbers: false,
                 diff_tab_width: 4,
                 github_integration: true,
+                pr_banner_position: "bottom".to_string(),
             },
             editor: EditorConfig::default(),
             keys: KeysConfig::default(),
@@ -340,6 +342,7 @@ impl Default for UiConfig {
             show_diff_line_numbers: false,
             diff_tab_width: 4,
             github_integration: true,
+            pr_banner_position: "bottom".to_string(),
         }
     }
 }
@@ -615,6 +618,13 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             )),
             value_fn: |c| FieldValue::Bool(c.ui.github_integration),
         },
+        ConfigEntry::Field {
+            key: "pr_banner_position",
+            comment: Some(CommentSource::Static(
+                "# Position of the PR banner in the agent pane: \"top\" or \"bottom\".\n# Toggle at runtime from the command palette.",
+            )),
+            value_fn: |c| FieldValue::Str(c.ui.pr_banner_position.clone()),
+        },
         ConfigEntry::Blank,
         ConfigEntry::Section("editor"),
         ConfigEntry::Field {
@@ -809,6 +819,12 @@ pub fn save_config(
         "ui",
         "github_integration",
         config.ui.github_integration,
+    );
+    patch_table_str(
+        &mut doc,
+        "ui",
+        "pr_banner_position",
+        &config.ui.pr_banner_position,
     );
 
     // --- [editor] ---
