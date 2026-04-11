@@ -497,11 +497,11 @@ pub(crate) fn build_visual_rows(rows: &[ResourceStats], expanded: &HashSet<u32>)
     let mut visual = Vec::new();
     for (i, row) in rows.iter().enumerate() {
         visual.push(VisualRow::Parent(i));
-        if let Some(pid) = row.pid {
-            if expanded.contains(&pid) {
-                for (j, _) in row.children.iter().enumerate() {
-                    visual.push(VisualRow::Child(i, j));
-                }
+        if let Some(pid) = row.pid
+            && expanded.contains(&pid)
+        {
+            for (j, _) in row.children.iter().enumerate() {
+                visual.push(VisualRow::Child(i, j));
             }
         }
     }
