@@ -65,3 +65,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload ${{ github.event.release.tag_name }} ${{ matrix.archive }}
+
+  upload-install-script:
+    name: Upload install script
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upload install script
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload ${{ github.event.release.tag_name }} install.sh

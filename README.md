@@ -20,6 +20,22 @@ Every agent runs through a PTY, the same pseudo-terminal your shell uses. That m
 brew install patrickdappollonio/tap/dux
 ```
 
+**Shell:**
+
+```bash
+curl -sSfL https://github.com/patrickdappollonio/dux/releases/latest/download/install.sh | bash
+```
+
+By default, the script installs to `~/.local/bin` if it exists and is in your `PATH`, otherwise `/usr/local/bin`. You can override the install directory or pin a specific version:
+
+```bash
+# Custom install directory
+curl -sSfL https://github.com/patrickdappollonio/dux/releases/latest/download/install.sh | DUX_INSTALL_DIR=~/.bin bash
+
+# Specific version
+curl -sSfL https://github.com/patrickdappollonio/dux/releases/latest/download/install.sh | DUX_VERSION=v0.1.0 bash
+```
+
 **Binary download:**
 
 Grab the latest release for your platform from the [Releases](https://github.com/patrickdappollonio/dux/releases) page. Extract it, drop the `dux` binary somewhere on your `PATH`, and run it. On first launch, dux creates a fully commented config file. That file *is* the documentation.
