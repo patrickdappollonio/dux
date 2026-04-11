@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  release:
+    types: [created]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.archive }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            archive: dux-linux-amd64.tar.gz
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            archive: dux-linux-arm64.tar.gz
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            archive: dux-darwin-amd64.tar.gz
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            archive: dux-darwin-arm64.tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Strip binary
+        run: strip target/${{ matrix.target }}/release/dux
+
+      - name: Package
+        run: tar czf ${{ matrix.archive }} -C target/${{ matrix.target }}/release dux
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload ${{ github.event.release.tag_name }} ${{ matrix.archive }}
