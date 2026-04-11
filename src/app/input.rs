@@ -1262,12 +1262,11 @@ impl App {
                 KeyCode::Enter | KeyCode::Char(' ') => {
                     if let Some(VisualRow::Parent(idx)) = visual.get(*selected_row) {
                         let stat = &rows[*idx];
-                        if let Some(pid) = stat.pid {
-                            if !stat.children.is_empty() {
-                                if !expanded.remove(&pid) {
-                                    expanded.insert(pid);
-                                }
-                            }
+                        if let Some(pid) = stat.pid
+                            && !stat.children.is_empty()
+                            && !expanded.remove(&pid)
+                        {
+                            expanded.insert(pid);
                         }
                     }
                 }
@@ -3015,10 +3014,8 @@ impl App {
             _ => return false,
         };
         self.prompt = PromptState::None;
-        if confirm {
-            if let Err(e) = self.finish_add_project(path, name, branch) {
-                self.set_error(format!("{e:#}"));
-            }
+        if confirm && let Err(e) = self.finish_add_project(path, name, branch) {
+            self.set_error(format!("{e:#}"));
         }
         false
     }
@@ -4766,7 +4763,7 @@ mod tests {
     #[test]
     fn copy_path_copies_selected_session_worktree() {
         let mut app = test_app(default_bindings());
-        let worktree_path = app.sessions[0].worktree_path.clone();
+        let _worktree_path = app.sessions[0].worktree_path.clone();
         app.clipboard = Clipboard::from_fn(clipboard_ok);
 
         app.copy_selected_path().unwrap();
@@ -6632,6 +6629,15 @@ mod tests {
     #[test]
     fn resume_fallback_retries_with_fresh_session_on_quick_exit() {
         let mut app = test_app(default_bindings());
+        // Override the "codex" provider to use /bin/sh so the fallback spawn
+        // works on CI where codex is not installed.
+        app.config.providers.commands.insert(
+            "codex".to_string(),
+            crate::config::ProviderCommandConfig {
+                command: "/bin/sh".to_string(),
+                ..Default::default()
+            },
+        );
         let session_id = app.sessions[0].id.clone();
         let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
         // Spawn a process that exits immediately without producing output.
@@ -6698,6 +6704,15 @@ mod tests {
     #[test]
     fn resume_fallback_triggers_on_one_liner_output() {
         let mut app = test_app(default_bindings());
+        // Override the "codex" provider to use /bin/sh so the fallback spawn
+        // works on CI where codex is not installed.
+        app.config.providers.commands.insert(
+            "codex".to_string(),
+            crate::config::ProviderCommandConfig {
+                command: "/bin/sh".to_string(),
+                ..Default::default()
+            },
+        );
         let session_id = app.sessions[0].id.clone();
         let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
         // Spawn a process that prints a single line (like a failed --continue)
