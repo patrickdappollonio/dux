@@ -15,6 +15,29 @@ const ASCII_LOGO_WIDTH: u16 = 33;
 /// Number of lines in `ASCII_LOGO`.
 const ASCII_LOGO_HEIGHT: u16 = 7;
 
+/// Alternate braille-art duck logo, same width as the text logo.
+const ASCII_LOGO_ALT: &[&str] = &[
+    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣤⠤⣄⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠔⠉⠀⠀⢸⢰⢸⢰⢰⠉⠢⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡔⢰⠀⢸⢰⢸⢸⢸⢸⢸⢸⢸⢸⢈⢦⠀⠀⠀⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⣰⢠⢸⠤⣤⠤⢸⢸⢸⢸⢸⠤⠤⢐⢸⢸⡆⠀⠀⠀⠀⠀⠀⠀",
+    "⢠⠀⠀⠀⠀⠀⠀⠀⠀⢹⢸⢸⢸⢸⢸⣤⢰⢲⢤⣄⢸⢸⢸⢸⢸⡇⠀⠀⠀⠀⠀⠀⠀",
+    "⠀⠙⡄⠀⠀⠀⠀⠀⠀⠀⣄⢸⢰⣶⣿⣤⣤⣶⣤⣤⣬⣷⡤⢸⣰⠀⠀⠀⠀⠀⠀⠀⠀",
+    "⠀⠀⠈⢦⠀⠀⠀⠀⠀⠀⠈⢦⢸⢈⠛⠿⣿⣼⣼⠿⠛⠁⢸⡼⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+    "⠀⠀⠸⠉⢻⣍⠉⠤⣀⣠⣤⣾⢸⣿⣿⣿⣶⣾⣾⣿⣿⢸⢸⠓⠤⣄⠀⠀⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠈⠒⠭⣀⢸⢸⢈⢈⢸⢸⢸⠙⠻⢸⢸⢸⠿⠛⢸⢸⢸⢸⢸⢈⠑⢄⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⣼⢸⢸⢈⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⣠⠤⠒⠁⢸⣦⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⣿⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢩⡂⢸⢸⣀⣴⣿⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠹⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢉⠉⠉⠁⢸⠃⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠀⢳⢨⠘⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⣴⢸⢸⢸⢸⡟⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠀⠀⠳⣀⢠⢨⢘⢘⢸⢸⢸⢸⢸⢸⢸⢸⣤⣿⢸⢸⢸⣀⠛⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠀⠀⠀⠀⠀⠀⠀⠀",
+];
+/// Display width of each line in `ASCII_LOGO_ALT`.
+const ASCII_LOGO_ALT_WIDTH: u16 = 33;
+/// Number of lines in `ASCII_LOGO_ALT`.
+const ASCII_LOGO_ALT_HEIGHT: u16 = 15;
+
 /// Maximum display width for a tip line (logo width + padding on each side).
 const TIP_MAX_WIDTH: u16 = 47;
 /// Blank lines between the bottom of the logo and the tip.
@@ -716,33 +739,39 @@ impl App {
             return;
         }
 
-        // Rotate the tip when the logo becomes visible again after being
-        // hidden, or when the selected left-pane item changes while the logo
-        // stays visible (e.g. navigating between projects).
+        // Rotate the tip and randomly pick a logo variant when the logo
+        // becomes visible again after being hidden, or when the selected
+        // left-pane item changes while the logo stays visible.
         if !self.welcome_logo_visible || self.welcome_tip_selection != self.selected_left {
             self.welcome_tip_index = self.welcome_tip_index.wrapping_add(1);
+            self.welcome_logo_alt = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() % 2 == 0)
+                .unwrap_or(false);
         }
         self.welcome_logo_visible = true;
         self.welcome_tip_selection = self.selected_left;
 
-        let total_height = ASCII_LOGO_HEIGHT + TIP_GAP + TIP_MAX_LINES;
+        // Pick the active logo variant. Fall back to the text logo when the
+        // area is too short for the taller duck.
+        let use_alt = self.welcome_logo_alt && area.height >= ASCII_LOGO_ALT_HEIGHT;
+        let (logo, logo_w, logo_h) = if use_alt {
+            (ASCII_LOGO_ALT, ASCII_LOGO_ALT_WIDTH, ASCII_LOGO_ALT_HEIGHT)
+        } else {
+            (ASCII_LOGO, ASCII_LOGO_WIDTH, ASCII_LOGO_HEIGHT)
+        };
+
+        let total_height = logo_h + TIP_GAP + TIP_MAX_LINES;
         let show_tip = area.width >= TIP_MAX_WIDTH && area.height >= total_height;
 
-        let block_height = if show_tip {
-            total_height
-        } else {
-            ASCII_LOGO_HEIGHT
-        };
-        let x = area.x + (area.width - ASCII_LOGO_WIDTH) / 2;
+        let block_height = if show_tip { total_height } else { logo_h };
+        let x = area.x + (area.width - logo_w) / 2;
         let y = area.y + (area.height - block_height) / 2;
 
         // --- logo ---
         let style = Style::default().fg(self.theme.border_normal);
-        let lines: Vec<Line> = ASCII_LOGO.iter().map(|l| Line::styled(*l, style)).collect();
-        Paragraph::new(lines).render(
-            Rect::new(x, y, ASCII_LOGO_WIDTH, ASCII_LOGO_HEIGHT),
-            frame.buffer_mut(),
-        );
+        let lines: Vec<Line> = logo.iter().map(|l| Line::styled(*l, style)).collect();
+        Paragraph::new(lines).render(Rect::new(x, y, logo_w, logo_h), frame.buffer_mut());
 
         // --- tip pill ---
         if show_tip {
@@ -777,7 +806,7 @@ impl App {
             let tip_line = Line::from(spans);
             let tip_width = TIP_MAX_WIDTH.min(area.width.saturating_sub(2));
             let tip_x = area.x + (area.width - tip_width) / 2;
-            let tip_y = y + ASCII_LOGO_HEIGHT + TIP_GAP;
+            let tip_y = y + logo_h + TIP_GAP;
 
             Paragraph::new(vec![tip_line])
                 .wrap(Wrap { trim: false })

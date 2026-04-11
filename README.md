@@ -2,7 +2,7 @@
 
 <img src="assets/dux-logo.png" width="200" align="right" />
 
-Your AI agents deserve a proper office. dux is a terminal UI that lets you run multiple AI coding agents side by side, each in its own git worktree, with full companion terminals, macros, commit generation, and a command palette that knows more tricks than you do.
+Your AI agents deserve a proper office. **dux** (pronounced "dooks") is a terminal UI that lets you run multiple AI coding agents side by side, each in its own git worktree, with full companion terminals, macros, commit generation, and a command palette that knows more tricks than you do.
 
 No protocol layers. No adapters. No JSON-RPC. Just real CLIs running in real terminals.
 

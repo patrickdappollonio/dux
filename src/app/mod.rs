@@ -130,6 +130,8 @@ pub struct App {
     pub(crate) welcome_logo_visible: bool,
     /// The left-pane selection index when the logo last rendered a tip.
     pub(crate) welcome_tip_selection: usize,
+    /// When true, show the alternate (duck) logo instead of the text logo.
+    pub(crate) welcome_logo_alt: bool,
     pub(crate) branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,
     pub(crate) gh_status: crate::model::GhStatus,
     pub(crate) github_integration_enabled: bool,
@@ -939,6 +941,7 @@ impl App {
                 .map(|d| d.as_millis() as usize)
                 .unwrap_or(0),
             welcome_logo_visible: false,
+            welcome_logo_alt: false,
             welcome_tip_selection: usize::MAX,
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             gh_status: crate::model::GhStatus::Unknown,
