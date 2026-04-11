@@ -3359,13 +3359,24 @@ impl App {
             PromptState::ResourceMonitor {
                 rows,
                 scroll_offset,
+                selected_row,
+                expanded,
                 first_sample,
                 ..
             } => {
                 let rows = rows.clone();
                 let scroll_offset = *scroll_offset;
+                let selected_row = *selected_row;
+                let expanded = expanded.clone();
                 let first_sample = *first_sample;
-                self.render_resource_monitor(frame, &rows, scroll_offset, first_sample);
+                self.render_resource_monitor(
+                    frame,
+                    &rows,
+                    scroll_offset,
+                    selected_row,
+                    &expanded,
+                    first_sample,
+                );
             }
             PromptState::DebugInput {
                 lines,
@@ -4062,6 +4073,8 @@ impl App {
         frame: &mut Frame,
         rows: &[ResourceStats],
         scroll_offset: u16,
+        selected_row: usize,
+        expanded: &HashSet<u32>,
         first_sample: bool,
     ) {
         use ratatui::widgets::{Cell, Row, Table, TableState};
@@ -4090,33 +4103,76 @@ impl App {
             Cell::from("RSS").style(header_style),
         ]);
 
-        let table_rows: Vec<Row> = rows
+        let visual = build_visual_rows(rows, expanded);
+        let dim_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+
+        let table_rows: Vec<Row> = visual
             .iter()
-            .map(|stat| {
-                let pid_str = stat.pid.map(|p| p.to_string()).unwrap_or_default();
-                let cpu_str = if first_sample {
-                    format!("~{:.1}%", stat.cpu_percent)
-                } else {
-                    format!("{:.1}%", stat.cpu_percent)
-                };
-                let rss_str = format_bytes(stat.rss_bytes);
-                let procs_str = stat.process_count.to_string();
+            .map(|vr| match vr {
+                VisualRow::Parent(idx) => {
+                    let stat = &rows[*idx];
+                    let pid_str = stat.pid.map(|p| p.to_string()).unwrap_or_default();
+                    let cpu_str = if first_sample {
+                        format!("~{:.1}%", stat.cpu_percent)
+                    } else {
+                        format!("{:.1}%", stat.cpu_percent)
+                    };
+                    let rss_str = format_bytes(stat.rss_bytes);
+                    let procs_str = stat.process_count.to_string();
 
-                let is_total = stat.label == "TOTAL";
-                let style = if is_total {
-                    Style::default().add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
+                    let is_total = stat.label == "TOTAL";
+                    let style = if is_total {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
 
-                Row::new(vec![
-                    Cell::from(stat.label.clone()),
-                    Cell::from(pid_str),
-                    Cell::from(procs_str),
-                    Cell::from(cpu_str),
-                    Cell::from(rss_str),
-                ])
-                .style(style)
+                    // Expand indicator: ▶/▼ for expandable rows, space for others.
+                    let indicator = if !stat.children.is_empty() {
+                        if let Some(pid) = stat.pid {
+                            if expanded.contains(&pid) {
+                                "▼ "
+                            } else {
+                                "▶ "
+                            }
+                        } else {
+                            "  "
+                        }
+                    } else {
+                        "  "
+                    };
+                    let label = format!("{indicator}{}", stat.label);
+
+                    Row::new(vec![
+                        Cell::from(label),
+                        Cell::from(pid_str),
+                        Cell::from(procs_str),
+                        Cell::from(cpu_str),
+                        Cell::from(rss_str),
+                    ])
+                    .style(style)
+                }
+                VisualRow::Child(parent_idx, child_idx) => {
+                    let child = &rows[*parent_idx].children[*child_idx];
+                    let is_last = *child_idx == rows[*parent_idx].children.len().saturating_sub(1);
+                    let connector = if is_last { "└" } else { "├" };
+                    let label = format!("    {connector} {}", child.name);
+                    let cpu_str = if first_sample {
+                        format!("~{:.1}%", child.cpu_percent)
+                    } else {
+                        format!("{:.1}%", child.cpu_percent)
+                    };
+                    let rss_str = format_bytes(child.rss_bytes);
+
+                    Row::new(vec![
+                        Cell::from(label),
+                        Cell::from(child.pid.to_string()),
+                        Cell::from(""),
+                        Cell::from(cpu_str),
+                        Cell::from(rss_str),
+                    ])
+                    .style(dim_style)
+                }
             })
             .collect();
 
@@ -4128,9 +4184,14 @@ impl App {
             Constraint::Length(12),
         ];
 
-        let table = Table::new(table_rows, widths).header(header);
+        let highlight_style = self.theme.selection_style();
+        let table = Table::new(table_rows, widths)
+            .header(header)
+            .row_highlight_style(highlight_style);
 
-        let mut table_state = TableState::default().with_offset(scroll_offset as usize);
+        let mut table_state = TableState::default()
+            .with_offset(scroll_offset as usize)
+            .with_selected(Some(selected_row));
         StatefulWidget::render(table, inner, frame.buffer_mut(), &mut table_state);
 
         // Footer hint.
@@ -4139,6 +4200,8 @@ impl App {
         let mut spans = vec![Span::raw(" ")];
         spans.extend(self.theme.key_badge_default(&close_key));
         spans.push(Span::styled(" close  ", desc_style));
+        spans.extend(self.theme.key_badge_default("Enter"));
+        spans.push(Span::styled(" expand/collapse  ", desc_style));
         spans.extend(self.theme.key_badge_default("Scroll"));
         spans.push(Span::styled(" navigate  ", desc_style));
         spans.push(Span::styled(

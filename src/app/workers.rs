@@ -255,6 +255,8 @@ impl App {
                     self.resource_stats_in_flight = false;
                     if let PromptState::ResourceMonitor {
                         rows,
+                        selected_row,
+                        expanded,
                         last_refresh,
                         first_sample,
                         ..
@@ -263,6 +265,12 @@ impl App {
                         *rows = stats;
                         *last_refresh = Instant::now();
                         *first_sample = false;
+                        // Clamp cursor to the (possibly changed) visual row count.
+                        let visual = build_visual_rows(rows, expanded);
+                        let max_row = visual.len().saturating_sub(1);
+                        if *selected_row > max_row {
+                            *selected_row = max_row;
+                        }
                     }
                 }
             }
