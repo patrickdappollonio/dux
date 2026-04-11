@@ -1,5 +1,7 @@
 # dux
 
+<img src="assets/dux-logo.png" width="200" align="right" />
+
 Your AI agents deserve a proper office. dux is a terminal UI that lets you run multiple AI coding agents side by side, each in its own git worktree, with full companion terminals, macros, commit generation, and a command palette that knows more tricks than you do.
 
 No protocol layers. No adapters. No JSON-RPC. Just real CLIs running in real terminals.
@@ -34,7 +36,7 @@ The interface has three panes:
 
 Tab between panes. Resize them with keyboard or mouse. Collapse the sidebar or git pane when you want more room. Go fullscreen with interactive mode. It's your layout.
 
-## Bring Any CLI
+### Bring Any CLI
 
 Any terminal command can be a provider. The four defaults (Claude, Codex, Gemini, and OpenCode) are pre-configured, but adding your own is a config-only change:
 
@@ -49,7 +51,7 @@ Set `resume_args` and dux can reconnect to detached or crashed sessions. Omit it
 
 Cycle through providers on the fly with a single keypress, or set a default per-project.
 
-## Macros
+### Macros
 
 Tired of typing the same prompt over and over? Turn it into a macro. Macros are reusable text snippets you trigger from a quick-select bar. Search by name, hit enter, and the text gets pasted into the active pane.
 
@@ -62,7 +64,7 @@ Tired of typing the same prompt over and over? Turn it into a macro. Macros are 
 
 Each macro can be scoped to the agent pane, the companion terminal, or both.
 
-## Git Integration
+### Git Integration
 
 The right pane is a full git staging area. Stage and unstage files, view syntax-highlighted diffs, write commit messages, push, and pull, all without leaving dux.
 
@@ -70,19 +72,19 @@ The right pane is a full git staging area. Stage and unstage files, view syntax-
 
 **PR tracking:** With the `gh` CLI installed, dux tracks pull requests for your agent branches and shows status pills right in the interface.
 
-## Companion Terminals
+### Companion Terminals
 
 Each agent gets its own companion terminal: a separate shell session in the same worktree. Use it for builds, tests, git operations, or anything else you'd normally do in a terminal. You can spawn multiple companion terminals per agent.
 
-## Forking Sessions
+### Forking Sessions
 
 See an agent going down the wrong path? Fork it. dux creates a new worktree with the current files copied over so you can try a different approach without losing the original session. It's branching, but for your AI conversations.
 
-## Command Palette
+### Command Palette
 
 Press the palette key and you get fuzzy-searchable access to every action in dux, including features that don't have dedicated keybindings. Sort agents, toggle UI elements, open the resource monitor, rename sessions, edit macros, and more. If you forget a keybinding, just open the palette.
 
-## Configuration
+### Configuration
 
 The config file at `~/.config/dux/config.toml` (Linux) or `~/.dux/config.toml` (macOS) is exhaustively commented. Every setting is explained inline, so you should never need to leave the file to understand an option. Every keybinding is rebindable. Every pane width, scrollback limit, and default provider is configurable.
 
@@ -97,7 +99,7 @@ dux config regenerate    # Preview a fresh default config
 
 Override the config directory with the `DUX_HOME` environment variable.
 
-## Keybindings
+### Keybindings
 
 All keybindings live in the `[keys]` section of the config. Key format supports single characters (`"j"`), special names (`"enter"`, `"pageup"`, `"shift-tab"`), and modifier combos (`"ctrl-d"`, `"ctrl-p"`). Each action takes an array of key combos:
 
@@ -109,7 +111,7 @@ open_palette = ["ctrl-k"]
 
 Press `?` in the app for the full keybinding reference. The help overlay is the authoritative source. This README intentionally doesn't list individual bindings because they're yours to change.
 
-## Logging
+### Logging
 
 Logs go to `dux.log` in the config directory. Control the level in your config:
 

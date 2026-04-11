@@ -1668,7 +1668,9 @@ impl App {
         let push_banner = |lines: &mut Vec<Line>, title: &str, width: usize| {
             let padding = width.saturating_sub(title.chars().count() + 3);
             let text = format!(" {title}{}", " ".repeat(padding));
-            lines.push(Line::from(""));
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
             lines.push(Line::from(Span::styled(text, banner_style)));
             lines.push(Line::from(""));
         };
