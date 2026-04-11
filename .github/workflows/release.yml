@@ -43,6 +43,15 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Install cargo-edit
+        run: cargo install cargo-edit --locked
+
+      - name: Set version from tag
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          cargo set-version "$VERSION"
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
