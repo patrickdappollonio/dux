@@ -9,6 +9,15 @@ use content_inspector::{ContentType, inspect};
 
 use crate::model::ChangedFile;
 
+/// Where a branch was found when checking for its existence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchLocation {
+    /// The branch exists as a local `refs/heads/` ref.
+    Local,
+    /// The branch exists only as a remote tracking ref (`refs/remotes/origin/`).
+    Remote,
+}
+
 enum DiffStat {
     Text(usize, usize),
     Binary,
@@ -123,6 +132,82 @@ pub fn pull_current_branch(repo_path: &Path) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Checks whether a branch exists locally or on the `origin` remote.
+///
+/// Uses the plumbing command `git rev-parse --verify --quiet` and inspects
+/// only the exit code — no stdout is parsed.
+pub fn branch_exists(repo_path: &Path, name: &str) -> Option<BranchLocation> {
+    let repo = repo_path.to_string_lossy();
+    let local_ref = format!("refs/heads/{name}");
+    let local = Command::new("git")
+        .args([
+            "-C",
+            repo.as_ref(),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &local_ref,
+        ])
+        .output()
+        .ok()
+        .is_some_and(|o| o.status.success());
+    if local {
+        return Some(BranchLocation::Local);
+    }
+    let remote_ref = format!("refs/remotes/origin/{name}");
+    let remote = Command::new("git")
+        .args([
+            "-C",
+            repo.as_ref(),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &remote_ref,
+        ])
+        .output()
+        .ok()
+        .is_some_and(|o| o.status.success());
+    if remote {
+        return Some(BranchLocation::Remote);
+    }
+    None
+}
+
+/// Creates a worktree that checks out an **existing** branch (no `-b`).
+///
+/// When the branch exists only as a remote tracking ref, git automatically
+/// creates a local branch that tracks the remote.
+pub fn create_worktree_existing_branch(
+    repo_path: &Path,
+    worktrees_root: &Path,
+    project_name: &str,
+    branch_name: &str,
+) -> Result<(String, PathBuf)> {
+    let project_root = worktrees_root.join(project_name);
+    fs::create_dir_all(&project_root)?;
+    let worktree_path = project_root.join(branch_name);
+    let repo = repo_path.to_string_lossy();
+    let worktree = worktree_path.to_string_lossy();
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo.as_ref(),
+            "worktree",
+            "add",
+            worktree.as_ref(),
+            branch_name,
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let canonical = worktree_path.canonicalize().unwrap_or(worktree_path);
+    Ok((branch_name.to_string(), canonical))
 }
 
 pub fn create_worktree(
@@ -1103,6 +1188,52 @@ mod tests {
 
         let branch = current_branch(&wt).unwrap();
         assert_eq!(branch, "same-name");
+    }
+
+    // ── branch_exists tests ────────────────────────────────────
+
+    #[test]
+    fn branch_exists_returns_none_for_nonexistent() {
+        let repo = init_test_repo();
+        assert_eq!(branch_exists(repo.path(), "no-such-branch"), None);
+    }
+
+    #[test]
+    fn branch_exists_returns_local_for_existing_branch() {
+        let repo = init_test_repo();
+        let _wt = add_worktree(repo.path(), "feature-x");
+        // "feature-x" now exists as a local branch.
+        assert_eq!(
+            branch_exists(repo.path(), "feature-x"),
+            Some(BranchLocation::Local)
+        );
+    }
+
+    // ── create_worktree_existing_branch tests ────────────────
+
+    #[test]
+    fn create_worktree_existing_branch_succeeds_for_local_branch() {
+        let repo = init_test_repo();
+        // Create a branch without a worktree that points to it.
+        run_git(repo.path(), &["branch", "reuse-me"]);
+        let worktrees_root = repo.path().join("wt-root");
+        let (name, path) =
+            create_worktree_existing_branch(repo.path(), &worktrees_root, "proj", "reuse-me")
+                .unwrap();
+        assert_eq!(name, "reuse-me");
+        assert!(path.exists());
+        assert_eq!(current_branch(&path).unwrap(), "reuse-me");
+    }
+
+    #[test]
+    fn create_worktree_existing_branch_fails_when_already_checked_out() {
+        let repo = init_test_repo();
+        let _wt = add_worktree(repo.path(), "occupied");
+        // "occupied" is checked out in _wt — git forbids a second worktree.
+        let worktrees_root = repo.path().join("wt-root");
+        let result =
+            create_worktree_existing_branch(repo.path(), &worktrees_root, "proj", "occupied");
+        assert!(result.is_err());
     }
 
     #[test]

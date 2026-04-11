@@ -742,37 +742,77 @@ pub(crate) fn run_create_agent_job(
             CreateAgentRequest::NewProject {
                 project,
                 custom_name,
+                use_existing_branch,
             } => {
-                let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
-                    "Creating a new worktree for project \"{}\"...",
-                    project.name
-                )));
+                let progress = if use_existing_branch {
+                    format!(
+                        "Attaching to existing branch for project \"{}\"...",
+                        project.name
+                    )
+                } else {
+                    format!(
+                        "Creating a new worktree for project \"{}\"...",
+                        project.name
+                    )
+                };
+                let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(progress));
                 let repo_path = PathBuf::from(&project.path);
-                let (branch_name, worktree_path) = match git::create_worktree(
-                    &repo_path,
-                    &paths.worktrees_root,
-                    &project.name,
-                    custom_name.as_deref(),
-                ) {
-                    Ok(result) => result,
-                    Err(err) => {
-                        logger::error(&format!(
-                            "worktree creation failed for {}: {err}",
-                            project.path
-                        ));
-                        let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
-                            "Failed to create a new worktree for project \"{}\": {err}",
-                            project.name
-                        )));
-                        return;
+                let (branch_name, worktree_path) = if use_existing_branch {
+                    match git::create_worktree_existing_branch(
+                        &repo_path,
+                        &paths.worktrees_root,
+                        &project.name,
+                        custom_name
+                            .as_deref()
+                            .expect("use_existing_branch requires custom_name"),
+                    ) {
+                        Ok(result) => result,
+                        Err(err) => {
+                            logger::error(&format!(
+                                "worktree creation (existing branch) failed for {}: {err}",
+                                project.path
+                            ));
+                            let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
+                                "Failed to attach to existing branch for project \"{}\": {err}",
+                                project.name
+                            )));
+                            return;
+                        }
+                    }
+                } else {
+                    match git::create_worktree(
+                        &repo_path,
+                        &paths.worktrees_root,
+                        &project.name,
+                        custom_name.as_deref(),
+                    ) {
+                        Ok(result) => result,
+                        Err(err) => {
+                            logger::error(&format!(
+                                "worktree creation failed for {}: {err}",
+                                project.path
+                            ));
+                            let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
+                                "Failed to create a new worktree for project \"{}\": {err}",
+                                project.name
+                            )));
+                            return;
+                        }
                     }
                 };
-                let status_message = format!(
-                    "Created {} agent \"{}\" in project \"{}\". The new worktree is ready in a fresh session.",
-                    project.default_provider.as_str(),
-                    branch_name,
-                    project.name
-                );
+                let status_message = if use_existing_branch {
+                    format!(
+                        "Attached to existing branch \"{}\" in project \"{}\". The worktree is ready in a fresh session.",
+                        branch_name, project.name
+                    )
+                } else {
+                    format!(
+                        "Created {} agent \"{}\" in project \"{}\". The new worktree is ready in a fresh session.",
+                        project.default_provider.as_str(),
+                        branch_name,
+                        project.name
+                    )
+                };
                 (
                     project.clone(),
                     project.default_provider.clone(),
