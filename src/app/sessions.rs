@@ -539,6 +539,36 @@ impl App {
         Ok(())
     }
 
+    pub(crate) fn confirm_delete_selected_terminal(&mut self) -> Result<()> {
+        let items = self.terminal_items();
+        let Some((terminal_id, terminal)) = items.get(self.selected_terminal_index) else {
+            self.set_error("Select a terminal first.");
+            return Ok(());
+        };
+        self.prompt = PromptState::ConfirmDeleteTerminal {
+            terminal_id: (*terminal_id).clone(),
+            terminal_label: terminal.label.clone(),
+            confirm_selected: false, // Cancel is default
+        };
+        Ok(())
+    }
+
+    pub(crate) fn do_delete_terminal(&mut self, terminal_id: &str) {
+        let label = self
+            .companion_terminals
+            .get(terminal_id)
+            .map(|t| t.label.clone());
+        // Removing from the map drops PtyClient, which kills the child process.
+        self.companion_terminals.remove(terminal_id);
+        if self.active_terminal_id.as_deref() == Some(terminal_id) {
+            self.active_terminal_id = None;
+        }
+        self.clamp_terminal_cursor();
+        if let Some(label) = label {
+            self.set_info(format!("Deleted terminal \"{}\"", label));
+        }
+    }
+
     pub(crate) fn cycle_selected_project_provider(&mut self) -> Result<()> {
         let Some(project) = self.selected_project().cloned() else {
             self.set_error("Select a project first.");

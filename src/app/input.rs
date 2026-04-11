@@ -39,6 +39,8 @@ enum PromptMouseTarget {
     ConfirmKillConfirm,
     ConfirmDeleteCancel,
     ConfirmDeleteConfirm,
+    ConfirmDeleteTerminalCancel,
+    ConfirmDeleteTerminalConfirm,
     ConfirmQuitCancel,
     ConfirmQuitConfirm,
     ConfirmDiscardCancel,
@@ -444,6 +446,7 @@ impl App {
                 Action::ShowTerminal => {
                     self.spawn_terminal_for_selected_terminal()?;
                 }
+                Action::DeleteSession => self.confirm_delete_selected_terminal()?,
                 _ => {}
             }
         }
@@ -1821,6 +1824,27 @@ impl App {
             }
         }
 
+        if let PromptState::ConfirmDeleteTerminal {
+            confirm_selected, ..
+        } = &mut self.prompt
+        {
+            match self.bindings.lookup(&key, BindingScope::Dialog) {
+                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+                Some(Action::ToggleSelection) => {
+                    *confirm_selected = !*confirm_selected;
+                }
+                Some(Action::Confirm) => {
+                    let confirm = *confirm_selected;
+                    return Ok(self.resolve_confirm_delete_terminal(confirm));
+                }
+                _ if key.code == KeyCode::Char(' ') => {
+                    let confirm = *confirm_selected;
+                    return Ok(self.resolve_confirm_delete_terminal(confirm));
+                }
+                _ => {}
+            }
+        }
+
         if let PromptState::ConfirmQuit {
             confirm_selected, ..
         } = &mut self.prompt
@@ -2308,6 +2332,18 @@ impl App {
                     Some(PromptMouseTarget::ConfirmDeleteCancel)
                 } else if contains_point(delete_button, column, row) {
                     Some(PromptMouseTarget::ConfirmDeleteConfirm)
+                } else {
+                    None
+                }
+            }
+            OverlayMouseLayout::ConfirmDeleteTerminal {
+                cancel_button,
+                delete_button,
+            } => {
+                if contains_point(cancel_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmDeleteTerminalCancel)
+                } else if contains_point(delete_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmDeleteTerminalConfirm)
                 } else {
                     None
                 }
@@ -2870,6 +2906,18 @@ impl App {
         false
     }
 
+    fn resolve_confirm_delete_terminal(&mut self, confirm: bool) -> bool {
+        let terminal_id = match &self.prompt {
+            PromptState::ConfirmDeleteTerminal { terminal_id, .. } => terminal_id.clone(),
+            _ => return false,
+        };
+        self.prompt = PromptState::None;
+        if confirm {
+            self.do_delete_terminal(&terminal_id);
+        }
+        false
+    }
+
     fn resolve_confirm_kill_running(&mut self, confirm: bool) -> bool {
         let confirm_prompt = match &self.prompt {
             PromptState::ConfirmKillRunning(confirm_prompt) => confirm_prompt.clone(),
@@ -3150,6 +3198,12 @@ impl App {
             }
             PromptMouseTarget::ConfirmDeleteConfirm => {
                 return self.resolve_confirm_delete_agent(true);
+            }
+            PromptMouseTarget::ConfirmDeleteTerminalCancel => {
+                return self.resolve_confirm_delete_terminal(false);
+            }
+            PromptMouseTarget::ConfirmDeleteTerminalConfirm => {
+                return self.resolve_confirm_delete_terminal(true);
             }
             PromptMouseTarget::ConfirmQuitCancel => return self.resolve_confirm_quit(false),
             PromptMouseTarget::ConfirmQuitConfirm => return self.resolve_confirm_quit(true),
@@ -7172,6 +7226,100 @@ mod tests {
         assert!(
             second,
             "double-click on center pane (no item index) must work"
+        );
+    }
+
+    #[test]
+    fn ctrl_d_in_terminal_list_shows_confirm_dialog() {
+        let mut app = test_app(default_bindings());
+        app.show_companion_terminal()
+            .expect("launch companion terminal");
+
+        // Close overlay so we're back in the normal left pane.
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        app.input_target = InputTarget::None;
+        app.session_surface = SessionSurface::Agent;
+        app.left_section = LeftSection::Terminals;
+        app.focus = FocusPane::Left;
+        app.selected_terminal_index = 0;
+
+        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        app.handle_key(ctrl_d).unwrap();
+
+        assert!(
+            matches!(app.prompt, PromptState::ConfirmDeleteTerminal { .. }),
+            "Ctrl+D in terminal list should show confirm delete terminal dialog"
+        );
+    }
+
+    #[test]
+    fn confirm_delete_terminal_removes_terminal() {
+        let mut app = test_app(default_bindings());
+        app.show_companion_terminal()
+            .expect("launch companion terminal");
+
+        assert_eq!(app.companion_terminals.len(), 1);
+        let terminal_id = app.terminal_items()[0].0.clone();
+
+        app.prompt = PromptState::ConfirmDeleteTerminal {
+            terminal_id: terminal_id.clone(),
+            terminal_label: "test".to_string(),
+            confirm_selected: true,
+        };
+
+        app.resolve_confirm_delete_terminal(true);
+
+        assert!(
+            app.companion_terminals.is_empty(),
+            "terminal should be removed after confirm"
+        );
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    #[test]
+    fn cancel_delete_terminal_keeps_terminal() {
+        let mut app = test_app(default_bindings());
+        app.show_companion_terminal()
+            .expect("launch companion terminal");
+
+        assert_eq!(app.companion_terminals.len(), 1);
+        let terminal_id = app.terminal_items()[0].0.clone();
+
+        app.prompt = PromptState::ConfirmDeleteTerminal {
+            terminal_id,
+            terminal_label: "test".to_string(),
+            confirm_selected: false,
+        };
+
+        app.resolve_confirm_delete_terminal(false);
+
+        assert_eq!(
+            app.companion_terminals.len(),
+            1,
+            "terminal should remain after cancel"
+        );
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    #[test]
+    fn delete_last_terminal_switches_to_projects() {
+        let mut app = test_app(default_bindings());
+        app.show_companion_terminal()
+            .expect("launch companion terminal");
+
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        app.input_target = InputTarget::None;
+        app.session_surface = SessionSurface::Agent;
+        app.left_section = LeftSection::Terminals;
+
+        let terminal_id = app.terminal_items()[0].0.clone();
+        app.do_delete_terminal(&terminal_id);
+
+        assert!(app.companion_terminals.is_empty());
+        assert_eq!(
+            app.left_section,
+            LeftSection::Projects,
+            "should switch back to projects when last terminal deleted"
         );
     }
 }

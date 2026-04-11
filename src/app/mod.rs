@@ -403,6 +403,11 @@ pub(crate) enum PromptState {
         branch_name: String,
         confirm_selected: bool, // false = Cancel (default), true = Delete
     },
+    ConfirmDeleteTerminal {
+        terminal_id: String,
+        terminal_label: String,
+        confirm_selected: bool, // false = Cancel (default), true = Delete
+    },
     ConfirmQuit {
         agent_count: usize,
         terminal_count: usize,
@@ -675,6 +680,10 @@ pub(crate) enum OverlayMouseLayout {
         kill_button: Rect,
     },
     ConfirmDeleteAgent {
+        cancel_button: Rect,
+        delete_button: Rect,
+    },
+    ConfirmDeleteTerminal {
         cancel_button: Rect,
         delete_button: Rect,
     },
