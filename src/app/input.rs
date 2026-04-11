@@ -47,6 +47,8 @@ enum PromptMouseTarget {
     ConfirmDiscardConfirm,
     ConfirmNonDefaultBranchCancel,
     ConfirmNonDefaultBranchAdd,
+    ConfirmUseExistingBranchCancel,
+    ConfirmUseExistingBranchUse,
     RenameInput,
     NameNewAgentInput,
 }
@@ -1909,6 +1911,28 @@ impl App {
             return Ok(false);
         }
 
+        if let PromptState::ConfirmUseExistingBranch {
+            confirm_selected, ..
+        } = &mut self.prompt
+        {
+            match self.bindings.lookup(&key, BindingScope::Dialog) {
+                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+                Some(Action::ToggleSelection) => {
+                    *confirm_selected = !*confirm_selected;
+                }
+                Some(Action::Confirm) => {
+                    let confirm = *confirm_selected;
+                    return Ok(self.resolve_confirm_use_existing_branch(confirm));
+                }
+                _ if key.code == KeyCode::Char(' ') => {
+                    let confirm = *confirm_selected;
+                    return Ok(self.resolve_confirm_use_existing_branch(confirm));
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+
         if matches!(self.prompt, PromptState::EditMacros { .. }) {
             self.handle_edit_macros_key(key)?;
             return Ok(false);
@@ -1952,6 +1976,29 @@ impl App {
                     let PromptState::NameNewAgent { mut request, .. } = old_prompt else {
                         unreachable!()
                     };
+
+                    // For NewProject requests, check whether the branch already
+                    // exists locally or on the remote before creating a new one.
+                    if let CreateAgentRequest::NewProject { ref project, .. } = request {
+                        let repo_path = std::path::PathBuf::from(&project.path);
+                        if let Some(location) = git::branch_exists(&repo_path, &name) {
+                            if let CreateAgentRequest::NewProject {
+                                ref mut custom_name,
+                                ..
+                            } = request
+                            {
+                                *custom_name = Some(name.clone());
+                            }
+                            self.prompt = PromptState::ConfirmUseExistingBranch {
+                                request,
+                                branch_name: name,
+                                location,
+                                confirm_selected: false,
+                            };
+                            return Ok(false);
+                        }
+                    }
+
                     let msg = match &request {
                         CreateAgentRequest::NewProject { project, .. } => {
                             format!(
@@ -2379,6 +2426,18 @@ impl App {
                     Some(PromptMouseTarget::ConfirmNonDefaultBranchCancel)
                 } else if contains_point(add_button, column, row) {
                     Some(PromptMouseTarget::ConfirmNonDefaultBranchAdd)
+                } else {
+                    None
+                }
+            }
+            OverlayMouseLayout::ConfirmUseExistingBranch {
+                cancel_button,
+                use_button,
+            } => {
+                if contains_point(cancel_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmUseExistingBranchCancel)
+                } else if contains_point(use_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmUseExistingBranchUse)
                 } else {
                     None
                 }
@@ -3020,6 +3079,40 @@ impl App {
         false
     }
 
+    fn resolve_confirm_use_existing_branch(&mut self, confirm: bool) -> bool {
+        let old_prompt = std::mem::replace(&mut self.prompt, PromptState::None);
+        let PromptState::ConfirmUseExistingBranch {
+            mut request,
+            branch_name,
+            ..
+        } = old_prompt
+        else {
+            return false;
+        };
+        if !confirm {
+            return false;
+        }
+        if let CreateAgentRequest::NewProject {
+            use_existing_branch,
+            ..
+        } = &mut request
+        {
+            *use_existing_branch = true;
+        }
+        let msg = if let CreateAgentRequest::NewProject { ref project, .. } = request {
+            format!(
+                "Attaching to existing branch \"{branch_name}\" for project \"{}\" and launching a fresh session...",
+                project.name
+            )
+        } else {
+            unreachable!()
+        };
+        if let Err(e) = self.dispatch_create_agent_request(request, msg) {
+            self.set_error(format!("{e:#}"));
+        }
+        false
+    }
+
     fn set_rename_cursor_from_mouse(&mut self, column: u16) {
         let input_area = match self.overlay_layout.active {
             OverlayMouseLayout::RenameSession { input } => input,
@@ -3215,6 +3308,12 @@ impl App {
             }
             PromptMouseTarget::ConfirmNonDefaultBranchAdd => {
                 return self.resolve_confirm_non_default_branch(true);
+            }
+            PromptMouseTarget::ConfirmUseExistingBranchCancel => {
+                return self.resolve_confirm_use_existing_branch(false);
+            }
+            PromptMouseTarget::ConfirmUseExistingBranchUse => {
+                return self.resolve_confirm_use_existing_branch(true);
             }
             PromptMouseTarget::RenameInput => {
                 self.set_rename_cursor_from_mouse(mouse.column);

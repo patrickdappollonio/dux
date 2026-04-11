@@ -447,6 +447,12 @@ pub(crate) enum PromptState {
         kind: BranchWarningKind,
         confirm_selected: bool, // false = Cancel (default), true = Add Anyway
     },
+    ConfirmUseExistingBranch {
+        request: CreateAgentRequest,
+        branch_name: String,
+        location: crate::git::BranchLocation,
+        confirm_selected: bool, // false = Cancel (default), true = Use Existing
+    },
     DebugInput {
         lines: Vec<Line<'static>>,
         scroll_offset: u16,
@@ -701,6 +707,10 @@ pub(crate) enum OverlayMouseLayout {
         cancel_button: Rect,
         add_button: Rect,
     },
+    ConfirmUseExistingBranch {
+        cancel_button: Rect,
+        use_button: Rect,
+    },
     RenameSession {
         input: Rect,
     },
@@ -766,6 +776,7 @@ pub(crate) enum CreateAgentRequest {
     NewProject {
         project: Project,
         custom_name: Option<String>,
+        use_existing_branch: bool,
     },
     ForkSession {
         project: Project,

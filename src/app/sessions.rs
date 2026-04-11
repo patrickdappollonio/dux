@@ -146,6 +146,7 @@ impl App {
                 request: CreateAgentRequest::NewProject {
                     project,
                     custom_name: None,
+                    use_existing_branch: false,
                 },
                 input: TextInput::new().with_char_map(crate::git::agent_name_char_map),
             };
@@ -157,6 +158,7 @@ impl App {
             CreateAgentRequest::NewProject {
                 project: project.clone(),
                 custom_name: None,
+                use_existing_branch: false,
             },
             format!(
                 "Creating a new agent worktree for project \"{}\" and launching a fresh session...",
