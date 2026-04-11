@@ -744,10 +744,24 @@ pub(crate) fn run_create_agent_job(
                 custom_name,
                 use_existing_branch,
             } => {
-                let progress = if use_existing_branch {
+                let repo_path = PathBuf::from(&project.path);
+
+                // Resolve the branch name early so we can check for an
+                // existing branch before calling git worktree add.  When no
+                // custom name was provided, a random pet name is generated.
+                let resolved_name = custom_name.unwrap_or_else(git::docker_style_name);
+
+                // If the caller already confirmed via the UI dialog,
+                // `use_existing_branch` is true.  Otherwise, do a last-mile
+                // check — this covers auto-generated pet names that
+                // coincidentally match an existing branch.
+                let attach_existing =
+                    use_existing_branch || git::branch_exists(&repo_path, &resolved_name).is_some();
+
+                let progress = if attach_existing {
                     format!(
-                        "Attaching to existing branch for project \"{}\"...",
-                        project.name
+                        "Attaching to existing branch \"{}\" for project \"{}\"...",
+                        resolved_name, project.name
                     )
                 } else {
                     format!(
@@ -756,15 +770,13 @@ pub(crate) fn run_create_agent_job(
                     )
                 };
                 let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(progress));
-                let repo_path = PathBuf::from(&project.path);
-                let (branch_name, worktree_path) = if use_existing_branch {
+
+                let (branch_name, worktree_path) = if attach_existing {
                     match git::create_worktree_existing_branch(
                         &repo_path,
                         &paths.worktrees_root,
                         &project.name,
-                        custom_name
-                            .as_deref()
-                            .expect("use_existing_branch requires custom_name"),
+                        &resolved_name,
                     ) {
                         Ok(result) => result,
                         Err(err) => {
@@ -784,7 +796,7 @@ pub(crate) fn run_create_agent_job(
                         &repo_path,
                         &paths.worktrees_root,
                         &project.name,
-                        custom_name.as_deref(),
+                        Some(&resolved_name),
                     ) {
                         Ok(result) => result,
                         Err(err) => {
@@ -800,7 +812,7 @@ pub(crate) fn run_create_agent_job(
                         }
                     }
                 };
-                let status_message = if use_existing_branch {
+                let status_message = if attach_existing {
                     format!(
                         "Attached to existing branch \"{}\" in project \"{}\". The worktree is ready in a fresh session.",
                         branch_name, project.name
