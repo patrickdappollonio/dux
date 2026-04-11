@@ -1052,6 +1052,7 @@ impl App {
 
                     // Overlay selection highlight if this cell is selected.
                     if let Some(sel) = &self.terminal_selection
+                        && sel.anchor != sel.end
                         && sel.contains(cell.row, cell.col)
                     {
                         ratatui_cell.set_style(self.theme.selection_style());
