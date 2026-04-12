@@ -6,6 +6,10 @@ Your AI agents deserve a proper office. **dux** (pronounced "dooks") is a termin
 
 No protocol layers. No adapters. No JSON-RPC. Just real CLIs running in real terminals.
 
+Oh, and it's fast and consumes low resources: more RAM is left for Claude, Codex or any of the other agents 👍
+
+[![asciicast](https://asciinema.org/a/IvqL89rXvwCzvSxQ.svg)](https://asciinema.org/a/IvqL89rXvwCzvSxQ)
+
 ## Why dux?
 
 Most AI coding tools give you one agent in one directory. dux gives you **unlimited agents across unlimited worktrees**, all visible at once. Spawn five agents on five branches and let them work in parallel. Fork a session to try a different approach without losing the original. Open companion terminals next to your agents for builds, tests, or just poking around.
