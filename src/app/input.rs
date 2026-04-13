@@ -2131,7 +2131,7 @@ impl App {
                         if let Some(ref old_name) = old_id
                             && *old_name != name
                         {
-                            self.config.macros.entries.remove(old_name);
+                            self.config.macros.entries.shift_remove(old_name);
                         }
 
                         // Update config
@@ -2228,7 +2228,7 @@ impl App {
                 // Delete selected macro
                 if let Some((name, _, _)) = entries.get(*selected) {
                     let name = name.clone();
-                    self.config.macros.entries.remove(&name);
+                    self.config.macros.entries.shift_remove(&name);
 
                     let PromptState::EditMacros {
                         entries, selected, ..

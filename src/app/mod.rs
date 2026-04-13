@@ -1502,14 +1502,14 @@ impl App {
     }
 
     pub(crate) fn open_edit_macros(&mut self) {
-        let mut entries: Vec<(String, String, MacroSurface)> = self
+        let entries: Vec<(String, String, MacroSurface)> = self
             .config
             .macros
             .entries
             .iter()
             .map(|(k, v)| (k.clone(), v.text.clone(), v.surface))
             .collect();
-        entries.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+        // Preserve declaration order from config file (IndexMap iteration order).
         self.prompt = PromptState::EditMacros {
             entries,
             selected: 0,

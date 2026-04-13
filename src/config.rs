@@ -109,7 +109,7 @@ pub struct MacroEntry {
 #[serde(default)]
 pub struct MacrosConfig {
     #[serde(flatten)]
-    pub entries: BTreeMap<String, MacroEntry>,
+    pub entries: IndexMap<String, MacroEntry>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2224,6 +2224,62 @@ oneshot_output = "stdout"
         assert_eq!(config.entries["Explain"].surface, MacroSurface::Agent);
         assert_eq!(config.entries["Review"].surface, MacroSurface::Both);
         assert_eq!(config.entries["Build"].surface, MacroSurface::Terminal);
+    }
+
+    #[test]
+    fn macros_config_preserves_declaration_order() {
+        // Names are deliberately non-alphabetical to verify we get declaration
+        // order (IndexMap) rather than sorted order (BTreeMap).
+        let toml_str = r#"
+"Zebra" = { text = "z cmd", surface = "agent" }
+"Alpha" = { text = "a cmd", surface = "terminal" }
+"Middle" = { text = "m cmd", surface = "both" }
+"#;
+        let config: MacrosConfig = toml::from_str(toml_str).unwrap();
+        let names: Vec<&str> = config.entries.keys().map(|s| s.as_str()).collect();
+        assert_eq!(names, vec!["Zebra", "Alpha", "Middle"]);
+    }
+
+    #[test]
+    fn macros_config_order_survives_serialize_round_trip() {
+        let toml_str = r#"
+"Zebra" = { text = "z cmd", surface = "agent" }
+"Alpha" = { text = "a cmd", surface = "terminal" }
+"Middle" = { text = "m cmd", surface = "both" }
+"#;
+        let config: MacrosConfig = toml::from_str(toml_str).unwrap();
+        let serialized = toml::to_string(&config).unwrap();
+        let round_tripped: MacrosConfig = toml::from_str(&serialized).unwrap();
+        let names: Vec<&str> = round_tripped.entries.keys().map(|s| s.as_str()).collect();
+        assert_eq!(names, vec!["Zebra", "Alpha", "Middle"]);
+    }
+
+    #[test]
+    fn macros_config_insert_order_preserved() {
+        let mut config = MacrosConfig::default();
+        config.entries.insert(
+            "Zulu".into(),
+            MacroEntry {
+                text: "z".into(),
+                surface: MacroSurface::Agent,
+            },
+        );
+        config.entries.insert(
+            "Alpha".into(),
+            MacroEntry {
+                text: "a".into(),
+                surface: MacroSurface::Agent,
+            },
+        );
+        config.entries.insert(
+            "Mike".into(),
+            MacroEntry {
+                text: "m".into(),
+                surface: MacroSurface::Agent,
+            },
+        );
+        let names: Vec<&str> = config.entries.keys().map(|s| s.as_str()).collect();
+        assert_eq!(names, vec!["Zulu", "Alpha", "Mike"]);
     }
 
     #[test]
