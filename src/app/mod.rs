@@ -1479,7 +1479,7 @@ impl App {
             .iter()
             .map(|(k, v)| (k.clone(), v.text.clone(), v.surface))
             .collect();
-        entries.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+        // Preserve declaration order from config file (IndexMap iteration order).
         self.prompt = PromptState::EditMacros {
             entries,
             selected: 0,
