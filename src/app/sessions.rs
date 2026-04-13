@@ -747,14 +747,14 @@ impl App {
                         detached,
                     ));
                 }
-                if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id) {
-                    if project.default_provider != session.provider {
-                        msg.push_str(&format!(
-                            " Note: this agent uses {}. Your current default provider is {}.",
-                            session.provider.as_str(),
-                            project.default_provider.as_str(),
-                        ));
-                    }
+                if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
+                    && project.default_provider != session.provider
+                {
+                    msg.push_str(&format!(
+                        " Note: this agent uses {}. Your current default provider is {}.",
+                        session.provider.as_str(),
+                        project.default_provider.as_str(),
+                    ));
                 }
                 self.set_info(msg);
             }
@@ -816,14 +816,14 @@ impl App {
                         detached,
                     ));
                 }
-                if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id) {
-                    if project.default_provider != session.provider {
-                        msg.push_str(&format!(
-                            " Note: this agent uses {}. Your current default provider is {}.",
-                            session.provider.as_str(),
-                            project.default_provider.as_str(),
-                        ));
-                    }
+                if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
+                    && project.default_provider != session.provider
+                {
+                    msg.push_str(&format!(
+                        " Note: this agent uses {}. Your current default provider is {}.",
+                        session.provider.as_str(),
+                        project.default_provider.as_str(),
+                    ));
                 }
                 self.set_info(msg);
             }
