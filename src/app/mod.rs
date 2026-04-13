@@ -1502,7 +1502,7 @@ impl App {
     }
 
     pub(crate) fn open_edit_macros(&mut self) {
-        let mut entries: Vec<(String, String, MacroSurface)> = self
+        let entries: Vec<(String, String, MacroSurface)> = self
             .config
             .macros
             .entries
