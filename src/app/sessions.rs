@@ -1654,7 +1654,7 @@ mod tests {
         let s1 = make_session("s1", "claude", "/tmp/wt/a");
         let s2 = make_session("s2", "codex", "/tmp/wt/a");
         let project = make_project("project-1", "claude");
-        let mut app = test_app_with_sessions(vec![s1, s2], vec![project]);
+        let app = test_app_with_sessions(vec![s1, s2], vec![project]);
 
         // Deleting s1 should preserve the worktree because s2 still uses it.
         // We can't call do_delete_session directly because git::remove_worktree
