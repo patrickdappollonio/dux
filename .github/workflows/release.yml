@@ -102,7 +102,9 @@ jobs:
 
           ---
 
-          ## Install
+          ## Installation
+
+          Use any of the following options to install dux on your system:
 
           ${install_section}
 
@@ -113,7 +115,9 @@ jobs:
 
           ---
 
-          ## Install
+          ## Installation
+
+          Use any of the following options to install dux on your system:
 
           ${install_section}"
           fi
