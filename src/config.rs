@@ -1161,9 +1161,12 @@ fn render_projects(out: &mut String, projects: &[ProjectConfig]) {
         "# Projects are registered here by the UI. The folder name is used when name is omitted.\n",
     );
     out.push_str("# default_provider can override the global default for one project.\n");
+    out.push_str(
+        "# Paths support environment variables ($HOME, ${USER}) and tilde (~) expansion.\n",
+    );
     if projects.is_empty() {
         out.push_str("# [[projects]]\n");
-        out.push_str("# path = \"/path/to/your/repo\"\n");
+        out.push_str("# path = \"$HOME/projects/your-repo\"\n");
     } else {
         for project in projects {
             out.push_str("[[projects]]\n");
@@ -1481,6 +1484,99 @@ fn discover_root(home: &Path, xdg_config_home: Option<std::ffi::OsString>) -> Pa
         }
         home.join(".config").join("dux")
     }
+}
+
+/// Expand environment variables (`$VAR`, `${VAR}`) and tilde (`~`) in a path
+/// string.  Returns `None` when the result is unsafe (relative path, directory
+/// traversal via `..`, or invalid variable names).
+pub fn expand_path(raw: &str) -> Option<String> {
+    let mut result = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+
+    // Handle leading tilde.
+    if chars.peek() == Some(&'~') {
+        chars.next(); // consume '~'
+        let home = home::home_dir()?;
+        result.push_str(&home.to_string_lossy());
+        // Allow `~/...` but also bare `~`.
+        if chars.peek() == Some(&'/') {
+            // keep the slash – the next iteration will push it
+        } else if chars.peek().is_some() {
+            // `~user` style – not supported, reject.
+            return None;
+        }
+    }
+
+    while let Some(ch) = chars.next() {
+        if ch == '$' {
+            // Try `${VAR}` or `$VAR`.
+            let braced = chars.peek() == Some(&'{');
+            if braced {
+                chars.next(); // consume '{'
+            }
+            let mut var_name = String::new();
+            while let Some(&c) = chars.peek() {
+                if braced {
+                    if c == '}' {
+                        chars.next(); // consume '}'
+                        break;
+                    }
+                } else if !c.is_ascii_alphanumeric() && c != '_' {
+                    break;
+                }
+                var_name.push(c);
+                chars.next();
+            }
+            // Validate variable name: [A-Za-z_][A-Za-z0-9_]*
+            if var_name.is_empty() || !is_valid_var_name(&var_name) {
+                return None;
+            }
+            match std::env::var(&var_name) {
+                Ok(value) => result.push_str(&value),
+                Err(_) => {
+                    // Unresolved variable – keep the literal token so the user
+                    // can see which variable failed in the warning message.
+                    result.push('$');
+                    if braced {
+                        result.push('{');
+                    }
+                    result.push_str(&var_name);
+                    if braced {
+                        result.push('}');
+                    }
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    let path = std::path::Path::new(&result);
+
+    // Must be absolute.
+    if !path.is_absolute() {
+        return None;
+    }
+
+    // Reject directory traversal (`..`).
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+
+    Some(result)
+}
+
+/// Returns `true` when `name` matches `[A-Za-z_][A-Za-z0-9_]*`.
+fn is_valid_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 #[cfg(test)]
@@ -2283,5 +2379,95 @@ args = [\"-l\"]
         let reloaded: Config = toml::from_str(&saved).expect("parse saved");
         assert_eq!(reloaded.ui.right_width_pct, 30);
         assert_eq!(reloaded.editor.default, "zed");
+    }
+
+    // ── expand_path tests ────────────────────────────────────────────────
+
+    #[test]
+    fn expand_path_absolute_unchanged() {
+        assert_eq!(
+            expand_path("/absolute/path").as_deref(),
+            Some("/absolute/path")
+        );
+    }
+
+    #[test]
+    fn expand_path_tilde() {
+        let home = home::home_dir().expect("home dir");
+        let result = expand_path("~/projects/foo").unwrap();
+        assert_eq!(result, format!("{}/projects/foo", home.display()));
+    }
+
+    #[test]
+    fn expand_path_bare_tilde() {
+        let home = home::home_dir().expect("home dir");
+        assert_eq!(expand_path("~").unwrap(), home.to_string_lossy());
+    }
+
+    #[test]
+    fn expand_path_dollar_var() {
+        // SAFETY: test-only env manipulation; tests are run with --test-threads=1
+        // or use unique variable names to avoid races.
+        unsafe { std::env::set_var("DUX_TEST_VAR_1", "/test/value") };
+        let result = expand_path("$DUX_TEST_VAR_1/subdir").unwrap();
+        assert_eq!(result, "/test/value/subdir");
+        unsafe { std::env::remove_var("DUX_TEST_VAR_1") };
+    }
+
+    #[test]
+    fn expand_path_braced_var() {
+        unsafe { std::env::set_var("DUX_TEST_VAR_2", "/braced") };
+        let result = expand_path("${DUX_TEST_VAR_2}/sub").unwrap();
+        assert_eq!(result, "/braced/sub");
+        unsafe { std::env::remove_var("DUX_TEST_VAR_2") };
+    }
+
+    #[test]
+    fn expand_path_unresolved_var_kept_literal() {
+        // Unresolved var is preserved literally; if the overall path is still
+        // absolute the function succeeds (the path just won't exist on disk).
+        let result = expand_path("/prefix/$NONEXISTENT_DUX_VAR_999/suffix");
+        assert_eq!(
+            result.as_deref(),
+            Some("/prefix/$NONEXISTENT_DUX_VAR_999/suffix")
+        );
+    }
+
+    #[test]
+    fn expand_path_rejects_relative() {
+        assert!(expand_path("relative/path").is_none());
+    }
+
+    #[test]
+    fn expand_path_rejects_dotdot_relative() {
+        assert!(expand_path("../relative/path").is_none());
+    }
+
+    #[test]
+    fn expand_path_rejects_traversal() {
+        unsafe { std::env::set_var("DUX_TEST_VAR_3", "/safe") };
+        assert!(expand_path("$DUX_TEST_VAR_3/../etc/passwd").is_none());
+        unsafe { std::env::remove_var("DUX_TEST_VAR_3") };
+    }
+
+    #[test]
+    fn expand_path_rejects_command_substitution() {
+        assert!(expand_path("$(whoami)/foo").is_none());
+    }
+
+    #[test]
+    fn expand_path_rejects_tilde_user() {
+        // `~otheruser/foo` is not supported.
+        assert!(expand_path("~otheruser/foo").is_none());
+    }
+
+    #[test]
+    fn expand_path_rejects_empty_var_name() {
+        assert!(expand_path("$/foo").is_none());
+    }
+
+    #[test]
+    fn expand_path_rejects_empty_braced_var_name() {
+        assert!(expand_path("${}/foo").is_none());
     }
 }

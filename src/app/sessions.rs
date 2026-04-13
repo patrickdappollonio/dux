@@ -126,6 +126,7 @@ impl App {
             path,
             default_provider: self.config.default_provider(),
             current_branch: branch,
+            path_missing: false,
         });
         self.rebuild_left_items();
         logger::info(&format!("registered project {}", path_buf.display()));
@@ -138,6 +139,10 @@ impl App {
             self.set_error("Select a project first.");
             return Ok(());
         };
+
+        if project.path_missing {
+            return Ok(());
+        }
 
         if self.config.defaults.prompt_for_name {
             self.input_target = InputTarget::None;
@@ -466,6 +471,13 @@ impl App {
             self.set_error("Select a project first.");
             return Ok(());
         };
+        if project.path_missing {
+            self.set_warning(format!(
+                "Cannot refresh: path not found for \"{}\"",
+                project.name
+            ));
+            return Ok(());
+        }
         logger::info(&format!("refreshing project {}", project.path));
         self.start_pull(
             PathBuf::from(&project.path),
