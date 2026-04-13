@@ -1259,13 +1259,20 @@ impl App {
     /// Show a status-line warning when a missing project is highlighted, or
     /// clear the warning when the selection moves away from one.
     pub(crate) fn update_missing_project_warning(&mut self) {
-        if let Some(LeftItem::Project(idx)) = self.left_items().get(self.selected_left).copied() {
-            if let Some(project) = self.projects.get(idx) {
-                if project.path_missing {
-                    self.set_warning(format!("Project path not found: {}", project.path));
-                    return;
+        let missing_path = self
+            .left_items()
+            .get(self.selected_left)
+            .copied()
+            .and_then(|item| match item {
+                LeftItem::Project(idx) => {
+                    let p = self.projects.get(idx)?;
+                    p.path_missing.then(|| p.path.clone())
                 }
-            }
+                _ => None,
+            });
+        if let Some(path) = missing_path {
+            self.set_warning(format!("Project path not found: {path}"));
+            return;
         }
         // Only clear if the current tone is Warning – don't clobber Info/Busy/Error.
         if matches!(self.status.tone(), crate::statusline::StatusTone::Warning) {
