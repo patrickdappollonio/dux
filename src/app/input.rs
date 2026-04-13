@@ -381,6 +381,7 @@ impl App {
                 }
                 Action::NewAgent => self.create_agent_for_selected_project()?,
                 Action::ForkAgent => self.fork_selected_session()?,
+                Action::NewProviderSession => self.create_provider_session_on_worktree()?,
                 Action::RefreshProject => self.refresh_selected_project()?,
                 Action::ShowTerminal => self.show_or_open_first_terminal()?,
                 Action::DeleteSession => self.confirm_delete_selected_session()?,
@@ -2011,12 +2012,16 @@ impl App {
                                 "Forking agent \"{source_label}\" as \"{name}\" by cloning its current worktree contents into a fresh session...",
                             )
                         }
+                        CreateAgentRequest::NewProviderSession { .. } => {
+                            unreachable!("NewProviderSession does not use the naming prompt")
+                        }
                     };
                     match &mut request {
                         CreateAgentRequest::NewProject { custom_name, .. }
                         | CreateAgentRequest::ForkSession { custom_name, .. } => {
                             *custom_name = Some(name);
                         }
+                        CreateAgentRequest::NewProviderSession { .. } => {}
                     }
                     self.dispatch_create_agent_request(request, msg)?;
                 }

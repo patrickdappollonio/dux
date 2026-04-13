@@ -11,6 +11,7 @@ pub enum Action {
     ToggleProject,
     NewAgent,
     ForkAgent,
+    NewProviderSession,
     FocusAgent,
     OpenProjectBrowser,
     CopyPath,
@@ -184,6 +185,7 @@ impl Action {
             Action::ToggleProject => "toggle_project",
             Action::NewAgent => "new_agent",
             Action::ForkAgent => "fork_agent",
+            Action::NewProviderSession => "new_provider_session",
             Action::FocusAgent => "focus_agent",
             Action::OpenProjectBrowser => "open_project_browser",
             Action::CopyPath => "copy_path",
@@ -263,6 +265,9 @@ impl Action {
             Action::ToggleProject => "Collapse or expand the selected project.",
             Action::NewAgent => "Create a new agent session (worktree).",
             Action::ForkAgent => "Fork the selected agent into a fresh worktree and session.",
+            Action::NewProviderSession => {
+                "Create a new session with a different provider on the selected agent's worktree."
+            }
             Action::FocusAgent => "Focus the selected agent's output pane.",
             Action::OpenProjectBrowser => "Open the project browser.",
             Action::CopyPath => "Copy the selected agent's worktree path.",
@@ -352,6 +357,7 @@ impl Action {
             | Action::ToggleProject
             | Action::NewAgent
             | Action::ForkAgent
+            | Action::NewProviderSession
             | Action::FocusAgent
             | Action::OpenProjectBrowser
             | Action::CopyPath
@@ -534,6 +540,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "fork-agent",
             description: "Fork the selected agent into a fresh worktree and session",
+        }),
+    },
+    BindingDef {
+        action: Action::NewProviderSession,
+        default_keys: &[],
+        scopes: &[BindingScope::Left],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "new-provider-session",
+            description: "Create a new session with a different provider on this worktree",
         }),
     },
     BindingDef {
@@ -2118,6 +2135,17 @@ mod tests {
             .filter_map(|binding| binding.palette_name)
             .collect::<Vec<_>>();
         assert!(names.contains(&"fork-agent"));
+    }
+
+    #[test]
+    fn filtered_palette_includes_new_provider_session_command() {
+        let bindings = default_bindings();
+        let results = bindings.filtered_palette("provider");
+        let names = results
+            .iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"new-provider-session"));
     }
 
     #[test]

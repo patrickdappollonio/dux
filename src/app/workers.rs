@@ -22,6 +22,10 @@ impl App {
                         self.set_error(format!("Failed to persist session: {err}"));
                         continue;
                     }
+                    self.detach_conflicting_worktree_session(
+                        &session.worktree_path,
+                        &session.id,
+                    );
                     self.providers.insert(session.id.clone(), client);
                     self.sessions.insert(0, session.clone());
                     self.update_branch_sync_sessions();
@@ -737,184 +741,235 @@ pub(crate) fn run_create_agent_job(
     worker_tx: Sender<WorkerEvent>,
     term_size: (u16, u16),
 ) {
-    let (project, provider, source_branch, status_message, branch_name, worktree_path) =
-        match request {
-            CreateAgentRequest::NewProject {
-                project,
-                custom_name,
-                use_existing_branch,
-            } => {
-                let repo_path = PathBuf::from(&project.path);
+    let (
+        project,
+        provider,
+        source_branch,
+        status_message,
+        branch_name,
+        worktree_path,
+        owns_worktree,
+    ) = match request {
+        CreateAgentRequest::NewProject {
+            project,
+            custom_name,
+            use_existing_branch,
+        } => {
+            let repo_path = PathBuf::from(&project.path);
 
-                // Resolve the branch name early so we can check for an
-                // existing branch before calling git worktree add.  When no
-                // custom name was provided, a random pet name is generated.
-                let resolved_name = custom_name.unwrap_or_else(git::docker_style_name);
+            // Resolve the branch name early so we can check for an
+            // existing branch before calling git worktree add.  When no
+            // custom name was provided, a random pet name is generated.
+            let resolved_name = custom_name.unwrap_or_else(git::docker_style_name);
 
-                // If the caller already confirmed via the UI dialog,
-                // `use_existing_branch` is true.  Otherwise, do a last-mile
-                // check — this covers auto-generated pet names that
-                // coincidentally match an existing branch.
-                let attach_existing =
-                    use_existing_branch || git::branch_exists(&repo_path, &resolved_name).is_some();
+            // If the caller already confirmed via the UI dialog,
+            // `use_existing_branch` is true.  Otherwise, do a last-mile
+            // check — this covers auto-generated pet names that
+            // coincidentally match an existing branch.
+            let attach_existing =
+                use_existing_branch || git::branch_exists(&repo_path, &resolved_name).is_some();
 
-                let progress = if attach_existing {
-                    format!(
-                        "Attaching to existing branch \"{}\" for project \"{}\"...",
-                        resolved_name, project.name
-                    )
-                } else {
-                    format!(
-                        "Creating a new worktree for project \"{}\"...",
-                        project.name
-                    )
-                };
-                let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(progress));
-
-                let (branch_name, worktree_path) = if attach_existing {
-                    match git::create_worktree_existing_branch(
-                        &repo_path,
-                        &paths.worktrees_root,
-                        &project.name,
-                        &resolved_name,
-                    ) {
-                        Ok(result) => result,
-                        Err(err) => {
-                            logger::error(&format!(
-                                "worktree creation (existing branch) failed for {}: {err}",
-                                project.path
-                            ));
-                            let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
-                                "Failed to attach to existing branch for project \"{}\": {err}",
-                                project.name
-                            )));
-                            return;
-                        }
-                    }
-                } else {
-                    match git::create_worktree(
-                        &repo_path,
-                        &paths.worktrees_root,
-                        &project.name,
-                        Some(&resolved_name),
-                    ) {
-                        Ok(result) => result,
-                        Err(err) => {
-                            logger::error(&format!(
-                                "worktree creation failed for {}: {err}",
-                                project.path
-                            ));
-                            let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
-                                "Failed to create a new worktree for project \"{}\": {err}",
-                                project.name
-                            )));
-                            return;
-                        }
-                    }
-                };
-                let status_message = if attach_existing {
-                    format!(
-                        "Attached to existing branch \"{}\" in project \"{}\". The worktree is ready in a fresh session.",
-                        branch_name, project.name
-                    )
-                } else {
-                    format!(
-                        "Created {} agent \"{}\" in project \"{}\". The new worktree is ready in a fresh session.",
-                        project.default_provider.as_str(),
-                        branch_name,
-                        project.name
-                    )
-                };
-                (
-                    project.clone(),
-                    project.default_provider.clone(),
-                    project.current_branch.clone(),
-                    status_message,
-                    branch_name,
-                    worktree_path,
+            let progress = if attach_existing {
+                format!(
+                    "Attaching to existing branch \"{}\" for project \"{}\"...",
+                    resolved_name, project.name
                 )
-            }
-            CreateAgentRequest::ForkSession {
-                project,
-                source_session,
-                source_label,
-                custom_name,
-            } => {
-                let source_worktree = PathBuf::from(&source_session.worktree_path);
-                let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
-                    "Creating a forked worktree from agent \"{source_label}\"...",
-                )));
-                let source_head = match git::head_commit(&source_worktree) {
-                    Ok(head) => head,
-                    Err(err) => {
-                        logger::error(&format!(
-                            "failed to resolve HEAD for {}: {err}",
-                            source_session.worktree_path
-                        ));
-                        let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
-                        "Failed to inspect the source worktree for agent \"{source_label}\": {err}",
-                    )));
-                        return;
-                    }
-                };
-                let repo_path = PathBuf::from(&project.path);
-                let (branch_name, worktree_path) = match git::create_worktree_from_start_point(
+            } else {
+                format!(
+                    "Creating a new worktree for project \"{}\"...",
+                    project.name
+                )
+            };
+            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(progress));
+
+            let (branch_name, worktree_path) = if attach_existing {
+                match git::create_worktree_existing_branch(
                     &repo_path,
                     &paths.worktrees_root,
                     &project.name,
-                    Some(&source_head),
-                    custom_name.as_deref(),
+                    &resolved_name,
                 ) {
                     Ok(result) => result,
                     Err(err) => {
                         logger::error(&format!(
-                            "fork worktree creation failed for {}: {err}",
+                            "worktree creation (existing branch) failed for {}: {err}",
                             project.path
                         ));
                         let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
-                        "Failed to create a forked worktree from agent \"{source_label}\": {err}",
-                    )));
+                            "Failed to attach to existing branch for project \"{}\": {err}",
+                            project.name
+                        )));
                         return;
                     }
-                };
-                let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
-                "Copying the current filesystem contents from agent \"{source_label}\" into the new fork...",
+                }
+            } else {
+                match git::create_worktree(
+                    &repo_path,
+                    &paths.worktrees_root,
+                    &project.name,
+                    Some(&resolved_name),
+                ) {
+                    Ok(result) => result,
+                    Err(err) => {
+                        logger::error(&format!(
+                            "worktree creation failed for {}: {err}",
+                            project.path
+                        ));
+                        let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
+                            "Failed to create a new worktree for project \"{}\": {err}",
+                            project.name
+                        )));
+                        return;
+                    }
+                }
+            };
+            let status_message = if attach_existing {
+                format!(
+                    "Attached to existing branch \"{}\" in project \"{}\". The worktree is ready in a fresh session.",
+                    branch_name, project.name
+                )
+            } else {
+                format!(
+                    "Created {} agent \"{}\" in project \"{}\". The new worktree is ready in a fresh session.",
+                    project.default_provider.as_str(),
+                    branch_name,
+                    project.name
+                )
+            };
+            (
+                project.clone(),
+                project.default_provider.clone(),
+                project.current_branch.clone(),
+                status_message,
+                branch_name,
+                worktree_path,
+                true,
+            )
+        }
+        CreateAgentRequest::ForkSession {
+            project,
+            source_session,
+            source_label,
+            custom_name,
+        } => {
+            let source_worktree = PathBuf::from(&source_session.worktree_path);
+            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
+                "Creating a forked worktree from agent \"{source_label}\"...",
             )));
-                if let Err(err) = git::mirror_worktree_contents(&source_worktree, &worktree_path) {
+            let source_head = match git::head_commit(&source_worktree) {
+                Ok(head) => head,
+                Err(err) => {
                     logger::error(&format!(
-                        "failed to mirror worktree {} into {}: {err}",
-                        source_worktree.display(),
-                        worktree_path.display()
+                        "failed to resolve HEAD for {}: {err}",
+                        source_session.worktree_path
                     ));
-                    let _ = git::remove_worktree(&repo_path, &worktree_path, &branch_name);
                     let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
-                    "Failed to copy the source worktree contents for agent \"{source_label}\": {err}",
-                )));
+                        "Failed to inspect the source worktree for agent \"{source_label}\": {err}",
+                    )));
                     return;
                 }
-                let status_message = format!(
-                    "Forked {} agent \"{}\" from \"{}\" in project \"{}\". The new worktree starts with copied files and a fresh session.",
-                    source_session.provider.as_str(),
-                    branch_name,
-                    source_label,
-                    project.name
-                );
-                (
-                    project,
-                    source_session.provider,
-                    source_session.branch_name,
-                    status_message,
-                    branch_name,
-                    worktree_path,
-                )
+            };
+            let repo_path = PathBuf::from(&project.path);
+            let (branch_name, worktree_path) = match git::create_worktree_from_start_point(
+                &repo_path,
+                &paths.worktrees_root,
+                &project.name,
+                Some(&source_head),
+                custom_name.as_deref(),
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    logger::error(&format!(
+                        "fork worktree creation failed for {}: {err}",
+                        project.path
+                    ));
+                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
+                        "Failed to create a forked worktree from agent \"{source_label}\": {err}",
+                    )));
+                    return;
+                }
+            };
+            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
+                "Copying the current filesystem contents from agent \"{source_label}\" into the new fork...",
+            )));
+            if let Err(err) = git::mirror_worktree_contents(&source_worktree, &worktree_path) {
+                logger::error(&format!(
+                    "failed to mirror worktree {} into {}: {err}",
+                    source_worktree.display(),
+                    worktree_path.display()
+                ));
+                let _ = git::remove_worktree(&repo_path, &worktree_path, &branch_name);
+                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
+                    "Failed to copy the source worktree contents for agent \"{source_label}\": {err}",
+                )));
+                return;
             }
-        };
+            let status_message = format!(
+                "Forked {} agent \"{}\" from \"{}\" in project \"{}\". The new worktree starts with copied files and a fresh session.",
+                source_session.provider.as_str(),
+                branch_name,
+                source_label,
+                project.name
+            );
+            (
+                project,
+                source_session.provider,
+                source_session.branch_name,
+                status_message,
+                branch_name,
+                worktree_path,
+                true,
+            )
+        }
+        CreateAgentRequest::NewProviderSession {
+            project,
+            source_session,
+            provider,
+        } => {
+            let worktree_path = PathBuf::from(&source_session.worktree_path);
+            if !worktree_path.exists() {
+                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
+                    "Worktree for agent \"{}\" no longer exists.",
+                    source_session.branch_name
+                )));
+                return;
+            }
+            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
+                "Creating {} session on existing worktree \"{}\"...",
+                provider.as_str(),
+                source_session.branch_name
+            )));
+            let status_message = format!(
+                "Created {} session on worktree \"{}\" in project \"{}\". The worktree is shared with existing agents.",
+                provider.as_str(),
+                source_session.branch_name,
+                project.name
+            );
+            (
+                project,
+                provider,
+                source_session.source_branch.clone(),
+                status_message,
+                source_session.branch_name.clone(),
+                worktree_path,
+                false,
+            )
+        }
+    };
     let repo_path = PathBuf::from(&project.path);
-    logger::info(&format!(
-        "created worktree {} on branch {}",
-        worktree_path.display(),
-        branch_name
-    ));
+    if owns_worktree {
+        logger::info(&format!(
+            "created worktree {} on branch {}",
+            worktree_path.display(),
+            branch_name
+        ));
+    } else {
+        logger::info(&format!(
+            "reusing worktree {} on branch {} for new provider session",
+            worktree_path.display(),
+            branch_name
+        ));
+    }
     let session = AgentSession {
         id: Uuid::new_v4().to_string(),
         project_id: project.id.clone(),
@@ -931,11 +986,13 @@ pub(crate) fn run_create_agent_job(
     let provider_cfg = provider_config(&config, &session.provider);
     if let Err(hint) = check_provider_available(&provider_cfg) {
         logger::error(&format!("provider not found for {}: {hint}", session.id));
-        let _ = git::remove_worktree(
-            &repo_path,
-            Path::new(&session.worktree_path),
-            &session.branch_name,
-        );
+        if owns_worktree {
+            let _ = git::remove_worktree(
+                &repo_path,
+                Path::new(&session.worktree_path),
+                &session.branch_name,
+            );
+        }
         let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(hint));
         return;
     }
@@ -956,11 +1013,13 @@ pub(crate) fn run_create_agent_job(
         Ok(client) => client,
         Err(err) => {
             logger::error(&format!("PTY spawn failed for {}: {err}", session.id));
-            let _ = git::remove_worktree(
-                &repo_path,
-                Path::new(&session.worktree_path),
-                &session.branch_name,
-            );
+            if owns_worktree {
+                let _ = git::remove_worktree(
+                    &repo_path,
+                    Path::new(&session.worktree_path),
+                    &session.branch_name,
+                );
+            }
             let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
                 "Failed to start {}: {err}",
                 provider_cfg.command

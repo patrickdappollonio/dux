@@ -784,6 +784,11 @@ pub(crate) enum CreateAgentRequest {
         source_label: String,
         custom_name: Option<String>,
     },
+    NewProviderSession {
+        project: Project,
+        source_session: Box<AgentSession>,
+        provider: ProviderKind,
+    },
 }
 
 pub(crate) enum WorkerEvent {
@@ -1324,6 +1329,7 @@ impl App {
         match command {
             "new-agent" => self.create_agent_for_selected_project(),
             "fork-agent" => self.fork_selected_session(),
+            "new-provider-session" => self.create_provider_session_on_worktree(),
             "provider" => self.cycle_selected_project_provider(),
             "pull-project" => self.refresh_selected_project(),
             "delete-project" => self.delete_selected_project(),
