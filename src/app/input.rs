@@ -361,6 +361,7 @@ impl App {
                     if self.selected_left + 1 < item_count {
                         self.selected_left += 1;
                         self.reload_changed_files();
+                        self.update_missing_project_warning();
                     } else if self.has_terminal_items() {
                         // Jump to terminals section.
                         self.left_section = LeftSection::Terminals;
@@ -371,6 +372,7 @@ impl App {
                     if self.selected_left > 0 {
                         self.selected_left -= 1;
                         self.reload_changed_files();
+                        self.update_missing_project_warning();
                     }
                 }
                 Action::FocusAgent | Action::ExitInteractive => {
@@ -3329,7 +3331,12 @@ impl App {
     fn activate_selected_left_item(&mut self) -> Result<()> {
         match self.left_items().get(self.selected_left) {
             Some(LeftItem::Project(project_index)) => {
-                let project_id = self.projects[*project_index].id.clone();
+                let project = &self.projects[*project_index];
+                if project.path_missing {
+                    self.set_warning(format!("Project path not found: {}", project.path));
+                    return Ok(());
+                }
+                let project_id = project.id.clone();
                 let has_sessions = self.sessions.iter().any(|s| s.project_id == project_id);
                 if has_sessions {
                     if self.collapsed_projects.contains(&project_id) {
@@ -4000,6 +4007,7 @@ mod tests {
             path: root.to_string_lossy().to_string(),
             default_provider: ProviderKind::from_str("codex"),
             current_branch: "main".to_string(),
+            path_missing: false,
         };
         let session = AgentSession {
             id: "session-1".to_string(),
@@ -6159,6 +6167,7 @@ mod tests {
             path: root.join("other-project").display().to_string(),
             default_provider: ProviderKind::from_str("codex"),
             current_branch: "main".to_string(),
+            path_missing: false,
         };
         let other_session = AgentSession {
             id: "session-4".to_string(),
