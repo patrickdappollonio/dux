@@ -75,3 +75,47 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload ${{ github.event.release.tag_name }} install.sh
+
+  update-release-notes:
+    name: Append install instructions
+    runs-on: ubuntu-latest
+    needs: [build, upload-install-script]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Append install section to release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Extract the Install section body from README
+          # (between "## Install" and next "## ", excluding both headings)
+          install_section=$(sed -n '/^## Install$/,/^## /{/^## /d; p}' README.md | sed -e :a -e '/^\n*$/{$d;N;ba;}')
+
+          # Get current release body
+          current_body=$(gh release view "${{ github.event.release.tag_name }}" --json body -q '.body')
+
+          # Split at "Full Changelog" line and reassemble
+          if echo "$current_body" | grep -q '^\*\*Full Changelog\*\*'; then
+            before=$(echo "$current_body" | sed '/^\*\*Full Changelog\*\*/,$d' | sed -e :a -e '/^\n*$/{$d;N;ba;}')
+            changelog_line=$(echo "$current_body" | grep '^\*\*Full Changelog\*\*')
+            new_body="${before}
+
+          ---
+
+          ## Install
+
+          ${install_section}
+
+          ${changelog_line}"
+          else
+            # No Full Changelog line — just append
+            new_body="${current_body}
+
+          ---
+
+          ## Install
+
+          ${install_section}"
+          fi
+
+          gh release edit "${{ github.event.release.tag_name }}" --notes "$new_body"
