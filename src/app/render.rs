@@ -355,17 +355,25 @@ impl App {
                 .map(|(i, item)| match item {
                     LeftItem::Project(index) => {
                         let project = &self.projects[*index];
-                        let has_sessions = self.sessions.iter().any(|s| s.project_id == project.id);
-                        let icon = if !has_sessions || self.collapsed_projects.contains(&project.id)
-                        {
-                            "▸"
+                        if project.path_missing {
+                            ListItem::new(Line::from(Span::styled(
+                                "⚠",
+                                Style::default().fg(self.theme.project_missing_fg),
+                            )))
                         } else {
-                            "▾"
-                        };
-                        ListItem::new(Line::from(Span::styled(
-                            icon,
-                            Style::default().fg(self.theme.project_icon),
-                        )))
+                            let has_sessions =
+                                self.sessions.iter().any(|s| s.project_id == project.id);
+                            let icon =
+                                if !has_sessions || self.collapsed_projects.contains(&project.id) {
+                                    "▸"
+                                } else {
+                                    "▾"
+                                };
+                            ListItem::new(Line::from(Span::styled(
+                                icon,
+                                Style::default().fg(self.theme.project_icon),
+                            )))
+                        }
                     }
                     LeftItem::Session(index) => {
                         let session = &self.sessions[*index];
@@ -434,26 +442,37 @@ impl App {
             .map(|(i, item)| match item {
                 LeftItem::Project(index) => {
                     let project = &self.projects[*index];
-                    let count = session_counts.get(&project.id).copied().unwrap_or(0);
-                    let icon = if count == 0 || self.collapsed_projects.contains(&project.id) {
-                        "▸ "
+                    if project.path_missing {
+                        let spans = vec![
+                            Span::styled("⚠ ", Style::default().fg(self.theme.project_missing_fg)),
+                            Span::styled(
+                                project.name.clone(),
+                                Style::default().fg(self.theme.project_missing_fg),
+                            ),
+                        ];
+                        ListItem::new(Line::from(spans))
                     } else {
-                        "▾ "
-                    };
-                    let mut spans = vec![
-                        Span::styled(icon, Style::default().fg(self.theme.project_icon)),
-                        Span::styled(
-                            project.name.clone(),
-                            Style::default().add_modifier(Modifier::BOLD),
-                        ),
-                    ];
-                    if count > 0 {
-                        spans.push(Span::styled(
-                            format!(" ({count})"),
-                            Style::default().fg(self.theme.provider_label_fg),
-                        ));
+                        let count = session_counts.get(&project.id).copied().unwrap_or(0);
+                        let icon = if count == 0 || self.collapsed_projects.contains(&project.id) {
+                            "▸ "
+                        } else {
+                            "▾ "
+                        };
+                        let mut spans = vec![
+                            Span::styled(icon, Style::default().fg(self.theme.project_icon)),
+                            Span::styled(
+                                project.name.clone(),
+                                Style::default().add_modifier(Modifier::BOLD),
+                            ),
+                        ];
+                        if count > 0 {
+                            spans.push(Span::styled(
+                                format!(" ({count})"),
+                                Style::default().fg(self.theme.provider_label_fg),
+                            ));
+                        }
+                        ListItem::new(Line::from(spans))
                     }
-                    ListItem::new(Line::from(spans))
                 }
                 LeftItem::Session(index) => {
                     let session = &self.sessions[*index];

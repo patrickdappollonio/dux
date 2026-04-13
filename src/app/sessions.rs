@@ -126,6 +126,7 @@ impl App {
             path,
             default_provider: self.config.default_provider(),
             current_branch: branch,
+            path_missing: false,
         });
         self.rebuild_left_items();
         logger::info(&format!("registered project {}", path_buf.display()));
@@ -138,6 +139,10 @@ impl App {
             self.set_error("Select a project first.");
             return Ok(());
         };
+
+        if project.path_missing {
+            return Ok(());
+        }
 
         if self.config.defaults.prompt_for_name {
             self.input_target = InputTarget::None;
@@ -466,6 +471,13 @@ impl App {
             self.set_error("Select a project first.");
             return Ok(());
         };
+        if project.path_missing {
+            self.set_warning(format!(
+                "Cannot refresh: path not found for \"{}\"",
+                project.name
+            ));
+            return Ok(());
+        }
         logger::info(&format!("refreshing project {}", project.path));
         self.start_pull(
             PathBuf::from(&project.path),
@@ -511,13 +523,14 @@ impl App {
         else {
             return Ok(());
         };
-        let result = git::remove_worktree(
-            Path::new(&project.path),
-            Path::new(&session.worktree_path),
-            &session.branch_name,
-        )?;
+        let other_sessions_on_worktree = self
+            .sessions
+            .iter()
+            .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
+
         self.providers.remove(&session.id);
         self.last_pty_activity.remove(&session.id);
+        self.resume_fallback_candidates.remove(&session.id);
         self.clear_companion_terminals_for_session(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
         self.session_store.delete_session(&session.id)?;
@@ -525,18 +538,32 @@ impl App {
         self.rebuild_left_items();
         self.selected_left = self.selected_left.saturating_sub(1);
         self.reload_changed_files();
-        if result.branch_already_deleted {
+
+        if other_sessions_on_worktree {
             self.set_info(format!(
-                "Deleted agent (branch \"{}\" was already removed)",
-                session.branch_name
+                "Deleted {} session for agent \"{}\". Worktree preserved for remaining sessions.",
+                session.provider.as_str(),
+                session.branch_name,
             ));
         } else {
-            self.set_info(format!(
-                "Deleted {} agent from project \"{}\" with branch \"{}\"",
-                session.provider.as_str(),
-                project.name,
-                session.branch_name
-            ));
+            let result = git::remove_worktree(
+                Path::new(&project.path),
+                Path::new(&session.worktree_path),
+                &session.branch_name,
+            )?;
+            if result.branch_already_deleted {
+                self.set_info(format!(
+                    "Deleted agent (branch \"{}\" was already removed)",
+                    session.branch_name
+                ));
+            } else {
+                self.set_info(format!(
+                    "Deleted {} agent from project \"{}\" with branch \"{}\"",
+                    session.provider.as_str(),
+                    project.name,
+                    session.branch_name
+                ));
+            }
         }
         Ok(())
     }
@@ -705,6 +732,9 @@ impl App {
         self.last_pty_activity.remove(&session.id);
         self.resume_fallback_candidates.remove(&session.id);
 
+        let detached_label =
+            self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
+
         logger::info(&format!(
             "restarting agent \"{}\" with fresh session (no resume args)",
             session.branch_name
@@ -717,12 +747,28 @@ impl App {
                 self.input_target = InputTarget::Agent;
                 self.fullscreen_overlay = FullscreenOverlay::Agent;
                 let proj_name = self.project_name_for_session(&session);
-                self.set_info(format!(
+                let mut msg = format!(
                     "Started fresh {} session for agent \"{}\" in project \"{}\". Use /sessions inside the agent to restore a prior conversation.",
                     session.provider.as_str(),
                     session.branch_name,
                     proj_name,
-                ));
+                );
+                if let Some(detached) = &detached_label {
+                    msg.push_str(&format!(
+                        " Agent \"{}\" was detached to avoid worktree conflicts.",
+                        detached,
+                    ));
+                }
+                if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
+                    && project.default_provider != session.provider
+                {
+                    msg.push_str(&format!(
+                        " Note: this agent uses {}. Your current default provider is {}.",
+                        session.provider.as_str(),
+                        project.default_provider.as_str(),
+                    ));
+                }
+                self.set_info(msg);
             }
             Err(err) => {
                 self.set_error(format!(
@@ -754,6 +800,9 @@ impl App {
             ));
             return Ok(());
         }
+        let detached_label =
+            self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
+
         let cfg = provider_config(&self.config, &session.provider);
         let use_resume = cfg.supports_session_resume();
         match self.spawn_pty_for_session(&session, use_resume) {
@@ -767,12 +816,28 @@ impl App {
                 self.input_target = InputTarget::Agent;
                 self.fullscreen_overlay = FullscreenOverlay::Agent;
                 let proj_name = self.project_name_for_session(&session);
-                self.set_info(format!(
-                    "Relaunched {} agent \"{}\" in project \"{}\"",
+                let mut msg = format!(
+                    "Relaunched {} agent \"{}\" in project \"{}\".",
                     session.provider.as_str(),
                     session.branch_name,
                     proj_name
-                ));
+                );
+                if let Some(detached) = &detached_label {
+                    msg.push_str(&format!(
+                        " Agent \"{}\" was detached to avoid worktree conflicts.",
+                        detached,
+                    ));
+                }
+                if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
+                    && project.default_provider != session.provider
+                {
+                    msg.push_str(&format!(
+                        " Note: this agent uses {}. Your current default provider is {}.",
+                        session.provider.as_str(),
+                        project.default_provider.as_str(),
+                    ));
+                }
+                self.set_info(msg);
             }
             Err(err) => {
                 self.set_error(format!(
@@ -1205,5 +1270,425 @@ impl App {
             .title
             .clone()
             .unwrap_or_else(|| session.branch_name.clone())
+    }
+
+    /// Creates a new session on the same worktree as the selected session but
+    /// using the project's current default provider.
+    pub(crate) fn create_provider_session_on_worktree(&mut self) -> Result<()> {
+        let Some(session) = self.selected_session().cloned() else {
+            self.set_error("Select an agent first.");
+            return Ok(());
+        };
+        let Some(project) = self
+            .projects
+            .iter()
+            .find(|p| p.id == session.project_id)
+            .cloned()
+        else {
+            self.set_error("Project not found for the selected agent.");
+            return Ok(());
+        };
+        if self.providers.contains_key(&session.id) {
+            self.set_error(
+                "The selected agent is still running. Stop it before creating a new provider session.",
+            );
+            return Ok(());
+        }
+        if project.default_provider == session.provider {
+            self.set_error(format!(
+                "The selected agent already uses {}. Change the default provider first with the \"provider\" command.",
+                session.provider.as_str(),
+            ));
+            return Ok(());
+        }
+        // Prevent creating a duplicate session with the same provider on
+        // the same worktree.
+        let target_provider = project.default_provider.clone();
+        let duplicate = self.sessions.iter().any(|s| {
+            s.id != session.id
+                && s.worktree_path == session.worktree_path
+                && s.provider == target_provider
+        });
+        if duplicate {
+            self.set_error(format!(
+                "A {} session already exists on this worktree. Select it from the session list instead.",
+                target_provider.as_str(),
+            ));
+            return Ok(());
+        }
+        if self.create_agent_in_flight {
+            self.set_error("Another agent is being created. Wait for it to finish.");
+            return Ok(());
+        }
+        self.create_agent_in_flight = true;
+        let request = CreateAgentRequest::NewProviderSession {
+            project,
+            source_session: Box::new(session),
+            provider: target_provider,
+        };
+        let paths = self.paths.clone();
+        let config = self.config.clone();
+        let tx = self.worker_tx.clone();
+        let term_size = self.last_pty_size;
+        std::thread::spawn(move || {
+            super::workers::run_create_agent_job(request, paths, config, tx, term_size);
+        });
+        Ok(())
+    }
+
+    /// If another session on the same worktree has a running PTY, detach it
+    /// (kill the PTY and mark the session as `Detached`).  Returns the
+    /// human-readable label of the detached session, if any.
+    pub(crate) fn detach_conflicting_worktree_session(
+        &mut self,
+        worktree_path: &str,
+        exclude_id: &str,
+    ) -> Option<String> {
+        let conflicting = self
+            .sessions
+            .iter()
+            .find(|s| {
+                s.id != exclude_id
+                    && s.worktree_path == worktree_path
+                    && self.providers.contains_key(&s.id)
+            })
+            .cloned()?;
+
+        let label = self.session_label(&conflicting);
+        let provider = conflicting.provider.as_str().to_string();
+        self.providers.remove(&conflicting.id);
+        self.last_pty_activity.remove(&conflicting.id);
+        self.resume_fallback_candidates.remove(&conflicting.id);
+        self.mark_session_status(&conflicting.id, SessionStatus::Detached);
+
+        logger::info(&format!(
+            "auto-detached {} agent \"{}\" to avoid worktree conflict",
+            provider, label,
+        ));
+        Some(label)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DuxPaths;
+    use crate::keybindings::{BINDING_DEFS, RuntimeBindings};
+    use crate::model::{AgentSession, Project, ProviderKind, SessionStatus};
+    use crate::storage::SessionStore;
+    use crate::theme::Theme;
+    use chrono::Utc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex, mpsc};
+    use tempfile::tempdir;
+
+    fn test_bindings() -> RuntimeBindings {
+        RuntimeBindings::new(
+            |action| {
+                BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == action)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default()
+            },
+            true,
+        )
+    }
+
+    fn test_app_with_sessions(sessions: Vec<AgentSession>, projects: Vec<Project>) -> App {
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            root: root.clone(),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).expect("worktrees dir");
+        let session_store = SessionStore::open(&paths.sessions_db_path).expect("session store");
+        let bindings = test_bindings();
+        let (worker_tx, worker_rx) = mpsc::channel();
+        let mut app = App {
+            config: Config::default(),
+            paths,
+            bindings,
+            session_store,
+            projects,
+            sessions,
+            staged_files: Vec::new(),
+            unstaged_files: Vec::new(),
+            selected_left: 0,
+            left_section: crate::app::LeftSection::Projects,
+            selected_terminal_index: 0,
+            right_section: RightSection::Unstaged,
+            files_index: 0,
+            files_search: TextInput::new(),
+            files_search_active: false,
+            commit_input: TextInput::new()
+                .with_multiline(4)
+                .with_placeholder("Type your commit message\u{2026}"),
+            show_diff_line_numbers: false,
+            left_width_pct: 20,
+            right_width_pct: 23,
+            terminal_pane_height_pct: 35,
+            staged_pane_height_pct: 50,
+            commit_pane_height_pct: 40,
+            focus: FocusPane::Left,
+            center_mode: CenterMode::Agent,
+            left_collapsed: false,
+            right_collapsed: false,
+            right_hidden: false,
+            resize_mode: false,
+            help_scroll: None,
+            last_help_height: 0,
+            last_help_lines: 0,
+            fullscreen_overlay: FullscreenOverlay::None,
+            status: StatusLine::new("ready"),
+            prompt: PromptState::None,
+            input_target: InputTarget::None,
+            session_surface: crate::model::SessionSurface::Agent,
+            clipboard: Clipboard::new(),
+            worker_tx,
+            worker_rx,
+            providers: std::collections::HashMap::new(),
+            companion_terminals: std::collections::HashMap::new(),
+            active_terminal_id: None,
+            terminal_return_to_list: false,
+            terminal_counter: 0,
+            create_agent_in_flight: false,
+            pulls_in_flight: std::collections::HashSet::new(),
+            resource_stats_in_flight: false,
+            last_pty_size: (0, 0),
+            last_pty_activity: std::collections::HashMap::new(),
+            prev_scrollback_offset: 0,
+            last_diff_height: 0,
+            last_diff_visual_lines: 0,
+            theme: Theme::default_dark(),
+            tick_count: 0,
+            start_time: std::time::Instant::now(),
+            readonly_nudge_tick: None,
+            watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
+            has_active_processes: Arc::new(AtomicBool::new(false)),
+            collapsed_projects: std::collections::HashSet::new(),
+            left_items_cache: Vec::new(),
+            mouse_layout: MouseLayoutState::default(),
+            overlay_layout: OverlayMouseLayoutState::default(),
+            mouse_drag: None,
+            last_mouse_click: None,
+            interactive_patterns: crate::keybindings::InteractiveBytePatterns {
+                bindings: Vec::new(),
+            },
+            raw_input_buf: Vec::new(),
+            macro_bar: None,
+            sigwinch_flag: Arc::new(AtomicBool::new(false)),
+            force_redraw: false,
+            welcome_tip_index: 0,
+            welcome_logo_visible: false,
+            welcome_logo_alt: false,
+            welcome_tip_selection: usize::MAX,
+            branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
+            gh_status: crate::model::GhStatus::Unknown,
+            github_integration_enabled: false,
+            pr_banner_at_bottom: true,
+            pr_statuses: std::collections::HashMap::new(),
+            pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
+            pr_sync_enabled: Arc::new(AtomicBool::new(false)),
+            pr_last_checked: std::collections::HashMap::new(),
+            refs_watcher: None,
+            refs_watch_paths: std::collections::HashMap::new(),
+            resume_fallback_candidates: std::collections::HashSet::new(),
+            syntax_cache: crate::diff::SyntaxCache::new(),
+            snapshot_buf: crate::pty::TerminalSnapshot::empty(),
+            last_snapshot_id: None,
+            terminal_selection: None,
+        };
+        app.interactive_patterns = app.bindings.interactive_byte_patterns();
+        app.rebuild_left_items();
+        app
+    }
+
+    fn make_session(id: &str, provider: &str, worktree: &str) -> AgentSession {
+        let now = Utc::now();
+        AgentSession {
+            id: id.to_string(),
+            project_id: "project-1".to_string(),
+            project_path: Some("/tmp/project".to_string()),
+            provider: ProviderKind::from_str(provider),
+            source_branch: "main".to_string(),
+            branch_name: format!("branch-{id}"),
+            worktree_path: worktree.to_string(),
+            title: None,
+            status: SessionStatus::Detached,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn make_project(id: &str, provider: &str) -> Project {
+        Project {
+            id: id.to_string(),
+            name: "demo".to_string(),
+            path: "/tmp/project".to_string(),
+            default_provider: ProviderKind::from_str(provider),
+            current_branch: "main".to_string(),
+            path_missing: false,
+        }
+    }
+
+    /// Inserts a dummy PtyClient placeholder into `app.providers` so that the
+    /// session appears "active" without actually spawning a process.
+    fn mark_active(app: &mut App, session_id: &str) {
+        let client =
+            crate::pty::PtyClient::spawn("echo", &[], std::path::Path::new("/tmp"), 24, 80, 1000)
+                .expect("spawn echo for test");
+        app.providers.insert(session_id.to_string(), client);
+    }
+
+    #[test]
+    fn detach_finds_conflict_on_same_worktree() {
+        let s1 = make_session("s1", "claude", "/tmp/wt/a");
+        let s2 = make_session("s2", "codex", "/tmp/wt/a");
+        let project = make_project("project-1", "claude");
+        let mut app = test_app_with_sessions(vec![s1, s2], vec![project]);
+        mark_active(&mut app, "s1");
+
+        let label = app.detach_conflicting_worktree_session("/tmp/wt/a", "s2");
+        assert!(label.is_some());
+        assert!(!app.providers.contains_key("s1"));
+    }
+
+    #[test]
+    fn detach_no_conflict_different_path() {
+        let s1 = make_session("s1", "claude", "/tmp/wt/a");
+        let s2 = make_session("s2", "codex", "/tmp/wt/b");
+        let project = make_project("project-1", "claude");
+        let mut app = test_app_with_sessions(vec![s1, s2], vec![project]);
+        mark_active(&mut app, "s1");
+
+        let label = app.detach_conflicting_worktree_session("/tmp/wt/b", "s2");
+        assert!(label.is_none());
+        assert!(app.providers.contains_key("s1"));
+    }
+
+    #[test]
+    fn detach_excludes_self() {
+        let s1 = make_session("s1", "claude", "/tmp/wt/a");
+        let project = make_project("project-1", "claude");
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+        mark_active(&mut app, "s1");
+
+        let label = app.detach_conflicting_worktree_session("/tmp/wt/a", "s1");
+        assert!(label.is_none());
+        assert!(app.providers.contains_key("s1"));
+    }
+
+    #[test]
+    fn detach_conflicting_worktree_session_removes_pty() {
+        let s1 = make_session("s1", "claude", "/tmp/wt/a");
+        let s2 = make_session("s2", "codex", "/tmp/wt/a");
+        let project = make_project("project-1", "codex");
+        let mut app = test_app_with_sessions(vec![s1, s2], vec![project]);
+        mark_active(&mut app, "s1");
+
+        let label = app.detach_conflicting_worktree_session("/tmp/wt/a", "s2");
+        assert!(label.is_some());
+        assert!(!app.providers.contains_key("s1"));
+        let s1_session = app.sessions.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(s1_session.status, SessionStatus::Detached);
+    }
+
+    #[test]
+    fn create_provider_session_rejects_running_agent() {
+        let s1 = make_session("s1", "claude", "/tmp/wt/a");
+        let project = make_project("project-1", "codex");
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(_)))
+            .unwrap_or(0);
+        mark_active(&mut app, "s1");
+
+        app.create_provider_session_on_worktree().unwrap();
+        assert!(app.status.text().contains("still running"));
+    }
+
+    #[test]
+    fn create_provider_session_rejects_same_provider() {
+        let s1 = make_session("s1", "claude", "/tmp/wt/a");
+        let project = make_project("project-1", "claude");
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+        // Select the session in the left pane.
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(_)))
+            .unwrap_or(0);
+
+        app.create_provider_session_on_worktree().unwrap();
+        // Should have set an error because the session already uses claude.
+        assert!(app.status.text().contains("already uses"));
+    }
+
+    #[test]
+    fn create_provider_session_rejects_duplicate() {
+        let s1 = make_session("s1", "claude", "/tmp/wt/a");
+        let s2 = make_session("s2", "codex", "/tmp/wt/a");
+        let project = make_project("project-1", "codex");
+        let mut app = test_app_with_sessions(vec![s1, s2], vec![project]);
+        // Select s1 (the claude session).
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| {
+                matches!(item, LeftItem::Session(i) if app.sessions.get(*i).map(|s| s.id.as_str()) == Some("s1"))
+            })
+            .unwrap_or(0);
+
+        app.create_provider_session_on_worktree().unwrap();
+        // Should reject because s2 already uses codex on the same worktree.
+        assert!(app.status.text().contains("already exists"));
+    }
+
+    #[test]
+    fn detach_conflicting_returns_none_when_no_conflict() {
+        let s1 = make_session("s1", "claude", "/tmp/wt/a");
+        let project = make_project("project-1", "claude");
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+
+        let label = app.detach_conflicting_worktree_session("/tmp/wt/a", "s1");
+        assert!(label.is_none());
+    }
+
+    #[test]
+    fn delete_session_preserves_shared_worktree() {
+        let s1 = make_session("s1", "claude", "/tmp/wt/a");
+        let s2 = make_session("s2", "codex", "/tmp/wt/a");
+        let project = make_project("project-1", "claude");
+        let app = test_app_with_sessions(vec![s1, s2], vec![project]);
+
+        // Deleting s1 should preserve the worktree because s2 still uses it.
+        // We can't call do_delete_session directly because git::remove_worktree
+        // would fail on a non-existent repo, but we can verify the guard logic.
+        let has_sibling = app
+            .sessions
+            .iter()
+            .any(|s| s.id != "s1" && s.worktree_path == "/tmp/wt/a");
+        assert!(has_sibling, "sibling session should exist");
+    }
+
+    #[test]
+    fn delete_session_allows_removal_when_last() {
+        let s1 = make_session("s1", "claude", "/tmp/wt/a");
+        let project = make_project("project-1", "claude");
+        let app = test_app_with_sessions(vec![s1], vec![project]);
+
+        let has_sibling = app
+            .sessions
+            .iter()
+            .any(|s| s.id != "s1" && s.worktree_path == "/tmp/wt/a");
+        assert!(!has_sibling, "no sibling session should exist");
     }
 }

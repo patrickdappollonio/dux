@@ -55,6 +55,7 @@ pub struct Project {
     pub path: String,
     pub default_provider: ProviderKind,
     pub current_branch: String,
+    pub path_missing: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -784,6 +784,11 @@ pub(crate) enum CreateAgentRequest {
         source_label: String,
         custom_name: Option<String>,
     },
+    NewProviderSession {
+        project: Project,
+        source_session: Box<AgentSession>,
+        provider: ProviderKind,
+    },
 }
 
 pub(crate) enum WorkerEvent {
@@ -1256,6 +1261,30 @@ impl App {
         self.status.error(message);
     }
 
+    /// Show a status-line warning when a missing project is highlighted, or
+    /// clear the warning when the selection moves away from one.
+    pub(crate) fn update_missing_project_warning(&mut self) {
+        let missing_path = self
+            .left_items()
+            .get(self.selected_left)
+            .copied()
+            .and_then(|item| match item {
+                LeftItem::Project(idx) => {
+                    let p = self.projects.get(idx)?;
+                    p.path_missing.then(|| p.path.clone())
+                }
+                _ => None,
+            });
+        if let Some(path) = missing_path {
+            self.set_warning(format!("Project path not found: {path}"));
+            return;
+        }
+        // Only clear if the current tone is Warning – don't clobber Info/Busy/Error.
+        if matches!(self.status.tone(), crate::statusline::StatusTone::Warning) {
+            self.set_info("");
+        }
+    }
+
     const NUDGE_DURATION_TICKS: u64 = 15; // ~1.5s at 100ms/tick
 
     pub(crate) fn is_nudge_active(&self) -> bool {
@@ -1324,6 +1353,7 @@ impl App {
         match command {
             "new-agent" => self.create_agent_for_selected_project(),
             "fork-agent" => self.fork_selected_session(),
+            "new-provider-session" => self.create_provider_session_on_worktree(),
             "provider" => self.cycle_selected_project_provider(),
             "pull-project" => self.refresh_selected_project(),
             "delete-project" => self.delete_selected_project(),
@@ -1527,7 +1557,7 @@ impl App {
         let mut items = Vec::new();
         for (project_index, project) in self.projects.iter().enumerate() {
             items.push(LeftItem::Project(project_index));
-            if self.collapsed_projects.contains(&project.id) {
+            if project.path_missing || self.collapsed_projects.contains(&project.id) {
                 continue;
             }
             for (session_index, session) in self.sessions.iter().enumerate() {
@@ -1976,10 +2006,17 @@ impl App {
 pub(crate) fn load_projects(config: &Config) -> Vec<Project> {
     let mut projects = Vec::new();
     for project in config.projects.iter() {
-        let path = PathBuf::from(&project.path);
-        if !path.exists() || !git::is_git_repo(&path) {
-            continue;
-        }
+        let (path, missing) = match crate::config::expand_path(&project.path) {
+            Some(expanded) => {
+                let p = PathBuf::from(&expanded);
+                let missing = !p.exists() || !git::is_git_repo(&p);
+                (p, missing)
+            }
+            None => {
+                // Unsafe or invalid path – treat as missing.
+                (PathBuf::from(&project.path), true)
+            }
+        };
         let provider = project
             .default_provider
             .as_deref()
@@ -1995,7 +2032,12 @@ pub(crate) fn load_projects(config: &Config) -> Vec<Project> {
             }),
             path: path.to_string_lossy().to_string(),
             default_provider: provider,
-            current_branch: git::current_branch(&path).unwrap_or_else(|_| "main".to_string()),
+            current_branch: if missing {
+                String::new()
+            } else {
+                git::current_branch(&path).unwrap_or_else(|_| "main".to_string())
+            },
+            path_missing: missing,
         });
     }
     projects
