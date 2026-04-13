@@ -1533,6 +1533,7 @@ mod tests {
             path: "/tmp/project".to_string(),
             default_provider: ProviderKind::from_str(provider),
             current_branch: "main".to_string(),
+            path_missing: false,
         }
     }
 
