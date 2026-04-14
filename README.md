@@ -8,7 +8,7 @@ No protocol layers. No adapters. No JSON-RPC. Just real CLIs running in real ter
 
 Oh, and it's fast and consumes low resources: more RAM is left for Claude, Codex or any of the other agents 👍
 
-[![asciicast](https://asciinema.org/a/IvqL89rXvwCzvSxQ.svg)](https://asciinema.org/a/IvqL89rXvwCzvSxQ)
+[![asciicast](assets/dux-screenshot.svg)](https://asciinema.org/a/IvqL89rXvwCzvSxQ)
 
 ## Why dux?
 
