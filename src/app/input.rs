@@ -995,10 +995,33 @@ impl App {
         // Don't forward input until the agent has produced visible output.
         // Keystrokes during the loading phase would reach a process that
         // isn't ready for them. We still drain stdin above to prevent
-        // buffer accumulation.
+        // buffer accumulation. However, we still honour ExitInteractive so
+        // the user can minimize a loading agent.
         if let Some(provider) = self.selected_terminal_surface_client()
             && !provider.has_output()
         {
+            let (sequences, _) = crate::raw_input::split_sequences(&buf[..n]);
+            for seq in &sequences {
+                if let Some((Action::ExitInteractive, _)) =
+                    self.interactive_patterns.match_sequence(seq)
+                {
+                    let return_to_terminal_list =
+                        matches!(self.input_target, InputTarget::Terminal)
+                            && self.terminal_return_to_list;
+                    self.input_target = InputTarget::None;
+                    self.fullscreen_overlay = FullscreenOverlay::None;
+                    self.session_surface = SessionSurface::Agent;
+                    self.terminal_selection = None;
+                    self.raw_input_buf.clear();
+                    if return_to_terminal_list {
+                        self.left_section = LeftSection::Terminals;
+                        self.clamp_terminal_cursor();
+                        self.focus = FocusPane::Left;
+                    }
+                    self.set_info("Exited interactive mode.");
+                    return Ok(false);
+                }
+            }
             return Ok(false);
         }
 
