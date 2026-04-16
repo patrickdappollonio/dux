@@ -271,35 +271,35 @@ impl App {
 
                     match result {
                         Ok(branch_already_deleted) => {
+                            // Only update the status line if the current
+                            // content is still the Busy message we set when
+                            // spawning this worker. If another operation
+                            // (push, pull, concurrent delete) has since
+                            // overwritten it, we should not clobber their
+                            // message — the session will visually disappear
+                            // from the list, which is sufficient feedback.
+                            let our_busy_still_showing =
+                                our_busy_msg.as_ref().is_some_and(|msg| {
+                                    self.status.tone()
+                                        == crate::statusline::StatusTone::Busy
+                                        && self.status.message() == *msg
+                                });
+
                             if self.sessions.iter().any(|s| s.id == session_id) {
-                                // Normal path: session still present, finish
-                                // cleanup. finish_delete_session will set its
-                                // own status message, replacing Busy.
                                 if let Err(e) = self.finish_delete_session(
                                     &session_id,
                                     true,
                                     Some(branch_already_deleted),
+                                    our_busy_still_showing,
                                 ) {
                                     self.set_error(format!(
                                         "Worktree removed but session cleanup failed: {e:#}"
                                     ));
                                 }
-                            } else {
-                                // Session was already removed by another code
-                                // path (e.g. the block on project deletion
-                                // was lifted and the project was deleted
-                                // after the worker started). Only clear the
-                                // status line if it still shows our exact
-                                // Busy message; otherwise leave the newer
-                                // content alone.
-                                let our_busy_still_showing = our_busy_msg.is_some_and(|msg| {
-                                    self.status.tone()
-                                        == crate::statusline::StatusTone::Busy
-                                        && self.status.message() == msg
-                                });
-                                if our_busy_still_showing {
-                                    self.set_info("Worktree removal finished.");
-                                }
+                            } else if our_busy_still_showing {
+                                // Session removed by another path; just clear
+                                // the lingering Busy so it doesn't stick.
+                                self.set_info("Worktree removal finished.");
                             }
                         }
                         Err(msg) => {

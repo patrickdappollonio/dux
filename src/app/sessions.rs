@@ -577,7 +577,7 @@ impl App {
             None
         };
 
-        self.finish_delete_session(session_id, delete_worktree, remove_outcome)?;
+        self.finish_delete_session(session_id, delete_worktree, remove_outcome, true)?;
         Ok(())
     }
 
@@ -656,7 +656,7 @@ impl App {
                 "deleting session {} at {} (delete_worktree={}, inline)",
                 session.id, session.worktree_path, delete_worktree
             ));
-            if let Err(e) = self.finish_delete_session(session_id, delete_worktree, None) {
+            if let Err(e) = self.finish_delete_session(session_id, delete_worktree, None, true) {
                 self.set_error(format!("{e:#}"));
             }
         }
@@ -670,11 +670,17 @@ impl App {
     /// `remove_outcome` is `Some(branch_already_deleted)` only on the branch
     /// where we actually removed the worktree; it drives the success message
     /// variant.
+    /// `update_status` controls whether the method writes a success message
+    /// to the status line. The async worker handler passes `false` when the
+    /// status line has already been overwritten by an unrelated operation
+    /// (push, pull, etc.) to avoid clobbering it. Synchronous callers and
+    /// the handler's "our Busy is still showing" path pass `true`.
     pub(crate) fn finish_delete_session(
         &mut self,
         session_id: &str,
         delete_worktree: bool,
         remove_outcome: Option<bool>,
+        update_status: bool,
     ) -> Result<()> {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
             return Ok(());
@@ -705,58 +711,60 @@ impl App {
         self.selected_left = self.selected_left.saturating_sub(1);
         self.reload_changed_files();
 
-        match (other_sessions_on_worktree, delete_worktree, remove_outcome) {
-            (true, true, _) => {
-                self.set_info(format!(
-                    "Deleted {} agent \"{}\". Worktree preserved because other sessions still use it.",
-                    session.provider.as_str(),
-                    session.branch_name,
-                ));
-            }
-            (true, false, _) => {
-                self.set_info(format!(
-                    "Deleted {} session for agent \"{}\". Worktree preserved for remaining sessions.",
-                    session.provider.as_str(),
-                    session.branch_name,
-                ));
-            }
-            (false, false, _) => {
-                self.set_info(format!(
-                    "Deleted {} agent \"{}\". Worktree preserved at {}.",
-                    session.provider.as_str(),
-                    session.branch_name,
-                    session.worktree_path,
-                ));
-            }
-            (false, true, Some(branch_already_deleted)) => {
-                if branch_already_deleted {
+        if update_status {
+            match (other_sessions_on_worktree, delete_worktree, remove_outcome) {
+                (true, true, _) => {
                     self.set_info(format!(
-                        "Deleted agent (branch \"{}\" was already removed)",
-                        session.branch_name
-                    ));
-                } else {
-                    let project_name = project
-                        .as_ref()
-                        .map(|p| p.name.as_str())
-                        .unwrap_or("<unknown>");
-                    self.set_info(format!(
-                        "Deleted {} agent from project \"{}\" with branch \"{}\"",
+                        "Deleted {} agent \"{}\". Worktree preserved because other sessions still use it.",
                         session.provider.as_str(),
-                        project_name,
-                        session.branch_name
+                        session.branch_name,
                     ));
                 }
-            }
-            (false, true, None) => {
-                // Callers that pass delete_worktree=true with no siblings
-                // must have already run git::remove_worktree and produced
-                // Some(outcome). This arm is unreachable via the current
-                // call graph but kept for exhaustiveness; surface a visible
-                // error in all builds so any future contract violation is
-                // noticed rather than silently swallowed.
-                self.set_error(
-                    "Internal error: worktree deletion flagged but no removal result provided.",
-                );
+                (true, false, _) => {
+                    self.set_info(format!(
+                        "Deleted {} session for agent \"{}\". Worktree preserved for remaining sessions.",
+                        session.provider.as_str(),
+                        session.branch_name,
+                    ));
+                }
+                (false, false, _) => {
+                    self.set_info(format!(
+                        "Deleted {} agent \"{}\". Worktree preserved at {}.",
+                        session.provider.as_str(),
+                        session.branch_name,
+                        session.worktree_path,
+                    ));
+                }
+                (false, true, Some(branch_already_deleted)) => {
+                    if branch_already_deleted {
+                        self.set_info(format!(
+                            "Deleted agent (branch \"{}\" was already removed)",
+                            session.branch_name
+                        ));
+                    } else {
+                        let project_name = project
+                            .as_ref()
+                            .map(|p| p.name.as_str())
+                            .unwrap_or("<unknown>");
+                        self.set_info(format!(
+                            "Deleted {} agent from project \"{}\" with branch \"{}\"",
+                            session.provider.as_str(),
+                            project_name,
+                            session.branch_name
+                        ));
+                    }
+                }
+                (false, true, None) => {
+                    // Callers that pass delete_worktree=true with no siblings
+                    // must have already run git::remove_worktree and produced
+                    // Some(outcome). This arm is unreachable via the current
+                    // call graph but kept for exhaustiveness; surface a
+                    // visible error in all builds so any future contract
+                    // violation is noticed.
+                    self.set_error(
+                        "Internal error: worktree deletion flagged but no removal result provided.",
+                    );
+                }
             }
         }
         Ok(())
@@ -2081,10 +2089,10 @@ mod tests {
         let project = make_project("project-1", "claude");
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        app.finish_delete_session("s1", false, None)
+        app.finish_delete_session("s1", false, None, true)
             .expect("first finish succeeds");
         // Second call must not panic or return Err even though session is gone.
-        app.finish_delete_session("s1", false, None)
+        app.finish_delete_session("s1", false, None, true)
             .expect("second finish is a no-op");
     }
 

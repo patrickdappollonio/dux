@@ -2890,21 +2890,24 @@ impl App {
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
 
-                // Layout: body / checkbox row / spacer / buttons.
-                // Checkbox row is two lines (checkbox + descriptor) so the
-                // yellow warning can replace the descriptor in-place without
-                // shifting the button row when toggled.
+                // Layout: body (flexible) / checkbox (1 row) / spacer / buttons.
+                // The warning text and hint live in the flexible body area so
+                // long lines can wrap safely without truncation. The checkbox
+                // is a single fixed-height row below the body.
                 let [body_area, checkbox_area, _, buttons_area] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Min(1),
-                        Constraint::Length(2),
+                        Constraint::Length(1),
                         Constraint::Length(1),
                         Constraint::Length(3),
                     ])
                     .areas(inner);
 
-                let body_lines = vec![
+                // Body: question text + conditional warning/hint/shared note.
+                // Long warning text is split into two explicit Lines so it
+                // renders correctly even at narrow dialog widths.
+                let mut body_lines = vec![
                     Line::from(""),
                     Line::from(vec![
                         Span::raw(" Are you sure you want to delete "),
@@ -2914,27 +2917,36 @@ impl App {
                         ),
                         Span::raw("?"),
                     ]),
+                    Line::from(""),
                 ];
+                if *worktree_shared {
+                    body_lines.push(Line::from(Span::styled(
+                        " Worktree is shared with another agent and will be preserved.",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )));
+                } else if *delete_worktree {
+                    body_lines.push(Line::from(Span::styled(
+                        " All uncommitted and unpushed changes in this",
+                        Style::default().fg(self.theme.warning_fg),
+                    )));
+                    body_lines.push(Line::from(Span::styled(
+                        " worktree will be permanently lost.",
+                        Style::default().fg(self.theme.warning_fg),
+                    )));
+                } else {
+                    body_lines.push(Line::from(Span::styled(
+                        " Worktree and branch will be preserved on disk.",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )));
+                }
                 Paragraph::new(body_lines)
                     .wrap(Wrap { trim: false })
                     .render(body_area, frame.buffer_mut());
 
-                // Checkbox row. When the worktree is shared with another
-                // session, the checkbox is meaningless (the worktree is always
-                // preserved), so it's replaced with an informational note.
-                // Otherwise, the focus ring follows the Tab cycle; when the
-                // checkbox is focused, the label is highlighted with the
-                // active button color so the user sees the same visual
-                // language whether they're hovering a button or the checkbox.
-                let (checkbox_line, descriptor_line) = if *worktree_shared {
-                    (
-                        Line::from(Span::styled(
-                            " Worktree is shared with another agent and will be preserved.",
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        )),
-                        Line::from(""),
-                    )
-                } else {
+                // Checkbox row (1 line). When the worktree is shared, the
+                // checkbox is hidden and the line is left empty — the shared
+                // note above already explains the situation.
+                if !*worktree_shared {
                     let check = if *delete_worktree { "x" } else { " " };
                     let checkbox_focused = *focus == DeleteAgentFocus::Checkbox;
                     let label_style = if checkbox_focused {
@@ -2951,27 +2963,13 @@ impl App {
                     } else {
                         Style::default().fg(self.theme.hint_key_fg)
                     };
-                    let checkbox_line = Line::from(vec![
+                    Paragraph::new(Line::from(vec![
                         Span::raw(" "),
                         Span::styled(format!("[{check}]"), bracket_style),
                         Span::styled(" Also delete the worktree and branch", label_style),
-                    ]);
-                    let descriptor_line = if *delete_worktree {
-                        Line::from(Span::styled(
-                            "     All uncommitted and unpushed changes in this worktree will be permanently lost.",
-                            Style::default().fg(self.theme.warning_fg),
-                        ))
-                    } else {
-                        Line::from(Span::styled(
-                            "     Worktree and branch will be preserved on disk.",
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        ))
-                    };
-                    (checkbox_line, descriptor_line)
-                };
-                Paragraph::new(vec![checkbox_line, descriptor_line])
-                    .wrap(Wrap { trim: false })
+                    ]))
                     .render(checkbox_area, frame.buffer_mut());
+                }
 
                 // Button area: two bordered panels side by side.
                 let btn_width = 16u16;
