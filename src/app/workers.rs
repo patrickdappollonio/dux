@@ -283,7 +283,14 @@ impl App {
                                         "Worktree removed but session cleanup failed: {e:#}"
                                     ));
                                 }
-                            } else {
+                            } else if self.status.tone()
+                                == crate::statusline::StatusTone::Busy
+                            {
+                                // Only overwrite when the status line is still
+                                // showing our Busy message. If another action
+                                // (e.g. project deletion) already replaced it
+                                // with a more informative message, we should
+                                // not clobber it with a generic fallback.
                                 self.set_info("Worktree removal finished.");
                             }
                         }

@@ -498,11 +498,12 @@ impl App {
                             (d.to_string(), c)
                         };
                     // While a background delete is in flight for this session,
-                    // dim the whole row and italicize it so the user sees the
-                    // transient state and understands why the session is
-                    // still visible but unresponsive. This overrides PR and
-                    // status colors on purpose — "being deleted" trumps
-                    // other signals.
+                    // dim the row text and italicize it so the user sees the
+                    // transient state. This covers the dot, label, and
+                    // provider suffix; the companion-terminal badge chain is
+                    // excluded because it renders through a separate helper
+                    // and the in-flight window is too brief to justify
+                    // threading a deletion flag through it.
                     let deleting = self.pending_deletions.contains(&session.id);
                     let label_color = if deleting {
                         self.theme.session_deleting
@@ -528,7 +529,11 @@ impl App {
                             Span::styled(label, label_style),
                             Span::styled(
                                 format!(" ({})", session.provider.as_str()),
-                                Style::default().fg(self.theme.provider_label_fg),
+                                if deleting {
+                                    label_style
+                                } else {
+                                    Style::default().fg(self.theme.provider_label_fg)
+                                },
                             ),
                         ]
                         .into_iter()

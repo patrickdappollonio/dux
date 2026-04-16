@@ -675,12 +675,17 @@ impl App {
             .iter()
             .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
 
+        // Persist the deletion FIRST so a DB failure leaves in-memory state
+        // untouched and the session remains visible in the UI. If we cleared
+        // in-memory state first and the DB call then failed, the session
+        // would vanish from the UI but reappear on restart.
+        self.session_store.delete_session(&session.id)?;
+
         self.providers.remove(&session.id);
         self.last_pty_activity.remove(&session.id);
         self.resume_fallback_candidates.remove(&session.id);
         self.clear_companion_terminals_for_session(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
-        self.session_store.delete_session(&session.id)?;
         self.update_branch_sync_sessions();
         self.rebuild_left_items();
         self.selected_left = self.selected_left.saturating_sub(1);
@@ -729,12 +734,13 @@ impl App {
                 }
             }
             (false, true, None) => {
-                // Unreachable: the caller only sets delete_worktree=true with
-                // no siblings when a successful git removal has already run,
-                // producing Some(outcome). Kept for exhaustiveness.
-                debug_assert!(
-                    false,
-                    "remove_outcome should be Some when finishing worktree delete without siblings"
+                // Unexpected: the caller should only set delete_worktree=true
+                // with no siblings when a successful git removal has already
+                // run, producing Some(outcome). Surface a visible error in
+                // all builds so the invalid state is noticed — debug_assert
+                // alone is a silent no-op in release.
+                self.set_error(
+                    "Internal error: worktree deletion flagged but no removal result provided.",
                 );
             }
         }
@@ -2156,6 +2162,48 @@ mod tests {
             app.status.tone(),
             crate::statusline::StatusTone::Busy,
             "Busy status must not linger after worker completes, got: {}",
+            app.status.text(),
+        );
+    }
+
+    /// When the session is already gone AND the status line has already been
+    /// overwritten by a later action (e.g. project deletion), the worker
+    /// completion should not clobber the newer message with a generic
+    /// fallback.
+    #[test]
+    fn worktree_remove_completed_does_not_clobber_newer_status() {
+        let project_dir = tempdir().expect("project tempdir");
+        let worktree_dir = tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+
+        let mut s1 = make_session("s1", "claude", &worktree_path);
+        s1.project_id = "project-1".to_string();
+        let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+
+        app.pending_deletions.insert("s1".to_string());
+        app.sessions.retain(|s| s.id != "s1");
+
+        // Another action (e.g. project deletion) already set a non-Busy
+        // status before the worker event arrives.
+        app.set_info("Deleted project \"demo\" and all its agents");
+
+        app.worker_tx
+            .send(WorkerEvent::WorktreeRemoveCompleted {
+                session_id: "s1".to_string(),
+                result: Ok(false),
+            })
+            .expect("channel send");
+        app.drain_events();
+
+        assert_eq!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Info,
+            "tone should remain Info",
+        );
+        assert!(
+            app.status.text().contains("Deleted project"),
+            "the project-deletion message must not be clobbered, got: {}",
             app.status.text(),
         );
     }
