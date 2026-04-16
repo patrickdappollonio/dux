@@ -63,8 +63,7 @@ impl std::fmt::Display for AcquireError {
                     }
                     None => writeln!(
                         f,
-                        "Another dux instance is already running (PID unknown \
-                         — lockfile is empty or unreadable)."
+                        "Another dux instance is already running (PID unknown — lockfile is empty or unreadable)."
                     )?,
                 }
                 writeln!(
