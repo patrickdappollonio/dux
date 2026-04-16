@@ -93,11 +93,12 @@ impl std::error::Error for AcquireError {}
 ///    and the winner is mid-overwrite (truncate → write). The loser reads
 ///    the old bytes before the winner's new PID appears.
 ///
-/// To handle both, the loop requires two consecutive reads to return the
-/// **same** PID before accepting it. A changing value means the winner is
-/// still writing, so the loop keeps going. This adds one extra 2ms sleep
-/// in the common case (winner already wrote) while correctly riding out
-/// mid-overwrite races.
+/// To handle both, the loop prefers two consecutive reads that return the
+/// **same** PID. A changing value means the winner is still writing, so
+/// the loop keeps going. If the budget is exhausted without two reads
+/// agreeing, the last observed PID is returned as a best-effort fallback.
+/// This adds one extra 2ms sleep in the common case (winner already wrote)
+/// while correctly riding out mid-overwrite races.
 const PID_READ_ATTEMPTS: usize = 5;
 const PID_READ_RETRY_DELAY: Duration = Duration::from_millis(2);
 
@@ -156,11 +157,16 @@ impl SingleInstanceLock {
     }
 }
 
-/// Read the holder's PID from `file`, requiring two consecutive reads to
-/// agree before accepting a value. This absorbs both the "empty file"
-/// window (winner hasn't written yet) and the "stale PID" window (winner
-/// is mid-overwrite of a leftover PID from a dead process). Returns `None`
-/// only if all attempts failed to produce a stable, parseable PID.
+/// Read the holder's PID from `file`, preferring a value confirmed by two
+/// consecutive identical reads. This absorbs both the "empty file" window
+/// (winner hasn't written yet) and the "stale PID" window (winner is
+/// mid-overwrite of a leftover PID from a dead process).
+///
+/// If two consecutive reads agree within the attempt budget, that value is
+/// returned immediately. If the budget is exhausted without agreement, the
+/// last successfully parsed PID is returned as a best-effort fallback —
+/// reporting a potentially-stale PID is more useful than `None`. Returns
+/// `None` only if no attempt produced a parseable value at all.
 fn read_holder_pid_with_retry(file: &mut File) -> Option<u32> {
     let mut last_pid: Option<u32> = None;
     for attempt in 0..PID_READ_ATTEMPTS {
