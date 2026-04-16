@@ -27,12 +27,25 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Resolve the config directory and acquire the single-instance lock
+    // before touching any shared state. Every dux entrypoint — TUI and all
+    // `dux config` subcommands — goes through this gate so exactly one
+    // process operates on a given config directory at a time.
+    let paths = config::DuxPaths::discover()?;
+    paths.ensure_dirs()?;
+    let lock = match lockfile::SingleInstanceLock::acquire(&paths.lock_path) {
+        Ok(lock) => lock,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+    };
+
     if args.first().map(|s| s.as_str()) == Some("config") {
-        let paths = config::DuxPaths::discover()?;
         return cli::run(&args[1..], &paths);
     }
 
-    let mut app = app::App::bootstrap()?;
+    let mut app = app::App::bootstrap_with_lock(paths, lock)?;
     app.run()
 }
 

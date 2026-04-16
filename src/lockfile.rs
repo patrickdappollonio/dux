@@ -309,21 +309,32 @@ mod tests {
     fn pid_read_retries_until_holder_finishes_writing() {
         // Simulate the race window between `flock()` winning and the PID
         // write landing: the file starts empty, a concurrent writer drops a
-        // valid PID after a short delay, and the retry loop must observe it
-        // rather than reporting "unknown".
+        // valid PID after a barrier is released. The barrier makes the test
+        // deterministic regardless of scheduler jitter — no wall-clock
+        // sleeps are used to coordinate the two threads.
+        use std::sync::{Arc, Barrier};
+
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("dux.lock");
         fs::write(&path, "").unwrap();
 
+        // The barrier gates the writer: it won't write until the main
+        // thread has started the retry loop (first attempt sees empty,
+        // then the barrier releases the writer for subsequent attempts).
+        let barrier = Arc::new(Barrier::new(2));
+        let writer_barrier = Arc::clone(&barrier);
         let writer_path = path.clone();
         let writer = std::thread::spawn(move || {
-            // Sleep well under the retry budget (5 * 2ms = 10ms) so the
-            // retry loop sees the PID before giving up.
-            std::thread::sleep(Duration::from_millis(3));
+            writer_barrier.wait();
             fs::write(&writer_path, "7777\n").unwrap();
         });
 
+        // Open the file for reading, then kick off the retry. On the first
+        // read, the file is empty. The barrier unblocks the writer and
+        // subsequent retries see the PID.
         let mut file = OpenOptions::new().read(true).open(&path).unwrap();
+        // Release the writer just before entering the retry loop.
+        barrier.wait();
         let pid = read_holder_pid_with_retry(&mut file);
         writer.join().unwrap();
 

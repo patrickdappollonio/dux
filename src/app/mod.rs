@@ -851,25 +851,15 @@ pub(crate) mod text_input;
 mod workers;
 
 impl App {
-    pub fn bootstrap() -> Result<Self> {
-        let paths = DuxPaths::discover()?;
+    /// Bootstrap the TUI. The caller must have already resolved `paths`,
+    /// created its directories, and acquired the single-instance lock.
+    /// This ensures the lock covers every entrypoint (TUI + config
+    /// subcommands) and that a losing process never touches shared state.
+    pub fn bootstrap_with_lock(
+        paths: DuxPaths,
+        single_instance_lock: SingleInstanceLock,
+    ) -> Result<Self> {
         let config = ensure_config(&paths)?;
-
-        // Single-instance guard: dux relies on an exclusive lock over its
-        // config directory so one process owns the SQLite session store,
-        // in-memory session list, file watchers, and polling workers. A
-        // second process sharing the same directory would silently diverge
-        // — writes to SQLite would interleave, but neither process would
-        // see the other's in-memory sessions. We fail fast before touching
-        // logging or the database so the colliding launch leaves no trace
-        // in the winning instance's log.
-        let single_instance_lock = match SingleInstanceLock::acquire(&paths.lock_path) {
-            Ok(lock) => lock,
-            Err(err) => {
-                eprintln!("{err}");
-                std::process::exit(1);
-            }
-        };
 
         logger::init(&config.logging, &paths);
         logger::info("bootstrapping dux");
