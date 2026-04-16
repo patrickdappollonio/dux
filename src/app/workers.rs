@@ -262,20 +262,38 @@ impl App {
                     self.pending_deletions.remove(&session_id);
                     match result {
                         Ok(branch_already_deleted) => {
-                            if let Err(e) = self.finish_delete_session(
-                                &session_id,
-                                true,
-                                Some(branch_already_deleted),
-                            ) {
-                                self.set_error(format!(
-                                    "Worktree removed but session cleanup failed: {e:#}"
-                                ));
+                            // `finish_delete_session` is intentionally
+                            // idempotent: if the session was already removed
+                            // by another code path (e.g. project deletion
+                            // cleaned it up synchronously while our worker
+                            // was running), it returns early without
+                            // touching the status line. That would leave the
+                            // Busy message from `begin_delete_session` stuck
+                            // on screen. Check session presence explicitly
+                            // and set a fallback info message so the
+                            // handler's status-line contract does not depend
+                            // on `finish_delete_session`'s internal guard.
+                            if self.sessions.iter().any(|s| s.id == session_id) {
+                                if let Err(e) = self.finish_delete_session(
+                                    &session_id,
+                                    true,
+                                    Some(branch_already_deleted),
+                                ) {
+                                    self.set_error(format!(
+                                        "Worktree removed but session cleanup failed: {e:#}"
+                                    ));
+                                }
+                            } else {
+                                self.set_info("Worktree removal finished.");
                             }
                         }
                         Err(msg) => {
                             // Session record is still present because we
                             // deferred cleanup until git succeeded. The user
                             // can retry by reopening the delete dialog.
+                            // `set_error` overwrites Busy regardless of
+                            // whether the session is still in the list, so
+                            // no extra presence check is needed here.
                             self.set_error(format!("Worktree delete failed: {msg}"));
                         }
                     }

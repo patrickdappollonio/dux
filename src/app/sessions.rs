@@ -2114,4 +2114,49 @@ mod tests {
             "duplicate request must not spawn a second worker",
         );
     }
+
+    /// If the session was removed by another code path (e.g. project
+    /// deletion) while the async delete worker was running, the worker's
+    /// completion event must still overwrite the Busy status line — the
+    /// handler cannot rely on `finish_delete_session`'s idempotent early
+    /// return to do it.
+    #[test]
+    fn worktree_remove_completed_clears_busy_when_session_already_gone() {
+        let project_dir = tempdir().expect("project tempdir");
+        let worktree_dir = tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+
+        let mut s1 = make_session("s1", "claude", &worktree_path);
+        s1.project_id = "project-1".to_string();
+        let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+
+        // Simulate the Busy state set by `begin_delete_session`.
+        app.set_busy("Removing worktree for agent \"branch-s1\"\u{2026}");
+        app.pending_deletions.insert("s1".to_string());
+
+        // Another code path removes the session before the worker replies
+        // (mirrors what `delete_project` does when iterating sessions).
+        app.sessions.retain(|s| s.id != "s1");
+
+        // The worker then reports success.
+        app.worker_tx
+            .send(WorkerEvent::WorktreeRemoveCompleted {
+                session_id: "s1".to_string(),
+                result: Ok(false),
+            })
+            .expect("channel send");
+        app.drain_events();
+
+        assert!(
+            app.pending_deletions.is_empty(),
+            "pending guard must be cleared on completion",
+        );
+        assert_ne!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Busy,
+            "Busy status must not linger after worker completes, got: {}",
+            app.status.text(),
+        );
+    }
 }
