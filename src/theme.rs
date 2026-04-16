@@ -24,10 +24,11 @@ pub struct Theme {
     pub session_detached: Color,
     pub session_exited: Color,
     /// Foreground used for a session row whose worktree is currently being
-    /// removed by a background worker. Visual cue is meant to be subtle —
-    /// the in-flight window is usually brief — but distinct from
-    /// `session_exited` so an eventual theme tweak can differentiate them
-    /// without a refactor.
+    /// removed by a background worker. Defaults to the same shade as
+    /// `session_exited`; the render code adds `Modifier::ITALIC` to
+    /// visually distinguish the two states. A separate theme slot so that
+    /// future theme customization can differentiate the colors without a
+    /// code change.
     pub session_deleting: Color,
     pub status_info_fg: Color,
     pub status_info_bg: Color,

@@ -711,6 +711,20 @@ impl App {
         self.selected_left = self.selected_left.saturating_sub(1);
         self.reload_changed_files();
 
+        // Detect contract violation unconditionally, regardless of
+        // update_status. Callers that pass delete_worktree=true with no
+        // siblings must have already run git::remove_worktree and produced
+        // Some(outcome). Return Err so the violation surfaces in callers
+        // and tests rather than being silently treated as a success.
+        // Note: session cleanup above already ran (DB + memory), so the
+        // session is gone; the Err signals the broken invariant, not an
+        // incomplete deletion.
+        if !other_sessions_on_worktree && delete_worktree && remove_outcome.is_none() {
+            return Err(anyhow::anyhow!(
+                "Internal error: worktree deletion flagged but no removal result provided."
+            ));
+        }
+
         if update_status {
             match (other_sessions_on_worktree, delete_worktree, remove_outcome) {
                 (true, true, _) => {
@@ -754,17 +768,8 @@ impl App {
                         ));
                     }
                 }
-                (false, true, None) => {
-                    // Callers that pass delete_worktree=true with no siblings
-                    // must have already run git::remove_worktree and produced
-                    // Some(outcome). This arm is unreachable via the current
-                    // call graph but kept for exhaustiveness; surface a
-                    // visible error in all builds so any future contract
-                    // violation is noticed.
-                    self.set_error(
-                        "Internal error: worktree deletion flagged but no removal result provided.",
-                    );
-                }
+                // Guarded by the early return above; kept for exhaustiveness.
+                (false, true, None) => {}
             }
         }
         Ok(())
