@@ -83,12 +83,21 @@ impl std::fmt::Display for AcquireError {
 
 impl std::error::Error for AcquireError {}
 
-/// Bounded retry parameters for reading the holder's PID on a contention
-/// loss. There's a small window between the winner's `flock()` returning
-/// success and the winner finishing its PID write. A loser that reads the
-/// file inside that window sees it empty. Retrying briefly makes the "PID
-/// unknown" branch of [`AcquireError`] the exceptional case it should be,
-/// while capping the delay well below human-perceptible latency.
+/// Bounded retry parameters for reading the holder's PID on contention.
+///
+/// There are two race windows the retry loop must absorb:
+///
+/// 1. **Empty file** — the winner's `flock()` returned but its PID write
+///    hasn't landed yet. The file is empty or truncated.
+/// 2. **Stale PID** — the lockfile contained a PID from a now-dead process
+///    and the winner is mid-overwrite (truncate → write). The loser reads
+///    the old bytes before the winner's new PID appears.
+///
+/// To handle both, the loop requires two consecutive reads to return the
+/// **same** PID before accepting it. A changing value means the winner is
+/// still writing, so the loop keeps going. This adds one extra 2ms sleep
+/// in the common case (winner already wrote) while correctly riding out
+/// mid-overwrite races.
 const PID_READ_ATTEMPTS: usize = 5;
 const PID_READ_RETRY_DELAY: Duration = Duration::from_millis(2);
 
@@ -147,20 +156,28 @@ impl SingleInstanceLock {
     }
 }
 
-/// Read the holder's PID from `file`, retrying briefly to absorb the small
-/// window between the holder's `flock()` succeeding and its PID write landing
-/// on disk. Returns `None` only if every attempt produced an empty or
-/// unparseable file.
+/// Read the holder's PID from `file`, requiring two consecutive reads to
+/// agree before accepting a value. This absorbs both the "empty file"
+/// window (winner hasn't written yet) and the "stale PID" window (winner
+/// is mid-overwrite of a leftover PID from a dead process). Returns `None`
+/// only if all attempts failed to produce a stable, parseable PID.
 fn read_holder_pid_with_retry(file: &mut File) -> Option<u32> {
+    let mut last_pid: Option<u32> = None;
     for attempt in 0..PID_READ_ATTEMPTS {
         if let Some(pid) = read_holder_pid_once(file) {
-            return Some(pid);
+            if last_pid == Some(pid) {
+                // Two consecutive reads agree — the PID is stable.
+                return Some(pid);
+            }
+            last_pid = Some(pid);
         }
         if attempt + 1 < PID_READ_ATTEMPTS {
             thread::sleep(PID_READ_RETRY_DELAY);
         }
     }
-    None
+    // Return the last observed PID even without a confirming second read.
+    // This is the best we can do after exhausting retries.
+    last_pid
 }
 
 fn read_holder_pid_once(file: &mut File) -> Option<u32> {
@@ -307,23 +324,19 @@ mod tests {
 
     #[test]
     fn pid_read_retries_until_holder_finishes_writing() {
-        // Simulate the race window between `flock()` winning and the PID
-        // write landing: the file starts empty, a concurrent writer drops a
-        // valid PID after a barrier is released. The barrier ensures the
-        // writer doesn't run before the retry loop has started, which
-        // removes the main source of non-determinism. A theoretical timing
-        // dependency remains (the bounded retry could exhaust before the
-        // writer is scheduled), but in practice the 2ms inter-attempt
-        // sleep gives the writer ample time to land its write.
+        // Simulate the empty-file race: the file starts empty and a
+        // concurrent writer drops a valid PID after a barrier is released.
+        // The barrier ensures the writer doesn't run before the retry loop
+        // has started, which coordinates ordering between the threads. A
+        // theoretical timing dependency remains (the bounded retry could
+        // exhaust before the writer is scheduled), but in practice the
+        // 2ms inter-attempt sleep gives the writer ample time.
         use std::sync::{Arc, Barrier};
 
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("dux.lock");
         fs::write(&path, "").unwrap();
 
-        // The barrier gates the writer: it won't write until the main
-        // thread has started the retry loop (first attempt sees empty,
-        // then the barrier releases the writer for subsequent attempts).
         let barrier = Arc::new(Barrier::new(2));
         let writer_barrier = Arc::clone(&barrier);
         let writer_path = path.clone();
@@ -332,11 +345,7 @@ mod tests {
             fs::write(&writer_path, "7777\n").unwrap();
         });
 
-        // Open the file for reading, then kick off the retry. On the first
-        // read, the file is empty. The barrier unblocks the writer and
-        // subsequent retries see the PID.
         let mut file = OpenOptions::new().read(true).open(&path).unwrap();
-        // Release the writer just before entering the retry loop.
         barrier.wait();
         let pid = read_holder_pid_with_retry(&mut file);
         writer.join().unwrap();
@@ -346,6 +355,51 @@ mod tests {
             Some(7777),
             "retry loop should eventually observe the holder's PID"
         );
+    }
+
+    #[test]
+    fn pid_read_requires_two_consecutive_agreeing_reads() {
+        // When a stale PID sits in the lockfile, the first read parses
+        // successfully. The retry loop must NOT accept it immediately —
+        // it should require a second read to agree. Here the file changes
+        // between reads: attempt 0 sees 9999, the writer overwrites to
+        // 7777, and the loop eventually stabilises on 7777.
+        use std::sync::{Arc, Barrier};
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("dux.lock");
+        fs::write(&path, "9999\n").unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let writer_barrier = Arc::clone(&barrier);
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            writer_barrier.wait();
+            fs::write(&writer_path, "7777\n").unwrap();
+        });
+
+        let mut file = OpenOptions::new().read(true).open(&path).unwrap();
+        barrier.wait();
+        let pid = read_holder_pid_with_retry(&mut file);
+        writer.join().unwrap();
+
+        assert_eq!(
+            pid,
+            Some(7777),
+            "retry loop should settle on the new PID, not the stale one"
+        );
+    }
+
+    #[test]
+    fn pid_read_accepts_stable_value_without_change() {
+        // When the PID is already written and stable, two consecutive
+        // reads agree and the loop returns quickly.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("dux.lock");
+        fs::write(&path, "4242\n").unwrap();
+
+        let mut file = OpenOptions::new().read(true).open(&path).unwrap();
+        assert_eq!(read_holder_pid_with_retry(&mut file), Some(4242));
     }
 
     #[test]

@@ -90,6 +90,14 @@ fn run_reset(paths: &DuxPaths, all: bool) -> Result<()> {
     prune_empty_ancestors(&log_path, &paths.root)?;
     remove_file_with_message(&paths.config_path)?;
     prune_empty_ancestors(&paths.config_path, &paths.root)?;
+
+    // Silently remove the lockfile so the root directory can be fully
+    // cleaned up. On Unix, unlinking a file while holding an flock on the
+    // open fd is safe — the lock persists on the orphaned inode until the
+    // fd is closed at process exit, so we remain protected for the rest
+    // of this function.
+    let _ = remove_file_if_present(&paths.lock_path);
+
     remove_root_if_empty_with_message(&paths.root)?;
 
     println!("reset complete");

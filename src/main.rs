@@ -17,6 +17,8 @@ mod statusline;
 mod storage;
 mod theme;
 
+use std::path::Path;
+
 use anyhow::Result;
 
 fn main() -> Result<()> {
@@ -27,27 +29,28 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Resolve the config directory and acquire the single-instance lock
-    // before touching any shared state. Only the root directory is created
-    // here (so the lockfile can be opened); remaining directories
-    // (worktrees, etc.) are created by downstream code after the lock is
-    // held. Every dux entrypoint — TUI and all `dux config` subcommands —
-    // goes through this gate so exactly one process operates on a given
-    // config directory at a time.
     let paths = config::DuxPaths::discover()?;
-    std::fs::create_dir_all(&paths.root)?;
-    let lock = match lockfile::SingleInstanceLock::acquire(&paths.lock_path) {
-        Ok(lock) => lock,
-        Err(err) => {
-            eprintln!("{err}");
-            std::process::exit(1);
-        }
-    };
 
     if args.first().map(|s| s.as_str()) == Some("config") {
+        // Only acquire the lock when the config root already exists. If
+        // the root is absent no dux instance can be running, so there is
+        // nothing to protect against — and creating the directory here
+        // would break fast-paths like `dux config reset` ("nothing to
+        // reset") and prevent `reset --all` from fully removing the root.
+        let _lock = if paths.root.exists() {
+            Some(acquire_lock_or_exit(&paths.lock_path))
+        } else {
+            None
+        };
         return cli::run(&args[1..], &paths);
     }
 
+    // TUI: always create the root directory (so the lockfile can be
+    // opened), acquire the lock, then let bootstrap create everything
+    // else. A losing process never touches shared state beyond the
+    // empty root.
+    std::fs::create_dir_all(&paths.root)?;
+    let lock = acquire_lock_or_exit(&paths.lock_path);
     let mut app = app::App::bootstrap_with_lock(paths, lock)?;
     app.run()
 }
@@ -80,4 +83,14 @@ fn print_help() {
            macOS: ~/.dux/sessions.sqlite3\n\
            Linux: $XDG_CONFIG_HOME/dux/sessions.sqlite3 or ~/.config/dux/sessions.sqlite3"
     );
+}
+
+fn acquire_lock_or_exit(path: &Path) -> lockfile::SingleInstanceLock {
+    match lockfile::SingleInstanceLock::acquire(path) {
+        Ok(lock) => lock,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+    }
 }
