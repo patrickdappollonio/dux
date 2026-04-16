@@ -7,6 +7,7 @@ mod editor;
 mod git;
 mod io_retry;
 mod keybindings;
+mod lockfile;
 mod logger;
 mod model;
 mod provider;
