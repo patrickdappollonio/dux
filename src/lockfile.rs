@@ -309,9 +309,12 @@ mod tests {
     fn pid_read_retries_until_holder_finishes_writing() {
         // Simulate the race window between `flock()` winning and the PID
         // write landing: the file starts empty, a concurrent writer drops a
-        // valid PID after a barrier is released. The barrier makes the test
-        // deterministic regardless of scheduler jitter — no wall-clock
-        // sleeps are used to coordinate the two threads.
+        // valid PID after a barrier is released. The barrier ensures the
+        // writer doesn't run before the retry loop has started, which
+        // removes the main source of non-determinism. A theoretical timing
+        // dependency remains (the bounded retry could exhaust before the
+        // writer is scheduled), but in practice the 2ms inter-attempt
+        // sleep gives the writer ample time to land its write.
         use std::sync::{Arc, Barrier};
 
         let tmp = TempDir::new().unwrap();

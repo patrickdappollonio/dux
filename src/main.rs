@@ -28,11 +28,14 @@ fn main() -> Result<()> {
     }
 
     // Resolve the config directory and acquire the single-instance lock
-    // before touching any shared state. Every dux entrypoint — TUI and all
-    // `dux config` subcommands — goes through this gate so exactly one
-    // process operates on a given config directory at a time.
+    // before touching any shared state. Only the root directory is created
+    // here (so the lockfile can be opened); remaining directories
+    // (worktrees, etc.) are created by downstream code after the lock is
+    // held. Every dux entrypoint — TUI and all `dux config` subcommands —
+    // goes through this gate so exactly one process operates on a given
+    // config directory at a time.
     let paths = config::DuxPaths::discover()?;
-    paths.ensure_dirs()?;
+    std::fs::create_dir_all(&paths.root)?;
     let lock = match lockfile::SingleInstanceLock::acquire(&paths.lock_path) {
         Ok(lock) => lock,
         Err(err) => {
