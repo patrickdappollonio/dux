@@ -18,7 +18,7 @@ toml = { version = "1.1.2", features = ["preserve_order"] }
 toml_edit = "0.25"
 uuid = { version = "1.17.0", features = ["v4"] }
 portable-pty = "0.9"
-rustix = { version = "1.1", features = ["termios", "process", "event", "stdio"] }
+rustix = { version = "1.1", features = ["termios", "process", "event", "stdio", "fs"] }
 signal-hook = "0.4"
 alacritty_terminal = "0.26.0"
 petname = { version = "3.0.0", default-features = false, features = ["default-rng", "default-words"] }

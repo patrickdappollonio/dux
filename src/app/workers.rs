@@ -255,6 +255,79 @@ impl App {
                         *selected = 0;
                     }
                 }
+                WorkerEvent::WorktreeRemoveCompleted { session_id, result } => {
+                    // Always clear the in-flight guard so the session is
+                    // interactive again — whether we're about to remove it
+                    // (Ok path) or leave it in place for retry (Err path).
+                    self.pending_deletions.remove(&session_id);
+
+                    // Retrieve (and remove) the exact Busy message we set
+                    // when the worker was spawned. We compare this against
+                    // the current status-line content rather than checking
+                    // tone alone, because another operation (push, pull,
+                    // refresh, concurrent delete) may have since set its own
+                    // Busy message that we must not clobber.
+                    let our_busy_msg = self.deletion_busy_messages.remove(&session_id);
+
+                    match result {
+                        Ok(branch_already_deleted) => {
+                            // Only update the status line if the current
+                            // content is still the Busy message we set when
+                            // spawning this worker. If another operation
+                            // (push, pull, concurrent delete) has since
+                            // overwritten it, we should not clobber their
+                            // message — the session will visually disappear
+                            // from the list, which is sufficient feedback.
+                            let our_busy_still_showing =
+                                our_busy_msg.as_ref().is_some_and(|msg| {
+                                    self.status.tone()
+                                        == crate::statusline::StatusTone::Busy
+                                        && self.status.message() == msg.as_str()
+                                });
+
+                            if self.sessions.iter().any(|s| s.id == session_id) {
+                                if let Err(e) = self.finish_delete_session(
+                                    &session_id,
+                                    true,
+                                    Some(branch_already_deleted),
+                                    our_busy_still_showing,
+                                ) {
+                                    self.set_error(format!(
+                                        "Worktree removed but session cleanup failed: {e:#}"
+                                    ));
+                                }
+                            } else if our_busy_still_showing {
+                                // Session removed by another path; just clear
+                                // the lingering Busy so it doesn't stick.
+                                self.set_info("Worktree removal finished.");
+                            }
+                        }
+                        Err(msg) => {
+                            // Session record is normally still present
+                            // because we deferred cleanup until git
+                            // succeeded. Look up the session label so the
+                            // user knows which agent failed — multiple async
+                            // deletes can be in flight concurrently, and a
+                            // bare error would be ambiguous.
+                            if let Some(session) =
+                                self.sessions.iter().find(|s| s.id == session_id)
+                            {
+                                let name = session
+                                    .title
+                                    .as_deref()
+                                    .unwrap_or(&session.branch_name);
+                                self.set_error(format!(
+                                    "Worktree delete failed for {} agent \"{name}\": {msg}",
+                                    session.provider.as_str(),
+                                ));
+                            } else {
+                                self.set_error(format!(
+                                    "Worktree delete failed: {msg}"
+                                ));
+                            }
+                        }
+                    }
+                }
                 WorkerEvent::ResourceStatsReady(stats) => {
                     self.resource_stats_in_flight = false;
                     if let PromptState::ResourceMonitor {
