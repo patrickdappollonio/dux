@@ -255,6 +255,27 @@ impl App {
                         *selected = 0;
                     }
                 }
+                WorkerEvent::WorktreeRemoveCompleted { session_id, result } => {
+                    match result {
+                        Ok(branch_already_deleted) => {
+                            if let Err(e) = self.finish_delete_session(
+                                &session_id,
+                                true,
+                                Some(branch_already_deleted),
+                            ) {
+                                self.set_error(format!(
+                                    "Worktree removed but session cleanup failed: {e:#}"
+                                ));
+                            }
+                        }
+                        Err(msg) => {
+                            // Session record is still present because we
+                            // deferred cleanup until git succeeded. The user
+                            // can retry by reopening the delete dialog.
+                            self.set_error(format!("Worktree delete failed: {msg}"));
+                        }
+                    }
+                }
                 WorkerEvent::ResourceStatsReady(stats) => {
                     self.resource_stats_in_flight = false;
                     if let PromptState::ResourceMonitor {

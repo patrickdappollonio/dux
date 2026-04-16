@@ -499,21 +499,42 @@ impl App {
             self.set_error("Select a session first.");
             return Ok(());
         };
+        let worktree_shared = self
+            .sessions
+            .iter()
+            .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
         self.prompt = PromptState::ConfirmDeleteAgent {
             session_id: session.id.clone(),
             branch_name: session.branch_name.clone(),
-            confirm_selected: false, // Cancel is default
+            focus: DeleteAgentFocus::Cancel, // Cancel is the safe default
+            delete_worktree: false,          // Opt-in destructive action
+            worktree_shared,
         };
         Ok(())
     }
 
-    pub(crate) fn do_delete_session(&mut self, session_id: &str) -> Result<()> {
+    /// Delete the agent session identified by `session_id`, blocking the
+    /// calling thread for any git work. Used by bulk flows like project
+    /// deletion, where we must complete all removals before the parent
+    /// operation proceeds. User-initiated single-agent deletes go through
+    /// [`begin_delete_session`] so git work runs off the UI thread.
+    ///
+    /// When `delete_worktree` is true AND no other sessions share the worktree,
+    /// the git worktree and branch are removed first. If the git removal fails,
+    /// the session record is preserved so the caller can retry without losing
+    /// the agent. When `delete_worktree` is false, the worktree and branch
+    /// are always preserved.
+    pub(crate) fn do_delete_session(
+        &mut self,
+        session_id: &str,
+        delete_worktree: bool,
+    ) -> Result<()> {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
             return Ok(());
         };
         logger::info(&format!(
-            "deleting session {} at {}",
-            session.id, session.worktree_path
+            "deleting session {} at {} (delete_worktree={}, sync)",
+            session.id, session.worktree_path, delete_worktree
         ));
         let Some(project) = self
             .projects
@@ -523,6 +544,120 @@ impl App {
         else {
             return Ok(());
         };
+        let other_sessions_on_worktree = self
+            .sessions
+            .iter()
+            .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
+
+        let should_remove_worktree = delete_worktree && !other_sessions_on_worktree;
+
+        // Attempt git operations FIRST so a failure leaves the agent intact.
+        // Worktrees are user data — if we can't remove the worktree cleanly, we
+        // must not leave the user with a deleted agent record and an orphaned
+        // worktree on disk.
+        let remove_outcome = if should_remove_worktree {
+            let result = git::remove_worktree(
+                Path::new(&project.path),
+                Path::new(&session.worktree_path),
+                &session.branch_name,
+            )?;
+            Some(result.branch_already_deleted)
+        } else {
+            None
+        };
+
+        self.finish_delete_session(session_id, delete_worktree, remove_outcome)?;
+        Ok(())
+    }
+
+    /// Kick off deletion of `session_id` from the user-facing modal.
+    ///
+    /// When the git worktree needs to be removed, the `git worktree remove`
+    /// call is dispatched to a background thread and the session record is
+    /// left in place until the worker reports success via
+    /// [`WorkerEvent::WorktreeRemoveCompleted`]. This keeps the UI responsive
+    /// even when git stalls (slow disk, held lock, large worktree). When no
+    /// git work is required the session is cleaned up synchronously — that
+    /// path only touches in-memory state and SQLite, which is effectively
+    /// instantaneous.
+    pub(crate) fn begin_delete_session(&mut self, session_id: &str, delete_worktree: bool) {
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
+            return;
+        };
+        let Some(project) = self
+            .projects
+            .iter()
+            .find(|project| project.id == session.project_id)
+            .cloned()
+        else {
+            return;
+        };
+        let other_sessions_on_worktree = self
+            .sessions
+            .iter()
+            .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
+        let should_remove_worktree = delete_worktree && !other_sessions_on_worktree;
+
+        if should_remove_worktree {
+            logger::info(&format!(
+                "deleting session {} at {} (delete_worktree=true, async)",
+                session.id, session.worktree_path
+            ));
+            let sid = session.id.clone();
+            let project_path = project.path.clone();
+            let worktree_path = session.worktree_path.clone();
+            let branch_name = session.branch_name.clone();
+            let tx = self.worker_tx.clone();
+            std::thread::spawn(move || {
+                let result = git::remove_worktree(
+                    Path::new(&project_path),
+                    Path::new(&worktree_path),
+                    &branch_name,
+                )
+                .map(|r| r.branch_already_deleted)
+                .map_err(|e| format!("{e:#}"));
+                let _ = tx.send(WorkerEvent::WorktreeRemoveCompleted {
+                    session_id: sid,
+                    result,
+                });
+            });
+            self.set_busy(format!(
+                "Removing worktree for agent \"{}\"\u{2026}",
+                session.branch_name
+            ));
+        } else {
+            logger::info(&format!(
+                "deleting session {} at {} (delete_worktree={}, inline)",
+                session.id, session.worktree_path, delete_worktree
+            ));
+            if let Err(e) = self.finish_delete_session(session_id, delete_worktree, None) {
+                self.set_error(format!("{e:#}"));
+            }
+        }
+    }
+
+    /// Remove all local bookkeeping for a session whose git side has already
+    /// been handled (or does not need handling). Idempotent — if the session
+    /// is no longer present this is a no-op, which matters for the async path
+    /// where the user may have deleted the project before the worker replies.
+    ///
+    /// `remove_outcome` is `Some(branch_already_deleted)` only on the branch
+    /// where we actually removed the worktree; it drives the success message
+    /// variant.
+    pub(crate) fn finish_delete_session(
+        &mut self,
+        session_id: &str,
+        delete_worktree: bool,
+        remove_outcome: Option<bool>,
+    ) -> Result<()> {
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
+            return Ok(());
+        };
+        let project = self
+            .projects
+            .iter()
+            .find(|project| project.id == session.project_id)
+            .cloned();
         let other_sessions_on_worktree = self
             .sessions
             .iter()
@@ -539,30 +674,56 @@ impl App {
         self.selected_left = self.selected_left.saturating_sub(1);
         self.reload_changed_files();
 
-        if other_sessions_on_worktree {
-            self.set_info(format!(
-                "Deleted {} session for agent \"{}\". Worktree preserved for remaining sessions.",
-                session.provider.as_str(),
-                session.branch_name,
-            ));
-        } else {
-            let result = git::remove_worktree(
-                Path::new(&project.path),
-                Path::new(&session.worktree_path),
-                &session.branch_name,
-            )?;
-            if result.branch_already_deleted {
+        match (other_sessions_on_worktree, delete_worktree, remove_outcome) {
+            (true, true, _) => {
                 self.set_info(format!(
-                    "Deleted agent (branch \"{}\" was already removed)",
-                    session.branch_name
-                ));
-            } else {
-                self.set_info(format!(
-                    "Deleted {} agent from project \"{}\" with branch \"{}\"",
+                    "Deleted {} agent \"{}\". Worktree preserved because other sessions still use it.",
                     session.provider.as_str(),
-                    project.name,
-                    session.branch_name
+                    session.branch_name,
                 ));
+            }
+            (true, false, _) => {
+                self.set_info(format!(
+                    "Deleted {} session for agent \"{}\". Worktree preserved for remaining sessions.",
+                    session.provider.as_str(),
+                    session.branch_name,
+                ));
+            }
+            (false, false, _) => {
+                self.set_info(format!(
+                    "Deleted {} agent \"{}\". Worktree preserved at {}.",
+                    session.provider.as_str(),
+                    session.branch_name,
+                    session.worktree_path,
+                ));
+            }
+            (false, true, Some(branch_already_deleted)) => {
+                if branch_already_deleted {
+                    self.set_info(format!(
+                        "Deleted agent (branch \"{}\" was already removed)",
+                        session.branch_name
+                    ));
+                } else {
+                    let project_name = project
+                        .as_ref()
+                        .map(|p| p.name.as_str())
+                        .unwrap_or("<unknown>");
+                    self.set_info(format!(
+                        "Deleted {} agent from project \"{}\" with branch \"{}\"",
+                        session.provider.as_str(),
+                        project_name,
+                        session.branch_name
+                    ));
+                }
+            }
+            (false, true, None) => {
+                // Unreachable: the caller only sets delete_worktree=true with
+                // no siblings when a successful git removal has already run,
+                // producing Some(outcome). Kept for exhaustiveness.
+                debug_assert!(
+                    false,
+                    "remove_outcome should be Some when finishing worktree delete without siblings"
+                );
             }
         }
         Ok(())
@@ -695,7 +856,10 @@ impl App {
                         |item| matches!(item, LeftItem::Session(session_index) if *session_index == index),
                     )
                     .unwrap_or(self.selected_left);
-                self.do_delete_session(&session_id)?;
+                // When deleting a project we also remove each agent's
+                // worktree — the project itself is going away, so leaving
+                // orphaned worktrees around would be surprising.
+                self.do_delete_session(&session_id, true)?;
             }
         }
         self.projects.retain(|candidate| candidate.id != project.id);
@@ -1690,5 +1854,184 @@ mod tests {
             .iter()
             .any(|s| s.id != "s1" && s.worktree_path == "/tmp/wt/a");
         assert!(!has_sibling, "no sibling session should exist");
+    }
+
+    /// Build a `Project` whose `path` points at a caller-controlled directory,
+    /// so tests can decide whether git operations succeed or fail.
+    fn make_project_at(id: &str, provider: &str, path: &str) -> Project {
+        Project {
+            id: id.to_string(),
+            name: "demo".to_string(),
+            path: path.to_string(),
+            default_provider: ProviderKind::from_str(provider),
+            current_branch: "main".to_string(),
+            path_missing: false,
+        }
+    }
+
+    /// With `delete_worktree = false`, the session record is removed but the
+    /// worktree on disk is left alone and git is never invoked. The project
+    /// path here is not a git repo — if the code accidentally invoked git it
+    /// would return `Err` and this test would catch it.
+    #[test]
+    fn do_delete_session_preserves_worktree_when_flag_off() {
+        let project_dir = tempdir().expect("project tempdir");
+        let worktree_dir = tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+
+        let mut s1 = make_session("s1", "claude", &worktree_path);
+        s1.project_id = "project-1".to_string();
+        let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+
+        app.do_delete_session("s1", false)
+            .expect("delete should succeed without touching git");
+
+        assert!(
+            app.sessions.iter().all(|s| s.id != "s1"),
+            "session should be removed"
+        );
+        assert!(
+            worktree_dir.path().exists(),
+            "worktree directory must be preserved on disk when delete_worktree=false",
+        );
+    }
+
+    /// When another session shares the worktree, the worktree must be
+    /// preserved even if the user checked "also delete the worktree" — other
+    /// sessions still depend on it. Git must not be invoked.
+    #[test]
+    fn do_delete_session_keeps_shared_worktree_even_when_flag_on() {
+        let project_dir = tempdir().expect("project tempdir");
+        let worktree_dir = tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+
+        let mut s1 = make_session("s1", "claude", &worktree_path);
+        let mut s2 = make_session("s2", "codex", &worktree_path);
+        s1.project_id = "project-1".to_string();
+        s2.project_id = "project-1".to_string();
+        let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+        let mut app = test_app_with_sessions(vec![s1, s2], vec![project]);
+
+        app.do_delete_session("s1", true)
+            .expect("delete should succeed without touching git for shared worktree");
+
+        assert!(
+            app.sessions.iter().all(|s| s.id != "s1"),
+            "s1 should be removed"
+        );
+        assert!(
+            app.sessions.iter().any(|s| s.id == "s2"),
+            "s2 should remain"
+        );
+        assert!(
+            worktree_dir.path().exists(),
+            "shared worktree must be preserved when siblings exist",
+        );
+    }
+
+    /// If git fails to remove the worktree, the session record must remain —
+    /// otherwise the user loses their agent with no way to retry. We force
+    /// the git call to fail by pointing the project path at a directory that
+    /// is not a git repository.
+    #[test]
+    fn do_delete_session_preserves_session_when_git_fails() {
+        let project_dir = tempdir().expect("project tempdir");
+        // Intentionally NOT a git repo — `git worktree remove` will exit
+        // non-zero, which bubbles up as Err from git::remove_worktree.
+        let worktree_dir = tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+
+        let mut s1 = make_session("s1", "claude", &worktree_path);
+        s1.project_id = "project-1".to_string();
+        let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+
+        let err = app
+            .do_delete_session("s1", true)
+            .expect_err("git should fail against a non-git project dir");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.to_lowercase().contains("worktree") || msg.contains("git"),
+            "error should mention git/worktree, got: {msg}",
+        );
+
+        assert!(
+            app.sessions.iter().any(|s| s.id == "s1"),
+            "session must be preserved when git fails so user can retry",
+        );
+        assert!(
+            worktree_dir.path().exists(),
+            "worktree directory should be untouched on failure",
+        );
+    }
+
+    /// The async path (`begin_delete_session`) must NOT remove the session
+    /// immediately when the worktree deletion is going to run in a worker —
+    /// otherwise a failed git call would leave the user with a vanished
+    /// agent and no way to retry. The session should only disappear once
+    /// the worker reports success.
+    #[test]
+    fn begin_delete_session_keeps_session_until_worker_replies() {
+        let project_dir = tempdir().expect("project tempdir");
+        let worktree_dir = tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+
+        let mut s1 = make_session("s1", "claude", &worktree_path);
+        s1.project_id = "project-1".to_string();
+        let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+
+        app.begin_delete_session("s1", true);
+
+        // Session must still be present: the worker thread has been spawned
+        // but hasn't (at most) completed the cleanup on our thread yet.
+        assert!(
+            app.sessions.iter().any(|s| s.id == "s1"),
+            "session must remain until the worker reports success",
+        );
+    }
+
+    /// When the async path does NOT need to run git (no siblings + flag off),
+    /// cleanup is safe to run inline and the session should be gone by the
+    /// time `begin_delete_session` returns.
+    #[test]
+    fn begin_delete_session_completes_inline_when_no_git_needed() {
+        let project_dir = tempdir().expect("project tempdir");
+        let worktree_dir = tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+
+        let mut s1 = make_session("s1", "claude", &worktree_path);
+        s1.project_id = "project-1".to_string();
+        let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+
+        app.begin_delete_session("s1", false);
+
+        assert!(
+            app.sessions.iter().all(|s| s.id != "s1"),
+            "no-git path should complete immediately",
+        );
+        assert!(
+            worktree_dir.path().exists(),
+            "worktree directory must be preserved when the flag is off",
+        );
+    }
+
+    /// `finish_delete_session` is the handler invoked both inline and from
+    /// the worker event. It must be idempotent: if the session has already
+    /// been removed (e.g. a duplicate worker event) it should no-op.
+    #[test]
+    fn finish_delete_session_is_idempotent() {
+        let mut s1 = make_session("s1", "claude", "/tmp/wt/a");
+        s1.project_id = "project-1".to_string();
+        let project = make_project("project-1", "claude");
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+
+        app.finish_delete_session("s1", false, None)
+            .expect("first finish succeeds");
+        // Second call must not panic or return Err even though session is gone.
+        app.finish_delete_session("s1", false, None)
+            .expect("second finish is a no-op");
     }
 }

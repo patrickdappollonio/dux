@@ -2854,7 +2854,9 @@ impl App {
             }
             PromptState::ConfirmDeleteAgent {
                 branch_name,
-                confirm_selected,
+                focus,
+                delete_worktree,
+                worktree_shared,
                 ..
             } => {
                 self.render_dim_overlay(frame);
@@ -2865,17 +2867,21 @@ impl App {
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
 
-                // Body text.
-                let [body_area, _, buttons_area] = Layout::default()
+                // Layout: body / checkbox row / spacer / buttons.
+                // Checkbox row is two lines (checkbox + descriptor) so the
+                // yellow warning can replace the descriptor in-place without
+                // shifting the button row when toggled.
+                let [body_area, checkbox_area, _, buttons_area] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Min(1),
+                        Constraint::Length(2),
                         Constraint::Length(1),
                         Constraint::Length(3),
                     ])
                     .areas(inner);
 
-                let lines = vec![
+                let body_lines = vec![
                     Line::from(""),
                     Line::from(vec![
                         Span::raw(" Are you sure you want to delete "),
@@ -2885,19 +2891,64 @@ impl App {
                         ),
                         Span::raw("?"),
                     ]),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        " All uncommitted and unpushed changes in this",
-                        Style::default().fg(self.theme.warning_fg),
-                    )),
-                    Line::from(Span::styled(
-                        " worktree will be permanently lost.",
-                        Style::default().fg(self.theme.warning_fg),
-                    )),
                 ];
-                Paragraph::new(lines)
+                Paragraph::new(body_lines)
                     .wrap(Wrap { trim: false })
                     .render(body_area, frame.buffer_mut());
+
+                // Checkbox row. When the worktree is shared with another
+                // session, the checkbox is meaningless (the worktree is always
+                // preserved), so it's replaced with an informational note.
+                // Otherwise, the focus ring follows the Tab cycle; when the
+                // checkbox is focused, the label is highlighted with the
+                // active button color so the user sees the same visual
+                // language whether they're hovering a button or the checkbox.
+                let (checkbox_line, descriptor_line) = if *worktree_shared {
+                    (
+                        Line::from(Span::styled(
+                            " Worktree is shared with another agent and will be preserved.",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        )),
+                        Line::from(""),
+                    )
+                } else {
+                    let check = if *delete_worktree { "x" } else { " " };
+                    let checkbox_focused = *focus == DeleteAgentFocus::Checkbox;
+                    let label_style = if checkbox_focused {
+                        Style::default()
+                            .fg(self.theme.button_active_fg)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(self.theme.input_label_fg)
+                    };
+                    let bracket_style = if checkbox_focused {
+                        Style::default()
+                            .fg(self.theme.button_active_fg)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(self.theme.hint_key_fg)
+                    };
+                    let checkbox_line = Line::from(vec![
+                        Span::raw(" "),
+                        Span::styled(format!("[{check}]"), bracket_style),
+                        Span::styled(" Also delete the worktree and branch", label_style),
+                    ]);
+                    let descriptor_line = if *delete_worktree {
+                        Line::from(Span::styled(
+                            "     All uncommitted and unpushed changes in this worktree will be permanently lost.",
+                            Style::default().fg(self.theme.warning_fg),
+                        ))
+                    } else {
+                        Line::from(Span::styled(
+                            "     Worktree and branch will be preserved on disk.",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ))
+                    };
+                    (checkbox_line, descriptor_line)
+                };
+                Paragraph::new(vec![checkbox_line, descriptor_line])
+                    .wrap(Wrap { trim: false })
+                    .render(checkbox_area, frame.buffer_mut());
 
                 // Button area: two bordered panels side by side.
                 let btn_width = 16u16;
@@ -2918,7 +2969,7 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) = if !confirm_selected {
+                let (cancel_border, cancel_fg) = if *focus == DeleteAgentFocus::Cancel {
                     (
                         self.theme.button_confirm_border,
                         self.theme.button_active_fg,
@@ -2926,7 +2977,7 @@ impl App {
                 } else {
                     (self.theme.border_normal, self.theme.hint_desc_fg)
                 };
-                let (delete_border, delete_fg) = if *confirm_selected {
+                let (delete_border, delete_fg) = if *focus == DeleteAgentFocus::Delete {
                     (self.theme.button_danger_border, self.theme.button_active_fg)
                 } else {
                     (self.theme.border_normal, self.theme.hint_desc_fg)

@@ -379,6 +379,15 @@ pub(crate) struct ConfirmKillRunningPrompt {
     pub(crate) confirm_selected: bool,
 }
 
+/// Which selectable element has focus in the Delete Agent confirmation modal.
+/// Focus cycles through all three via Tab / arrow keys / h / l.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeleteAgentFocus {
+    Cancel,
+    Delete,
+    Checkbox,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PromptState {
     None,
@@ -403,7 +412,12 @@ pub(crate) enum PromptState {
     ConfirmDeleteAgent {
         session_id: String,
         branch_name: String,
-        confirm_selected: bool, // false = Cancel (default), true = Delete
+        focus: DeleteAgentFocus,
+        delete_worktree: bool,
+        /// True when one or more other sessions share this worktree. In that
+        /// case the worktree is always preserved regardless of the user's
+        /// choice, so the checkbox is hidden and a note is shown instead.
+        worktree_shared: bool,
     },
     ConfirmDeleteTerminal {
         terminal_id: String,
@@ -827,6 +841,15 @@ pub(crate) enum WorkerEvent {
     GhStatusChecked(crate::model::GhStatus),
     PrStatusReady(Vec<(String, Option<crate::model::PrInfo>)>),
     RefsChanged(String),
+    /// Background `git worktree remove` for a session-initiated delete has
+    /// finished. On `Ok`, the boolean indicates whether the branch was
+    /// already gone (used for the status message). On `Err`, the message is
+    /// the formatted error; the session record must be preserved so the user
+    /// can retry.
+    WorktreeRemoveCompleted {
+        session_id: String,
+        result: Result<bool, String>,
+    },
 }
 
 #[derive(Clone, Debug)]

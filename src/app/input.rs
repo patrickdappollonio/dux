@@ -1808,24 +1808,57 @@ impl App {
         }
 
         if let PromptState::ConfirmDeleteAgent {
-            confirm_selected, ..
+            focus,
+            delete_worktree,
+            worktree_shared,
+            ..
         } = &mut self.prompt
         {
+            // When the worktree is shared with another session it is always
+            // preserved, so the checkbox is hidden and the focus cycle skips
+            // over it (Cancel ↔ Delete only).
+            let shared = *worktree_shared;
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => self.prompt = PromptState::None,
                 Some(Action::ToggleSelection) => {
-                    *confirm_selected = !*confirm_selected;
+                    // Cycle forward through all selectable elements so Tab and
+                    // arrow keys (Left/Right/h/l all map to ToggleSelection in
+                    // Dialog scope) behave identically.
+                    *focus = match (*focus, shared) {
+                        (DeleteAgentFocus::Cancel, false) => DeleteAgentFocus::Delete,
+                        (DeleteAgentFocus::Delete, false) => DeleteAgentFocus::Checkbox,
+                        (DeleteAgentFocus::Checkbox, _) => DeleteAgentFocus::Cancel,
+                        (DeleteAgentFocus::Cancel, true) => DeleteAgentFocus::Delete,
+                        (DeleteAgentFocus::Delete, true) => DeleteAgentFocus::Cancel,
+                    };
                 }
-                Some(Action::Confirm) => {
-                    let confirm = *confirm_selected;
-                    return Ok(self.resolve_confirm_delete_agent(confirm));
-                }
-                _ if key.code == KeyCode::Char(' ') => {
-                    let confirm = *confirm_selected;
-                    return Ok(self.resolve_confirm_delete_agent(confirm));
-                }
+                Some(Action::Confirm) => match *focus {
+                    DeleteAgentFocus::Checkbox => {
+                        *delete_worktree = !*delete_worktree;
+                    }
+                    DeleteAgentFocus::Cancel => {
+                        return Ok(self.resolve_confirm_delete_agent(false));
+                    }
+                    DeleteAgentFocus::Delete => {
+                        return Ok(self.resolve_confirm_delete_agent(true));
+                    }
+                },
+                // Space activates the focused element — toggles the checkbox
+                // when focused there, otherwise activates the current button.
+                _ if key.code == KeyCode::Char(' ') => match *focus {
+                    DeleteAgentFocus::Checkbox => {
+                        *delete_worktree = !*delete_worktree;
+                    }
+                    DeleteAgentFocus::Cancel => {
+                        return Ok(self.resolve_confirm_delete_agent(false));
+                    }
+                    DeleteAgentFocus::Delete => {
+                        return Ok(self.resolve_confirm_delete_agent(true));
+                    }
+                },
                 _ => {}
             }
+            return Ok(false);
         }
 
         if let PromptState::ConfirmDeleteTerminal {
@@ -2960,13 +2993,20 @@ impl App {
     }
 
     fn resolve_confirm_delete_agent(&mut self, confirm: bool) -> bool {
-        let session_id = match &self.prompt {
-            PromptState::ConfirmDeleteAgent { session_id, .. } => session_id.clone(),
+        let (session_id, delete_worktree) = match &self.prompt {
+            PromptState::ConfirmDeleteAgent {
+                session_id,
+                delete_worktree,
+                ..
+            } => (session_id.clone(), *delete_worktree),
             _ => return false,
         };
         self.prompt = PromptState::None;
-        if confirm && let Err(e) = self.do_delete_session(&session_id) {
-            self.set_error(format!("{e:#}"));
+        if confirm {
+            // Dispatches git work to a worker when needed, so the UI stays
+            // responsive. Errors arrive asynchronously via
+            // `WorkerEvent::WorktreeRemoveCompleted`.
+            self.begin_delete_session(&session_id, delete_worktree);
         }
         false
     }
@@ -3932,11 +3972,11 @@ mod tests {
 
     use super::DOUBLE_CLICK_THRESHOLD;
     use crate::app::{
-        App, CenterMode, ConfirmKillRunningPrompt, FocusPane, FullscreenOverlay, InputTarget,
-        KillRunningAction, KillRunningFocus, KillRunningFooterAction, KillRunningPrompt,
-        KillableRuntime, KillableRuntimeKind, LeftSection, MouseClickTarget, MouseLayoutState,
-        OverlayMouseLayout, OverlayMouseLayoutState, PromptState, PullTarget, RightSection,
-        RuntimeTargetId, TextInput, WorkerEvent,
+        App, CenterMode, ConfirmKillRunningPrompt, DeleteAgentFocus, FocusPane, FullscreenOverlay,
+        InputTarget, KillRunningAction, KillRunningFocus, KillRunningFooterAction,
+        KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftSection, MouseClickTarget,
+        MouseLayoutState, OverlayMouseLayout, OverlayMouseLayoutState, PromptState, PullTarget,
+        RightSection, RuntimeTargetId, TextInput, WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
@@ -6618,7 +6658,9 @@ mod tests {
         app.prompt = PromptState::ConfirmDeleteAgent {
             session_id: app.sessions[0].id.clone(),
             branch_name: app.sessions[0].branch_name.clone(),
-            confirm_selected: false,
+            focus: DeleteAgentFocus::Cancel,
+            delete_worktree: false,
+            worktree_shared: false,
         };
         install_confirm_delete_overlay(&mut app);
 
