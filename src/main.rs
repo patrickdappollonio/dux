@@ -32,17 +32,34 @@ fn main() -> Result<()> {
     let paths = config::DuxPaths::discover()?;
 
     if args.first().map(|s| s.as_str()) == Some("config") {
-        // Only acquire the lock when the config root already exists. If
-        // the root is absent no dux instance can be running, so there is
-        // nothing to protect against — and creating the directory here
-        // would break fast-paths like `dux config reset` ("nothing to
-        // reset") and prevent `reset --all` from fully removing the root.
-        let _lock = if paths.root.exists() {
-            Some(acquire_lock_or_exit(&paths.lock_path))
-        } else {
-            None
+        let config_args = &args[1..];
+        let sub = config_args.first().map(|s| s.as_str()).unwrap_or("");
+
+        // Acquire the single-instance lock only for subcommands that
+        // mutate shared on-disk state. Read-only operations (path, diff,
+        // regenerate preview) skip the lock entirely.
+        let _lock = match sub {
+            // reset mutates state when root exists. When root is absent,
+            // run_reset's fast-path reports "nothing to reset" and exits,
+            // so we avoid creating the directory just to take a lock.
+            "reset" if paths.root.exists() => Some(acquire_lock_or_exit(&paths.lock_path)),
+
+            // regenerate --yes creates directories and writes config.
+            // Create root (so the lockfile can be opened) and lock before
+            // any writes, preventing a concurrent TUI from starting
+            // between directory creation and the config write.
+            "regenerate" if config_args.iter().any(|a| a == "--yes") => {
+                std::fs::create_dir_all(&paths.root)?;
+                Some(acquire_lock_or_exit(&paths.lock_path))
+            }
+
+            // Everything else is read-only or prints help — no shared
+            // state to protect. This includes: path, diff, diff --raw,
+            // regenerate (preview without --yes), --help, and empty.
+            _ => None,
         };
-        return cli::run(&args[1..], &paths);
+
+        return cli::run(config_args, &paths);
     }
 
     // TUI: always create the root directory (so the lockfile can be

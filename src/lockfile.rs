@@ -157,19 +157,29 @@ impl SingleInstanceLock {
     }
 }
 
+/// Production entry point: reads the holder's PID with the default retry
+/// budget ([`PID_READ_ATTEMPTS`] × [`PID_READ_RETRY_DELAY`]).
+fn read_holder_pid_with_retry(file: &mut File) -> Option<u32> {
+    read_holder_pid(file, PID_READ_ATTEMPTS, PID_READ_RETRY_DELAY)
+}
+
 /// Read the holder's PID from `file`, preferring a value confirmed by two
 /// consecutive identical reads. This absorbs both the "empty file" window
 /// (winner hasn't written yet) and the "stale PID" window (winner is
 /// mid-overwrite of a leftover PID from a dead process).
 ///
-/// If two consecutive reads agree within the attempt budget, that value is
-/// returned immediately. If the budget is exhausted without agreement, the
-/// last successfully parsed PID is returned as a best-effort fallback —
+/// If two consecutive reads agree within `attempts`, that value is returned
+/// immediately. If the budget is exhausted without agreement, the last
+/// successfully parsed PID is returned as a best-effort fallback —
 /// reporting a potentially-stale PID is more useful than `None`. Returns
 /// `None` only if no attempt produced a parseable value at all.
-fn read_holder_pid_with_retry(file: &mut File) -> Option<u32> {
+///
+/// The retry parameters are explicit so tests can use generous budgets
+/// that remain deterministic under CI load, while production uses the
+/// tight defaults from [`PID_READ_ATTEMPTS`] and [`PID_READ_RETRY_DELAY`].
+fn read_holder_pid(file: &mut File, attempts: usize, delay: Duration) -> Option<u32> {
     let mut last_pid: Option<u32> = None;
-    for attempt in 0..PID_READ_ATTEMPTS {
+    for attempt in 0..attempts {
         if let Some(pid) = read_holder_pid_once(file) {
             if last_pid == Some(pid) {
                 // Two consecutive reads agree — the PID is stable.
@@ -177,8 +187,8 @@ fn read_holder_pid_with_retry(file: &mut File) -> Option<u32> {
             }
             last_pid = Some(pid);
         }
-        if attempt + 1 < PID_READ_ATTEMPTS {
-            thread::sleep(PID_READ_RETRY_DELAY);
+        if attempt + 1 < attempts {
+            thread::sleep(delay);
         }
     }
     // Return the last observed PID even without a confirming second read.
@@ -328,15 +338,19 @@ mod tests {
         }
     }
 
+    /// Generous retry budget for tests. The writer thread needs only
+    /// microseconds; 50 × 20ms = 1s gives even the slowest CI scheduler
+    /// ample room, eliminating timing-dependent flakiness.
+    const TEST_ATTEMPTS: usize = 50;
+    const TEST_DELAY: Duration = Duration::from_millis(20);
+
     #[test]
     fn pid_read_retries_until_holder_finishes_writing() {
         // Simulate the empty-file race: the file starts empty and a
         // concurrent writer drops a valid PID after a barrier is released.
-        // The barrier ensures the writer doesn't run before the retry loop
-        // has started, which coordinates ordering between the threads. A
-        // theoretical timing dependency remains (the bounded retry could
-        // exhaust before the writer is scheduled), but in practice the
-        // 2ms inter-attempt sleep gives the writer ample time.
+        // The barrier coordinates ordering (writer won't run before the
+        // retry loop starts). The generous test budget ensures the writer
+        // is always scheduled within the retry window.
         use std::sync::{Arc, Barrier};
 
         let tmp = TempDir::new().unwrap();
@@ -353,7 +367,7 @@ mod tests {
 
         let mut file = OpenOptions::new().read(true).open(&path).unwrap();
         barrier.wait();
-        let pid = read_holder_pid_with_retry(&mut file);
+        let pid = read_holder_pid(&mut file, TEST_ATTEMPTS, TEST_DELAY);
         writer.join().unwrap();
 
         assert_eq!(
@@ -367,9 +381,9 @@ mod tests {
     fn pid_read_requires_two_consecutive_agreeing_reads() {
         // When a stale PID sits in the lockfile, the first read parses
         // successfully. The retry loop must NOT accept it immediately —
-        // it should require a second read to agree. Here the file changes
-        // between reads: attempt 0 sees 9999, the writer overwrites to
-        // 7777, and the loop eventually stabilises on 7777.
+        // it needs a second read to agree. Here the file changes between
+        // reads: attempt 0 sees 9999, the writer overwrites to 7777, and
+        // the loop eventually stabilises on 7777.
         use std::sync::{Arc, Barrier};
 
         let tmp = TempDir::new().unwrap();
@@ -386,7 +400,7 @@ mod tests {
 
         let mut file = OpenOptions::new().read(true).open(&path).unwrap();
         barrier.wait();
-        let pid = read_holder_pid_with_retry(&mut file);
+        let pid = read_holder_pid(&mut file, TEST_ATTEMPTS, TEST_DELAY);
         writer.join().unwrap();
 
         assert_eq!(
@@ -399,22 +413,30 @@ mod tests {
     #[test]
     fn pid_read_accepts_stable_value_without_change() {
         // When the PID is already written and stable, two consecutive
-        // reads agree and the loop returns quickly.
+        // reads agree and the loop returns on the second attempt.
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("dux.lock");
         fs::write(&path, "4242\n").unwrap();
 
         let mut file = OpenOptions::new().read(true).open(&path).unwrap();
-        assert_eq!(read_holder_pid_with_retry(&mut file), Some(4242));
+        assert_eq!(
+            read_holder_pid(&mut file, PID_READ_ATTEMPTS, PID_READ_RETRY_DELAY),
+            Some(4242)
+        );
     }
 
     #[test]
     fn pid_read_gives_up_and_returns_none_when_file_stays_empty() {
+        // Use minimal budget here — no writer thread, so every attempt
+        // fails immediately and there's nothing to wait for.
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("dux.lock");
         fs::write(&path, "").unwrap();
 
         let mut file = OpenOptions::new().read(true).open(&path).unwrap();
-        assert_eq!(read_holder_pid_with_retry(&mut file), None);
+        assert_eq!(
+            read_holder_pid(&mut file, PID_READ_ATTEMPTS, PID_READ_RETRY_DELAY),
+            None
+        );
     }
 }
