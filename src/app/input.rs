@@ -8,6 +8,31 @@ const MAX_RIGHT_WIDTH_PCT: u16 = 50;
 const MIN_CENTER_WIDTH_PCT: u16 = 20;
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 
+/// Maximum size of `loading_input_buf`. During the loading phase we
+/// accumulate bytes only to detect a (possibly multi-byte) ExitInteractive
+/// binding. Since any realistic binding fits in well under this cap, we
+/// truncate to the trailing window to bound memory and scan cost even when
+/// the user pastes large amounts of text while the agent is starting.
+const LOADING_INPUT_BUF_MAX: usize = 64;
+
+/// Append `bytes` to `buf`, keeping at most `max` trailing bytes. Used to
+/// bound `loading_input_buf` so it cannot grow without bound when the user
+/// pastes large content during the agent loading phase.
+fn append_capped(buf: &mut Vec<u8>, bytes: &[u8], max: usize) {
+    if bytes.len() >= max {
+        // The new chunk alone fills or exceeds the cap: drop prior state
+        // and keep only the trailing `max` bytes of the new chunk.
+        buf.clear();
+        buf.extend_from_slice(&bytes[bytes.len() - max..]);
+        return;
+    }
+    buf.extend_from_slice(bytes);
+    if buf.len() > max {
+        let drop = buf.len() - max;
+        buf.drain(..drop);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MouseTarget {
     LeftPane,
@@ -954,6 +979,7 @@ impl App {
             self.input_target = InputTarget::None;
             self.terminal_selection = None;
             self.raw_input_buf.clear();
+            self.loading_input_buf.clear();
             return Ok(false);
         }
         let surface = self.session_surface;
@@ -961,6 +987,7 @@ impl App {
             self.input_target = InputTarget::None;
             self.terminal_selection = None;
             self.raw_input_buf.clear();
+            self.loading_input_buf.clear();
             let label = match surface {
                 SessionSurface::Agent => "Agent",
                 SessionSurface::Terminal => "Companion terminal",
@@ -1002,15 +1029,23 @@ impl App {
         // `raw_input_buf`) so that suppressed keystrokes typed during
         // loading cannot leak into the first post-loading
         // `process_raw_input_bytes` call when `has_output()` flips to true.
+        // The buffer is capped at LOADING_INPUT_BUF_MAX so that pasting a
+        // large amount of text (or an unterminated OSC sequence, which
+        // split_sequences reports as an entirely-incomplete remainder)
+        // cannot grow the buffer without bound.
         if let Some(provider) = self.selected_terminal_surface_client()
             && !provider.has_output()
         {
-            self.loading_input_buf.extend_from_slice(&buf[..n]);
+            append_capped(
+                &mut self.loading_input_buf,
+                &buf[..n],
+                LOADING_INPUT_BUF_MAX,
+            );
             if self.scan_exit_interactive() {
                 return Ok(false);
             }
-            // Trim the buffer to the remainder that couldn't form a complete
-            // sequence yet, so the next read can complete a partial escape.
+            // Trim to the incomplete remainder so a partial escape can be
+            // completed by the next read (already bounded by the cap above).
             let (_, remainder) = crate::raw_input::split_sequences(&self.loading_input_buf);
             let keep = remainder.len();
             let start = self.loading_input_buf.len() - keep;
@@ -7390,6 +7425,67 @@ mod tests {
         );
         assert_eq!(app.input_target, InputTarget::Agent);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+    }
+
+    #[test]
+    fn append_capped_keeps_trailing_bytes_on_large_chunk() {
+        let mut buf = b"prefix".to_vec();
+        let big: Vec<u8> = (0..200u8).collect();
+        super::append_capped(&mut buf, &big, super::LOADING_INPUT_BUF_MAX);
+        assert_eq!(
+            buf.len(),
+            super::LOADING_INPUT_BUF_MAX,
+            "buffer must be capped to the configured maximum"
+        );
+        // When the incoming chunk alone exceeds the cap, prior prefix is
+        // discarded and only the trailing window of the new chunk remains.
+        let expected_tail: Vec<u8> = (200 - super::LOADING_INPUT_BUF_MAX as u8..200u8).collect();
+        assert_eq!(buf, expected_tail);
+    }
+
+    #[test]
+    fn append_capped_drops_oldest_bytes_on_incremental_overflow() {
+        // Fill exactly to cap with distinct leading bytes.
+        let mut buf: Vec<u8> = (0..super::LOADING_INPUT_BUF_MAX as u8).collect();
+        // Append 5 more bytes — should drop the first 5.
+        super::append_capped(
+            &mut buf,
+            &[0xA, 0xB, 0xC, 0xD, 0xE],
+            super::LOADING_INPUT_BUF_MAX,
+        );
+        assert_eq!(buf.len(), super::LOADING_INPUT_BUF_MAX);
+        assert_eq!(
+            &buf[buf.len() - 5..],
+            &[0xA, 0xB, 0xC, 0xD, 0xE],
+            "most recent bytes must be preserved at the tail"
+        );
+        assert_eq!(
+            buf[0], 5,
+            "first 5 original bytes (0..=4) must have been dropped"
+        );
+    }
+
+    #[test]
+    fn loading_phase_cap_still_matches_exit_interactive_at_tail() {
+        // Ensure that after a large paste, a trailing single-byte
+        // ExitInteractive (Ctrl-G) still triggers exit.
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.session_surface = SessionSurface::Agent;
+
+        // Fill the buffer with filler past the cap, then put Ctrl-G at the
+        // tail. append_capped would have done the same; we prepare the
+        // post-cap state directly here.
+        let mut filler: Vec<u8> = vec![b'x'; super::LOADING_INPUT_BUF_MAX - 1];
+        filler.push(0x07);
+        app.loading_input_buf = filler;
+        assert!(
+            app.scan_exit_interactive(),
+            "Ctrl-G at the tail of a capped buffer must still trigger exit"
+        );
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
     }
 
     // ---------------------------------------------------------------
