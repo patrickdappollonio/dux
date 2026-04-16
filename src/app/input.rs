@@ -998,23 +998,30 @@ impl App {
         // buffer accumulation. However, we still honour ExitInteractive so
         // the user can minimize a loading agent.
         //
-        // Bytes are accumulated into raw_input_buf across reads so that
-        // multi-byte ExitInteractive bindings (e.g. ESC-prefixed sequences)
-        // that arrive fragmented across two stdin reads are still matched.
+        // Bytes are accumulated into a dedicated `loading_input_buf` (not
+        // `raw_input_buf`) so that suppressed keystrokes typed during
+        // loading cannot leak into the first post-loading
+        // `process_raw_input_bytes` call when `has_output()` flips to true.
         if let Some(provider) = self.selected_terminal_surface_client()
             && !provider.has_output()
         {
-            self.raw_input_buf.extend_from_slice(&buf[..n]);
+            self.loading_input_buf.extend_from_slice(&buf[..n]);
             if self.scan_exit_interactive() {
                 return Ok(false);
             }
             // Trim the buffer to the remainder that couldn't form a complete
             // sequence yet, so the next read can complete a partial escape.
-            let (_, remainder) = crate::raw_input::split_sequences(&self.raw_input_buf);
+            let (_, remainder) = crate::raw_input::split_sequences(&self.loading_input_buf);
             let keep = remainder.len();
-            let start = self.raw_input_buf.len() - keep;
-            self.raw_input_buf = self.raw_input_buf[start..].to_vec();
+            let start = self.loading_input_buf.len() - keep;
+            self.loading_input_buf = self.loading_input_buf[start..].to_vec();
             return Ok(false);
+        }
+
+        // If we just transitioned out of loading, clear the loading buffer
+        // so stale remainders don't accumulate across sessions.
+        if !self.loading_input_buf.is_empty() {
+            self.loading_input_buf.clear();
         }
 
         self.process_raw_input_bytes(&buf[..n])
@@ -3923,6 +3930,7 @@ impl App {
         self.session_surface = SessionSurface::Agent;
         self.terminal_selection = None;
         self.raw_input_buf.clear();
+        self.loading_input_buf.clear();
         if return_to_terminal_list {
             self.left_section = LeftSection::Terminals;
             self.clamp_terminal_cursor();
@@ -3931,11 +3939,11 @@ impl App {
         self.set_info("Exited interactive mode.");
     }
 
-    /// Scan `raw_input_buf` for an ExitInteractive sequence. Returns `true`
-    /// if the binding was found and interactive mode was exited. Used during
-    /// the loading phase when all other input is suppressed.
+    /// Scan `loading_input_buf` for an ExitInteractive sequence. Returns
+    /// `true` if the binding was found and interactive mode was exited. Used
+    /// during the loading phase when all other input is suppressed.
     pub(crate) fn scan_exit_interactive(&mut self) -> bool {
-        let (sequences, _) = crate::raw_input::split_sequences(&self.raw_input_buf);
+        let (sequences, _) = crate::raw_input::split_sequences(&self.loading_input_buf);
         for seq in &sequences {
             if let Some((Action::ExitInteractive, _)) =
                 self.interactive_patterns.match_sequence(seq)
@@ -4123,6 +4131,7 @@ mod tests {
                 bindings: Vec::new(),
             },
             raw_input_buf: Vec::new(),
+            loading_input_buf: Vec::new(),
             macro_bar: None,
             sigwinch_flag: Arc::new(AtomicBool::new(false)),
             force_redraw: false,
@@ -7289,9 +7298,9 @@ mod tests {
         app.fullscreen_overlay = FullscreenOverlay::Agent;
         app.session_surface = SessionSurface::Agent;
 
-        // Default ExitInteractive is Ctrl-G (0x07). Put it in raw_input_buf
+        // Default ExitInteractive is Ctrl-G (0x07). Put it in loading_input_buf
         // as scan_exit_interactive reads from there.
-        app.raw_input_buf = vec![0x07];
+        app.loading_input_buf = vec![0x07];
         assert!(
             app.scan_exit_interactive(),
             "scan_exit_interactive must detect Ctrl-G"
@@ -7319,7 +7328,7 @@ mod tests {
         app.session_surface = SessionSurface::Agent;
 
         // Full sequence in one buffer.
-        app.raw_input_buf = b"\x1b[H".to_vec();
+        app.loading_input_buf = b"\x1b[H".to_vec();
         assert!(
             app.scan_exit_interactive(),
             "scan_exit_interactive must detect multi-byte ExitInteractive"
@@ -7338,7 +7347,7 @@ mod tests {
         app.session_surface = SessionSurface::Agent;
 
         // First "read" delivers only the ESC byte — not a complete sequence.
-        app.raw_input_buf = vec![0x1b];
+        app.loading_input_buf = vec![0x1b];
         assert!(
             !app.scan_exit_interactive(),
             "incomplete sequence must not trigger exit"
@@ -7351,13 +7360,13 @@ mod tests {
 
         // Simulate the remainder trimming that poll_and_forward_raw_input
         // does: keep only the incomplete remainder.
-        let (_, remainder) = crate::raw_input::split_sequences(&app.raw_input_buf);
+        let (_, remainder) = crate::raw_input::split_sequences(&app.loading_input_buf);
         let keep = remainder.len();
-        let start = app.raw_input_buf.len() - keep;
-        app.raw_input_buf = app.raw_input_buf[start..].to_vec();
+        let start = app.loading_input_buf.len() - keep;
+        app.loading_input_buf = app.loading_input_buf[start..].to_vec();
 
         // Second "read" delivers the rest of the sequence.
-        app.raw_input_buf.extend_from_slice(b"[H");
+        app.loading_input_buf.extend_from_slice(b"[H");
         assert!(
             app.scan_exit_interactive(),
             "completed sequence across reads must trigger exit"
@@ -7374,7 +7383,7 @@ mod tests {
         app.session_surface = SessionSurface::Agent;
 
         // Regular ASCII input should not trigger exit.
-        app.raw_input_buf = b"hello".to_vec();
+        app.loading_input_buf = b"hello".to_vec();
         assert!(
             !app.scan_exit_interactive(),
             "regular input must not trigger exit"

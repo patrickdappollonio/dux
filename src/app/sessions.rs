@@ -1481,6 +1481,7 @@ mod tests {
                 bindings: Vec::new(),
             },
             raw_input_buf: Vec::new(),
+            loading_input_buf: Vec::new(),
             macro_bar: None,
             sigwinch_flag: Arc::new(AtomicBool::new(false)),
             force_redraw: false,
