@@ -21,7 +21,7 @@ portable-pty = "0.9"
 rustix = { version = "1.1", features = ["termios", "process", "event", "stdio", "fs"] }
 signal-hook = "0.4"
 alacritty_terminal = "0.26.0"
-petname = { version = "2.0.2", default-features = false, features = ["default-rng", "default-words"] }
+petname = { version = "3.0.0", default-features = false, features = ["default-rng", "default-words"] }
 similar = "3"
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }
 crokey = "1.4.0"
