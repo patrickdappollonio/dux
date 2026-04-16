@@ -18,9 +18,13 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 use rustix::fs::{FlockOperation, flock};
 use rustix::io::Errno;
+
+use crate::io_retry::retry_on_interrupt_errno;
 
 /// Exclusive single-instance lock on the dux config directory.
 ///
@@ -47,25 +51,29 @@ pub enum AcquireError {
 impl std::fmt::Display for AcquireError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AlreadyRunning {
-                pid: Some(pid),
-                path,
-            } => write!(
-                f,
-                "Another dux instance is already running (PID {pid}).\n\
-                 Close it before starting a new one, or set DUX_HOME to a \
-                 different directory to run a separate workspace.\n\
-                 Lockfile: {}",
-                path.display()
-            ),
-            Self::AlreadyRunning { pid: None, path } => write!(
-                f,
-                "Another dux instance is already running (PID unknown — lockfile is empty or unreadable).\n\
-                 Close it before starting a new one, or set DUX_HOME to a \
-                 different directory to run a separate workspace.\n\
-                 Lockfile: {}",
-                path.display()
-            ),
+            Self::AlreadyRunning { pid, path } => {
+                // Each line is written independently so the output is
+                // unambiguously left-aligned. Earlier iterations used a single
+                // string literal with `\<newline>` continuations; that renders
+                // correctly today, but separate writes remove any chance of a
+                // stray leading space sneaking in on a reformat.
+                match pid {
+                    Some(pid) => {
+                        writeln!(f, "Another dux instance is already running (PID {pid}).")?
+                    }
+                    None => writeln!(
+                        f,
+                        "Another dux instance is already running (PID unknown \
+                         — lockfile is empty or unreadable)."
+                    )?,
+                }
+                writeln!(
+                    f,
+                    "Close it before starting a new one, or set DUX_HOME to a \
+                     different directory to run a separate workspace."
+                )?;
+                write!(f, "Lockfile: {}", path.display())
+            }
             Self::Io { path, err } => {
                 write!(f, "Failed to acquire lockfile at {}: {err}", path.display())
             }
@@ -74,6 +82,15 @@ impl std::fmt::Display for AcquireError {
 }
 
 impl std::error::Error for AcquireError {}
+
+/// Bounded retry parameters for reading the holder's PID on a contention
+/// loss. There's a small window between the winner's `flock()` returning
+/// success and the winner finishing its PID write. A loser that reads the
+/// file inside that window sees it empty. Retrying briefly makes the "PID
+/// unknown" branch of [`AcquireError`] the exceptional case it should be,
+/// while capping the delay well below human-perceptible latency.
+const PID_READ_ATTEMPTS: usize = 5;
+const PID_READ_RETRY_DELAY: Duration = Duration::from_millis(2);
 
 impl SingleInstanceLock {
     /// Attempt to take the lock at `path`. On success the current PID is
@@ -95,7 +112,14 @@ impl SingleInstanceLock {
                 err,
             })?;
 
-        match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+        // `flock(2)` is normally fast when paired with `LOCK_NB`, but it can
+        // still return `EINTR` if a signal is delivered during the syscall.
+        // Retry transparently on `EINTR`; contention (`EWOULDBLOCK`/`EAGAIN`)
+        // and real errors flow through unchanged.
+        let outcome =
+            retry_on_interrupt_errno(|| flock(&file, FlockOperation::NonBlockingLockExclusive));
+
+        match outcome {
             Ok(()) => {
                 // We won the race. Replace whatever PID was in the file with
                 // our own. Writes here are best-effort: the lock itself comes
@@ -108,15 +132,10 @@ impl SingleInstanceLock {
             }
             Err(err) if err == Errno::WOULDBLOCK || err == Errno::AGAIN => {
                 // Someone else owns the lock. Read their PID so the caller
-                // can show an actionable error.
-                let mut buf = String::new();
-                let _ = file.seek(SeekFrom::Start(0));
-                let pid = file
-                    .read_to_string(&mut buf)
-                    .ok()
-                    .and_then(|_| buf.trim().parse::<u32>().ok());
+                // can show an actionable error. The holder may be mid-write,
+                // so retry briefly before giving up and reporting "unknown".
                 Err(AcquireError::AlreadyRunning {
-                    pid,
+                    pid: read_holder_pid_with_retry(&mut file),
                     path: path.to_path_buf(),
                 })
             }
@@ -126,6 +145,29 @@ impl SingleInstanceLock {
             }),
         }
     }
+}
+
+/// Read the holder's PID from `file`, retrying briefly to absorb the small
+/// window between the holder's `flock()` succeeding and its PID write landing
+/// on disk. Returns `None` only if every attempt produced an empty or
+/// unparseable file.
+fn read_holder_pid_with_retry(file: &mut File) -> Option<u32> {
+    for attempt in 0..PID_READ_ATTEMPTS {
+        if let Some(pid) = read_holder_pid_once(file) {
+            return Some(pid);
+        }
+        if attempt + 1 < PID_READ_ATTEMPTS {
+            thread::sleep(PID_READ_RETRY_DELAY);
+        }
+    }
+    None
+}
+
+fn read_holder_pid_once(file: &mut File) -> Option<u32> {
+    let mut buf = String::new();
+    file.seek(SeekFrom::Start(0)).ok()?;
+    file.read_to_string(&mut buf).ok()?;
+    buf.trim().parse::<u32>().ok()
 }
 
 #[cfg(test)]
@@ -210,20 +252,95 @@ mod tests {
     }
 
     #[test]
-    fn display_message_mentions_pid_and_path() {
+    fn display_message_has_no_leading_whitespace_on_wrapped_lines() {
         let err = AcquireError::AlreadyRunning {
             pid: Some(12345),
             path: PathBuf::from("/tmp/dux/dux.lock"),
         };
         let msg = format!("{err}");
-        assert!(msg.contains("12345"), "message should include the PID");
-        assert!(
-            msg.contains("/tmp/dux/dux.lock"),
-            "message should include the lockfile path"
+
+        // Each visible line must start at column 0. Splitting on `\n` and
+        // inspecting the bytes directly catches any regression to
+        // `\<newline><whitespace>` continuation style, which would leave a
+        // leading space on the wrapped lines.
+        let lines: Vec<&str> = msg.split('\n').collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "message should be exactly three lines, got: {msg:?}"
+        );
+        assert_eq!(
+            lines[0],
+            "Another dux instance is already running (PID 12345)."
         );
         assert!(
-            msg.to_lowercase().contains("already running"),
-            "message should explain the situation"
+            lines[1].starts_with("Close it before starting a new one,"),
+            "line 2 should start at column 0, got: {:?}",
+            lines[1]
         );
+        assert_eq!(lines[2], "Lockfile: /tmp/dux/dux.lock");
+
+        for (i, line) in lines.iter().enumerate() {
+            assert!(
+                !line.starts_with(' '),
+                "line {i} must not start with whitespace: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn display_message_without_pid_keeps_unknown_explanation() {
+        let err = AcquireError::AlreadyRunning {
+            pid: None,
+            path: PathBuf::from("/tmp/dux/dux.lock"),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("PID unknown"));
+        assert!(msg.contains("/tmp/dux/dux.lock"));
+        for (i, line) in msg.split('\n').enumerate() {
+            assert!(
+                !line.starts_with(' '),
+                "line {i} must not start with whitespace: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pid_read_retries_until_holder_finishes_writing() {
+        // Simulate the race window between `flock()` winning and the PID
+        // write landing: the file starts empty, a concurrent writer drops a
+        // valid PID after a short delay, and the retry loop must observe it
+        // rather than reporting "unknown".
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("dux.lock");
+        fs::write(&path, "").unwrap();
+
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            // Sleep well under the retry budget (5 * 2ms = 10ms) so the
+            // retry loop sees the PID before giving up.
+            std::thread::sleep(Duration::from_millis(3));
+            fs::write(&writer_path, "7777\n").unwrap();
+        });
+
+        let mut file = OpenOptions::new().read(true).open(&path).unwrap();
+        let pid = read_holder_pid_with_retry(&mut file);
+        writer.join().unwrap();
+
+        assert_eq!(
+            pid,
+            Some(7777),
+            "retry loop should eventually observe the holder's PID"
+        );
+    }
+
+    #[test]
+    fn pid_read_gives_up_and_returns_none_when_file_stays_empty() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("dux.lock");
+        fs::write(&path, "").unwrap();
+
+        let mut file = OpenOptions::new().read(true).open(&path).unwrap();
+        assert_eq!(read_holder_pid_with_retry(&mut file), None);
     }
 }
