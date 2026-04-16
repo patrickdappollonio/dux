@@ -997,31 +997,23 @@ impl App {
         // isn't ready for them. We still drain stdin above to prevent
         // buffer accumulation. However, we still honour ExitInteractive so
         // the user can minimize a loading agent.
+        //
+        // Bytes are accumulated into raw_input_buf across reads so that
+        // multi-byte ExitInteractive bindings (e.g. ESC-prefixed sequences)
+        // that arrive fragmented across two stdin reads are still matched.
         if let Some(provider) = self.selected_terminal_surface_client()
             && !provider.has_output()
         {
-            let (sequences, _) = crate::raw_input::split_sequences(&buf[..n]);
-            for seq in &sequences {
-                if let Some((Action::ExitInteractive, _)) =
-                    self.interactive_patterns.match_sequence(seq)
-                {
-                    let return_to_terminal_list =
-                        matches!(self.input_target, InputTarget::Terminal)
-                            && self.terminal_return_to_list;
-                    self.input_target = InputTarget::None;
-                    self.fullscreen_overlay = FullscreenOverlay::None;
-                    self.session_surface = SessionSurface::Agent;
-                    self.terminal_selection = None;
-                    self.raw_input_buf.clear();
-                    if return_to_terminal_list {
-                        self.left_section = LeftSection::Terminals;
-                        self.clamp_terminal_cursor();
-                        self.focus = FocusPane::Left;
-                    }
-                    self.set_info("Exited interactive mode.");
-                    return Ok(false);
-                }
+            self.raw_input_buf.extend_from_slice(&buf[..n]);
+            if self.scan_exit_interactive() {
+                return Ok(false);
             }
+            // Trim the buffer to the remainder that couldn't form a complete
+            // sequence yet, so the next read can complete a partial escape.
+            let (_, remainder) = crate::raw_input::split_sequences(&self.raw_input_buf);
+            let keep = remainder.len();
+            let start = self.raw_input_buf.len() - keep;
+            self.raw_input_buf = self.raw_input_buf[start..].to_vec();
             return Ok(false);
         }
 
@@ -1100,20 +1092,7 @@ impl App {
                     return Ok(false);
                 }
                 SeqAction::Intercept(Action::ExitInteractive, _, _) => {
-                    let return_to_terminal_list =
-                        matches!(self.input_target, InputTarget::Terminal)
-                            && self.terminal_return_to_list;
-                    self.input_target = InputTarget::None;
-                    self.fullscreen_overlay = FullscreenOverlay::None;
-                    self.session_surface = SessionSurface::Agent;
-                    self.terminal_selection = None;
-                    self.raw_input_buf.clear();
-                    if return_to_terminal_list {
-                        self.left_section = LeftSection::Terminals;
-                        self.clamp_terminal_cursor();
-                        self.focus = FocusPane::Left;
-                    }
-                    self.set_info("Exited interactive mode.");
+                    self.exit_interactive_mode();
                     return Ok(false);
                 }
                 SeqAction::Intercept(Action::ScrollPageUp, _, _) => {
@@ -1201,20 +1180,7 @@ impl App {
                                     contains_point(rect, mouse_ev.column, mouse_ev.row)
                                 });
                         if outside_overlay {
-                            let return_to_terminal_list =
-                                matches!(self.input_target, InputTarget::Terminal)
-                                    && self.terminal_return_to_list;
-                            self.input_target = InputTarget::None;
-                            self.fullscreen_overlay = FullscreenOverlay::None;
-                            self.session_surface = SessionSurface::Agent;
-                            self.raw_input_buf.clear();
-                            self.terminal_selection = None;
-                            if return_to_terminal_list {
-                                self.left_section = LeftSection::Terminals;
-                                self.clamp_terminal_cursor();
-                                self.focus = FocusPane::Left;
-                            }
-                            self.set_info("Exited interactive mode.");
+                            self.exit_interactive_mode();
                             return Ok(false);
                         }
 
@@ -3944,6 +3910,41 @@ impl App {
                 &self.worker_tx,
             );
         }
+    }
+
+    /// Reset all state associated with interactive mode (agent or terminal)
+    /// and show a status message. Used by ExitInteractive key handling,
+    /// mouse-click-outside-overlay, and the loading-phase exit path.
+    pub(crate) fn exit_interactive_mode(&mut self) {
+        let return_to_terminal_list =
+            matches!(self.input_target, InputTarget::Terminal) && self.terminal_return_to_list;
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.session_surface = SessionSurface::Agent;
+        self.terminal_selection = None;
+        self.raw_input_buf.clear();
+        if return_to_terminal_list {
+            self.left_section = LeftSection::Terminals;
+            self.clamp_terminal_cursor();
+            self.focus = FocusPane::Left;
+        }
+        self.set_info("Exited interactive mode.");
+    }
+
+    /// Scan `raw_input_buf` for an ExitInteractive sequence. Returns `true`
+    /// if the binding was found and interactive mode was exited. Used during
+    /// the loading phase when all other input is suppressed.
+    pub(crate) fn scan_exit_interactive(&mut self) -> bool {
+        let (sequences, _) = crate::raw_input::split_sequences(&self.raw_input_buf);
+        for seq in &sequences {
+            if let Some((Action::ExitInteractive, _)) =
+                self.interactive_patterns.match_sequence(seq)
+            {
+                self.exit_interactive_mode();
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -7277,6 +7278,109 @@ mod tests {
             FullscreenOverlay::None,
             "clicking outside overlay must dismiss fullscreen even when scrolled back"
         );
+    }
+
+    // ── Loading-phase ExitInteractive tests ─────────────────────────
+
+    #[test]
+    fn loading_phase_exit_interactive_single_byte_binding() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.session_surface = SessionSurface::Agent;
+
+        // Default ExitInteractive is Ctrl-G (0x07). Put it in raw_input_buf
+        // as scan_exit_interactive reads from there.
+        app.raw_input_buf = vec![0x07];
+        assert!(
+            app.scan_exit_interactive(),
+            "scan_exit_interactive must detect Ctrl-G"
+        );
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    #[test]
+    fn loading_phase_exit_interactive_multi_byte_binding() {
+        // Rebind ExitInteractive to Home (ESC [ H) — a multi-byte sequence.
+        let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["home"])]);
+        let mut app = test_app(bindings);
+
+        // Verify the binding was registered as an interactive byte pattern.
+        let result = app.interactive_patterns.match_sequence(&[0x1b, b'[', b'H']);
+        assert_eq!(
+            result.map(|(a, _)| a),
+            Some(Action::ExitInteractive),
+            "ESC [ H must resolve to ExitInteractive in interactive patterns"
+        );
+
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.session_surface = SessionSurface::Agent;
+
+        // Full sequence in one buffer.
+        app.raw_input_buf = b"\x1b[H".to_vec();
+        assert!(
+            app.scan_exit_interactive(),
+            "scan_exit_interactive must detect multi-byte ExitInteractive"
+        );
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    #[test]
+    fn loading_phase_exit_interactive_fragmented_across_reads() {
+        // Rebind ExitInteractive to Home (ESC [ H) — a multi-byte sequence.
+        let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["home"])]);
+        let mut app = test_app(bindings);
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.session_surface = SessionSurface::Agent;
+
+        // First "read" delivers only the ESC byte — not a complete sequence.
+        app.raw_input_buf = vec![0x1b];
+        assert!(
+            !app.scan_exit_interactive(),
+            "incomplete sequence must not trigger exit"
+        );
+        assert_eq!(
+            app.input_target,
+            InputTarget::Agent,
+            "should still be in interactive mode"
+        );
+
+        // Simulate the remainder trimming that poll_and_forward_raw_input
+        // does: keep only the incomplete remainder.
+        let (_, remainder) = crate::raw_input::split_sequences(&app.raw_input_buf);
+        let keep = remainder.len();
+        let start = app.raw_input_buf.len() - keep;
+        app.raw_input_buf = app.raw_input_buf[start..].to_vec();
+
+        // Second "read" delivers the rest of the sequence.
+        app.raw_input_buf.extend_from_slice(b"[H");
+        assert!(
+            app.scan_exit_interactive(),
+            "completed sequence across reads must trigger exit"
+        );
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    #[test]
+    fn loading_phase_ignores_non_exit_input() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.session_surface = SessionSurface::Agent;
+
+        // Regular ASCII input should not trigger exit.
+        app.raw_input_buf = b"hello".to_vec();
+        assert!(
+            !app.scan_exit_interactive(),
+            "regular input must not trigger exit"
+        );
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
     }
 
     // ---------------------------------------------------------------
