@@ -4157,6 +4157,7 @@ mod tests {
             refs_watcher: None,
             refs_watch_paths: std::collections::HashMap::new(),
             resume_fallback_candidates: std::collections::HashSet::new(),
+            pending_deletions: std::collections::HashSet::new(),
             syntax_cache: crate::diff::SyntaxCache::new(),
             snapshot_buf: crate::pty::TerminalSnapshot::empty(),
             last_snapshot_id: None,

@@ -581,6 +581,14 @@ impl App {
     /// path only touches in-memory state and SQLite, which is effectively
     /// instantaneous.
     pub(crate) fn begin_delete_session(&mut self, session_id: &str, delete_worktree: bool) {
+        // Reject duplicate delete requests for the same session. The first
+        // worker will clean up when it finishes; spawning a second one would
+        // just race and confuse the status line.
+        if self.pending_deletions.contains(session_id) {
+            self.set_error("Deletion already in progress for this agent. Wait for it to finish.");
+            return;
+        }
+
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
             return;
         };
@@ -603,6 +611,10 @@ impl App {
                 "deleting session {} at {} (delete_worktree=true, async)",
                 session.id, session.worktree_path
             ));
+            // Mark in-flight BEFORE spawning, so a fast follow-up action from
+            // the same event loop tick can see the guard. The worker event
+            // handler clears the entry on completion (Ok or Err).
+            self.pending_deletions.insert(session.id.clone());
             let sid = session.id.clone();
             let project_path = project.path.clone();
             let worktree_path = session.worktree_path.clone();
@@ -1663,6 +1675,7 @@ mod tests {
             refs_watcher: None,
             refs_watch_paths: std::collections::HashMap::new(),
             resume_fallback_candidates: std::collections::HashSet::new(),
+            pending_deletions: std::collections::HashSet::new(),
             syntax_cache: crate::diff::SyntaxCache::new(),
             snapshot_buf: crate::pty::TerminalSnapshot::empty(),
             last_snapshot_id: None,
@@ -2033,5 +2046,72 @@ mod tests {
         // Second call must not panic or return Err even though session is gone.
         app.finish_delete_session("s1", false, None)
             .expect("second finish is a no-op");
+    }
+
+    /// Kicking off the async delete path should mark the session as
+    /// pending so the UI can dim the row.
+    #[test]
+    fn begin_delete_session_tracks_pending_deletion() {
+        let project_dir = tempdir().expect("project tempdir");
+        let worktree_dir = tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+
+        let mut s1 = make_session("s1", "claude", &worktree_path);
+        s1.project_id = "project-1".to_string();
+        let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+
+        app.begin_delete_session("s1", true);
+
+        assert!(
+            app.pending_deletions.contains("s1"),
+            "session must be marked pending while async worker runs",
+        );
+    }
+
+    /// The inline (no-git) path completes immediately, so pending_deletions
+    /// should never gain the session in the first place.
+    #[test]
+    fn begin_delete_session_inline_does_not_track() {
+        let project_dir = tempdir().expect("project tempdir");
+        let worktree_dir = tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+
+        let mut s1 = make_session("s1", "claude", &worktree_path);
+        s1.project_id = "project-1".to_string();
+        let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+
+        app.begin_delete_session("s1", false);
+
+        assert!(
+            app.pending_deletions.is_empty(),
+            "inline path should never populate pending_deletions",
+        );
+    }
+
+    /// A second delete request for a session that's already being deleted
+    /// must be refused with an error, and must NOT spawn another worker
+    /// (i.e. the pending-deletions set size stays at 1).
+    #[test]
+    fn begin_delete_session_rejects_duplicate_request() {
+        let project_dir = tempdir().expect("project tempdir");
+        let worktree_dir = tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+
+        let mut s1 = make_session("s1", "claude", &worktree_path);
+        s1.project_id = "project-1".to_string();
+        let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+
+        app.begin_delete_session("s1", true);
+        assert_eq!(app.pending_deletions.len(), 1, "first call records pending");
+
+        app.begin_delete_session("s1", true);
+        assert_eq!(
+            app.pending_deletions.len(),
+            1,
+            "duplicate request must not spawn a second worker",
+        );
     }
 }

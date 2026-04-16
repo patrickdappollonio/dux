@@ -256,6 +256,10 @@ impl App {
                     }
                 }
                 WorkerEvent::WorktreeRemoveCompleted { session_id, result } => {
+                    // Always clear the in-flight guard so the session is
+                    // interactive again — whether we're about to remove it
+                    // (Ok path) or leave it in place for retry (Err path).
+                    self.pending_deletions.remove(&session_id);
                     match result {
                         Ok(branch_already_deleted) => {
                             if let Err(e) = self.finish_delete_session(

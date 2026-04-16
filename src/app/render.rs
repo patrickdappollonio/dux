@@ -497,17 +497,35 @@ impl App {
                             let (d, c) = self.theme.session_dot(&session.status);
                             (d.to_string(), c)
                         };
-                    let label_color = match self.pr_statuses.get(&session.id).map(|pr| &pr.state) {
-                        Some(crate::model::PrState::Merged) => self.theme.pr_merged_label,
-                        Some(crate::model::PrState::Closed) => self.theme.pr_closed_label,
-                        Some(crate::model::PrState::Open) => self.theme.pr_open_label,
-                        None => dot_color,
+                    // While a background delete is in flight for this session,
+                    // dim the whole row and italicize it so the user sees the
+                    // transient state and understands why the session is
+                    // still visible but unresponsive. This overrides PR and
+                    // status colors on purpose — "being deleted" trumps
+                    // other signals.
+                    let deleting = self.pending_deletions.contains(&session.id);
+                    let label_color = if deleting {
+                        self.theme.session_deleting
+                    } else {
+                        match self.pr_statuses.get(&session.id).map(|pr| &pr.state) {
+                            Some(crate::model::PrState::Merged) => self.theme.pr_merged_label,
+                            Some(crate::model::PrState::Closed) => self.theme.pr_closed_label,
+                            Some(crate::model::PrState::Open) => self.theme.pr_open_label,
+                            None => dot_color,
+                        }
+                    };
+                    let label_style = if deleting {
+                        Style::default()
+                            .fg(label_color)
+                            .add_modifier(Modifier::ITALIC)
+                    } else {
+                        Style::default().fg(label_color)
                     };
                     ListItem::new(Line::from(
                         vec![
                             Span::styled(connector, Style::default().fg(self.theme.project_icon)),
-                            Span::styled(format!("{dot} "), Style::default().fg(label_color)),
-                            Span::styled(label, Style::default().fg(label_color)),
+                            Span::styled(format!("{dot} "), label_style),
+                            Span::styled(label, label_style),
                             Span::styled(
                                 format!(" ({})", session.provider.as_str()),
                                 Style::default().fg(self.theme.provider_label_fg),

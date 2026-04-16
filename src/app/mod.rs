@@ -151,6 +151,12 @@ pub struct App {
     /// Session IDs spawned with resume_args that should fall back to regular
     /// args if the PTY exits before producing any output.
     pub(crate) resume_fallback_candidates: HashSet<String>,
+    /// Session IDs whose worktree is currently being removed by a background
+    /// worker. Prevents duplicate delete requests from spawning a second
+    /// worker while the first is still running; also drives the dimmed
+    /// visual cue on the left pane row so the user can see the in-flight
+    /// state.
+    pub(crate) pending_deletions: HashSet<String>,
     /// Cached syntax highlighting resources shared across diff computations.
     pub(crate) syntax_cache: SyntaxCache,
     /// Reusable snapshot buffer to avoid per-frame allocation of terminal cells.
@@ -993,6 +999,7 @@ impl App {
             refs_watcher: None,
             refs_watch_paths: HashMap::new(),
             resume_fallback_candidates: HashSet::new(),
+            pending_deletions: HashSet::new(),
             syntax_cache: SyntaxCache::new(),
             snapshot_buf: TerminalSnapshot::empty(),
             last_snapshot_id: None,
