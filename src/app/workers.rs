@@ -260,20 +260,21 @@ impl App {
                     // interactive again — whether we're about to remove it
                     // (Ok path) or leave it in place for retry (Err path).
                     self.pending_deletions.remove(&session_id);
+
+                    // Retrieve (and remove) the exact Busy message we set
+                    // when the worker was spawned. We compare this against
+                    // the current status-line content rather than checking
+                    // tone alone, because another operation (push, pull,
+                    // refresh, concurrent delete) may have since set its own
+                    // Busy message that we must not clobber.
+                    let our_busy_msg = self.deletion_busy_messages.remove(&session_id);
+
                     match result {
                         Ok(branch_already_deleted) => {
-                            // `finish_delete_session` is intentionally
-                            // idempotent: if the session was already removed
-                            // by another code path (e.g. project deletion
-                            // cleaned it up synchronously while our worker
-                            // was running), it returns early without
-                            // touching the status line. That would leave the
-                            // Busy message from `begin_delete_session` stuck
-                            // on screen. Check session presence explicitly
-                            // and set a fallback info message so the
-                            // handler's status-line contract does not depend
-                            // on `finish_delete_session`'s internal guard.
                             if self.sessions.iter().any(|s| s.id == session_id) {
+                                // Normal path: session still present, finish
+                                // cleanup. finish_delete_session will set its
+                                // own status message, replacing Busy.
                                 if let Err(e) = self.finish_delete_session(
                                     &session_id,
                                     true,
@@ -283,15 +284,22 @@ impl App {
                                         "Worktree removed but session cleanup failed: {e:#}"
                                     ));
                                 }
-                            } else if self.status.tone()
-                                == crate::statusline::StatusTone::Busy
-                            {
-                                // Only overwrite when the status line is still
-                                // showing our Busy message. If another action
-                                // (e.g. project deletion) already replaced it
-                                // with a more informative message, we should
-                                // not clobber it with a generic fallback.
-                                self.set_info("Worktree removal finished.");
+                            } else {
+                                // Session was already removed by another code
+                                // path (e.g. the block on project deletion
+                                // was lifted and the project was deleted
+                                // after the worker started). Only clear the
+                                // status line if it still shows our exact
+                                // Busy message; otherwise leave the newer
+                                // content alone.
+                                let our_busy_still_showing = our_busy_msg.is_some_and(|msg| {
+                                    self.status.tone()
+                                        == crate::statusline::StatusTone::Busy
+                                        && self.status.message() == msg
+                                });
+                                if our_busy_still_showing {
+                                    self.set_info("Worktree removal finished.");
+                                }
                             }
                         }
                         Err(msg) => {
@@ -300,10 +308,7 @@ impl App {
                             // succeeded. Look up the session label so the
                             // user knows which agent failed — multiple async
                             // deletes can be in flight concurrently, and a
-                            // bare error would be ambiguous. The session
-                            // could be gone if project deletion cleaned it
-                            // up synchronously while the worker ran; fall
-                            // back to a generic message in that case.
+                            // bare error would be ambiguous.
                             if let Some(session) =
                                 self.sessions.iter().find(|s| s.id == session_id)
                             {

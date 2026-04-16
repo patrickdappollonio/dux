@@ -556,21 +556,26 @@ impl App {
         // must not leave the user with a deleted agent record and an orphaned
         // worktree on disk.
         //
-        // If an async delete worker is already removing this worktree (the
-        // session is in `pending_deletions`), skip the synchronous git call
-        // to avoid racing it. The worker will finish the removal on its own;
-        // we only need to clean up the session record here.
-        let remove_outcome =
-            if should_remove_worktree && !self.pending_deletions.contains(session_id) {
-                let result = git::remove_worktree(
-                    Path::new(&project.path),
-                    Path::new(&session.worktree_path),
-                    &session.branch_name,
-                )?;
-                Some(result.branch_already_deleted)
-            } else {
-                None
-            };
+        // Callers must ensure no async worker is already removing this
+        // worktree (`pending_deletions` should not contain this session).
+        // `delete_selected_project` checks this at entry; `begin_delete_session`
+        // uses a separate async path entirely. If a caller violates this
+        // contract two concurrent git calls will race, so we assert in debug.
+        debug_assert!(
+            !self.pending_deletions.contains(session_id),
+            "do_delete_session called while an async delete worker is in-flight for {}",
+            session_id,
+        );
+        let remove_outcome = if should_remove_worktree {
+            let result = git::remove_worktree(
+                Path::new(&project.path),
+                Path::new(&session.worktree_path),
+                &session.branch_name,
+            )?;
+            Some(result.branch_already_deleted)
+        } else {
+            None
+        };
 
         self.finish_delete_session(session_id, delete_worktree, remove_outcome)?;
         Ok(())
@@ -639,10 +644,13 @@ impl App {
                     result,
                 });
             });
-            self.set_busy(format!(
+            let busy_msg = format!(
                 "Removing worktree for agent \"{}\"\u{2026}",
                 session.branch_name
-            ));
+            );
+            self.set_busy(&busy_msg);
+            self.deletion_busy_messages
+                .insert(session.id.clone(), busy_msg);
         } else {
             logger::info(&format!(
                 "deleting session {} at {} (delete_worktree={}, inline)",
@@ -740,17 +748,15 @@ impl App {
                 }
             }
             (false, true, None) => {
-                // Worktree deletion was requested but git was not invoked by
-                // this code path. This happens when an async delete worker
-                // is already removing the worktree (`do_delete_session`
-                // skips the synchronous git call to avoid racing the
-                // worker). The session record is now cleaned up; the worker
-                // will finish the worktree removal separately.
-                self.set_info(format!(
-                    "Deleted {} agent \"{}\". Worktree removal already in progress.",
-                    session.provider.as_str(),
-                    session.branch_name,
-                ));
+                // Callers that pass delete_worktree=true with no siblings
+                // must have already run git::remove_worktree and produced
+                // Some(outcome). This arm is unreachable via the current
+                // call graph but kept for exhaustiveness; surface a visible
+                // error in all builds so any future contract violation is
+                // noticed rather than silently swallowed.
+                self.set_error(
+                    "Internal error: worktree deletion flagged but no removal result provided.",
+                );
             }
         }
         Ok(())
@@ -863,6 +869,24 @@ impl App {
             self.set_error("Select a project first.");
             return Ok(());
         };
+
+        // Refuse if any of this project's sessions have an async worktree
+        // removal in-flight. `do_delete_session` runs git synchronously and
+        // would race the worker, potentially leaving the project deletion
+        // half-finished. The user must wait for the worker to complete (or
+        // fail) before retrying.
+        let pending_in_project = self
+            .sessions
+            .iter()
+            .any(|s| s.project_id == project.id && self.pending_deletions.contains(&s.id));
+        if pending_in_project {
+            self.set_error(
+                "Cannot delete project while agent worktree removals are in progress. \
+                 Wait for them to finish, then try again.",
+            );
+            return Ok(());
+        }
+
         logger::info(&format!("deleting project {}", project.path));
         let session_ids = self
             .sessions
@@ -1691,6 +1715,7 @@ mod tests {
             refs_watch_paths: std::collections::HashMap::new(),
             resume_fallback_candidates: std::collections::HashSet::new(),
             pending_deletions: std::collections::HashSet::new(),
+            deletion_busy_messages: std::collections::HashMap::new(),
             syntax_cache: crate::diff::SyntaxCache::new(),
             snapshot_buf: crate::pty::TerminalSnapshot::empty(),
             last_snapshot_id: None,
@@ -2130,11 +2155,9 @@ mod tests {
         );
     }
 
-    /// If the session was removed by another code path (e.g. project
-    /// deletion) while the async delete worker was running, the worker's
-    /// completion event must still overwrite the Busy status line — the
-    /// handler cannot rely on `finish_delete_session`'s idempotent early
-    /// return to do it.
+    /// If the session was removed by another code path while the async
+    /// delete worker was running, the worker's completion event must still
+    /// overwrite the Busy status line when the message matches.
     #[test]
     fn worktree_remove_completed_clears_busy_when_session_already_gone() {
         let project_dir = tempdir().expect("project tempdir");
@@ -2146,12 +2169,15 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        // Simulate the Busy state set by `begin_delete_session`.
-        app.set_busy("Removing worktree for agent \"branch-s1\"\u{2026}");
+        // Simulate the Busy state set by `begin_delete_session`, including
+        // the tracking map entry.
+        let busy_msg = "Removing worktree for agent \"branch-s1\"\u{2026}";
+        app.set_busy(busy_msg);
         app.pending_deletions.insert("s1".to_string());
+        app.deletion_busy_messages
+            .insert("s1".to_string(), busy_msg.to_string());
 
-        // Another code path removes the session before the worker replies
-        // (mirrors what `delete_project` does when iterating sessions).
+        // Another code path removes the session before the worker replies.
         app.sessions.retain(|s| s.id != "s1");
 
         // The worker then reports success.
@@ -2176,11 +2202,10 @@ mod tests {
     }
 
     /// When the session is already gone AND the status line has already been
-    /// overwritten by a later action (e.g. project deletion), the worker
-    /// completion should not clobber the newer message with a generic
-    /// fallback.
+    /// overwritten by a later Info action (e.g. project deletion), the
+    /// worker completion should not clobber the newer message.
     #[test]
-    fn worktree_remove_completed_does_not_clobber_newer_status() {
+    fn worktree_remove_completed_does_not_clobber_newer_info() {
         let project_dir = tempdir().expect("project tempdir");
         let worktree_dir = tempdir().expect("worktree tempdir");
         let worktree_path = worktree_dir.path().to_string_lossy().to_string();
@@ -2191,10 +2216,11 @@ mod tests {
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
         app.pending_deletions.insert("s1".to_string());
+        app.deletion_busy_messages
+            .insert("s1".to_string(), "Removing worktree\u{2026}".to_string());
         app.sessions.retain(|s| s.id != "s1");
 
-        // Another action (e.g. project deletion) already set a non-Busy
-        // status before the worker event arrives.
+        // Another action already set a non-Busy status.
         app.set_info("Deleted project \"demo\" and all its agents");
 
         app.worker_tx
@@ -2217,15 +2243,13 @@ mod tests {
         );
     }
 
-    /// When `do_delete_session` is called for a session that already has an
-    /// async worker removing its worktree (`pending_deletions` contains the
-    /// session ID), the synchronous git call must be skipped to avoid racing
-    /// the worker. The session record should still be cleaned up and the
-    /// status message should note that the worktree removal is in progress.
+    /// When the session is already gone AND the status line shows a Busy
+    /// message from an *unrelated* operation (push, pull, etc.), the worker
+    /// completion should not clobber it — the message text doesn't match
+    /// ours, even though the tone is also Busy.
     #[test]
-    fn do_delete_session_skips_git_when_pending() {
+    fn worktree_remove_completed_does_not_clobber_unrelated_busy() {
         let project_dir = tempdir().expect("project tempdir");
-        // Non-git directory — if the code accidentally ran git, it would fail.
         let worktree_dir = tempdir().expect("worktree tempdir");
         let worktree_path = worktree_dir.path().to_string_lossy().to_string();
 
@@ -2234,22 +2258,76 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        // Pretend an async delete worker is already running for this session.
+        app.pending_deletions.insert("s1".to_string());
+        app.deletion_busy_messages.insert(
+            "s1".to_string(),
+            "Removing worktree for agent \"branch-s1\"\u{2026}".to_string(),
+        );
+        app.sessions.retain(|s| s.id != "s1");
+
+        // An unrelated operation set its own Busy message.
+        app.set_busy("Pushing to remote\u{2026}");
+
+        app.worker_tx
+            .send(WorkerEvent::WorktreeRemoveCompleted {
+                session_id: "s1".to_string(),
+                result: Ok(false),
+            })
+            .expect("channel send");
+        app.drain_events();
+
+        // The status should still show the push Busy, not "Worktree removal
+        // finished."
+        assert_eq!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Busy,
+            "tone should remain Busy from the push",
+        );
+        assert_eq!(
+            app.status.message(),
+            "Pushing to remote\u{2026}",
+            "the push message must not be clobbered, got: {}",
+            app.status.message(),
+        );
+    }
+
+    /// Project deletion must be refused when any of the project's sessions
+    /// have an async worktree removal in-flight. Allowing it would race the
+    /// synchronous `do_delete_session` against the worker and could leave the
+    /// project half-deleted with an orphaned worktree.
+    #[test]
+    fn delete_selected_project_blocked_when_pending() {
+        let project_dir = tempdir().expect("project tempdir");
+        let worktree_dir = tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+
+        let mut s1 = make_session("s1", "claude", &worktree_path);
+        s1.project_id = "project-1".to_string();
+        let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+
+        // Simulate an async delete in-flight for this session.
         app.pending_deletions.insert("s1".to_string());
 
-        // This would fail with Err if git ran (non-git project dir). If the
-        // pending check works, git is skipped and this succeeds.
-        app.do_delete_session("s1", true)
-            .expect("must succeed by skipping git when worker is in-flight");
+        // The project is the first item in the list, select it.
+        app.selected_left = 0;
 
+        app.delete_selected_project()
+            .expect("should return Ok (error reported via status line)");
+
+        // Session must still be present — deletion was refused.
         assert!(
-            app.sessions.iter().all(|s| s.id != "s1"),
-            "session record should be cleaned up even though git was skipped",
+            app.sessions.iter().any(|s| s.id == "s1"),
+            "session must not be removed when deletion is blocked",
         );
         assert!(
-            app.status.text().contains("already in progress"),
-            "status should mention the in-progress removal, got: {}",
-            app.status.text(),
+            app.projects.iter().any(|p| p.id == "project-1"),
+            "project must not be removed when deletion is blocked",
+        );
+        assert_eq!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Error,
+            "should show an error explaining why deletion was blocked",
         );
     }
 

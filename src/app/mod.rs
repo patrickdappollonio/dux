@@ -157,6 +157,12 @@ pub struct App {
     /// visual cue on the left pane row so the user can see the in-flight
     /// state.
     pub(crate) pending_deletions: HashSet<String>,
+    /// Maps session IDs to the exact Busy message set by
+    /// `begin_delete_session`. Used by the worker event handler to decide
+    /// whether the current status-line content was set by this deletion (and
+    /// should be cleared) or by an unrelated operation (and should be left
+    /// alone). Cleared per-session when the worker event arrives.
+    pub(crate) deletion_busy_messages: HashMap<String, String>,
     /// Cached syntax highlighting resources shared across diff computations.
     pub(crate) syntax_cache: SyntaxCache,
     /// Reusable snapshot buffer to avoid per-frame allocation of terminal cells.
@@ -1000,6 +1006,7 @@ impl App {
             refs_watch_paths: HashMap::new(),
             resume_fallback_candidates: HashSet::new(),
             pending_deletions: HashSet::new(),
+            deletion_busy_messages: HashMap::new(),
             syntax_cache: SyntaxCache::new(),
             snapshot_buf: TerminalSnapshot::empty(),
             last_snapshot_id: None,
