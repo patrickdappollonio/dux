@@ -152,6 +152,18 @@ pub struct App {
     /// Session IDs spawned with resume_args that should fall back to regular
     /// args if the PTY exits before producing any output.
     pub(crate) resume_fallback_candidates: HashSet<String>,
+    /// Session IDs whose worktree is currently being removed by a background
+    /// worker. Prevents duplicate delete requests from spawning a second
+    /// worker while the first is still running; also drives the dimmed
+    /// visual cue on the left pane row so the user can see the in-flight
+    /// state.
+    pub(crate) pending_deletions: HashSet<String>,
+    /// Maps session IDs to the exact Busy message set by
+    /// `begin_delete_session`. Used by the worker event handler to decide
+    /// whether the current status-line content was set by this deletion (and
+    /// should be cleared) or by an unrelated operation (and should be left
+    /// alone). Cleared per-session when the worker event arrives.
+    pub(crate) deletion_busy_messages: HashMap<String, String>,
     /// Cached syntax highlighting resources shared across diff computations.
     pub(crate) syntax_cache: SyntaxCache,
     /// Reusable snapshot buffer to avoid per-frame allocation of terminal cells.
@@ -385,6 +397,15 @@ pub(crate) struct ConfirmKillRunningPrompt {
     pub(crate) confirm_selected: bool,
 }
 
+/// Which selectable element has focus in the Delete Agent confirmation modal.
+/// Focus cycles through all three via Tab / arrow keys / h / l.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeleteAgentFocus {
+    Cancel,
+    Delete,
+    Checkbox,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PromptState {
     None,
@@ -409,7 +430,12 @@ pub(crate) enum PromptState {
     ConfirmDeleteAgent {
         session_id: String,
         branch_name: String,
-        confirm_selected: bool, // false = Cancel (default), true = Delete
+        focus: DeleteAgentFocus,
+        delete_worktree: bool,
+        /// True when one or more other sessions share this worktree. In that
+        /// case the worktree is always preserved regardless of the user's
+        /// choice, so the checkbox is hidden and a note is shown instead.
+        worktree_shared: bool,
     },
     ConfirmDeleteTerminal {
         terminal_id: String,
@@ -833,6 +859,15 @@ pub(crate) enum WorkerEvent {
     GhStatusChecked(crate::model::GhStatus),
     PrStatusReady(Vec<(String, Option<crate::model::PrInfo>)>),
     RefsChanged(String),
+    /// Background `git worktree remove` for a session-initiated delete has
+    /// finished. On `Ok`, the boolean indicates whether the branch was
+    /// already gone (used for the status message). On `Err`, the message is
+    /// the formatted error; the session record must be preserved so the user
+    /// can retry.
+    WorktreeRemoveCompleted {
+        session_id: String,
+        result: Result<bool, String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -983,6 +1018,8 @@ impl App {
             refs_watcher: None,
             refs_watch_paths: HashMap::new(),
             resume_fallback_candidates: HashSet::new(),
+            pending_deletions: HashSet::new(),
+            deletion_busy_messages: HashMap::new(),
             syntax_cache: SyntaxCache::new(),
             snapshot_buf: TerminalSnapshot::empty(),
             last_snapshot_id: None,

@@ -60,6 +60,11 @@ impl StatusLine {
         self.tone
     }
 
+    /// The raw message text, without tone-specific prefixes or spinners.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
     fn spinner_frame(&self) -> &'static str {
         const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let index = ((self.since.elapsed().as_millis() / 100) as usize) % FRAMES.len();
