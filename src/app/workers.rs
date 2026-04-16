@@ -282,7 +282,7 @@ impl App {
                                 our_busy_msg.as_ref().is_some_and(|msg| {
                                     self.status.tone()
                                         == crate::statusline::StatusTone::Busy
-                                        && self.status.message() == *msg
+                                        && self.status.message() == msg.as_str()
                                 });
 
                             if self.sessions.iter().any(|s| s.id == session_id) {
