@@ -397,6 +397,9 @@ pub struct DuxPaths {
     pub config_path: PathBuf,
     pub sessions_db_path: PathBuf,
     pub worktrees_root: PathBuf,
+    /// Path to the lockfile that enforces a single dux instance per
+    /// config directory. Contains the PID of the holder.
+    pub lock_path: PathBuf,
 }
 
 impl DuxPaths {
@@ -410,6 +413,7 @@ impl DuxPaths {
             config_path: root.join("config.toml"),
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
             root,
         })
     }

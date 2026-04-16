@@ -36,6 +36,7 @@ use crate::git;
 use crate::keybindings::{
     Action, BindingScope, HintContext, InteractiveBytePatterns, RuntimeBindings,
 };
+use crate::lockfile::SingleInstanceLock;
 use crate::logger;
 use crate::model::{
     AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProviderKind, SessionStatus,
@@ -172,6 +173,11 @@ pub struct App {
     last_snapshot_id: Option<String>,
     /// Active text selection in the terminal viewport, if any.
     pub(crate) terminal_selection: Option<TerminalSelection>,
+    /// Exclusive lock held for the lifetime of this `App` so only one dux
+    /// instance runs against a given config directory. Released
+    /// automatically on drop (including crashes), so there is nothing to
+    /// clean up on exit.
+    _single_instance_lock: SingleInstanceLock,
 }
 
 /// Snapshot of session data shared with the branch-sync background worker.
@@ -880,9 +886,16 @@ pub(crate) mod text_input;
 mod workers;
 
 impl App {
-    pub fn bootstrap() -> Result<Self> {
-        let paths = DuxPaths::discover()?;
+    /// Bootstrap the TUI. The caller must have already resolved `paths`,
+    /// created its directories, and acquired the single-instance lock.
+    /// This ensures the lock covers every entrypoint (TUI + config
+    /// subcommands) and that a losing process never touches shared state.
+    pub fn bootstrap_with_lock(
+        paths: DuxPaths,
+        single_instance_lock: SingleInstanceLock,
+    ) -> Result<Self> {
         let config = ensure_config(&paths)?;
+
         logger::init(&config.logging, &paths);
         logger::info("bootstrapping dux");
 
@@ -1011,6 +1024,7 @@ impl App {
             snapshot_buf: TerminalSnapshot::empty(),
             last_snapshot_id: None,
             terminal_selection: None,
+            _single_instance_lock: single_instance_lock,
         };
         app.restore_sessions();
         app.seed_pr_statuses_from_db();

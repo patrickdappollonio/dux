@@ -4041,6 +4041,7 @@ mod tests {
             config_path: root.join("config.toml"),
             sessions_db_path: root.join("sessions.sqlite3"),
             worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
             root: root.clone(),
         };
         std::fs::create_dir_all(&paths.worktrees_root).expect("worktrees dir");
@@ -4068,6 +4069,8 @@ mod tests {
             updated_at: now,
         };
         let (worker_tx, worker_rx) = mpsc::channel();
+        let single_instance_lock = crate::lockfile::SingleInstanceLock::acquire(&paths.lock_path)
+            .expect("single-instance lock for test App");
         let mut app = App {
             config: Config::default(),
             paths,
@@ -4163,6 +4166,7 @@ mod tests {
             snapshot_buf: crate::pty::TerminalSnapshot::empty(),
             last_snapshot_id: None,
             terminal_selection: None,
+            _single_instance_lock: single_instance_lock,
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();
