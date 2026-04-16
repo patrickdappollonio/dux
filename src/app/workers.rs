@@ -295,13 +295,31 @@ impl App {
                             }
                         }
                         Err(msg) => {
-                            // Session record is still present because we
-                            // deferred cleanup until git succeeded. The user
-                            // can retry by reopening the delete dialog.
-                            // `set_error` overwrites Busy regardless of
-                            // whether the session is still in the list, so
-                            // no extra presence check is needed here.
-                            self.set_error(format!("Worktree delete failed: {msg}"));
+                            // Session record is normally still present
+                            // because we deferred cleanup until git
+                            // succeeded. Look up the session label so the
+                            // user knows which agent failed — multiple async
+                            // deletes can be in flight concurrently, and a
+                            // bare error would be ambiguous. The session
+                            // could be gone if project deletion cleaned it
+                            // up synchronously while the worker ran; fall
+                            // back to a generic message in that case.
+                            if let Some(session) =
+                                self.sessions.iter().find(|s| s.id == session_id)
+                            {
+                                let name = session
+                                    .title
+                                    .as_deref()
+                                    .unwrap_or(&session.branch_name);
+                                self.set_error(format!(
+                                    "Worktree delete failed for {} agent \"{name}\": {msg}",
+                                    session.provider.as_str(),
+                                ));
+                            } else {
+                                self.set_error(format!(
+                                    "Worktree delete failed: {msg}"
+                                ));
+                            }
                         }
                     }
                 }

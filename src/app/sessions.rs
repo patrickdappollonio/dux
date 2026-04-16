@@ -555,16 +555,22 @@ impl App {
         // Worktrees are user data — if we can't remove the worktree cleanly, we
         // must not leave the user with a deleted agent record and an orphaned
         // worktree on disk.
-        let remove_outcome = if should_remove_worktree {
-            let result = git::remove_worktree(
-                Path::new(&project.path),
-                Path::new(&session.worktree_path),
-                &session.branch_name,
-            )?;
-            Some(result.branch_already_deleted)
-        } else {
-            None
-        };
+        //
+        // If an async delete worker is already removing this worktree (the
+        // session is in `pending_deletions`), skip the synchronous git call
+        // to avoid racing it. The worker will finish the removal on its own;
+        // we only need to clean up the session record here.
+        let remove_outcome =
+            if should_remove_worktree && !self.pending_deletions.contains(session_id) {
+                let result = git::remove_worktree(
+                    Path::new(&project.path),
+                    Path::new(&session.worktree_path),
+                    &session.branch_name,
+                )?;
+                Some(result.branch_already_deleted)
+            } else {
+                None
+            };
 
         self.finish_delete_session(session_id, delete_worktree, remove_outcome)?;
         Ok(())
@@ -734,14 +740,17 @@ impl App {
                 }
             }
             (false, true, None) => {
-                // Unexpected: the caller should only set delete_worktree=true
-                // with no siblings when a successful git removal has already
-                // run, producing Some(outcome). Surface a visible error in
-                // all builds so the invalid state is noticed — debug_assert
-                // alone is a silent no-op in release.
-                self.set_error(
-                    "Internal error: worktree deletion flagged but no removal result provided.",
-                );
+                // Worktree deletion was requested but git was not invoked by
+                // this code path. This happens when an async delete worker
+                // is already removing the worktree (`do_delete_session`
+                // skips the synchronous git call to avoid racing the
+                // worker). The session record is now cleaned up; the worker
+                // will finish the worktree removal separately.
+                self.set_info(format!(
+                    "Deleted {} agent \"{}\". Worktree removal already in progress.",
+                    session.provider.as_str(),
+                    session.branch_name,
+                ));
             }
         }
         Ok(())
@@ -2205,6 +2214,76 @@ mod tests {
             app.status.text().contains("Deleted project"),
             "the project-deletion message must not be clobbered, got: {}",
             app.status.text(),
+        );
+    }
+
+    /// When `do_delete_session` is called for a session that already has an
+    /// async worker removing its worktree (`pending_deletions` contains the
+    /// session ID), the synchronous git call must be skipped to avoid racing
+    /// the worker. The session record should still be cleaned up and the
+    /// status message should note that the worktree removal is in progress.
+    #[test]
+    fn do_delete_session_skips_git_when_pending() {
+        let project_dir = tempdir().expect("project tempdir");
+        // Non-git directory — if the code accidentally ran git, it would fail.
+        let worktree_dir = tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+
+        let mut s1 = make_session("s1", "claude", &worktree_path);
+        s1.project_id = "project-1".to_string();
+        let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+
+        // Pretend an async delete worker is already running for this session.
+        app.pending_deletions.insert("s1".to_string());
+
+        // This would fail with Err if git ran (non-git project dir). If the
+        // pending check works, git is skipped and this succeeds.
+        app.do_delete_session("s1", true)
+            .expect("must succeed by skipping git when worker is in-flight");
+
+        assert!(
+            app.sessions.iter().all(|s| s.id != "s1"),
+            "session record should be cleaned up even though git was skipped",
+        );
+        assert!(
+            app.status.text().contains("already in progress"),
+            "status should mention the in-progress removal, got: {}",
+            app.status.text(),
+        );
+    }
+
+    /// When the worker fails to delete a worktree, the error message should
+    /// include the agent label so the user knows which one failed.
+    #[test]
+    fn worktree_remove_failure_identifies_agent() {
+        let project_dir = tempdir().expect("project tempdir");
+        let worktree_dir = tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+
+        let mut s1 = make_session("s1", "claude", &worktree_path);
+        s1.project_id = "project-1".to_string();
+        let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+
+        app.pending_deletions.insert("s1".to_string());
+
+        app.worker_tx
+            .send(WorkerEvent::WorktreeRemoveCompleted {
+                session_id: "s1".to_string(),
+                result: Err("fatal: not a git repository".to_string()),
+            })
+            .expect("channel send");
+        app.drain_events();
+
+        let msg = app.status.text();
+        assert!(
+            msg.contains("branch-s1"),
+            "error should include the agent's branch name, got: {msg}",
+        );
+        assert!(
+            msg.contains("not a git repository"),
+            "error should include the git error, got: {msg}",
         );
     }
 }
