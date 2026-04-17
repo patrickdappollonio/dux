@@ -138,6 +138,9 @@ Use:
 
 ```bash
 cargo fmt
+cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 cargo run
 ```
+
+`cargo clippy --all-targets --all-features -- -D warnings` is a CI gate — the `Clippy` check on every pull request runs this exact command and fails the PR if it emits any warning. Run it locally before committing so a toolchain bump or a newly introduced lint doesn't surface only once the PR is pushed. A new stable Rust release can enable lints that previously passed; when that happens, fix the code rather than suppressing the lint unless there is a specific, documented reason.
