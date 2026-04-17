@@ -759,11 +759,7 @@ pub fn rename_branch(worktree_path: &Path, old_name: &str, new_name: &str) -> Re
 }
 
 pub fn docker_style_name() -> String {
-    use petname::{Generator, Petnames};
-
-    Petnames::default()
-        .generate_one(2, "-")
-        .expect("petname generation should not fail")
+    petname::petname(2, "-").expect("petname generation should not fail")
 }
 
 /// Returns `true` if `name` contains only characters safe for git branch names:

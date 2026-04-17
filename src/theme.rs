@@ -23,6 +23,13 @@ pub struct Theme {
     pub session_active: Color,
     pub session_detached: Color,
     pub session_exited: Color,
+    /// Foreground used for a session row whose worktree is currently being
+    /// removed by a background worker. Defaults to the same shade as
+    /// `session_exited`; the render code adds `Modifier::ITALIC` to
+    /// visually distinguish the two states. A separate theme slot so that
+    /// future theme customization can differentiate the colors without a
+    /// code change.
+    pub session_deleting: Color,
     pub status_info_fg: Color,
     pub status_info_bg: Color,
     pub status_busy_fg: Color,
@@ -103,6 +110,7 @@ impl Theme {
             session_active: Color::Rgb(210, 210, 210),
             session_detached: Color::Yellow,
             session_exited: Color::Rgb(100, 100, 100),
+            session_deleting: Color::Rgb(100, 100, 100),
             status_info_fg: Color::Rgb(100, 100, 100),
             status_info_bg: Color::Rgb(25, 25, 25),
             status_busy_fg: Color::Yellow,

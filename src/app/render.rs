@@ -497,20 +497,43 @@ impl App {
                             let (d, c) = self.theme.session_dot(&session.status);
                             (d.to_string(), c)
                         };
-                    let label_color = match self.pr_statuses.get(&session.id).map(|pr| &pr.state) {
-                        Some(crate::model::PrState::Merged) => self.theme.pr_merged_label,
-                        Some(crate::model::PrState::Closed) => self.theme.pr_closed_label,
-                        Some(crate::model::PrState::Open) => self.theme.pr_open_label,
-                        None => dot_color,
+                    // While a background delete is in flight for this session,
+                    // dim the row text and italicize it so the user sees the
+                    // transient state. This covers the dot, label, and
+                    // provider suffix; the companion-terminal badge chain is
+                    // excluded because it renders through a separate helper
+                    // and the in-flight window is too brief to justify
+                    // threading a deletion flag through it.
+                    let deleting = self.pending_deletions.contains(&session.id);
+                    let label_color = if deleting {
+                        self.theme.session_deleting
+                    } else {
+                        match self.pr_statuses.get(&session.id).map(|pr| &pr.state) {
+                            Some(crate::model::PrState::Merged) => self.theme.pr_merged_label,
+                            Some(crate::model::PrState::Closed) => self.theme.pr_closed_label,
+                            Some(crate::model::PrState::Open) => self.theme.pr_open_label,
+                            None => dot_color,
+                        }
+                    };
+                    let label_style = if deleting {
+                        Style::default()
+                            .fg(label_color)
+                            .add_modifier(Modifier::ITALIC)
+                    } else {
+                        Style::default().fg(label_color)
                     };
                     ListItem::new(Line::from(
                         vec![
                             Span::styled(connector, Style::default().fg(self.theme.project_icon)),
-                            Span::styled(format!("{dot} "), Style::default().fg(label_color)),
-                            Span::styled(label, Style::default().fg(label_color)),
+                            Span::styled(format!("{dot} "), label_style),
+                            Span::styled(label, label_style),
                             Span::styled(
                                 format!(" ({})", session.provider.as_str()),
-                                Style::default().fg(self.theme.provider_label_fg),
+                                if deleting {
+                                    label_style
+                                } else {
+                                    Style::default().fg(self.theme.provider_label_fg)
+                                },
                             ),
                         ]
                         .into_iter()
@@ -2854,7 +2877,9 @@ impl App {
             }
             PromptState::ConfirmDeleteAgent {
                 branch_name,
-                confirm_selected,
+                focus,
+                delete_worktree,
+                worktree_shared,
                 ..
             } => {
                 self.render_dim_overlay(frame);
@@ -2865,17 +2890,24 @@ impl App {
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
 
-                // Body text.
-                let [body_area, _, buttons_area] = Layout::default()
+                // Layout: body (flexible) / checkbox (1 row) / spacer / buttons.
+                // The warning text and hint live in the flexible body area so
+                // long lines can wrap safely without truncation. The checkbox
+                // is a single fixed-height row below the body.
+                let [body_area, checkbox_area, _, buttons_area] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Min(1),
+                        Constraint::Length(1),
                         Constraint::Length(1),
                         Constraint::Length(3),
                     ])
                     .areas(inner);
 
-                let lines = vec![
+                // Body: question text + conditional warning/hint/shared note.
+                // Long warning text is split into two explicit Lines so it
+                // renders correctly even at narrow dialog widths.
+                let mut body_lines = vec![
                     Line::from(""),
                     Line::from(vec![
                         Span::raw(" Are you sure you want to delete "),
@@ -2886,18 +2918,58 @@ impl App {
                         Span::raw("?"),
                     ]),
                     Line::from(""),
-                    Line::from(Span::styled(
+                ];
+                if *worktree_shared {
+                    body_lines.push(Line::from(Span::styled(
+                        " Worktree is shared with another agent and will be preserved.",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )));
+                } else if *delete_worktree {
+                    body_lines.push(Line::from(Span::styled(
                         " All uncommitted and unpushed changes in this",
                         Style::default().fg(self.theme.warning_fg),
-                    )),
-                    Line::from(Span::styled(
+                    )));
+                    body_lines.push(Line::from(Span::styled(
                         " worktree will be permanently lost.",
                         Style::default().fg(self.theme.warning_fg),
-                    )),
-                ];
-                Paragraph::new(lines)
+                    )));
+                } else {
+                    body_lines.push(Line::from(Span::styled(
+                        " Worktree and branch will be preserved on disk.",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )));
+                }
+                Paragraph::new(body_lines)
                     .wrap(Wrap { trim: false })
                     .render(body_area, frame.buffer_mut());
+
+                // Checkbox row (1 line). When the worktree is shared, the
+                // checkbox is hidden and the line is left empty — the shared
+                // note above already explains the situation.
+                if !*worktree_shared {
+                    let check = if *delete_worktree { "x" } else { " " };
+                    let checkbox_focused = *focus == DeleteAgentFocus::Checkbox;
+                    let label_style = if checkbox_focused {
+                        Style::default()
+                            .fg(self.theme.button_active_fg)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(self.theme.input_label_fg)
+                    };
+                    let bracket_style = if checkbox_focused {
+                        Style::default()
+                            .fg(self.theme.button_active_fg)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(self.theme.hint_key_fg)
+                    };
+                    Paragraph::new(Line::from(vec![
+                        Span::raw(" "),
+                        Span::styled(format!("[{check}]"), bracket_style),
+                        Span::styled(" Also delete the worktree and branch", label_style),
+                    ]))
+                    .render(checkbox_area, frame.buffer_mut());
+                }
 
                 // Button area: two bordered panels side by side.
                 let btn_width = 16u16;
@@ -2918,7 +2990,7 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) = if !confirm_selected {
+                let (cancel_border, cancel_fg) = if *focus == DeleteAgentFocus::Cancel {
                     (
                         self.theme.button_confirm_border,
                         self.theme.button_active_fg,
@@ -2926,7 +2998,7 @@ impl App {
                 } else {
                     (self.theme.border_normal, self.theme.hint_desc_fg)
                 };
-                let (delete_border, delete_fg) = if *confirm_selected {
+                let (delete_border, delete_fg) = if *focus == DeleteAgentFocus::Delete {
                     (self.theme.button_danger_border, self.theme.button_active_fg)
                 } else {
                     (self.theme.border_normal, self.theme.hint_desc_fg)

@@ -90,6 +90,14 @@ fn run_reset(paths: &DuxPaths, all: bool) -> Result<()> {
     prune_empty_ancestors(&log_path, &paths.root)?;
     remove_file_with_message(&paths.config_path)?;
     prune_empty_ancestors(&paths.config_path, &paths.root)?;
+
+    // The lockfile (`dux.lock`) is intentionally left in place. Unlinking
+    // it while holding the flock would orphan the inode: a new process
+    // could create a fresh file at the same path (different inode) and
+    // successfully flock it, breaking the single-instance guarantee. The
+    // stale lockfile is harmless — the next launch takes it over
+    // transparently — so `remove_root_if_empty` will simply skip removal
+    // of root when the lockfile is the sole remaining entry.
     remove_root_if_empty_with_message(&paths.root)?;
 
     println!("reset complete");
@@ -717,6 +725,7 @@ mod tests {
             config_path: PathBuf::from("/tmp/test/config.toml"),
             sessions_db_path: PathBuf::from("/tmp/test/sessions.sqlite3"),
             worktrees_root: PathBuf::from("/tmp/test/worktrees"),
+            lock_path: PathBuf::from("/tmp/test/dux.lock"),
         };
         let result = run(&["path".to_string()], &paths);
         assert!(result.is_ok());
@@ -736,6 +745,7 @@ mod tests {
                 config_path: root.join("config.toml"),
                 sessions_db_path: root.join("sessions.sqlite3"),
                 worktrees_root: root.join("worktrees"),
+                lock_path: root.join("dux.lock"),
                 root,
             };
             Self {
