@@ -479,6 +479,7 @@ pub(crate) enum PromptState {
         entries: Vec<(String, String, MacroSurface)>,
         selected: usize,
         editing: Option<MacroEditState>,
+        pending_delete: Option<PendingMacroDelete>,
     },
     ConfirmNonDefaultBranch {
         path: String,
@@ -576,6 +577,12 @@ pub(crate) struct MacroEditState {
 pub(crate) enum MacroEditStage {
     EditName,
     EditText,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PendingMacroDelete {
+    pub(crate) name: String,
+    pub(crate) confirm_selected: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -732,6 +739,10 @@ pub(crate) enum OverlayMouseLayout {
         delete_button: Rect,
     },
     ConfirmDeleteTerminal {
+        cancel_button: Rect,
+        delete_button: Rect,
+    },
+    ConfirmDeleteMacro {
         cancel_button: Rect,
         delete_button: Rect,
     },
@@ -1487,23 +1498,31 @@ impl App {
             "toggle-diff-line-numbers" => {
                 self.show_diff_line_numbers = !self.show_diff_line_numbers;
                 self.config.ui.show_diff_line_numbers = self.show_diff_line_numbers;
-                let _ = save_config(&self.paths.config_path, &self.config, &self.bindings);
+                let save_result =
+                    save_config(&self.paths.config_path, &self.config, &self.bindings);
                 let _ = self.refresh_current_diff();
                 let state = if self.show_diff_line_numbers {
                     "enabled"
                 } else {
                     "disabled"
                 };
-                let palette_key = self.bindings.label_for(Action::OpenPalette);
-                self.set_info(format!(
-                    "Diff line numbers {state}. Press {palette_key} to open the palette and toggle back."
-                ));
+                if let Err(err) = save_result {
+                    self.set_error(format!(
+                        "Diff line numbers {state} for this session, but couldn't persist the change to config: {err:#}"
+                    ));
+                } else {
+                    let palette_key = self.bindings.label_for(Action::OpenPalette);
+                    self.set_info(format!(
+                        "Diff line numbers {state}. Press {palette_key} to open the palette and toggle back."
+                    ));
+                }
                 Ok(())
             }
             "toggle-github-integration" => {
                 self.github_integration_enabled = !self.github_integration_enabled;
                 self.config.ui.github_integration = self.github_integration_enabled;
-                let _ = save_config(&self.paths.config_path, &self.config, &self.bindings);
+                let save_result =
+                    save_config(&self.paths.config_path, &self.config, &self.bindings);
                 if self.github_integration_enabled
                     && matches!(self.gh_status, crate::model::GhStatus::Available)
                 {
@@ -1520,21 +1539,34 @@ impl App {
                 } else {
                     "disabled"
                 };
-                self.set_info(format!("GitHub integration {state}."));
+                if let Err(err) = save_result {
+                    self.set_error(format!(
+                        "GitHub integration {state} for this session, but couldn't persist the change to config: {err:#}"
+                    ));
+                } else {
+                    self.set_info(format!("GitHub integration {state}."));
+                }
                 Ok(())
             }
             "toggle-prompt-for-name" => {
                 self.config.defaults.prompt_for_name = !self.config.defaults.prompt_for_name;
-                let _ = save_config(&self.paths.config_path, &self.config, &self.bindings);
+                let save_result =
+                    save_config(&self.paths.config_path, &self.config, &self.bindings);
                 let state = if self.config.defaults.prompt_for_name {
                     "enabled — you'll be prompted for a name"
                 } else {
                     "disabled — random names will be generated"
                 };
-                let palette_key = self.bindings.label_for(Action::OpenPalette);
-                self.set_info(format!(
-                    "Prompt for agent name {state}. Press {palette_key} to toggle back."
-                ));
+                if let Err(err) = save_result {
+                    self.set_error(format!(
+                        "Prompt for agent name {state} for this session, but couldn't persist the change to config: {err:#}"
+                    ));
+                } else {
+                    let palette_key = self.bindings.label_for(Action::OpenPalette);
+                    self.set_info(format!(
+                        "Prompt for agent name {state}. Press {palette_key} to toggle back."
+                    ));
+                }
                 Ok(())
             }
             "toggle-pr-banner-position" => {
@@ -1545,8 +1577,14 @@ impl App {
                     "top"
                 };
                 self.config.ui.pr_banner_position = pos.to_string();
-                let _ = save_config(&self.paths.config_path, &self.config, &self.bindings);
-                self.set_info(format!("PR banner moved to {pos} of agent pane."));
+                if let Err(err) = save_config(&self.paths.config_path, &self.config, &self.bindings)
+                {
+                    self.set_error(format!(
+                        "PR banner moved to {pos} for this session, but couldn't persist the change to config: {err:#}"
+                    ));
+                } else {
+                    self.set_info(format!("PR banner moved to {pos} of agent pane."));
+                }
                 Ok(())
             }
             "force-redraw" => {
@@ -1575,6 +1613,7 @@ impl App {
             entries,
             selected: 0,
             editing: None,
+            pending_delete: None,
         };
     }
 
