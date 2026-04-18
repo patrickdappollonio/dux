@@ -1033,7 +1033,7 @@ impl App {
                 &buf[..n],
                 LOADING_INPUT_BUF_MAX,
             );
-            if self.scan_exit_interactive() {
+            if self.scan_loading_phase_exit() {
                 return Ok(false);
             }
             // Trim to the incomplete remainder so a partial escape can be
@@ -4259,17 +4259,32 @@ impl App {
         self.set_info("Exited interactive mode.");
     }
 
-    /// Scan `loading_input_buf` for an ExitInteractive sequence. Returns
-    /// `true` if the binding was found and interactive mode was exited. Used
-    /// during the loading phase when all other input is suppressed.
-    pub(crate) fn scan_exit_interactive(&mut self) -> bool {
+    /// Scan `loading_input_buf` for an ExitInteractive key sequence or a
+    /// mouse left-click outside the fullscreen overlay. Returns `true` if
+    /// either was found and interactive mode was exited. Used during the
+    /// loading phase when all other input is suppressed.
+    pub(crate) fn scan_loading_phase_exit(&mut self) -> bool {
         let (sequences, _) = crate::raw_input::split_sequences(&self.loading_input_buf);
         for seq in &sequences {
+            // Check for ExitInteractive keybinding.
             if let Some((Action::ExitInteractive, _)) =
                 self.interactive_patterns.match_sequence(seq)
             {
                 self.exit_interactive_mode();
                 return true;
+            }
+            // Check for a left-click outside the fullscreen overlay, mirroring
+            // the click-outside dismiss in process_raw_input_bytes.
+            if let Some(mouse_ev) = crate::raw_input::parse_sgr_mouse(seq) {
+                let outside_overlay =
+                    matches!(mouse_ev.kind, MouseEventKind::Down(MouseButton::Left))
+                        && !self.mouse_layout.agent_term.is_some_and(|rect| {
+                            contains_point(rect, mouse_ev.column, mouse_ev.row)
+                        });
+                if outside_overlay {
+                    self.exit_interactive_mode();
+                    return true;
+                }
             }
         }
         false
@@ -7628,11 +7643,11 @@ mod tests {
         app.session_surface = SessionSurface::Agent;
 
         // Default ExitInteractive is Ctrl-G (0x07). Put it in loading_input_buf
-        // as scan_exit_interactive reads from there.
+        // as scan_loading_phase_exit reads from there.
         app.loading_input_buf = vec![0x07];
         assert!(
-            app.scan_exit_interactive(),
-            "scan_exit_interactive must detect Ctrl-G"
+            app.scan_loading_phase_exit(),
+            "scan_loading_phase_exit must detect Ctrl-G"
         );
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
@@ -7659,8 +7674,8 @@ mod tests {
         // Full sequence in one buffer.
         app.loading_input_buf = b"\x1b[H".to_vec();
         assert!(
-            app.scan_exit_interactive(),
-            "scan_exit_interactive must detect multi-byte ExitInteractive"
+            app.scan_loading_phase_exit(),
+            "scan_loading_phase_exit must detect multi-byte ExitInteractive"
         );
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
@@ -7678,7 +7693,7 @@ mod tests {
         // First "read" delivers only the ESC byte — not a complete sequence.
         app.loading_input_buf = vec![0x1b];
         assert!(
-            !app.scan_exit_interactive(),
+            !app.scan_loading_phase_exit(),
             "incomplete sequence must not trigger exit"
         );
         assert_eq!(
@@ -7697,7 +7712,7 @@ mod tests {
         // Second "read" delivers the rest of the sequence.
         app.loading_input_buf.extend_from_slice(b"[H");
         assert!(
-            app.scan_exit_interactive(),
+            app.scan_loading_phase_exit(),
             "completed sequence across reads must trigger exit"
         );
         assert_eq!(app.input_target, InputTarget::None);
@@ -7714,7 +7729,7 @@ mod tests {
         // Regular ASCII input should not trigger exit.
         app.loading_input_buf = b"hello".to_vec();
         assert!(
-            !app.scan_exit_interactive(),
+            !app.scan_loading_phase_exit(),
             "regular input must not trigger exit"
         );
         assert_eq!(app.input_target, InputTarget::Agent);
@@ -7775,11 +7790,131 @@ mod tests {
         filler.push(0x07);
         app.loading_input_buf = filler;
         assert!(
-            app.scan_exit_interactive(),
+            app.scan_loading_phase_exit(),
             "Ctrl-G at the tail of a capped buffer must still trigger exit"
         );
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    // ── Loading-phase mouse click-outside tests ─────────────────────
+
+    #[test]
+    fn loading_phase_click_outside_overlay_exits_interactive_mode() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.session_surface = SessionSurface::Agent;
+        install_mouse_layout(&mut app);
+
+        // Click at (1,1) which is inside the left pane, outside agent_term
+        // (agent_term starts at x=21). SGR coords are 1-based, so (2,2).
+        app.loading_input_buf = sgr_mouse_down(2, 2);
+        assert!(
+            app.scan_loading_phase_exit(),
+            "left-click outside overlay must trigger exit during loading"
+        );
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    #[test]
+    fn loading_phase_click_inside_overlay_stays_in_interactive_mode() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.session_surface = SessionSurface::Agent;
+        install_mouse_layout(&mut app);
+
+        // Click at (30, 5) which is inside agent_term (x=21..76, y=1..17).
+        // SGR coords are 1-based so (31, 6).
+        app.loading_input_buf = sgr_mouse_down(31, 6);
+        assert!(
+            !app.scan_loading_phase_exit(),
+            "left-click inside overlay must not trigger exit during loading"
+        );
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+    }
+
+    #[test]
+    fn loading_phase_right_click_outside_overlay_does_not_exit() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.session_surface = SessionSurface::Agent;
+        install_mouse_layout(&mut app);
+
+        // Right-click outside the overlay. SGR button 2 = right button.
+        // Format: ESC [ < 2 ; cx ; cy M
+        app.loading_input_buf = b"\x1b[<2;2;2M".to_vec();
+        assert!(
+            !app.scan_loading_phase_exit(),
+            "right-click must not trigger exit during loading"
+        );
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+    }
+
+    #[test]
+    fn loading_phase_scroll_outside_overlay_does_not_exit() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.session_surface = SessionSurface::Agent;
+        install_mouse_layout(&mut app);
+
+        // Scroll-up outside the overlay. SGR button 64 = scroll up.
+        // Format: ESC [ < 64 ; cx ; cy M
+        app.loading_input_buf = b"\x1b[<64;2;2M".to_vec();
+        assert!(
+            !app.scan_loading_phase_exit(),
+            "scroll events must not trigger exit during loading"
+        );
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+    }
+
+    #[test]
+    fn loading_phase_click_outside_without_mouse_layout_exits() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.session_surface = SessionSurface::Agent;
+        // No mouse layout installed — agent_term is None.
+        // Any left-click should be treated as outside.
+        app.loading_input_buf = sgr_mouse_down(50, 10);
+        assert!(
+            app.scan_loading_phase_exit(),
+            "left-click must exit when agent_term rect is not set"
+        );
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    #[test]
+    fn loading_phase_click_outside_terminal_overlay_exits() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Terminal;
+        app.fullscreen_overlay = FullscreenOverlay::Terminal;
+        app.session_surface = SessionSurface::Terminal;
+        app.terminal_return_to_list = true;
+        app.focus = FocusPane::Center;
+        install_mouse_layout(&mut app);
+
+        // Click outside agent_term (which also covers terminal overlays).
+        app.loading_input_buf = sgr_mouse_down(2, 2);
+        assert!(
+            app.scan_loading_phase_exit(),
+            "left-click outside must exit terminal interactive mode during loading"
+        );
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+        assert_eq!(
+            app.focus,
+            FocusPane::Left,
+            "focus should move to left pane when terminal_return_to_list is set"
+        );
     }
 
     // ---------------------------------------------------------------
