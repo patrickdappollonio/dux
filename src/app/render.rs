@@ -3046,9 +3046,10 @@ impl App {
                     )));
                 }
                 let body_height = wrapped_line_count(&body_lines, inner_width, false);
+                let checkbox_spacing = u16::from(!*worktree_shared);
                 let area = centered_rect_exact(
                     dialog_width,
-                    2 + body_height + checkbox_height + 3,
+                    2 + body_height + checkbox_spacing + checkbox_height + 3,
                     frame.area(),
                 );
                 Clear.render(area, frame.buffer_mut());
@@ -3056,10 +3057,11 @@ impl App {
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
 
-                let [body_area, checkbox_area, buttons_area] = Layout::default()
+                let [body_area, _, checkbox_area, buttons_area] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(body_height),
+                        Constraint::Length(checkbox_spacing),
                         Constraint::Length(checkbox_height),
                         Constraint::Length(3),
                     ])
@@ -3730,18 +3732,24 @@ impl App {
                     )
                     .height
                     .saturating_add(1);
-                let area = centered_rect_exact(dialog_width, 9 + checkbox_height, frame.area());
+                let checkbox_spacing = 1;
+                let area = centered_rect_exact(
+                    dialog_width,
+                    9 + checkbox_spacing + checkbox_height,
+                    frame.area(),
+                );
                 Clear.render(area, frame.buffer_mut());
 
                 let outer = self.themed_overlay_block("Rename Agent");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
 
-                let [label_area, input_area, checkbox_area, hint_area] = Layout::default()
+                let [label_area, input_area, _, checkbox_area, hint_area] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(1),
                         Constraint::Length(3),
+                        Constraint::Length(checkbox_spacing),
                         Constraint::Length(checkbox_height),
                         Constraint::Min(1),
                     ])
