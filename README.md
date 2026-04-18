@@ -74,7 +74,7 @@ resume_args = ["--continue"]
 
 Set `resume_args` and dux can reconnect to detached or crashed sessions. Omit it if your CLI doesn't support resuming; dux will just relaunch it.
 
-Cycle through providers on the fly with a single keypress, or set a default per-project.
+Switch providers from the command palette while keeping each provider's session history on the same worktree, or set a default per-project.
 
 ### Macros
 

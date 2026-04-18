@@ -388,6 +388,13 @@ pub(crate) enum KillRunningFocus {
     Footer(KillRunningFooterAction),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChangeAgentProviderFocus {
+    List,
+    Cancel,
+    Apply,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct KillRunningPrompt {
     pub(crate) runtimes: Vec<KillableRuntime>,
@@ -396,6 +403,24 @@ pub(crate) struct KillRunningPrompt {
     pub(crate) hovered_visible_index: usize,
     pub(crate) selected_ids: HashSet<RuntimeTargetId>,
     pub(crate) focus: KillRunningFocus,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ChangeAgentProviderOption {
+    pub(crate) provider: ProviderKind,
+    pub(crate) session_id: Option<String>,
+    pub(crate) resume_available: bool,
+    pub(crate) is_current: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ChangeAgentProviderPrompt {
+    pub(crate) session_id: String,
+    pub(crate) session_label: String,
+    pub(crate) worktree_path: String,
+    pub(crate) options: Vec<ChangeAgentProviderOption>,
+    pub(crate) selected: usize,
+    pub(crate) focus: ChangeAgentProviderFocus,
 }
 
 #[derive(Clone, Debug)]
@@ -434,6 +459,7 @@ pub(crate) enum PromptState {
         tab_completions: Vec<String>,
         tab_index: usize,
     },
+    ChangeAgentProvider(ChangeAgentProviderPrompt),
     KillRunning(KillRunningPrompt),
     ConfirmKillRunning(ConfirmKillRunningPrompt),
     ConfirmDeleteAgent {
@@ -728,6 +754,13 @@ pub(crate) enum OverlayMouseLayout {
         items: usize,
         offset: usize,
     },
+    ChangeAgentProvider {
+        list: Rect,
+        items: usize,
+        offset: usize,
+        cancel_button: Rect,
+        apply_button: Rect,
+    },
     PickEditor {
         list: Rect,
         items: usize,
@@ -849,11 +882,6 @@ pub(crate) enum CreateAgentRequest {
         source_session: Box<AgentSession>,
         source_label: String,
         custom_name: Option<String>,
-    },
-    NewProviderSession {
-        project: Project,
-        source_session: Box<AgentSession>,
-        provider: ProviderKind,
     },
 }
 
@@ -1442,7 +1470,7 @@ impl App {
             "new-agent" => self.create_agent_for_selected_project(),
             "fork-agent" => self.fork_selected_session(),
             "new-provider-session" => self.create_provider_session_on_worktree(),
-            "provider" => self.cycle_selected_project_provider(),
+            "change-agent-provider" => self.open_change_agent_provider_prompt(),
             "pull-project" => self.refresh_selected_project(),
             "delete-project" => self.delete_selected_project(),
             "remove-project" => self.remove_selected_project(),

@@ -12,12 +12,12 @@ pub enum Action {
     NewAgent,
     ForkAgent,
     NewProviderSession,
+    ChangeAgentProvider,
     FocusAgent,
     OpenProjectBrowser,
     CopyPath,
     OpenWorktreeInEditor,
     ChooseWorktreeEditor,
-    CycleProvider,
     RefreshProject,
     ReconnectAgent,
     DeleteSession,
@@ -186,12 +186,12 @@ impl Action {
             Action::NewAgent => "new_agent",
             Action::ForkAgent => "fork_agent",
             Action::NewProviderSession => "new_provider_session",
+            Action::ChangeAgentProvider => "change_agent_provider",
             Action::FocusAgent => "focus_agent",
             Action::OpenProjectBrowser => "open_project_browser",
             Action::CopyPath => "copy_path",
             Action::OpenWorktreeInEditor => "open_worktree_in_editor",
             Action::ChooseWorktreeEditor => "choose_worktree_editor",
-            Action::CycleProvider => "cycle_provider",
             Action::RefreshProject => "refresh_project",
             Action::ReconnectAgent => "reconnect_agent",
             Action::DeleteSession => "delete_session",
@@ -268,6 +268,9 @@ impl Action {
             Action::NewProviderSession => {
                 "Create a new session with a different provider on the selected agent's worktree."
             }
+            Action::ChangeAgentProvider => {
+                "Switch the selected agent worktree to a different provider session."
+            }
             Action::FocusAgent => "Focus the selected agent's output pane.",
             Action::OpenProjectBrowser => "Open the project browser.",
             Action::CopyPath => "Copy the selected agent's worktree path.",
@@ -277,7 +280,6 @@ impl Action {
             Action::ChooseWorktreeEditor => {
                 "Open a picker and choose which editor should open the selected agent worktree."
             }
-            Action::CycleProvider => "Cycle the default provider for the selected project.",
             Action::RefreshProject => "Git pull the selected project checkout.",
             Action::ReconnectAgent => "Restart the CLI for the selected agent.",
             Action::DeleteSession => "Delete the selected session and worktree.",
@@ -358,12 +360,12 @@ impl Action {
             | Action::NewAgent
             | Action::ForkAgent
             | Action::NewProviderSession
+            | Action::ChangeAgentProvider
             | Action::FocusAgent
             | Action::OpenProjectBrowser
             | Action::CopyPath
             | Action::OpenWorktreeInEditor
             | Action::ChooseWorktreeEditor
-            | Action::CycleProvider
             | Action::RefreshProject
             | Action::InteractAgent
             | Action::ReconnectAgent
@@ -554,6 +556,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         }),
     },
     BindingDef {
+        action: Action::ChangeAgentProvider,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "change-agent-provider",
+            description: "Switch this worktree to a different provider session",
+        }),
+    },
+    BindingDef {
         action: Action::FocusAgent,
         default_keys: &[key!(enter)],
         scopes: &[BindingScope::Left, BindingScope::Center],
@@ -631,20 +644,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "open-worktree-with",
             description: "Choose which editor should open the selected agent worktree",
-        }),
-    },
-    BindingDef {
-        action: Action::CycleProvider,
-        default_keys: &[key!(d)],
-        scopes: &[BindingScope::Left],
-        help: Some(HelpEntry {
-            section: "Projects pane",
-            description: "Cycle default provider",
-        }),
-        hint_contexts: &[(HintContext::LeftProject, "Provider")],
-        palette: Some(PaletteEntry {
-            name: "provider",
-            description: "Toggle the selected project's default provider",
         }),
     },
     BindingDef {
@@ -2145,14 +2144,14 @@ mod tests {
     }
 
     #[test]
-    fn filtered_palette_includes_new_provider_session_command() {
+    fn filtered_palette_includes_change_agent_provider_command() {
         let bindings = default_bindings();
         let results = bindings.filtered_palette("provider");
         let names = results
             .iter()
             .filter_map(|binding| binding.palette_name)
             .collect::<Vec<_>>();
-        assert!(names.contains(&"new-provider-session"));
+        assert!(names.contains(&"change-agent-provider"));
     }
 
     #[test]

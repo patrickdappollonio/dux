@@ -1055,40 +1055,6 @@ pub(crate) fn run_create_agent_job(
                 true,
             )
         }
-        CreateAgentRequest::NewProviderSession {
-            project,
-            source_session,
-            provider,
-        } => {
-            let worktree_path = PathBuf::from(&source_session.worktree_path);
-            if !worktree_path.exists() {
-                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
-                    "Worktree for agent \"{}\" no longer exists.",
-                    source_session.branch_name
-                )));
-                return;
-            }
-            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
-                "Creating {} session on existing worktree \"{}\"...",
-                provider.as_str(),
-                source_session.branch_name
-            )));
-            let status_message = format!(
-                "Created {} session on worktree \"{}\" in project \"{}\". The worktree is shared with existing agents.",
-                provider.as_str(),
-                source_session.branch_name,
-                project.name
-            );
-            (
-                project,
-                provider,
-                source_session.source_branch.clone(),
-                status_message,
-                source_session.branch_name.clone(),
-                worktree_path,
-                false,
-            )
-        }
     };
     let repo_path = PathBuf::from(&project.path);
     if owns_worktree {

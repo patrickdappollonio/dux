@@ -54,6 +54,9 @@ enum PromptMouseTarget {
     BrowseProjectInput,
     BrowseProjectItem(usize),
     PickEditorItem(usize),
+    ChangeAgentProviderItem(usize),
+    ChangeAgentProviderCancel,
+    ChangeAgentProviderApply,
     RuntimeKillInput,
     RuntimeKillItem(usize),
     RuntimeKillCancel,
@@ -415,7 +418,6 @@ impl App {
                 Action::DeleteSession => self.confirm_delete_selected_session()?,
                 Action::RenameSession => self.open_rename_session()?,
                 Action::EditMacros => self.open_edit_macros(),
-                Action::CycleProvider => self.cycle_selected_project_provider()?,
                 Action::CopyPath => self.copy_selected_path()?,
                 Action::OpenWorktreeInEditor => self.open_selected_worktree_in_default_editor()?,
                 Action::ChooseWorktreeEditor => self.open_worktree_editor_picker()?,
@@ -1971,6 +1973,59 @@ impl App {
             return Ok(false);
         }
 
+        if let PromptState::ChangeAgentProvider(prompt) = &mut self.prompt {
+            let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
+            let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
+            let is_space = key.code == KeyCode::Char(' ');
+            let reverse_tab = key.code == KeyCode::BackTab;
+
+            if matches!(palette_action.or(dialog_action), Some(Action::CloseOverlay)) {
+                self.prompt = PromptState::None;
+                return Ok(false);
+            }
+
+            if reverse_tab {
+                prompt.focus = Self::next_change_agent_provider_focus(prompt.focus, false);
+                return Ok(false);
+            }
+
+            match prompt.focus {
+                ChangeAgentProviderFocus::List => match palette_action.or(dialog_action) {
+                    Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
+                        prompt.selected += 1;
+                    }
+                    Some(Action::MoveUp) if prompt.selected > 0 => {
+                        prompt.selected -= 1;
+                    }
+                    Some(Action::Confirm) => {
+                        self.apply_change_agent_provider()?;
+                    }
+                    Some(Action::ToggleSelection) => {
+                        prompt.focus = Self::next_change_agent_provider_focus(prompt.focus, true);
+                    }
+                    _ => {}
+                },
+                ChangeAgentProviderFocus::Cancel | ChangeAgentProviderFocus::Apply => {
+                    if matches!(dialog_action, Some(Action::ToggleSelection)) {
+                        prompt.focus = Self::next_change_agent_provider_focus(prompt.focus, true);
+                        return Ok(false);
+                    }
+                    if matches!(dialog_action, Some(Action::Confirm)) || is_space {
+                        match prompt.focus {
+                            ChangeAgentProviderFocus::Cancel => {
+                                self.prompt = PromptState::None;
+                            }
+                            ChangeAgentProviderFocus::Apply => {
+                                self.apply_change_agent_provider()?;
+                            }
+                            ChangeAgentProviderFocus::List => {}
+                        }
+                    }
+                }
+            }
+            return Ok(false);
+        }
+
         if let PromptState::ConfirmKillRunning(confirm_prompt) = &mut self.prompt {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => {
@@ -2237,16 +2292,12 @@ impl App {
                                 "Forking agent \"{source_label}\" as \"{name}\" by cloning its current worktree contents into a fresh session...",
                             )
                         }
-                        CreateAgentRequest::NewProviderSession { .. } => {
-                            unreachable!("NewProviderSession does not use the naming prompt")
-                        }
                     };
                     match &mut request {
                         CreateAgentRequest::NewProject { custom_name, .. }
                         | CreateAgentRequest::ForkSession { custom_name, .. } => {
                             *custom_name = Some(name);
                         }
-                        CreateAgentRequest::NewProviderSession { .. } => {}
                     }
                     self.dispatch_create_agent_request(request, msg)?;
                 }
@@ -2633,6 +2684,23 @@ impl App {
                 ..
             } => Self::overlay_row_at(list, offset, items, column, row)
                 .map(PromptMouseTarget::PickEditorItem),
+            OverlayMouseLayout::ChangeAgentProvider {
+                list,
+                items,
+                offset,
+                cancel_button,
+                apply_button,
+            } => {
+                if let Some(index) = Self::overlay_row_at(list, offset, items, column, row) {
+                    Some(PromptMouseTarget::ChangeAgentProviderItem(index))
+                } else if contains_point(cancel_button, column, row) {
+                    Some(PromptMouseTarget::ChangeAgentProviderCancel)
+                } else if contains_point(apply_button, column, row) {
+                    Some(PromptMouseTarget::ChangeAgentProviderApply)
+                } else {
+                    None
+                }
+            }
             OverlayMouseLayout::KillRunning {
                 input,
                 list,
@@ -3272,6 +3340,34 @@ impl App {
         }
     }
 
+    fn next_change_agent_provider_focus(
+        current: ChangeAgentProviderFocus,
+        forward: bool,
+    ) -> ChangeAgentProviderFocus {
+        match (current, forward) {
+            (ChangeAgentProviderFocus::List, true) => ChangeAgentProviderFocus::Cancel,
+            (ChangeAgentProviderFocus::Cancel, true) => ChangeAgentProviderFocus::Apply,
+            (ChangeAgentProviderFocus::Apply, true) => ChangeAgentProviderFocus::List,
+            (ChangeAgentProviderFocus::List, false) => ChangeAgentProviderFocus::Apply,
+            (ChangeAgentProviderFocus::Apply, false) => ChangeAgentProviderFocus::Cancel,
+            (ChangeAgentProviderFocus::Cancel, false) => ChangeAgentProviderFocus::List,
+        }
+    }
+
+    fn set_change_agent_provider_selection(&mut self, index: usize) {
+        let count = match &self.prompt {
+            PromptState::ChangeAgentProvider(prompt) => prompt.options.len(),
+            _ => 0,
+        };
+        if count == 0 {
+            return;
+        }
+        if let PromptState::ChangeAgentProvider(prompt) = &mut self.prompt {
+            prompt.selected = index.min(count.saturating_sub(1));
+            prompt.focus = ChangeAgentProviderFocus::List;
+        }
+    }
+
     fn resolve_confirm_delete_agent(&mut self, confirm: bool) -> bool {
         let (session_id, delete_worktree) = match &self.prompt {
             PromptState::ConfirmDeleteAgent {
@@ -3590,6 +3686,22 @@ impl App {
                 self.set_pick_editor_selection(index);
                 if double_click {
                     self.open_selected_pick_editor();
+                }
+            }
+            PromptMouseTarget::ChangeAgentProviderItem(index) => {
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                self.set_change_agent_provider_selection(index);
+                if double_click && let Err(err) = self.apply_change_agent_provider() {
+                    self.set_error(format!("{err:#}"));
+                }
+            }
+            PromptMouseTarget::ChangeAgentProviderCancel => {
+                self.prompt = PromptState::None;
+            }
+            PromptMouseTarget::ChangeAgentProviderApply => {
+                if let Err(err) = self.apply_change_agent_provider() {
+                    self.set_error(format!("{err:#}"));
                 }
             }
             PromptMouseTarget::RuntimeKillInput => {
@@ -4336,8 +4448,8 @@ mod tests {
     use crate::app::{
         App, CenterMode, ConfirmKillRunningPrompt, DeleteAgentFocus, FocusPane, FullscreenOverlay,
         InputTarget, KillRunningAction, KillRunningFocus, KillRunningFooterAction,
-        KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftSection, MouseClickTarget,
-        MouseLayoutState, OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout,
+        KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftItem, LeftSection,
+        MouseClickTarget, MouseLayoutState, OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout,
         OverlayMouseLayoutState, PromptState, PullTarget, RightSection, RuntimeTargetId, TextInput,
         WorkerEvent,
     };
@@ -6575,7 +6687,7 @@ mod tests {
     }
 
     #[test]
-    fn cycle_provider_only_updates_new_and_stopped_agents() {
+    fn change_agent_provider_switches_to_existing_sibling_session() {
         let mut app = test_app(default_bindings());
         let root = PathBuf::from(&app.projects[0].path);
         let now = Utc::now();
@@ -6617,15 +6729,10 @@ mod tests {
             id: "session-3".to_string(),
             project_id: app.projects[0].id.clone(),
             project_path: Some(app.projects[0].path.clone()),
-            provider: ProviderKind::from_str("codex"),
+            provider: ProviderKind::from_str("gemini"),
             source_branch: "main".to_string(),
             branch_name: "exited-branch".to_string(),
-            worktree_path: app
-                .paths
-                .worktrees_root
-                .join("exited")
-                .display()
-                .to_string(),
+            worktree_path: app.sessions[0].worktree_path.clone(),
             title: None,
             started_providers: vec!["codex".to_string()],
             status: SessionStatus::Exited,
@@ -6673,38 +6780,39 @@ mod tests {
         }
 
         app.rebuild_left_items();
-        app.selected_left = 0;
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| {
+                matches!(item, LeftItem::Session(index) if app.sessions.get(*index).map(|session| session.id.as_str()) == Some("session-1"))
+            })
+            .expect("selected session");
 
-        app.cycle_selected_project_provider()
-            .expect("cycle provider");
+        app.open_change_agent_provider_prompt()
+            .expect("open provider picker");
+        if let PromptState::ChangeAgentProvider(prompt) = &mut app.prompt {
+            prompt.selected = prompt
+                .options
+                .iter()
+                .position(|option| option.provider.as_str() == "gemini")
+                .expect("gemini option");
+        } else {
+            panic!("expected change-agent-provider prompt");
+        }
 
-        // With providers [claude, codex, gemini, opencode], cycling from codex
-        // advances to the next provider: gemini.
-        assert_eq!(app.projects[0].default_provider.as_str(), "gemini");
+        app.apply_change_agent_provider()
+            .expect("apply provider switch");
+
         assert_eq!(
-            app.config.projects[0].default_provider.as_deref(),
-            Some("gemini")
+            app.selected_session().map(|session| session.id.as_str()),
+            Some("session-3")
         );
-        // Active session keeps its original provider.
+        // The current session keeps its original provider-specific history.
         assert_eq!(app.sessions[0].provider.as_str(), "codex");
-        // Non-active sessions are updated to the new default.
-        assert_eq!(app.sessions[1].provider.as_str(), "gemini");
+        // Existing sibling session is reused instead of being overwritten.
         assert_eq!(app.sessions[2].provider.as_str(), "gemini");
-        // Session belonging to a different project is untouched.
-        assert_eq!(app.sessions[3].provider.as_str(), "codex");
 
         let persisted = app.session_store.load_sessions().expect("load sessions");
-        let provider_for = |id: &str| {
-            persisted
-                .iter()
-                .find(|session| session.id == id)
-                .map(|session| session.provider.as_str())
-        };
-        assert_eq!(provider_for("session-1"), Some("codex"));
-        assert_eq!(provider_for("session-2"), Some("gemini"));
-        assert_eq!(provider_for("session-3"), Some("gemini"));
-        assert_eq!(provider_for("session-4"), Some("codex"));
-
         let started_providers_for = |id: &str| {
             persisted
                 .iter()
@@ -6712,18 +6820,13 @@ mod tests {
                 .map(|session| session.started_providers.clone())
         };
         assert_eq!(
-            started_providers_for("session-2"),
-            Some(vec!["codex".to_string()])
-        );
-        assert_eq!(
             started_providers_for("session-3"),
             Some(vec!["codex".to_string()])
         );
-
         assert!(
             app.status
                 .text()
-                .contains("Changed default CLI agent to \"gemini\"")
+                .contains("Switched to the existing gemini session")
         );
     }
 
