@@ -97,6 +97,17 @@ impl<'a> Checkbox<'a> {
         }
     }
 
+    pub(crate) fn inline_prefix(&self, marker_style: Style) -> Vec<Span<'static>> {
+        vec![
+            Span::raw(Self::PREFIX),
+            Span::styled(
+                if self.checked { "[x]" } else { "[ ]" }.to_string(),
+                self.marker_style(marker_style),
+            ),
+            Span::raw(Self::GAP),
+        ]
+    }
+
     pub(crate) fn marker_style(&self, base_marker_style: Style) -> Style {
         match self.state {
             CheckboxState::Normal => base_marker_style,
@@ -242,5 +253,19 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::BOLD)
         );
+    }
+
+    #[test]
+    fn checkbox_inline_prefix_uses_shared_ascii_marker() {
+        let unchecked = Checkbox::new("")
+            .checked(false)
+            .state(CheckboxState::Normal);
+        let checked = Checkbox::new("").checked(true).state(CheckboxState::Normal);
+
+        let unchecked_spans = unchecked.inline_prefix(Style::default());
+        let checked_spans = checked.inline_prefix(Style::default());
+
+        assert_eq!(unchecked_spans[1].content.as_ref(), "[ ]");
+        assert_eq!(checked_spans[1].content.as_ref(), "[x]");
     }
 }

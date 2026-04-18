@@ -2527,11 +2527,9 @@ impl App {
                         .iter()
                         .filter_map(|index| prompt.runtimes.get(*index))
                         .map(|runtime| {
-                            let checked = if prompt.selected_ids.contains(&runtime.id) {
-                                "[x]"
-                            } else {
-                                "[ ]"
-                            };
+                            let checkbox = Checkbox::new("")
+                                .checked(prompt.selected_ids.contains(&runtime.id))
+                                .state(CheckboxState::Normal);
                             let label = if runtime.label.chars().count() > label_col {
                                 runtime.label.chars().take(label_col).collect::<String>()
                             } else {
@@ -2542,11 +2540,9 @@ impl App {
                                 KillableRuntimeKind::Agent => self.theme.session_active,
                                 KillableRuntimeKind::Terminal => self.theme.session_detached,
                             };
-                            let mut spans = vec![
-                                Span::styled(
-                                    format!("{checked} "),
-                                    Style::default().fg(self.theme.hint_key_fg),
-                                ),
+                            let mut spans =
+                                checkbox.inline_prefix(Style::default().fg(self.theme.hint_key_fg));
+                            spans.extend([
                                 Span::styled(
                                     format!("{:>6} ", runtime.kind.badge()),
                                     Style::default().fg(kind_color).add_modifier(Modifier::BOLD),
@@ -2555,7 +2551,7 @@ impl App {
                                     label_padded,
                                     Style::default().add_modifier(Modifier::BOLD),
                                 ),
-                            ];
+                            ]);
                             spans.extend(runtime_context_spans(
                                 &format!("  {}", runtime.context),
                                 Style::default()
