@@ -1327,7 +1327,12 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 5] {
             ProviderCommandConfig {
                 command: "copilot".to_string(),
                 args: Vec::new(),
-                resume_args: Some(vec!["--continue".to_string()]),
+                // Copilot's --continue resumes the most recent session
+                // globally, not scoped to the current working directory.
+                // Unlike claude/codex/gemini/opencode, there is no flag
+                // to limit resume to the CWD, so we disable it.
+                resume_args: None,
+                resume_wait_timeout_ms: None,
                 oneshot_args: vec![
                     "-p".to_string(),
                     "{prompt}".to_string(),
@@ -2192,11 +2197,8 @@ oneshot_output = "stdout"
             vec!["-p", "{prompt}", "--allow-all-tools"]
         );
         assert!(matches!(cfg.oneshot_output, OneshotOutput::Stdout));
-        assert_eq!(
-            cfg.resume_args.clone(),
-            Some(vec!["--continue".to_string()])
-        );
-        assert!(cfg.supports_session_resume());
+        assert_eq!(cfg.resume_args, None);
+        assert!(!cfg.supports_session_resume());
     }
 
     #[test]
