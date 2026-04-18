@@ -101,6 +101,41 @@ pub fn parse_sgr_mouse(seq: &[u8]) -> Option<MouseEvent> {
     })
 }
 
+/// Rewrite an SGR mouse sequence with coordinates translated by the given
+/// screen offset.
+///
+/// `origin_col` and `origin_row` are the 0-based screen position of the
+/// terminal content area's top-left corner (i.e. `term_area.x` and
+/// `term_area.y` from the layout).
+///
+/// The SGR wire format uses 1-based coordinates, so a screen click at
+/// column `origin_col + 1` (the first content column) maps to translated
+/// column 1. Returns `None` if the sequence is not a valid SGR mouse event
+/// or the click falls on or before the origin (i.e. outside the content
+/// area).
+pub fn translate_sgr_mouse(seq: &[u8], origin_col: u16, origin_row: u16) -> Option<Vec<u8>> {
+    if !is_sgr_mouse(seq) {
+        return None;
+    }
+    let final_byte = *seq.last()?;
+    let params = std::str::from_utf8(&seq[3..seq.len() - 1]).ok()?;
+    let mut parts = params.split(';');
+    let cb: u16 = parts.next()?.parse().ok()?;
+    let cx: u16 = parts.next()?.parse().ok()?; // 1-based screen column
+    let cy: u16 = parts.next()?.parse().ok()?; // 1-based screen row
+
+    // Translate: wire values are 1-based and origin is 0-based, so
+    // translated = wire - origin. A result of 0 means the click landed on
+    // the border/header (before content column/row 1), so reject it.
+    let tx = cx.checked_sub(origin_col)?;
+    let ty = cy.checked_sub(origin_row)?;
+    if tx == 0 || ty == 0 {
+        return None;
+    }
+
+    Some(format!("\x1b[<{cb};{tx};{ty}{}", final_byte as char).into_bytes())
+}
+
 /// Splits a raw byte buffer into complete terminal input sequences.
 ///
 /// Returns `(complete, remainder)` where `complete` is a list of byte-slice
@@ -605,5 +640,85 @@ mod tests {
         let ev = parse_sgr_mouse(seq).unwrap();
         assert_eq!(ev.kind, MouseEventKind::Up(MouseButton::Left));
         assert!(ev.modifiers.contains(KeyModifiers::SHIFT));
+    }
+
+    // -- translate_sgr_mouse tests --
+    //
+    // These prove the coordinate-offset bug: when the terminal area starts
+    // at screen row 3, column 5 and we receive a click at screen position
+    // (50, 15), forwarding the raw bytes verbatim sends row=15 to the child
+    // process instead of the correct row=12 (15 - 3). The child highlights
+    // text 3 rows too low.
+
+    #[test]
+    fn translate_sgr_mouse_adjusts_coordinates() {
+        // Screen click at 1-based (50, 15), terminal area origin at (5, 3).
+        // Expected translated coords: (50-5, 15-3) = (45, 12).
+        let seq = b"\x1b[<0;50;15M";
+        let translated = translate_sgr_mouse(seq, 5, 3).unwrap();
+        assert_eq!(translated, b"\x1b[<0;45;12M");
+    }
+
+    #[test]
+    fn translate_sgr_mouse_top_left_corner() {
+        // Click at the very first content cell: 1-based (6, 4) with origin (5, 3).
+        // Translated: (1, 1) — the top-left of the child's viewport.
+        let seq = b"\x1b[<0;6;4M";
+        let translated = translate_sgr_mouse(seq, 5, 3).unwrap();
+        assert_eq!(translated, b"\x1b[<0;1;1M");
+    }
+
+    #[test]
+    fn translate_sgr_mouse_on_border_returns_none() {
+        // Click at 1-based (5, 3) with origin (5, 3) → translated col = 0,
+        // which is the border itself, not content. Should return None.
+        let seq = b"\x1b[<0;5;3M";
+        assert!(translate_sgr_mouse(seq, 5, 3).is_none());
+    }
+
+    #[test]
+    fn translate_sgr_mouse_before_origin_returns_none() {
+        // Click at 1-based (2, 1) with origin (5, 3) → would underflow.
+        let seq = b"\x1b[<0;2;1M";
+        assert!(translate_sgr_mouse(seq, 5, 3).is_none());
+    }
+
+    #[test]
+    fn translate_sgr_mouse_release_event() {
+        // Release events use 'm' as the final byte; translation must preserve it.
+        let seq = b"\x1b[<0;50;15m";
+        let translated = translate_sgr_mouse(seq, 5, 3).unwrap();
+        assert_eq!(translated, b"\x1b[<0;45;12m");
+    }
+
+    #[test]
+    fn translate_sgr_mouse_scroll_event() {
+        // Scroll-up (cb=64) should also be translated.
+        let seq = b"\x1b[<64;20;10M";
+        let translated = translate_sgr_mouse(seq, 5, 3).unwrap();
+        assert_eq!(translated, b"\x1b[<64;15;7M");
+    }
+
+    #[test]
+    fn translate_sgr_mouse_drag_with_modifiers() {
+        // Shift+left drag: cb = 32 (motion) | 4 (shift) = 36.
+        let seq = b"\x1b[<36;30;20M";
+        let translated = translate_sgr_mouse(seq, 5, 3).unwrap();
+        assert_eq!(translated, b"\x1b[<36;25;17M");
+    }
+
+    #[test]
+    fn translate_sgr_mouse_non_sgr_returns_none() {
+        // A regular CSI sequence (cursor up) is not an SGR mouse event.
+        let seq = b"\x1b[A";
+        assert!(translate_sgr_mouse(seq, 5, 3).is_none());
+    }
+
+    #[test]
+    fn translate_sgr_mouse_zero_origin() {
+        // With origin (0, 0), coordinates should pass through unchanged.
+        let seq = b"\x1b[<0;10;5M";
+        let translated = translate_sgr_mouse(seq, 0, 0).unwrap();
+        assert_eq!(translated, b"\x1b[<0;10;5M");
     }
 }
