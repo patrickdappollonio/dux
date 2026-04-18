@@ -1,3 +1,4 @@
+use super::checkbox::{Checkbox, CheckboxState};
 use super::*;
 
 /// ASCII art logo displayed in the agent pane when no content is active.
@@ -213,7 +214,115 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+fn wrapped_line_count(lines: &[Line<'_>], width: u16, trim: bool) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+
+    let max_width = usize::from(width);
+    let mut total = 0u16;
+    for line in lines {
+        let mut current_width = 0usize;
+        let mut line_count = 1u16;
+        for span in &line.spans {
+            let content = if trim {
+                span.content.trim_end_matches(' ')
+            } else {
+                span.content.as_ref()
+            };
+            for segment in content.split('\n') {
+                let segment_width = segment.chars().count();
+                if segment_width == 0 {
+                    continue;
+                }
+
+                let remaining = if current_width == 0 {
+                    max_width
+                } else {
+                    max_width.saturating_sub(current_width)
+                };
+                if segment_width <= remaining {
+                    current_width += segment_width;
+                } else {
+                    let needed = if current_width == 0 {
+                        segment_width
+                    } else {
+                        segment_width - remaining
+                    };
+                    line_count = line_count.saturating_add(((needed - 1) / max_width) as u16 + 1);
+                    current_width = needed % max_width;
+                    if current_width == 0 {
+                        current_width = max_width;
+                    }
+                }
+            }
+        }
+        total = total.saturating_add(line_count);
+    }
+    total
+}
+
 impl App {
+    fn render_overlay_checkbox(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        label: &str,
+        checked: bool,
+        state: CheckboxState,
+        hint: Option<Line<'static>>,
+    ) -> (Rect, u16) {
+        let checkbox = Checkbox::new(label).checked(checked).state(state);
+        let marker_style = checkbox.marker_style(match state {
+            CheckboxState::Focused => Style::default().fg(self.theme.button_active_fg),
+            CheckboxState::Hovered => Style::default().fg(self.theme.button_active_fg),
+            CheckboxState::Disabled => Style::default().fg(self.theme.hint_desc_fg),
+            CheckboxState::Normal => Style::default().fg(self.theme.hint_key_fg),
+        });
+        let label_style = checkbox.label_style(match state {
+            CheckboxState::Focused => Style::default().fg(self.theme.button_active_fg),
+            CheckboxState::Hovered => Style::default().fg(self.theme.button_active_fg),
+            CheckboxState::Disabled => Style::default().fg(self.theme.hint_desc_fg),
+            CheckboxState::Normal => Style::default().fg(self.theme.input_label_fg),
+        });
+        let layout = checkbox.layout(area.width, marker_style, label_style);
+        let checkbox_height = layout.height;
+        let hint_height = u16::from(hint.is_some());
+        let total_height = checkbox_height.saturating_add(hint_height);
+
+        layout.render(
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: checkbox_height,
+            },
+            frame.buffer_mut(),
+        );
+
+        if let Some(hint_line) = hint {
+            Paragraph::new(hint_line).render(
+                Rect {
+                    x: area.x,
+                    y: area.y.saturating_add(checkbox_height),
+                    width: area.width,
+                    height: 1,
+                },
+                frame.buffer_mut(),
+            );
+        }
+
+        (
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: total_height,
+            },
+            total_height,
+        )
+    }
+
     pub(crate) fn render(&mut self, frame: &mut Frame) {
         let term_w = frame.area().width as usize;
         let status_text_len = self.status.text().len() + 3; // " ● " prefix
@@ -2464,11 +2573,9 @@ impl App {
                         .iter()
                         .filter_map(|index| prompt.runtimes.get(*index))
                         .map(|runtime| {
-                            let checked = if prompt.selected_ids.contains(&runtime.id) {
-                                "[x]"
-                            } else {
-                                "[ ]"
-                            };
+                            let checkbox = Checkbox::new("")
+                                .checked(prompt.selected_ids.contains(&runtime.id))
+                                .state(CheckboxState::Normal);
                             let label = if runtime.label.chars().count() > label_col {
                                 runtime.label.chars().take(label_col).collect::<String>()
                             } else {
@@ -2479,11 +2586,9 @@ impl App {
                                 KillableRuntimeKind::Agent => self.theme.session_active,
                                 KillableRuntimeKind::Terminal => self.theme.session_detached,
                             };
-                            let mut spans = vec![
-                                Span::styled(
-                                    format!("{checked} "),
-                                    Style::default().fg(self.theme.hint_key_fg),
-                                ),
+                            let mut spans =
+                                checkbox.inline_prefix(Style::default().fg(self.theme.hint_key_fg));
+                            spans.extend([
                                 Span::styled(
                                     format!("{:>6} ", runtime.kind.badge()),
                                     Style::default().fg(kind_color).add_modifier(Modifier::BOLD),
@@ -2492,7 +2597,7 @@ impl App {
                                     label_padded,
                                     Style::default().add_modifier(Modifier::BOLD),
                                 ),
-                            ];
+                            ]);
                             spans.extend(runtime_context_spans(
                                 &format!("  {}", runtime.context),
                                 Style::default()
@@ -2883,26 +2988,27 @@ impl App {
                 ..
             } => {
                 self.render_dim_overlay(frame);
-                // Outer dialog: border + title.
-                let area = centered_rect(56, 30, frame.area());
-                Clear.render(area, frame.buffer_mut());
-                let outer = self.themed_overlay_block("Delete Agent");
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
-
-                // Layout: body (flexible) / checkbox (1 row) / spacer / buttons.
-                // The warning text and hint live in the flexible body area so
-                // long lines can wrap safely without truncation. The checkbox
-                // is a single fixed-height row below the body.
-                let [body_area, checkbox_area, _, buttons_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Min(1),
-                        Constraint::Length(1),
-                        Constraint::Length(1),
-                        Constraint::Length(3),
-                    ])
-                    .areas(inner);
+                let dialog_width = 56.min(frame.area().width.max(1));
+                let inner_width = dialog_width.saturating_sub(2);
+                let checkbox_height = if *worktree_shared {
+                    0
+                } else {
+                    let state = if *focus == DeleteAgentFocus::Checkbox {
+                        CheckboxState::Focused
+                    } else {
+                        CheckboxState::Normal
+                    };
+                    let checkbox = Checkbox::new("Also delete the worktree and branch")
+                        .checked(*delete_worktree)
+                        .state(state);
+                    checkbox
+                        .layout(
+                            inner_width,
+                            checkbox.marker_style(Style::default()),
+                            checkbox.label_style(Style::default()),
+                        )
+                        .height
+                };
 
                 // Body: question text + conditional warning/hint/shared note.
                 // Long warning text is split into two explicit Lines so it
@@ -2939,37 +3045,53 @@ impl App {
                         Style::default().fg(self.theme.hint_desc_fg),
                     )));
                 }
+                let body_height = wrapped_line_count(&body_lines, inner_width, false);
+                let checkbox_spacing = u16::from(!*worktree_shared);
+                let area = centered_rect_exact(
+                    dialog_width,
+                    2 + body_height + checkbox_spacing + checkbox_height + 3,
+                    frame.area(),
+                );
+                Clear.render(area, frame.buffer_mut());
+                let outer = self.themed_overlay_block("Delete Agent");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, checkbox_area, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(body_height),
+                        Constraint::Length(checkbox_spacing),
+                        Constraint::Length(checkbox_height),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
                 Paragraph::new(body_lines)
                     .wrap(Wrap { trim: false })
                     .render(body_area, frame.buffer_mut());
 
-                // Checkbox row (1 line). When the worktree is shared, the
-                // checkbox is hidden and the line is left empty — the shared
-                // note above already explains the situation.
-                if !*worktree_shared {
-                    let check = if *delete_worktree { "x" } else { " " };
-                    let checkbox_focused = *focus == DeleteAgentFocus::Checkbox;
-                    let label_style = if checkbox_focused {
-                        Style::default()
-                            .fg(self.theme.button_active_fg)
-                            .add_modifier(Modifier::BOLD)
+                let checkbox_rect = if !*worktree_shared {
+                    let checkbox_state = if *focus == DeleteAgentFocus::Checkbox {
+                        CheckboxState::Focused
                     } else {
-                        Style::default().fg(self.theme.input_label_fg)
+                        CheckboxState::Normal
                     };
-                    let bracket_style = if checkbox_focused {
-                        Style::default()
-                            .fg(self.theme.button_active_fg)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(self.theme.hint_key_fg)
-                    };
-                    Paragraph::new(Line::from(vec![
-                        Span::raw(" "),
-                        Span::styled(format!("[{check}]"), bracket_style),
-                        Span::styled(" Also delete the worktree and branch", label_style),
-                    ]))
-                    .render(checkbox_area, frame.buffer_mut());
-                }
+                    let (rect, _) = self.render_overlay_checkbox(
+                        frame,
+                        checkbox_area,
+                        "Also delete the worktree and branch",
+                        *delete_worktree,
+                        checkbox_state,
+                        None,
+                    );
+                    Some(OverlayCheckbox {
+                        id: OverlayCheckboxId::DeleteAgentWorktree,
+                        rect,
+                    })
+                } else {
+                    None
+                };
 
                 // Button area: two bordered panels side by side.
                 let btn_width = 16u16;
@@ -3032,6 +3154,7 @@ impl App {
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
                     cancel_button: cancel_area,
                     delete_button: delete_area,
+                    checkbox: checkbox_rect,
                 };
             }
             PromptState::ConfirmDeleteTerminal {
@@ -3596,19 +3719,38 @@ impl App {
                 ..
             } => {
                 self.render_dim_overlay(frame);
-                let area = centered_rect_exact(62, 12, frame.area());
+                let checkbox = Checkbox::new("Also rename the git branch")
+                    .checked(*rename_branch)
+                    .state(CheckboxState::Normal);
+                let dialog_width = 62.min(frame.area().width.max(1));
+                let inner_width = dialog_width.saturating_sub(2);
+                let checkbox_height = checkbox
+                    .layout(
+                        inner_width,
+                        checkbox.marker_style(Style::default()),
+                        checkbox.label_style(Style::default()),
+                    )
+                    .height
+                    .saturating_add(1);
+                let checkbox_spacing = 1;
+                let area = centered_rect_exact(
+                    dialog_width,
+                    9 + checkbox_spacing + checkbox_height,
+                    frame.area(),
+                );
                 Clear.render(area, frame.buffer_mut());
 
                 let outer = self.themed_overlay_block("Rename Agent");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
 
-                let [label_area, input_area, checkbox_area, hint_area] = Layout::default()
+                let [label_area, input_area, _, checkbox_area, hint_area] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(1),
                         Constraint::Length(3),
-                        Constraint::Length(3),
+                        Constraint::Length(checkbox_spacing),
+                        Constraint::Length(checkbox_height),
                         Constraint::Min(1),
                     ])
                     .areas(inner);
@@ -3653,25 +3795,20 @@ impl App {
                     .block(input_block)
                     .render(input_area, frame.buffer_mut());
 
-                // Checkbox for optional branch rename.
-                let check = if *rename_branch { "x" } else { " " };
-                let checkbox_line = Line::from(vec![
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("[{check}]"),
-                        Style::default().fg(self.theme.hint_key_fg),
-                    ),
-                    Span::styled(
-                        " Also rename the git branch",
-                        Style::default().fg(self.theme.input_label_fg),
-                    ),
-                ]);
-                let checkbox_hint = Line::from(Span::styled(
-                    "     Open PRs will still reference the old branch name",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                Paragraph::new(vec![checkbox_line, checkbox_hint])
-                    .render(checkbox_area, frame.buffer_mut());
+                let (checkbox_rect, _) = self.render_overlay_checkbox(
+                    frame,
+                    checkbox_area,
+                    "Also rename the git branch",
+                    *rename_branch,
+                    CheckboxState::Normal,
+                    Some(Line::from(Span::styled(
+                        format!(
+                            "{}Open PRs will still reference the old branch name",
+                            Checkbox::indent()
+                        ),
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ))),
+                );
 
                 let confirm_key = self.bindings.label_for(Action::Confirm);
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
@@ -3693,8 +3830,13 @@ impl App {
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
                 Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
-                self.overlay_layout.active =
-                    OverlayMouseLayout::RenameSession { input: input_inner };
+                self.overlay_layout.active = OverlayMouseLayout::RenameSession {
+                    input: input_inner,
+                    checkbox: Some(OverlayCheckbox {
+                        id: OverlayCheckboxId::RenameSessionBranch,
+                        rect: checkbox_rect,
+                    }),
+                };
             }
             PromptState::EditMacros { .. } => {
                 // Full rendering implemented in Task #5.
@@ -5204,6 +5346,27 @@ mod tests {
     fn centered_rect_exact_clamps_to_available_area() {
         let area = Rect::new(0, 0, 40, 6);
         assert_eq!(centered_rect_exact(56, 9, area), area);
+    }
+
+    #[test]
+    fn wrapped_line_count_counts_unwrapped_lines() {
+        let lines = vec![Line::from(" short line"), Line::from(" another short line")];
+
+        assert_eq!(wrapped_line_count(&lines, 40, false), 2);
+    }
+
+    #[test]
+    fn wrapped_line_count_grows_for_narrow_widths() {
+        let lines = vec![Line::from(vec![
+            Span::raw(" Are you sure you want to delete "),
+            Span::styled(
+                "very-long-branch-name",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("?"),
+        ])];
+
+        assert!(wrapped_line_count(&lines, 20, false) > 1);
     }
 
     // ── Unit tests for capitalize ─────────────────────────────────

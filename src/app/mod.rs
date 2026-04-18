@@ -699,6 +699,18 @@ impl OverlayMouseLayoutState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OverlayCheckboxId {
+    DeleteAgentWorktree,
+    RenameSessionBranch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OverlayCheckbox {
+    pub(crate) id: OverlayCheckboxId,
+    pub(crate) rect: Rect,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) enum OverlayMouseLayout {
     #[default]
@@ -738,6 +750,7 @@ pub(crate) enum OverlayMouseLayout {
     ConfirmDeleteAgent {
         cancel_button: Rect,
         delete_button: Rect,
+        checkbox: Option<OverlayCheckbox>,
     },
     ConfirmDeleteTerminal {
         cancel_button: Rect,
@@ -765,6 +778,7 @@ pub(crate) enum OverlayMouseLayout {
     },
     RenameSession {
         input: Rect,
+        checkbox: Option<OverlayCheckbox>,
     },
     NameNewAgent {
         input: Rect,
@@ -899,6 +913,7 @@ pub(crate) enum PullTarget {
     Session,
 }
 
+mod checkbox;
 mod input;
 mod render;
 mod sessions;
