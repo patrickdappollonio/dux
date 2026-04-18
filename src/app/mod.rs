@@ -127,6 +127,10 @@ pub struct App {
     /// Kept independent of `raw_input_buf` so that suppressed keystrokes
     /// cannot leak into the first post-loading `process_raw_input_bytes` call.
     pub(crate) loading_input_buf: Vec<u8>,
+    /// True while processing bytes between bracket-paste markers
+    /// (`ESC[200~` … `ESC[201~`). Inside a paste, intercept matching is
+    /// skipped so pasted text doesn't trigger keybindings.
+    pub(crate) in_bracket_paste: bool,
     pub(crate) macro_bar: Option<MacroBarState>,
     pub(crate) sigwinch_flag: Arc<AtomicBool>,
     pub(crate) force_redraw: bool,
@@ -1002,6 +1006,7 @@ impl App {
             interactive_patterns,
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
+            in_bracket_paste: false,
             macro_bar: None,
             sigwinch_flag,
             force_redraw: false,

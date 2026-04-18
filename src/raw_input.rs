@@ -1,5 +1,10 @@
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
+/// Bracket paste mode start marker: `ESC [ 200 ~`
+pub const BRACKET_PASTE_START: &[u8] = b"\x1b[200~";
+/// Bracket paste mode end marker: `ESC [ 201 ~`
+pub const BRACKET_PASTE_END: &[u8] = b"\x1b[201~";
+
 /// Returns `true` if the byte sequence is an SGR mouse event (`\x1b[<…M` or
 /// `\x1b[<…m`).
 pub fn is_sgr_mouse(seq: &[u8]) -> bool {
@@ -720,5 +725,32 @@ mod tests {
         let seq = b"\x1b[<0;10;5M";
         let translated = translate_sgr_mouse(seq, 0, 0).unwrap();
         assert_eq!(translated, b"\x1b[<0;10;5M");
+    }
+
+    #[test]
+    fn bracket_paste_markers_split_correctly() {
+        // ESC[200~ starts bracket paste, ESC[201~ ends it.
+        let mut input = Vec::new();
+        input.extend_from_slice(BRACKET_PASTE_START);
+        input.extend_from_slice(b"hello");
+        input.extend_from_slice(BRACKET_PASTE_END);
+
+        let (seqs, rem) = split_sequences(&input);
+        assert!(rem.is_empty());
+        // 1 start marker + 5 chars + 1 end marker = 7 sequences
+        assert_eq!(seqs.len(), 7);
+        assert_eq!(seqs[0], BRACKET_PASTE_START);
+        assert_eq!(seqs[1], b"h");
+        assert_eq!(seqs[2], b"e");
+        assert_eq!(seqs[3], b"l");
+        assert_eq!(seqs[4], b"l");
+        assert_eq!(seqs[5], b"o");
+        assert_eq!(seqs[6], BRACKET_PASTE_END);
+    }
+
+    #[test]
+    fn bracket_paste_constants_are_valid() {
+        assert_eq!(BRACKET_PASTE_START, b"\x1b[200~");
+        assert_eq!(BRACKET_PASTE_END, b"\x1b[201~");
     }
 }
