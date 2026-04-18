@@ -157,9 +157,10 @@ pub struct App {
     /// Maps watched worktree paths back to session IDs so the refs watcher
     /// can route change events.
     pub(crate) refs_watch_paths: HashMap<PathBuf, String>,
-    /// Session IDs spawned with resume_args that should fall back to regular
-    /// args if the PTY exits before producing any output.
-    pub(crate) resume_fallback_candidates: HashSet<String>,
+    /// Session IDs spawned with resume args and the wall-clock time the resume
+    /// attempt began. Used for one-shot fallbacks when resume exits quickly or
+    /// hangs without rendering visible output.
+    pub(crate) resume_fallback_candidates: HashMap<String, Instant>,
     /// Session IDs whose worktree is currently being removed by a background
     /// worker. Prevents duplicate delete requests from spawning a second
     /// worker while the first is still running; also drives the dimmed
@@ -1038,7 +1039,7 @@ impl App {
             pr_last_checked: HashMap::new(),
             refs_watcher: None,
             refs_watch_paths: HashMap::new(),
-            resume_fallback_candidates: HashSet::new(),
+            resume_fallback_candidates: HashMap::new(),
             pending_deletions: HashSet::new(),
             deletion_busy_messages: HashMap::new(),
             syntax_cache: SyntaxCache::new(),
@@ -1966,6 +1967,24 @@ impl App {
             session.updated_at = Utc::now();
             let _ = self.session_store.upsert_session(session);
         }
+    }
+
+    pub(crate) fn mark_session_provider_started(&mut self, session_id: &str) {
+        let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|candidate| candidate.id == session_id)
+        else {
+            return;
+        };
+
+        let provider = session.provider.clone();
+        if !session.mark_provider_started(&provider) {
+            return;
+        }
+
+        session.updated_at = Utc::now();
+        let _ = self.session_store.upsert_session(session);
     }
 
     /// Refreshes the shared session snapshot used by the branch-sync worker.

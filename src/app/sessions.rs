@@ -267,6 +267,11 @@ impl App {
         )
     }
 
+    pub(crate) fn should_resume_session(&self, session: &AgentSession) -> bool {
+        let cfg = provider_config(&self.config, &session.provider);
+        cfg.supports_session_resume() && session.has_started_provider(&session.provider)
+    }
+
     pub(crate) fn spawn_companion_terminal_for_session(
         &self,
         session: &AgentSession,
@@ -971,6 +976,7 @@ impl App {
             Ok(client) => {
                 self.providers.insert(session.id.clone(), client);
                 self.mark_session_status(&session.id, SessionStatus::Active);
+                self.mark_session_provider_started(&session.id);
                 self.show_agent_surface();
                 self.input_target = InputTarget::Agent;
                 self.fullscreen_overlay = FullscreenOverlay::Agent;
@@ -1031,25 +1037,35 @@ impl App {
         let detached_label =
             self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
 
-        let cfg = provider_config(&self.config, &session.provider);
-        let use_resume = cfg.supports_session_resume();
+        let use_resume = self.should_resume_session(&session);
         match self.spawn_pty_for_session(&session, use_resume) {
             Ok(client) => {
                 self.providers.insert(session.id.clone(), client);
                 if use_resume {
-                    self.resume_fallback_candidates.insert(session.id.clone());
+                    self.resume_fallback_candidates
+                        .insert(session.id.clone(), Instant::now());
                 }
                 self.mark_session_status(&session.id, SessionStatus::Active);
+                self.mark_session_provider_started(&session.id);
                 self.show_agent_surface();
                 self.input_target = InputTarget::Agent;
                 self.fullscreen_overlay = FullscreenOverlay::Agent;
                 let proj_name = self.project_name_for_session(&session);
-                let mut msg = format!(
-                    "Relaunched {} agent \"{}\" in project \"{}\".",
-                    session.provider.as_str(),
-                    session.branch_name,
-                    proj_name
-                );
+                let mut msg = if use_resume {
+                    format!(
+                        "Resumed {} agent \"{}\" in project \"{}\".",
+                        session.provider.as_str(),
+                        session.branch_name,
+                        proj_name
+                    )
+                } else {
+                    format!(
+                        "Started fresh {} session for agent \"{}\" in project \"{}\". Use /sessions inside the agent to restore a prior conversation.",
+                        session.provider.as_str(),
+                        session.branch_name,
+                        proj_name
+                    )
+                };
                 if let Some(detached) = &detached_label {
                     msg.push_str(&format!(
                         " Agent \"{}\" was detached to avoid worktree conflicts.",
@@ -1731,7 +1747,7 @@ mod tests {
             pr_last_checked: std::collections::HashMap::new(),
             refs_watcher: None,
             refs_watch_paths: std::collections::HashMap::new(),
-            resume_fallback_candidates: std::collections::HashSet::new(),
+            resume_fallback_candidates: std::collections::HashMap::new(),
             pending_deletions: std::collections::HashSet::new(),
             deletion_busy_messages: std::collections::HashMap::new(),
             syntax_cache: crate::diff::SyntaxCache::new(),
@@ -1756,6 +1772,7 @@ mod tests {
             branch_name: format!("branch-{id}"),
             worktree_path: worktree.to_string(),
             title: None,
+            started_providers: Vec::new(),
             status: SessionStatus::Detached,
             created_at: now,
             updated_at: now,
@@ -1926,6 +1943,40 @@ mod tests {
             .iter()
             .any(|s| s.id != "s1" && s.worktree_path == "/tmp/wt/a");
         assert!(!has_sibling, "no sibling session should exist");
+    }
+
+    #[test]
+    fn should_resume_only_for_providers_started_on_session() {
+        let mut session = make_session("s1", "claude", "/tmp/wt/a");
+        session.started_providers = vec!["claude".to_string()];
+        let project = make_project("project-1", "claude");
+        let mut app = test_app_with_sessions(vec![session.clone()], vec![project]);
+
+        assert!(app.should_resume_session(&session));
+
+        app.sessions[0].provider = ProviderKind::from_str("codex");
+        let session = app.sessions[0].clone();
+        assert!(!app.should_resume_session(&session));
+
+        app.sessions[0].started_providers.push("codex".to_string());
+        let session = app.sessions[0].clone();
+        assert!(app.should_resume_session(&session));
+    }
+
+    #[test]
+    fn mark_session_provider_started_persists_history() {
+        let session = make_session("s1", "claude", "/tmp/wt/a");
+        let project = make_project("project-1", "claude");
+        let mut app = test_app_with_sessions(vec![session], vec![project]);
+
+        app.mark_session_provider_started("s1");
+
+        assert_eq!(
+            app.sessions[0].started_providers,
+            vec!["claude".to_string()]
+        );
+        let persisted = app.session_store.load_sessions().expect("load sessions");
+        assert_eq!(persisted[0].started_providers, vec!["claude".to_string()]);
     }
 
     /// Build a `Project` whose `path` points at a caller-controlled directory,

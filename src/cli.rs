@@ -787,6 +787,7 @@ mod tests {
                     branch_name: format!("branch-{id}"),
                     worktree_path: worktree.to_string_lossy().to_string(),
                     title: None,
+                    started_providers: Vec::new(),
                     status: SessionStatus::Active,
                     created_at: now,
                     updated_at: now,
