@@ -1228,7 +1228,21 @@ impl App {
                             && !is_scrolled_back
                             && let Some(provider) = self.selected_terminal_surface_client()
                         {
-                            let _ = provider.write_bytes(&raw);
+                            // Translate screen-absolute coordinates to
+                            // child-relative coordinates before forwarding.
+                            // Without this, the child sees rows/cols offset
+                            // by the terminal area's position on screen
+                            // (header + borders), causing highlights to land
+                            // several lines below the actual click.
+                            if let Some(term_area) = self.mouse_layout.agent_term
+                                && let Some(translated) = crate::raw_input::translate_sgr_mouse(
+                                    &raw,
+                                    term_area.x,
+                                    term_area.y,
+                                )
+                            {
+                                let _ = provider.write_bytes(&translated);
+                            }
                         }
                     }
                 }
