@@ -112,9 +112,26 @@ pub struct AgentSession {
     pub branch_name: String,
     pub worktree_path: String,
     pub title: Option<String>,
+    pub started_providers: Vec<String>,
     pub status: SessionStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl AgentSession {
+    pub fn has_started_provider(&self, provider: &ProviderKind) -> bool {
+        self.started_providers
+            .iter()
+            .any(|started| started == provider.as_str())
+    }
+
+    pub fn mark_provider_started(&mut self, provider: &ProviderKind) -> bool {
+        if self.has_started_provider(provider) {
+            return false;
+        }
+        self.started_providers.push(provider.as_str().to_string());
+        true
+    }
 }
 
 #[derive(Clone, Debug)]

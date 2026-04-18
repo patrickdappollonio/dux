@@ -161,6 +161,7 @@ pub struct ProviderCommandConfig {
     pub command: String,
     pub args: Vec<String>,
     pub resume_args: Option<Vec<String>>,
+    pub resume_wait_timeout_ms: Option<u64>,
     pub oneshot_args: Vec<String>,
     pub oneshot_output: OneshotOutput,
     pub install_hint: Option<String>,
@@ -277,6 +278,7 @@ impl Default for ProviderCommandConfig {
             command: String::new(),
             args: Vec::new(),
             resume_args: None,
+            resume_wait_timeout_ms: None,
             oneshot_args: Vec::new(),
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
@@ -384,6 +386,9 @@ impl ProvidersConfig {
                 indexmap::map::Entry::Occupied(mut entry) => {
                     if entry.get().resume_args.is_none() {
                         entry.get_mut().resume_args = config.resume_args;
+                    }
+                    if entry.get().resume_wait_timeout_ms.is_none() {
+                        entry.get_mut().resume_wait_timeout_ms = config.resume_wait_timeout_ms;
                     }
                 }
             }
@@ -969,6 +974,9 @@ fn patch_providers(doc: &mut DocumentMut, providers: &ProvidersConfig) {
             resume.push(a.as_str());
         }
         tbl["resume_args"] = toml_edit::value(resume);
+        if let Some(timeout_ms) = config.resume_wait_timeout_ms {
+            tbl["resume_wait_timeout_ms"] = toml_edit::value(timeout_ms as i64);
+        }
 
         let mut oneshot = Array::new();
         for a in &config.oneshot_args {
@@ -1251,6 +1259,7 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4] {
                 command: "claude".to_string(),
                 args: Vec::new(),
                 resume_args: Some(vec!["--continue".to_string()]),
+                resume_wait_timeout_ms: None,
                 oneshot_args: vec![
                     "--bare".to_string(),
                     "-p".to_string(),
@@ -1271,6 +1280,7 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4] {
                 command: "codex".to_string(),
                 args: Vec::new(),
                 resume_args: Some(vec!["resume".to_string(), "--last".to_string()]),
+                resume_wait_timeout_ms: None,
                 oneshot_args: vec![
                     "exec".to_string(),
                     "--ephemeral".to_string(),
@@ -1292,6 +1302,7 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4] {
                 command: "gemini".to_string(),
                 args: Vec::new(),
                 resume_args: Some(vec!["--resume".to_string()]),
+                resume_wait_timeout_ms: None,
                 oneshot_args: vec!["-p".to_string(), "{prompt}".to_string()],
                 oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("npm install -g @google/gemini-cli".to_string()),
@@ -1304,6 +1315,7 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4] {
                 command: "opencode".to_string(),
                 args: Vec::new(),
                 resume_args: Some(vec!["--continue".to_string()]),
+                resume_wait_timeout_ms: Some(3_000),
                 oneshot_args: vec!["run".to_string(), "{prompt}".to_string()],
                 oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("npm install -g opencode-ai".to_string()),
@@ -1355,6 +1367,15 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
     out.push_str(&format!(
         "resume_args = {}\n",
         render_string_list(config.resume_args.as_deref().unwrap_or(&[]))
+    ));
+    out.push_str(
+        "# Optional timeout for resumed sessions that produce no visible output.\n\
+         # If resume hangs before rendering anything, dux kills it and retries fresh after this many milliseconds.\n\
+         # Set to 0 to disable the timeout.\n",
+    );
+    out.push_str(&format!(
+        "resume_wait_timeout_ms = {}\n",
+        config.resume_wait_timeout_ms.unwrap_or(0)
     ));
     out.push_str("# Oneshot args for non-interactive use (e.g. AI commit messages).\n");
     out.push_str("# Placeholders: {prompt} = the prompt text, {tempfile} = temp file path.\n");
@@ -1783,6 +1804,7 @@ agent_scrollback_lines = 10000
             command: "example".to_string(),
             args: vec!["--interactive".to_string()],
             resume_args: Some(vec!["--resume".to_string(), "--last".to_string()]),
+            resume_wait_timeout_ms: Some(2_000),
             oneshot_args: Vec::new(),
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
@@ -1795,6 +1817,7 @@ agent_scrollback_lines = 10000
             command: "example".to_string(),
             args: vec!["--interactive".to_string()],
             resume_args: None,
+            resume_wait_timeout_ms: None,
             oneshot_args: Vec::new(),
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
@@ -1813,6 +1836,7 @@ agent_scrollback_lines = 10000
                     command: "claude".to_string(),
                     args: Vec::new(),
                     resume_args: None,
+                    resume_wait_timeout_ms: None,
                     oneshot_args: Vec::new(),
                     oneshot_output: OneshotOutput::Stdout,
                     install_hint: None,
@@ -1841,6 +1865,7 @@ agent_scrollback_lines = 10000
                     command: "claude".to_string(),
                     args: Vec::new(),
                     resume_args: Some(Vec::new()),
+                    resume_wait_timeout_ms: None,
                     oneshot_args: Vec::new(),
                     oneshot_output: OneshotOutput::Stdout,
                     install_hint: None,
@@ -1856,6 +1881,16 @@ agent_scrollback_lines = 10000
             .expect("claude provider should still exist");
         assert_eq!(claude.resume_args, Some(Vec::new()));
         assert!(!claude.supports_session_resume());
+    }
+
+    #[test]
+    fn built_in_opencode_ships_resume_timeout() {
+        let config = Config::default();
+        let opencode = config
+            .providers
+            .get("opencode")
+            .expect("opencode provider should exist");
+        assert_eq!(opencode.resume_wait_timeout_ms, Some(3_000));
     }
 
     #[test]
@@ -1894,6 +1929,7 @@ agent_scrollback_lines = 10000
             .get("custom")
             .expect("custom provider should exist");
         assert_eq!(provider.resume_args, None);
+        assert_eq!(provider.resume_wait_timeout_ms, None);
         assert_eq!(provider.interactive_args(true), ["chat"]);
     }
 
@@ -1911,6 +1947,7 @@ oneshot_output = "stdout"
         assert_eq!(parsed.command, "legacy-agent");
         assert_eq!(parsed.args, vec!["serve"]);
         assert_eq!(parsed.resume_args, None);
+        assert_eq!(parsed.resume_wait_timeout_ms, None);
         assert!(!parsed.supports_session_resume());
     }
 
@@ -2136,6 +2173,7 @@ oneshot_output = "stdout"
                     command: "claude".to_string(),
                     args: Vec::new(),
                     resume_args: Some(vec!["--continue".to_string()]),
+                    resume_wait_timeout_ms: None,
                     oneshot_args: vec!["-p".to_string(), "{prompt}".to_string()],
                     oneshot_output: OneshotOutput::Stdout,
                     install_hint: None,

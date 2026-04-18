@@ -4064,6 +4064,7 @@ mod tests {
             branch_name: "agent-branch".to_string(),
             worktree_path: paths.worktrees_root.to_string_lossy().to_string(),
             title: None,
+            started_providers: Vec::new(),
             status: SessionStatus::Detached,
             created_at: now,
             updated_at: now,
@@ -4159,7 +4160,7 @@ mod tests {
             pr_last_checked: std::collections::HashMap::new(),
             refs_watcher: None,
             refs_watch_paths: std::collections::HashMap::new(),
-            resume_fallback_candidates: std::collections::HashSet::new(),
+            resume_fallback_candidates: std::collections::HashMap::new(),
             pending_deletions: std::collections::HashSet::new(),
             deletion_busy_messages: std::collections::HashMap::new(),
             syntax_cache: crate::diff::SyntaxCache::new(),
@@ -4782,6 +4783,7 @@ mod tests {
             branch_name: "beta-agent".to_string(),
             worktree_path: app.paths.worktrees_root.join("other").display().to_string(),
             title: None,
+            started_providers: Vec::new(),
             status: SessionStatus::Detached,
             created_at: now,
             updated_at: now,
@@ -6190,6 +6192,7 @@ mod tests {
                 .display()
                 .to_string(),
             title: None,
+            started_providers: vec!["codex".to_string()],
             status: SessionStatus::Detached,
             created_at: now,
             updated_at: now,
@@ -6208,6 +6211,7 @@ mod tests {
                 .display()
                 .to_string(),
             title: None,
+            started_providers: vec!["codex".to_string()],
             status: SessionStatus::Exited,
             created_at: now,
             updated_at: now,
@@ -6229,6 +6233,7 @@ mod tests {
             branch_name: "other-branch".to_string(),
             worktree_path: app.paths.worktrees_root.join("other").display().to_string(),
             title: None,
+            started_providers: vec!["codex".to_string()],
             status: SessionStatus::Detached,
             created_at: now,
             updated_at: now,
@@ -6283,6 +6288,21 @@ mod tests {
         assert_eq!(provider_for("session-2"), Some("gemini"));
         assert_eq!(provider_for("session-3"), Some("gemini"));
         assert_eq!(provider_for("session-4"), Some("codex"));
+
+        let started_providers_for = |id: &str| {
+            persisted
+                .iter()
+                .find(|session| session.id == id)
+                .map(|session| session.started_providers.clone())
+        };
+        assert_eq!(
+            started_providers_for("session-2"),
+            Some(vec!["codex".to_string()])
+        );
+        assert_eq!(
+            started_providers_for("session-3"),
+            Some(vec!["codex".to_string()])
+        );
 
         assert!(
             app.status
@@ -6808,7 +6828,8 @@ mod tests {
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn quick-exit");
         app.providers.insert(session_id.clone(), client);
         app.mark_session_status(&session_id, SessionStatus::Active);
-        app.resume_fallback_candidates.insert(session_id.clone());
+        app.resume_fallback_candidates
+            .insert(session_id.clone(), std::time::Instant::now());
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
 
@@ -6824,7 +6845,7 @@ mod tests {
         );
         assert_eq!(app.sessions[0].status, SessionStatus::Active);
         assert!(
-            !app.resume_fallback_candidates.contains(&session_id),
+            !app.resume_fallback_candidates.contains_key(&session_id),
             "candidate should have been removed after fallback"
         );
         assert!(
@@ -6846,7 +6867,8 @@ mod tests {
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn with output");
         app.providers.insert(session_id.clone(), client);
         app.mark_session_status(&session_id, SessionStatus::Active);
-        app.resume_fallback_candidates.insert(session_id.clone());
+        app.resume_fallback_candidates
+            .insert(session_id.clone(), std::time::Instant::now());
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
 
@@ -6858,7 +6880,7 @@ mod tests {
         // should NOT have triggered. The session should be detached.
         assert_eq!(app.sessions[0].status, SessionStatus::Detached);
         assert!(
-            !app.resume_fallback_candidates.contains(&session_id),
+            !app.resume_fallback_candidates.contains_key(&session_id),
             "candidate should have been removed even when skipped"
         );
     }
@@ -6888,7 +6910,8 @@ mod tests {
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn one-liner");
         app.providers.insert(session_id.clone(), client);
         app.mark_session_status(&session_id, SessionStatus::Active);
-        app.resume_fallback_candidates.insert(session_id.clone());
+        app.resume_fallback_candidates
+            .insert(session_id.clone(), std::time::Instant::now());
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
 
@@ -6934,6 +6957,82 @@ mod tests {
             "provider should have been removed"
         );
         assert_eq!(app.sessions[0].status, SessionStatus::Detached);
+    }
+
+    #[test]
+    fn hung_resume_falls_back_to_fresh_session_once() {
+        let mut app = test_app(default_bindings());
+        app.config.providers.commands.insert(
+            "opencode".to_string(),
+            crate::config::ProviderCommandConfig {
+                command: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "sleep 5".to_string()],
+                resume_args: Some(vec!["-c".to_string(), "sleep 5".to_string()]),
+                resume_wait_timeout_ms: Some(10),
+                ..Default::default()
+            },
+        );
+        app.sessions[0].provider = ProviderKind::from_str("opencode");
+        let session_id = app.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let args = vec!["-c".to_string(), "sleep 5".to_string()];
+        let client =
+            PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn hung resume");
+        app.providers.insert(session_id.clone(), client);
+        app.mark_session_status(&session_id, SessionStatus::Active);
+        app.resume_fallback_candidates.insert(
+            session_id.clone(),
+            std::time::Instant::now() - std::time::Duration::from_millis(20),
+        );
+        app.selected_left = 1;
+        app.session_surface = SessionSurface::Agent;
+
+        app.drain_events();
+
+        assert!(
+            app.providers.contains_key(&session_id),
+            "provider should still be present after timeout fallback"
+        );
+        assert_eq!(app.sessions[0].status, SessionStatus::Active);
+        assert!(
+            !app.resume_fallback_candidates.contains_key(&session_id),
+            "candidate should have been removed after timeout fallback"
+        );
+        assert!(
+            app.status.text().contains("Resume timed out"),
+            "status should inform user about timeout fallback: {:?}",
+            app.status.text()
+        );
+    }
+
+    #[test]
+    fn hung_fresh_session_does_not_retry_forever() {
+        let mut app = test_app(default_bindings());
+        app.config.providers.commands.insert(
+            "opencode".to_string(),
+            crate::config::ProviderCommandConfig {
+                command: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "sleep 5".to_string()],
+                resume_args: Some(vec!["-c".to_string(), "sleep 5".to_string()]),
+                resume_wait_timeout_ms: Some(10),
+                ..Default::default()
+            },
+        );
+        app.sessions[0].provider = ProviderKind::from_str("opencode");
+        let session_id = app.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let args = vec!["-c".to_string(), "sleep 5".to_string()];
+        let client =
+            PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn fresh hang");
+        app.providers.insert(session_id.clone(), client);
+        app.mark_session_status(&session_id, SessionStatus::Active);
+
+        app.drain_events();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        app.drain_events();
+
+        assert!(app.providers.contains_key(&session_id));
+        assert!(app.resume_fallback_candidates.is_empty());
     }
 
     // ── Scroll-mode input suppression tests ─────────────────────────

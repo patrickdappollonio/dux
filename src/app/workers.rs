@@ -28,6 +28,7 @@ impl App {
                     );
                     self.providers.insert(session.id.clone(), client);
                     self.sessions.insert(0, session.clone());
+                    self.mark_session_provider_started(&session.id);
                     self.update_branch_sync_sessions();
                     self.rebuild_left_items();
                     self.selected_left = self
@@ -352,6 +353,7 @@ impl App {
                 }
             }
         }
+        self.retry_hung_resume_sessions();
         // Detect PTY exits.
         let mut exited = Vec::new();
         for (session_id, provider) in &mut self.providers {
@@ -365,7 +367,7 @@ impl App {
         // This handles `claude --continue || claude` style fallback.
         let mut retried = HashSet::new();
         for session_id in &exited {
-            if !self.resume_fallback_candidates.remove(session_id) {
+            if self.resume_fallback_candidates.remove(session_id).is_none() {
                 continue;
             }
             // Check whether the exited process produced only minimal output
@@ -393,10 +395,11 @@ impl App {
                 Ok(client) => {
                     self.providers.insert(session_id.clone(), client);
                     self.mark_session_status(session_id, SessionStatus::Active);
+                    self.mark_session_provider_started(session_id);
                     let proj_name = self.project_name_for_session(&session);
                     self.set_info(format!(
-                        "No prior session to resume for agent \"{}\". Started a fresh {} session in project \"{}\".",
-                        session.branch_name,
+                            "No prior session to resume for agent \"{}\". Started a fresh {} session in project \"{}\".",
+                            session.branch_name,
                         session.provider.as_str(),
                         proj_name,
                     ));
@@ -805,6 +808,64 @@ impl App {
             }
         });
     }
+
+    fn retry_hung_resume_sessions(&mut self) {
+        let mut hung = Vec::new();
+
+        for (session_id, started_at) in &self.resume_fallback_candidates {
+            let Some(session) = self.sessions.iter().find(|s| s.id == *session_id) else {
+                continue;
+            };
+            let cfg = provider_config(&self.config, &session.provider);
+            let Some(timeout_ms) = cfg.resume_wait_timeout_ms.filter(|timeout| *timeout > 0) else {
+                continue;
+            };
+            if started_at.elapsed() < Duration::from_millis(timeout_ms) {
+                continue;
+            }
+            let Some(provider) = self.providers.get(session_id) else {
+                continue;
+            };
+            if provider.has_output() {
+                continue;
+            }
+            hung.push(session_id.clone());
+        }
+
+        for session_id in hung {
+            self.resume_fallback_candidates.remove(&session_id);
+            let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
+                continue;
+            };
+            self.providers.remove(&session_id);
+            self.last_pty_activity.remove(&session_id);
+            logger::info(&format!(
+                "resume args produced no visible output for agent \"{}\" within timeout, retrying with regular args",
+                session.branch_name
+            ));
+            match self.spawn_pty_for_session(&session, false) {
+                Ok(client) => {
+                    self.providers.insert(session_id.clone(), client);
+                    self.mark_session_status(&session_id, SessionStatus::Active);
+                    self.mark_session_provider_started(&session_id);
+                    let proj_name = self.project_name_for_session(&session);
+                    self.set_info(format!(
+                        "Resume timed out for agent \"{}\" with no visible output. Started a fresh {} session in project \"{}\".",
+                        session.branch_name,
+                        session.provider.as_str(),
+                        proj_name,
+                    ));
+                }
+                Err(err) => {
+                    logger::error(&format!(
+                        "timeout fallback PTY spawn failed for {}: {err}",
+                        session_id
+                    ));
+                    self.mark_session_status(&session_id, SessionStatus::Detached);
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn run_create_agent_job(
@@ -1052,6 +1113,7 @@ pub(crate) fn run_create_agent_job(
         branch_name,
         worktree_path: worktree_path.to_string_lossy().to_string(),
         title: None,
+        started_providers: Vec::new(),
         status: SessionStatus::Active,
         created_at: Utc::now(),
         updated_at: Utc::now(),

@@ -47,6 +47,12 @@ impl SessionStore {
         )?;
         ensure_column(&self.conn, "agent_sessions", "title", "text")?;
         ensure_column(&self.conn, "agent_sessions", "project_path", "text")?;
+        ensure_column(
+            &self.conn,
+            "agent_sessions",
+            "started_providers",
+            "text not null default '[]'",
+        )?;
         self.conn.execute_batch(
             r#"
             create table if not exists session_prs (
@@ -154,9 +160,9 @@ impl SessionStore {
         self.conn.execute(
             r#"
             insert into agent_sessions
-                (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, status, created_at, updated_at)
+                (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, status, created_at, updated_at)
             values
-                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             on conflict(id) do update set
                 project_path=excluded.project_path,
                 provider=excluded.provider,
@@ -164,6 +170,7 @@ impl SessionStore {
                 branch_name=excluded.branch_name,
                 worktree_path=excluded.worktree_path,
                 title=excluded.title,
+                started_providers=excluded.started_providers,
                 status=excluded.status,
                 updated_at=excluded.updated_at
             "#,
@@ -176,6 +183,7 @@ impl SessionStore {
                 session.branch_name,
                 session.worktree_path,
                 session.title,
+                serialize_started_providers(&session.started_providers),
                 session.status.as_str(),
                 session.created_at.to_rfc3339(),
                 session.updated_at.to_rfc3339(),
@@ -187,14 +195,15 @@ impl SessionStore {
     pub fn load_sessions(&self) -> Result<Vec<AgentSession>> {
         let mut stmt = self.conn.prepare(
             r#"
-            select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, status, created_at, updated_at
+            select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, status, created_at, updated_at
             from agent_sessions
             order by updated_at desc
             "#,
         )?;
         let rows = stmt.query_map([], |row| {
-            let created_at: String = row.get(9)?;
-            let updated_at: String = row.get(10)?;
+            let started_providers: String = row.get(8)?;
+            let created_at: String = row.get(10)?;
+            let updated_at: String = row.get(11)?;
             Ok(AgentSession {
                 id: row.get(0)?,
                 project_id: row.get::<_, String>(1).unwrap_or_default(),
@@ -204,7 +213,8 @@ impl SessionStore {
                 worktree_path: row.get(5)?,
                 title: row.get(6)?,
                 project_path: row.get(7)?,
-                status: SessionStatus::from_str(row.get::<_, String>(8)?.as_str()),
+                started_providers: parse_started_providers(&started_providers),
+                status: SessionStatus::from_str(row.get::<_, String>(9)?.as_str()),
                 created_at: parse_time(&created_at).unwrap_or_else(Utc::now),
                 updated_at: parse_time(&updated_at).unwrap_or_else(Utc::now),
             })
@@ -230,6 +240,14 @@ fn parse_time(value: &str) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
+fn serialize_started_providers(started_providers: &[String]) -> String {
+    serde_json::to_string(started_providers).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn parse_started_providers(value: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(value).unwrap_or_default()
+}
+
 /// Opens an in-memory session store for tests.
 #[cfg(test)]
 fn test_store() -> SessionStore {
@@ -252,6 +270,7 @@ fn test_session(
         branch_name: format!("branch-{id}"),
         worktree_path: format!("/tmp/{id}"),
         title: None,
+        started_providers: Vec::new(),
         status: SessionStatus::Active,
         created_at,
         updated_at,
@@ -304,6 +323,23 @@ mod tests {
 
         // Order unchanged: s2 still has the more recent updated_at.
         assert_eq!(ids, vec!["b", "a"]);
+    }
+
+    #[test]
+    fn started_providers_round_trip() {
+        let store = test_store();
+        let now = Utc::now();
+        let mut session = test_session("started", now, now);
+        session.started_providers = vec!["claude".to_string(), "codex".to_string()];
+
+        store.upsert_session(&session).unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].started_providers,
+            vec!["claude".to_string(), "codex".to_string()]
+        );
     }
 }
 
