@@ -1,3 +1,4 @@
+use super::checkbox::{Checkbox, CheckboxState};
 use super::*;
 
 /// ASCII art logo displayed in the agent pane when no content is active.
@@ -44,6 +45,8 @@ const TIP_MAX_WIDTH: u16 = 47;
 const TIP_GAP: u16 = 2;
 /// Maximum number of wrapped lines a tip may occupy.
 const TIP_MAX_LINES: u16 = 3;
+
+const CHECKBOX_PREFIX_WIDTH: u16 = 5;
 
 /// Welcome-screen tips shown beneath the ASCII logo. Wrap text in backticks
 /// to highlight it in an accent color (the backticks themselves are not
@@ -214,6 +217,66 @@ fn capitalize(s: &str) -> String {
 }
 
 impl App {
+    fn render_overlay_checkbox(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        label: &str,
+        checked: bool,
+        state: CheckboxState,
+        hint: Option<Line<'static>>,
+    ) -> (Rect, u16) {
+        let checkbox = Checkbox::new(label).checked(checked).state(state);
+        let marker_style = checkbox.marker_style(match state {
+            CheckboxState::Focused => Style::default().fg(self.theme.button_active_fg),
+            CheckboxState::Hovered => Style::default().fg(self.theme.button_active_fg),
+            CheckboxState::Disabled => Style::default().fg(self.theme.hint_desc_fg),
+            CheckboxState::Normal => Style::default().fg(self.theme.hint_key_fg),
+        });
+        let label_style = checkbox.label_style(match state {
+            CheckboxState::Focused => Style::default().fg(self.theme.button_active_fg),
+            CheckboxState::Hovered => Style::default().fg(self.theme.button_active_fg),
+            CheckboxState::Disabled => Style::default().fg(self.theme.hint_desc_fg),
+            CheckboxState::Normal => Style::default().fg(self.theme.input_label_fg),
+        });
+        let layout = checkbox.layout(area.width, marker_style, label_style);
+        let checkbox_height = layout.height;
+        let hint_height = u16::from(hint.is_some());
+        let total_height = checkbox_height.saturating_add(hint_height);
+
+        layout.render(
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: checkbox_height,
+            },
+            frame.buffer_mut(),
+        );
+
+        if let Some(hint_line) = hint {
+            Paragraph::new(hint_line).render(
+                Rect {
+                    x: area.x,
+                    y: area.y.saturating_add(checkbox_height),
+                    width: area.width,
+                    height: 1,
+                },
+                frame.buffer_mut(),
+            );
+        }
+
+        (
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: total_height,
+            },
+            total_height,
+        )
+    }
+
     pub(crate) fn render(&mut self, frame: &mut Frame) {
         let term_w = frame.area().width as usize;
         let status_text_len = self.status.text().len() + 3; // " ● " prefix
@@ -2883,23 +2946,37 @@ impl App {
                 ..
             } => {
                 self.render_dim_overlay(frame);
-                // Outer dialog: border + title.
-                let area = centered_rect(56, 30, frame.area());
+                let checkbox_height = if *worktree_shared {
+                    0
+                } else {
+                    let state = if *focus == DeleteAgentFocus::Checkbox {
+                        CheckboxState::Focused
+                    } else {
+                        CheckboxState::Normal
+                    };
+                    let checkbox = Checkbox::new("Also delete the worktree and branch")
+                        .checked(*delete_worktree)
+                        .state(state);
+                    checkbox
+                        .layout(
+                            54,
+                            checkbox.marker_style(Style::default()),
+                            checkbox.label_style(Style::default()),
+                        )
+                        .height
+                };
+                let area = centered_rect_exact(56, 11 + checkbox_height, frame.area());
                 Clear.render(area, frame.buffer_mut());
                 let outer = self.themed_overlay_block("Delete Agent");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
 
-                // Layout: body (flexible) / checkbox (1 row) / spacer / buttons.
-                // The warning text and hint live in the flexible body area so
-                // long lines can wrap safely without truncation. The checkbox
-                // is a single fixed-height row below the body.
-                let [body_area, checkbox_area, _, buttons_area] = Layout::default()
+                let body_height = if *delete_worktree { 5 } else { 4 };
+                let [body_area, checkbox_area, buttons_area] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
-                        Constraint::Min(1),
-                        Constraint::Length(1),
-                        Constraint::Length(1),
+                        Constraint::Length(body_height),
+                        Constraint::Length(checkbox_height),
                         Constraint::Length(3),
                     ])
                     .areas(inner);
@@ -2943,33 +3020,27 @@ impl App {
                     .wrap(Wrap { trim: false })
                     .render(body_area, frame.buffer_mut());
 
-                // Checkbox row (1 line). When the worktree is shared, the
-                // checkbox is hidden and the line is left empty — the shared
-                // note above already explains the situation.
-                if !*worktree_shared {
-                    let check = if *delete_worktree { "x" } else { " " };
-                    let checkbox_focused = *focus == DeleteAgentFocus::Checkbox;
-                    let label_style = if checkbox_focused {
-                        Style::default()
-                            .fg(self.theme.button_active_fg)
-                            .add_modifier(Modifier::BOLD)
+                let checkbox_rect = if !*worktree_shared {
+                    let checkbox_state = if *focus == DeleteAgentFocus::Checkbox {
+                        CheckboxState::Focused
                     } else {
-                        Style::default().fg(self.theme.input_label_fg)
+                        CheckboxState::Normal
                     };
-                    let bracket_style = if checkbox_focused {
-                        Style::default()
-                            .fg(self.theme.button_active_fg)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(self.theme.hint_key_fg)
-                    };
-                    Paragraph::new(Line::from(vec![
-                        Span::raw(" "),
-                        Span::styled(format!("[{check}]"), bracket_style),
-                        Span::styled(" Also delete the worktree and branch", label_style),
-                    ]))
-                    .render(checkbox_area, frame.buffer_mut());
-                }
+                    let (rect, _) = self.render_overlay_checkbox(
+                        frame,
+                        checkbox_area,
+                        "Also delete the worktree and branch",
+                        *delete_worktree,
+                        checkbox_state,
+                        None,
+                    );
+                    Some(OverlayCheckbox {
+                        id: OverlayCheckboxId::DeleteAgentWorktree,
+                        rect,
+                    })
+                } else {
+                    None
+                };
 
                 // Button area: two bordered panels side by side.
                 let btn_width = 16u16;
@@ -3032,6 +3103,7 @@ impl App {
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
                     cancel_button: cancel_area,
                     delete_button: delete_area,
+                    checkbox: checkbox_rect,
                 };
             }
             PromptState::ConfirmDeleteTerminal {
@@ -3596,7 +3668,18 @@ impl App {
                 ..
             } => {
                 self.render_dim_overlay(frame);
-                let area = centered_rect_exact(62, 12, frame.area());
+                let checkbox = Checkbox::new("Also rename the git branch")
+                    .checked(*rename_branch)
+                    .state(CheckboxState::Normal);
+                let checkbox_height = checkbox
+                    .layout(
+                        60,
+                        checkbox.marker_style(Style::default()),
+                        checkbox.label_style(Style::default()),
+                    )
+                    .height
+                    .saturating_add(1);
+                let area = centered_rect_exact(62, 9 + checkbox_height, frame.area());
                 Clear.render(area, frame.buffer_mut());
 
                 let outer = self.themed_overlay_block("Rename Agent");
@@ -3608,7 +3691,7 @@ impl App {
                     .constraints([
                         Constraint::Length(1),
                         Constraint::Length(3),
-                        Constraint::Length(3),
+                        Constraint::Length(checkbox_height),
                         Constraint::Min(1),
                     ])
                     .areas(inner);
@@ -3653,25 +3736,20 @@ impl App {
                     .block(input_block)
                     .render(input_area, frame.buffer_mut());
 
-                // Checkbox for optional branch rename.
-                let check = if *rename_branch { "x" } else { " " };
-                let checkbox_line = Line::from(vec![
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("[{check}]"),
-                        Style::default().fg(self.theme.hint_key_fg),
-                    ),
-                    Span::styled(
-                        " Also rename the git branch",
-                        Style::default().fg(self.theme.input_label_fg),
-                    ),
-                ]);
-                let checkbox_hint = Line::from(Span::styled(
-                    "     Open PRs will still reference the old branch name",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                Paragraph::new(vec![checkbox_line, checkbox_hint])
-                    .render(checkbox_area, frame.buffer_mut());
+                let (checkbox_rect, _) = self.render_overlay_checkbox(
+                    frame,
+                    checkbox_area,
+                    "Also rename the git branch",
+                    *rename_branch,
+                    CheckboxState::Normal,
+                    Some(Line::from(Span::styled(
+                        format!(
+                            "{}Open PRs will still reference the old branch name",
+                            " ".repeat(usize::from(CHECKBOX_PREFIX_WIDTH))
+                        ),
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ))),
+                );
 
                 let confirm_key = self.bindings.label_for(Action::Confirm);
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
@@ -3693,8 +3771,13 @@ impl App {
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
                 Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
-                self.overlay_layout.active =
-                    OverlayMouseLayout::RenameSession { input: input_inner };
+                self.overlay_layout.active = OverlayMouseLayout::RenameSession {
+                    input: input_inner,
+                    checkbox: Some(OverlayCheckbox {
+                        id: OverlayCheckboxId::RenameSessionBranch,
+                        rect: checkbox_rect,
+                    }),
+                };
             }
             PromptState::EditMacros { .. } => {
                 // Full rendering implemented in Task #5.

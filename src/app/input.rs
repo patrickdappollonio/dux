@@ -74,6 +74,7 @@ enum PromptMouseTarget {
     ConfirmNonDefaultBranchAdd,
     ConfirmUseExistingBranchCancel,
     ConfirmUseExistingBranchUse,
+    Checkbox(OverlayCheckboxId),
     RenameInput,
     NameNewAgentInput,
 }
@@ -2597,8 +2598,11 @@ impl App {
             OverlayMouseLayout::ConfirmDeleteAgent {
                 cancel_button,
                 delete_button,
+                checkbox,
             } => {
-                if contains_point(cancel_button, column, row) {
+                if checkbox.is_some_and(|checkbox| contains_point(checkbox.rect, column, row)) {
+                    checkbox.map(|checkbox| PromptMouseTarget::Checkbox(checkbox.id))
+                } else if contains_point(cancel_button, column, row) {
                     Some(PromptMouseTarget::ConfirmDeleteCancel)
                 } else if contains_point(delete_button, column, row) {
                     Some(PromptMouseTarget::ConfirmDeleteConfirm)
@@ -2666,8 +2670,12 @@ impl App {
                     None
                 }
             }
-            OverlayMouseLayout::RenameSession { input } => {
-                contains_point(input, column, row).then_some(PromptMouseTarget::RenameInput)
+            OverlayMouseLayout::RenameSession { input, checkbox } => {
+                if checkbox.is_some_and(|checkbox| contains_point(checkbox.rect, column, row)) {
+                    checkbox.map(|checkbox| PromptMouseTarget::Checkbox(checkbox.id))
+                } else {
+                    contains_point(input, column, row).then_some(PromptMouseTarget::RenameInput)
+                }
             }
             OverlayMouseLayout::NameNewAgent { input } => {
                 contains_point(input, column, row).then_some(PromptMouseTarget::NameNewAgentInput)
@@ -3346,7 +3354,7 @@ impl App {
 
     fn set_rename_cursor_from_mouse(&mut self, column: u16) {
         let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::RenameSession { input } => input,
+            OverlayMouseLayout::RenameSession { input, .. } => input,
             _ => return,
         };
         if let PromptState::RenameSession { input, .. } = &mut self.prompt {
@@ -3361,6 +3369,29 @@ impl App {
         };
         if let PromptState::NameNewAgent { input, .. } = &mut self.prompt {
             input.cursor = cursor_from_single_line_position(&input.text, input_area, 0, column);
+        }
+    }
+
+    fn toggle_overlay_checkbox(&mut self, checkbox_id: OverlayCheckboxId) {
+        match checkbox_id {
+            OverlayCheckboxId::DeleteAgentWorktree => {
+                if let PromptState::ConfirmDeleteAgent {
+                    delete_worktree,
+                    focus,
+                    worktree_shared,
+                    ..
+                } = &mut self.prompt
+                    && !*worktree_shared
+                {
+                    *delete_worktree = !*delete_worktree;
+                    *focus = DeleteAgentFocus::Checkbox;
+                }
+            }
+            OverlayCheckboxId::RenameSessionBranch => {
+                if let PromptState::RenameSession { rename_branch, .. } = &mut self.prompt {
+                    *rename_branch = !*rename_branch;
+                }
+            }
         }
     }
 
@@ -3545,6 +3576,9 @@ impl App {
             }
             PromptMouseTarget::ConfirmUseExistingBranchUse => {
                 return self.resolve_confirm_use_existing_branch(true);
+            }
+            PromptMouseTarget::Checkbox(checkbox_id) => {
+                self.toggle_overlay_checkbox(checkbox_id);
             }
             PromptMouseTarget::RenameInput => {
                 self.set_rename_cursor_from_mouse(mouse.column);
@@ -4192,8 +4226,9 @@ mod tests {
         App, CenterMode, ConfirmKillRunningPrompt, DeleteAgentFocus, FocusPane, FullscreenOverlay,
         InputTarget, KillRunningAction, KillRunningFocus, KillRunningFooterAction,
         KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftSection, MouseClickTarget,
-        MouseLayoutState, OverlayMouseLayout, OverlayMouseLayoutState, PromptState, PullTarget,
-        RightSection, RuntimeTargetId, TextInput, WorkerEvent,
+        MouseLayoutState, OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout,
+        OverlayMouseLayoutState, PromptState, PullTarget, RightSection, RuntimeTargetId, TextInput,
+        WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
@@ -4461,6 +4496,10 @@ mod tests {
         app.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
             cancel_button: Rect::new(34, 10, 16, 3),
             delete_button: Rect::new(52, 10, 16, 3),
+            checkbox: Some(OverlayCheckbox {
+                id: OverlayCheckboxId::DeleteAgentWorktree,
+                rect: Rect::new(24, 7, 44, 1),
+            }),
         };
     }
 
@@ -4481,6 +4520,10 @@ mod tests {
     fn install_rename_overlay(app: &mut App) {
         app.overlay_layout.active = OverlayMouseLayout::RenameSession {
             input: Rect::new(24, 10, 30, 1),
+            checkbox: Some(OverlayCheckbox {
+                id: OverlayCheckboxId::RenameSessionBranch,
+                rect: Rect::new(24, 12, 34, 2),
+            }),
         };
     }
 
@@ -6895,6 +6938,33 @@ mod tests {
     }
 
     #[test]
+    fn mouse_click_delete_dialog_checkbox_toggles_delete_worktree() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmDeleteAgent {
+            session_id: app.sessions[0].id.clone(),
+            branch_name: app.sessions[0].branch_name.clone(),
+            focus: DeleteAgentFocus::Cancel,
+            delete_worktree: false,
+            worktree_shared: false,
+        };
+        install_confirm_delete_overlay(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 7));
+
+        match &app.prompt {
+            PromptState::ConfirmDeleteAgent {
+                delete_worktree,
+                focus,
+                ..
+            } => {
+                assert!(*delete_worktree);
+                assert_eq!(*focus, DeleteAgentFocus::Checkbox);
+            }
+            other => panic!("expected delete prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn mouse_click_rename_input_moves_cursor() {
         let mut app = test_app(default_bindings());
         let sid = app.sessions[0].id.clone();
@@ -6910,6 +6980,25 @@ mod tests {
         match &app.prompt {
             PromptState::RenameSession { input, .. } => assert_eq!(input.cursor, 5),
             _ => panic!("expected rename prompt"),
+        }
+    }
+
+    #[test]
+    fn mouse_click_rename_checkbox_toggles_branch_rename() {
+        let mut app = test_app(default_bindings());
+        let sid = app.sessions[0].id.clone();
+        app.prompt = PromptState::RenameSession {
+            session_id: sid,
+            input: TextInput::with_text("rename me".to_string()),
+            rename_branch: false,
+        };
+        install_rename_overlay(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 12));
+
+        match &app.prompt {
+            PromptState::RenameSession { rename_branch, .. } => assert!(*rename_branch),
+            other => panic!("expected rename prompt, got {other:?}"),
         }
     }
 
