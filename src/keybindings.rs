@@ -1214,7 +1214,14 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     },
     BindingDef {
         action: Action::ToggleSelection,
-        default_keys: &[key!(h), key!(l), key!(Left), key!(Right), key!(tab)],
+        default_keys: &[
+            key!(h),
+            key!(l),
+            key!(Left),
+            key!(Right),
+            key!(tab),
+            key!(shift - tab),
+        ],
         scopes: &[BindingScope::Dialog],
         help: Some(HelpEntry {
             section: "Overlays",
@@ -2231,6 +2238,17 @@ mod tests {
             bindings.lookup(&key, BindingScope::Global),
             Some(Action::FocusPrev),
             "shift-tab (BackTab) should match FocusPrev"
+        );
+    }
+
+    #[test]
+    fn lookup_shift_tab_matches_dialog_toggle_selection() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Dialog),
+            Some(Action::ToggleSelection),
+            "shift-tab (BackTab) should match ToggleSelection in dialogs"
         );
     }
 

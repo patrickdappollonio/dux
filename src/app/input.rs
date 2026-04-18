@@ -2010,15 +2010,16 @@ impl App {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => self.prompt = PromptState::None,
                 Some(Action::ToggleSelection) => {
-                    // Cycle forward through all selectable elements so Tab and
-                    // arrow keys (Left/Right/h/l all map to ToggleSelection in
-                    // Dialog scope) behave identically.
-                    *focus = match (*focus, shared) {
-                        (DeleteAgentFocus::Cancel, false) => DeleteAgentFocus::Delete,
-                        (DeleteAgentFocus::Delete, false) => DeleteAgentFocus::Checkbox,
-                        (DeleteAgentFocus::Checkbox, _) => DeleteAgentFocus::Cancel,
-                        (DeleteAgentFocus::Cancel, true) => DeleteAgentFocus::Delete,
-                        (DeleteAgentFocus::Delete, true) => DeleteAgentFocus::Cancel,
+                    let reverse = matches!(key.code, KeyCode::BackTab);
+                    *focus = match (*focus, shared, reverse) {
+                        (DeleteAgentFocus::Cancel, false, false) => DeleteAgentFocus::Delete,
+                        (DeleteAgentFocus::Delete, false, false) => DeleteAgentFocus::Checkbox,
+                        (DeleteAgentFocus::Checkbox, _, false) => DeleteAgentFocus::Cancel,
+                        (DeleteAgentFocus::Cancel, false, true) => DeleteAgentFocus::Checkbox,
+                        (DeleteAgentFocus::Delete, false, true) => DeleteAgentFocus::Cancel,
+                        (DeleteAgentFocus::Checkbox, _, true) => DeleteAgentFocus::Delete,
+                        (DeleteAgentFocus::Cancel, true, _) => DeleteAgentFocus::Delete,
+                        (DeleteAgentFocus::Delete, true, _) => DeleteAgentFocus::Cancel,
                     };
                 }
                 Some(Action::Confirm) => match *focus {
@@ -4890,6 +4891,29 @@ mod tests {
     }
 
     #[test]
+    fn rename_shift_tab_toggles_checkbox() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::RenameSession {
+            session_id: "session-1".to_string(),
+            input: TextInput::with_text("test".to_string()),
+            rename_branch: true,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::RenameSession { rename_branch, .. } => {
+                assert!(
+                    !*rename_branch,
+                    "Shift-Tab should toggle rename_branch to false"
+                );
+            }
+            other => panic!("expected RenameSession, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn open_rename_session_initializes_rename_branch_true() {
         let mut app = test_app(default_bindings());
 
@@ -6491,6 +6515,26 @@ mod tests {
     }
 
     #[test]
+    fn shift_tab_toggles_confirm_quit_selection() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmQuit {
+            agent_count: 1,
+            terminal_count: 0,
+            confirm_selected: false,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .unwrap();
+
+        match app.prompt {
+            PromptState::ConfirmQuit {
+                confirm_selected, ..
+            } => assert!(confirm_selected, "Shift-Tab should move selection to Quit"),
+            other => panic!("expected quit confirmation, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn quit_prompt_counts_running_companion_terminals_and_agents() {
         let mut app = test_app(default_bindings());
         let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
@@ -7091,6 +7135,46 @@ mod tests {
                 assert_eq!(*focus, DeleteAgentFocus::Checkbox);
             }
             other => panic!("expected delete prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shift_tab_moves_delete_agent_focus_backwards() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmDeleteAgent {
+            session_id: app.sessions[0].id.clone(),
+            branch_name: app.sessions[0].branch_name.clone(),
+            focus: DeleteAgentFocus::Cancel,
+            delete_worktree: false,
+            worktree_shared: false,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::ConfirmDeleteAgent { focus, .. } => {
+                assert_eq!(
+                    *focus,
+                    DeleteAgentFocus::Checkbox,
+                    "Shift-Tab should move backward from Cancel to the checkbox"
+                );
+            }
+            other => panic!("expected delete-agent confirmation, got {other:?}"),
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::ConfirmDeleteAgent { focus, .. } => {
+                assert_eq!(
+                    *focus,
+                    DeleteAgentFocus::Delete,
+                    "Shift-Tab should continue backward from the checkbox to Delete"
+                );
+            }
+            other => panic!("expected delete-agent confirmation, got {other:?}"),
         }
     }
 
