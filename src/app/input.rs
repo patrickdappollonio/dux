@@ -393,12 +393,10 @@ impl App {
                         self.selected_terminal_index = 0;
                     }
                 }
-                Action::MoveUp => {
-                    if self.selected_left > 0 {
-                        self.selected_left -= 1;
-                        self.reload_changed_files();
-                        self.update_missing_project_warning();
-                    }
+                Action::MoveUp if self.selected_left > 0 => {
+                    self.selected_left -= 1;
+                    self.reload_changed_files();
+                    self.update_missing_project_warning();
                 }
                 Action::FocusAgent | Action::ExitInteractive => {
                     self.activate_selected_left_item()?
@@ -452,10 +450,8 @@ impl App {
         let term_count = self.terminal_items().len();
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
             match action {
-                Action::MoveDown => {
-                    if self.selected_terminal_index + 1 < term_count {
-                        self.selected_terminal_index += 1;
-                    }
+                Action::MoveDown if self.selected_terminal_index + 1 < term_count => {
+                    self.selected_terminal_index += 1;
                 }
                 Action::MoveUp => {
                     if self.selected_terminal_index > 0 {
@@ -620,23 +616,19 @@ impl App {
 
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Files) {
             match action {
-                Action::MoveDown => {
-                    if self.right_section != RightSection::CommitInput {
-                        let len = self.current_files_len();
-                        if self.files_index + 1 < len {
-                            self.files_index += 1;
-                        }
+                Action::MoveDown if self.right_section != RightSection::CommitInput => {
+                    let len = self.current_files_len();
+                    if self.files_index + 1 < len {
+                        self.files_index += 1;
                     }
                 }
-                Action::MoveUp => {
-                    if self.right_section != RightSection::CommitInput && self.files_index > 0 {
-                        self.files_index -= 1;
-                    }
+                Action::MoveUp
+                    if self.right_section != RightSection::CommitInput && self.files_index > 0 =>
+                {
+                    self.files_index -= 1;
                 }
-                Action::StageUnstage => {
-                    if self.right_section != RightSection::CommitInput {
-                        self.toggle_stage_selected_file()?;
-                    }
+                Action::StageUnstage if self.right_section != RightSection::CommitInput => {
+                    self.toggle_stage_selected_file()?;
                 }
                 Action::CommitChanges if !self.staged_files.is_empty() => {
                     self.execute_commit()?;
@@ -650,10 +642,8 @@ impl App {
                         self.open_diff_for_selected_file()?;
                     }
                 }
-                Action::DiscardChanges => {
-                    if self.right_section != RightSection::CommitInput {
-                        self.confirm_discard_selected_file()?;
-                    }
+                Action::DiscardChanges if self.right_section != RightSection::CommitInput => {
+                    self.confirm_discard_selected_file()?;
                 }
                 Action::GenerateCommitMessage => {
                     self.trigger_ai_commit_message()?;
@@ -670,10 +660,8 @@ impl App {
                 Action::SearchFiles => {
                     self.files_search_active = true;
                 }
-                Action::SearchNext => {
-                    if !self.advance_files_search_match() {
-                        self.set_info("No active file search matches.");
-                    }
+                Action::SearchNext if !self.advance_files_search_match() => {
+                    self.set_info("No active file search matches.");
                 }
                 _ => {}
             }
@@ -1795,15 +1783,11 @@ impl App {
         {
             match self.bindings.lookup(&key, BindingScope::Palette) {
                 Some(Action::CloseOverlay) => self.prompt = PromptState::None,
-                Some(Action::MoveDown) => {
-                    if *selected + 1 < editors.len() {
-                        *selected += 1;
-                    }
+                Some(Action::MoveDown) if *selected + 1 < editors.len() => {
+                    *selected += 1;
                 }
-                Some(Action::MoveUp) => {
-                    if *selected > 0 {
-                        *selected -= 1;
-                    }
+                Some(Action::MoveUp) if *selected > 0 => {
+                    *selected -= 1;
                 }
                 Some(Action::Confirm) => {
                     self.open_selected_pick_editor();
@@ -2253,15 +2237,13 @@ impl App {
             KeyCode::Esc => {
                 self.prompt = PromptState::None;
             }
-            KeyCode::Char('j') | KeyCode::Down => {
-                if !entries.is_empty() && *selected + 1 < entries.len() {
-                    *selected += 1;
-                }
+            KeyCode::Char('j') | KeyCode::Down
+                if !entries.is_empty() && *selected + 1 < entries.len() =>
+            {
+                *selected += 1;
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if *selected > 0 {
-                    *selected -= 1;
-                }
+            KeyCode::Char('k') | KeyCode::Up if *selected > 0 => {
+                *selected -= 1;
             }
             KeyCode::Enter => {
                 // Edit selected macro
@@ -3806,15 +3788,11 @@ impl App {
                     None => {}
                 }
             }
-            MouseEventKind::Drag(MouseButton::Left) => {
-                if self.mouse_drag.is_some() {
-                    self.update_dragged_panes(mouse.column, mouse.row);
-                }
+            MouseEventKind::Drag(MouseButton::Left) if self.mouse_drag.is_some() => {
+                self.update_dragged_panes(mouse.column, mouse.row);
             }
-            MouseEventKind::Up(MouseButton::Left) => {
-                if self.mouse_drag.take().is_some() {
-                    self.persist_pane_widths();
-                }
+            MouseEventKind::Up(MouseButton::Left) if self.mouse_drag.take().is_some() => {
+                self.persist_pane_widths();
             }
             MouseEventKind::ScrollDown => match self.mouse_target(mouse.column, mouse.row) {
                 Some(MouseTarget::LeftRow(_)) => {

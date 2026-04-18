@@ -1627,14 +1627,14 @@ impl App {
 
     pub(crate) fn sort_sessions_by_updated(&mut self) {
         self.sessions
-            .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            .sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         self.rebuild_left_items();
         self.set_info("Agents sorted by most recently updated.");
     }
 
     pub(crate) fn sort_sessions_by_created(&mut self) {
         self.sessions
-            .sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            .sort_by_key(|b| std::cmp::Reverse(b.created_at));
         self.rebuild_left_items();
         self.set_info("Agents sorted by creation date (newest first).");
     }
@@ -2206,7 +2206,7 @@ fn aggregate_tree(
             });
         }
     }
-    children.sort_by(|a, b| b.rss_bytes.cmp(&a.rss_bytes));
+    children.sort_by_key(|b| std::cmp::Reverse(b.rss_bytes));
     children.truncate(10);
     (cpu, rss, count, children)
 }
