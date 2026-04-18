@@ -46,8 +46,6 @@ const TIP_GAP: u16 = 2;
 /// Maximum number of wrapped lines a tip may occupy.
 const TIP_MAX_LINES: u16 = 3;
 
-const CHECKBOX_PREFIX_WIDTH: u16 = 5;
-
 /// Welcome-screen tips shown beneath the ASCII logo. Wrap text in backticks
 /// to highlight it in an accent color (the backticks themselves are not
 /// rendered). Each function receives `&RuntimeBindings` so keybinding labels
@@ -214,6 +212,54 @@ fn capitalize(s: &str) -> String {
         Some(first) => format!("{}{}", first.to_uppercase(), c.as_str()),
         None => String::new(),
     }
+}
+
+fn wrapped_line_count(lines: &[Line<'_>], width: u16, trim: bool) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+
+    let max_width = usize::from(width);
+    let mut total = 0u16;
+    for line in lines {
+        let mut current_width = 0usize;
+        let mut line_count = 1u16;
+        for span in &line.spans {
+            let content = if trim {
+                span.content.trim_end_matches(' ')
+            } else {
+                span.content.as_ref()
+            };
+            for segment in content.split('\n') {
+                let segment_width = segment.chars().count();
+                if segment_width == 0 {
+                    continue;
+                }
+
+                let remaining = if current_width == 0 {
+                    max_width
+                } else {
+                    max_width.saturating_sub(current_width)
+                };
+                if segment_width <= remaining {
+                    current_width += segment_width;
+                } else {
+                    let needed = if current_width == 0 {
+                        segment_width
+                    } else {
+                        segment_width - remaining
+                    };
+                    line_count = line_count.saturating_add(((needed - 1) / max_width) as u16 + 1);
+                    current_width = needed % max_width;
+                    if current_width == 0 {
+                        current_width = max_width;
+                    }
+                }
+            }
+        }
+        total = total.saturating_add(line_count);
+    }
+    total
 }
 
 impl App {
@@ -2942,6 +2988,8 @@ impl App {
                 ..
             } => {
                 self.render_dim_overlay(frame);
+                let dialog_width = 56.min(frame.area().width.max(1));
+                let inner_width = dialog_width.saturating_sub(2);
                 let checkbox_height = if *worktree_shared {
                     0
                 } else {
@@ -2955,27 +3003,12 @@ impl App {
                         .state(state);
                     checkbox
                         .layout(
-                            54,
+                            inner_width,
                             checkbox.marker_style(Style::default()),
                             checkbox.label_style(Style::default()),
                         )
                         .height
                 };
-                let area = centered_rect_exact(56, 11 + checkbox_height, frame.area());
-                Clear.render(area, frame.buffer_mut());
-                let outer = self.themed_overlay_block("Delete Agent");
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
-
-                let body_height = if *delete_worktree { 5 } else { 4 };
-                let [body_area, checkbox_area, buttons_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(body_height),
-                        Constraint::Length(checkbox_height),
-                        Constraint::Length(3),
-                    ])
-                    .areas(inner);
 
                 // Body: question text + conditional warning/hint/shared note.
                 // Long warning text is split into two explicit Lines so it
@@ -3012,6 +3045,26 @@ impl App {
                         Style::default().fg(self.theme.hint_desc_fg),
                     )));
                 }
+                let body_height = wrapped_line_count(&body_lines, inner_width, false);
+                let area = centered_rect_exact(
+                    dialog_width,
+                    2 + body_height + checkbox_height + 3,
+                    frame.area(),
+                );
+                Clear.render(area, frame.buffer_mut());
+                let outer = self.themed_overlay_block("Delete Agent");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, checkbox_area, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(body_height),
+                        Constraint::Length(checkbox_height),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
                 Paragraph::new(body_lines)
                     .wrap(Wrap { trim: false })
                     .render(body_area, frame.buffer_mut());
@@ -3667,15 +3720,17 @@ impl App {
                 let checkbox = Checkbox::new("Also rename the git branch")
                     .checked(*rename_branch)
                     .state(CheckboxState::Normal);
+                let dialog_width = 62.min(frame.area().width.max(1));
+                let inner_width = dialog_width.saturating_sub(2);
                 let checkbox_height = checkbox
                     .layout(
-                        60,
+                        inner_width,
                         checkbox.marker_style(Style::default()),
                         checkbox.label_style(Style::default()),
                     )
                     .height
                     .saturating_add(1);
-                let area = centered_rect_exact(62, 9 + checkbox_height, frame.area());
+                let area = centered_rect_exact(dialog_width, 9 + checkbox_height, frame.area());
                 Clear.render(area, frame.buffer_mut());
 
                 let outer = self.themed_overlay_block("Rename Agent");
@@ -3741,7 +3796,7 @@ impl App {
                     Some(Line::from(Span::styled(
                         format!(
                             "{}Open PRs will still reference the old branch name",
-                            " ".repeat(usize::from(CHECKBOX_PREFIX_WIDTH))
+                            Checkbox::indent()
                         ),
                         Style::default().fg(self.theme.hint_desc_fg),
                     ))),
@@ -5176,6 +5231,27 @@ mod tests {
     fn centered_rect_exact_clamps_to_available_area() {
         let area = Rect::new(0, 0, 40, 6);
         assert_eq!(centered_rect_exact(56, 9, area), area);
+    }
+
+    #[test]
+    fn wrapped_line_count_counts_unwrapped_lines() {
+        let lines = vec![Line::from(" short line"), Line::from(" another short line")];
+
+        assert_eq!(wrapped_line_count(&lines, 40, false), 2);
+    }
+
+    #[test]
+    fn wrapped_line_count_grows_for_narrow_widths() {
+        let lines = vec![Line::from(vec![
+            Span::raw(" Are you sure you want to delete "),
+            Span::styled(
+                "very-long-branch-name",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("?"),
+        ])];
+
+        assert!(wrapped_line_count(&lines, 20, false) > 1);
     }
 
     // ── Unit tests for capitalize ─────────────────────────────────

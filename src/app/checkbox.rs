@@ -40,6 +40,10 @@ impl<'a> Checkbox<'a> {
     const GAP: &'static str = " ";
     const INDENT: &'static str = "     ";
 
+    pub(crate) const fn indent() -> &'static str {
+        Self::INDENT
+    }
+
     pub(crate) fn new(label: &'a str) -> Self {
         Self {
             label,
@@ -129,6 +133,13 @@ impl<'a> Checkbox<'a> {
 
 impl Widget for CheckboxLayout {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        for clear_offset in 0..area.height {
+            let y = area.y.saturating_add(clear_offset);
+            for x_offset in 0..area.width {
+                buf[(area.x.saturating_add(x_offset), y)].reset();
+            }
+        }
+
         for (offset, line) in self.lines.into_iter().enumerate() {
             let y = area.y.saturating_add(offset as u16);
             if y >= area.y.saturating_add(area.height) {
@@ -267,5 +278,10 @@ mod tests {
 
         assert_eq!(unchecked_spans[1].content.as_ref(), "[ ]");
         assert_eq!(checked_spans[1].content.as_ref(), "[x]");
+    }
+
+    #[test]
+    fn checkbox_indent_width_matches_indent_text() {
+        assert_eq!(Checkbox::indent().chars().count(), 5);
     }
 }
