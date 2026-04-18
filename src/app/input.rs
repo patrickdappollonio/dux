@@ -8,6 +8,31 @@ const MAX_RIGHT_WIDTH_PCT: u16 = 50;
 const MIN_CENTER_WIDTH_PCT: u16 = 20;
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 
+/// Maximum size of `loading_input_buf`. During the loading phase we
+/// accumulate bytes only to detect a (possibly multi-byte) ExitInteractive
+/// binding. Since any realistic binding fits in well under this cap, we
+/// truncate to the trailing window to bound memory and scan cost even when
+/// the user pastes large amounts of text while the agent is starting.
+const LOADING_INPUT_BUF_MAX: usize = 64;
+
+/// Append `bytes` to `buf`, keeping at most `max` trailing bytes. Used to
+/// bound `loading_input_buf` so it cannot grow without bound when the user
+/// pastes large content during the agent loading phase.
+fn append_capped(buf: &mut Vec<u8>, bytes: &[u8], max: usize) {
+    if bytes.len() >= max {
+        // The new chunk alone fills or exceeds the cap: drop prior state
+        // and keep only the trailing `max` bytes of the new chunk.
+        buf.clear();
+        buf.extend_from_slice(&bytes[bytes.len() - max..]);
+        return;
+    }
+    buf.extend_from_slice(bytes);
+    if buf.len() > max {
+        let drop = buf.len() - max;
+        buf.drain(..drop);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MouseTarget {
     LeftPane,
@@ -368,12 +393,10 @@ impl App {
                         self.selected_terminal_index = 0;
                     }
                 }
-                Action::MoveUp => {
-                    if self.selected_left > 0 {
-                        self.selected_left -= 1;
-                        self.reload_changed_files();
-                        self.update_missing_project_warning();
-                    }
+                Action::MoveUp if self.selected_left > 0 => {
+                    self.selected_left -= 1;
+                    self.reload_changed_files();
+                    self.update_missing_project_warning();
                 }
                 Action::FocusAgent | Action::ExitInteractive => {
                     self.activate_selected_left_item()?
@@ -427,10 +450,8 @@ impl App {
         let term_count = self.terminal_items().len();
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
             match action {
-                Action::MoveDown => {
-                    if self.selected_terminal_index + 1 < term_count {
-                        self.selected_terminal_index += 1;
-                    }
+                Action::MoveDown if self.selected_terminal_index + 1 < term_count => {
+                    self.selected_terminal_index += 1;
                 }
                 Action::MoveUp => {
                     if self.selected_terminal_index > 0 {
@@ -595,23 +616,19 @@ impl App {
 
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Files) {
             match action {
-                Action::MoveDown => {
-                    if self.right_section != RightSection::CommitInput {
-                        let len = self.current_files_len();
-                        if self.files_index + 1 < len {
-                            self.files_index += 1;
-                        }
+                Action::MoveDown if self.right_section != RightSection::CommitInput => {
+                    let len = self.current_files_len();
+                    if self.files_index + 1 < len {
+                        self.files_index += 1;
                     }
                 }
-                Action::MoveUp => {
-                    if self.right_section != RightSection::CommitInput && self.files_index > 0 {
-                        self.files_index -= 1;
-                    }
+                Action::MoveUp
+                    if self.right_section != RightSection::CommitInput && self.files_index > 0 =>
+                {
+                    self.files_index -= 1;
                 }
-                Action::StageUnstage => {
-                    if self.right_section != RightSection::CommitInput {
-                        self.toggle_stage_selected_file()?;
-                    }
+                Action::StageUnstage if self.right_section != RightSection::CommitInput => {
+                    self.toggle_stage_selected_file()?;
                 }
                 Action::CommitChanges if !self.staged_files.is_empty() => {
                     self.execute_commit()?;
@@ -625,10 +642,8 @@ impl App {
                         self.open_diff_for_selected_file()?;
                     }
                 }
-                Action::DiscardChanges => {
-                    if self.right_section != RightSection::CommitInput {
-                        self.confirm_discard_selected_file()?;
-                    }
+                Action::DiscardChanges if self.right_section != RightSection::CommitInput => {
+                    self.confirm_discard_selected_file()?;
                 }
                 Action::GenerateCommitMessage => {
                     self.trigger_ai_commit_message()?;
@@ -645,10 +660,8 @@ impl App {
                 Action::SearchFiles => {
                     self.files_search_active = true;
                 }
-                Action::SearchNext => {
-                    if !self.advance_files_search_match() {
-                        self.set_info("No active file search matches.");
-                    }
+                Action::SearchNext if !self.advance_files_search_match() => {
+                    self.set_info("No active file search matches.");
                 }
                 _ => {}
             }
@@ -954,6 +967,7 @@ impl App {
             self.input_target = InputTarget::None;
             self.terminal_selection = None;
             self.raw_input_buf.clear();
+            self.loading_input_buf.clear();
             return Ok(false);
         }
         let surface = self.session_surface;
@@ -961,6 +975,7 @@ impl App {
             self.input_target = InputTarget::None;
             self.terminal_selection = None;
             self.raw_input_buf.clear();
+            self.loading_input_buf.clear();
             let label = match surface {
                 SessionSurface::Agent => "Agent",
                 SessionSurface::Terminal => "Companion terminal",
@@ -995,11 +1010,41 @@ impl App {
         // Don't forward input until the agent has produced visible output.
         // Keystrokes during the loading phase would reach a process that
         // isn't ready for them. We still drain stdin above to prevent
-        // buffer accumulation.
+        // buffer accumulation. However, we still honour ExitInteractive so
+        // the user can minimize a loading agent.
+        //
+        // Bytes are accumulated into a dedicated `loading_input_buf` (not
+        // `raw_input_buf`) so that suppressed keystrokes typed during
+        // loading cannot leak into the first post-loading
+        // `process_raw_input_bytes` call when `has_output()` flips to true.
+        // The buffer is capped at LOADING_INPUT_BUF_MAX so that pasting a
+        // large amount of text (or an unterminated OSC sequence, which
+        // split_sequences reports as an entirely-incomplete remainder)
+        // cannot grow the buffer without bound.
         if let Some(provider) = self.selected_terminal_surface_client()
             && !provider.has_output()
         {
+            append_capped(
+                &mut self.loading_input_buf,
+                &buf[..n],
+                LOADING_INPUT_BUF_MAX,
+            );
+            if self.scan_exit_interactive() {
+                return Ok(false);
+            }
+            // Trim to the incomplete remainder so a partial escape can be
+            // completed by the next read (already bounded by the cap above).
+            let (_, remainder) = crate::raw_input::split_sequences(&self.loading_input_buf);
+            let keep = remainder.len();
+            let start = self.loading_input_buf.len() - keep;
+            self.loading_input_buf = self.loading_input_buf[start..].to_vec();
             return Ok(false);
+        }
+
+        // If we just transitioned out of loading, clear the loading buffer
+        // so stale remainders don't accumulate across sessions.
+        if !self.loading_input_buf.is_empty() {
+            self.loading_input_buf.clear();
         }
 
         self.process_raw_input_bytes(&buf[..n])
@@ -1077,20 +1122,7 @@ impl App {
                     return Ok(false);
                 }
                 SeqAction::Intercept(Action::ExitInteractive, _, _) => {
-                    let return_to_terminal_list =
-                        matches!(self.input_target, InputTarget::Terminal)
-                            && self.terminal_return_to_list;
-                    self.input_target = InputTarget::None;
-                    self.fullscreen_overlay = FullscreenOverlay::None;
-                    self.session_surface = SessionSurface::Agent;
-                    self.terminal_selection = None;
-                    self.raw_input_buf.clear();
-                    if return_to_terminal_list {
-                        self.left_section = LeftSection::Terminals;
-                        self.clamp_terminal_cursor();
-                        self.focus = FocusPane::Left;
-                    }
-                    self.set_info("Exited interactive mode.");
+                    self.exit_interactive_mode();
                     return Ok(false);
                 }
                 SeqAction::Intercept(Action::ScrollPageUp, _, _) => {
@@ -1178,20 +1210,7 @@ impl App {
                                     contains_point(rect, mouse_ev.column, mouse_ev.row)
                                 });
                         if outside_overlay {
-                            let return_to_terminal_list =
-                                matches!(self.input_target, InputTarget::Terminal)
-                                    && self.terminal_return_to_list;
-                            self.input_target = InputTarget::None;
-                            self.fullscreen_overlay = FullscreenOverlay::None;
-                            self.session_surface = SessionSurface::Agent;
-                            self.raw_input_buf.clear();
-                            self.terminal_selection = None;
-                            if return_to_terminal_list {
-                                self.left_section = LeftSection::Terminals;
-                                self.clamp_terminal_cursor();
-                                self.focus = FocusPane::Left;
-                            }
-                            self.set_info("Exited interactive mode.");
+                            self.exit_interactive_mode();
                             return Ok(false);
                         }
 
@@ -1764,15 +1783,11 @@ impl App {
         {
             match self.bindings.lookup(&key, BindingScope::Palette) {
                 Some(Action::CloseOverlay) => self.prompt = PromptState::None,
-                Some(Action::MoveDown) => {
-                    if *selected + 1 < editors.len() {
-                        *selected += 1;
-                    }
+                Some(Action::MoveDown) if *selected + 1 < editors.len() => {
+                    *selected += 1;
                 }
-                Some(Action::MoveUp) => {
-                    if *selected > 0 {
-                        *selected -= 1;
-                    }
+                Some(Action::MoveUp) if *selected > 0 => {
+                    *selected -= 1;
                 }
                 Some(Action::Confirm) => {
                     self.open_selected_pick_editor();
@@ -2222,15 +2237,13 @@ impl App {
             KeyCode::Esc => {
                 self.prompt = PromptState::None;
             }
-            KeyCode::Char('j') | KeyCode::Down => {
-                if !entries.is_empty() && *selected + 1 < entries.len() {
-                    *selected += 1;
-                }
+            KeyCode::Char('j') | KeyCode::Down
+                if !entries.is_empty() && *selected + 1 < entries.len() =>
+            {
+                *selected += 1;
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if *selected > 0 {
-                    *selected -= 1;
-                }
+            KeyCode::Char('k') | KeyCode::Up if *selected > 0 => {
+                *selected -= 1;
             }
             KeyCode::Enter => {
                 // Edit selected macro
@@ -3775,15 +3788,11 @@ impl App {
                     None => {}
                 }
             }
-            MouseEventKind::Drag(MouseButton::Left) => {
-                if self.mouse_drag.is_some() {
-                    self.update_dragged_panes(mouse.column, mouse.row);
-                }
+            MouseEventKind::Drag(MouseButton::Left) if self.mouse_drag.is_some() => {
+                self.update_dragged_panes(mouse.column, mouse.row);
             }
-            MouseEventKind::Up(MouseButton::Left) => {
-                if self.mouse_drag.take().is_some() {
-                    self.persist_pane_widths();
-                }
+            MouseEventKind::Up(MouseButton::Left) if self.mouse_drag.take().is_some() => {
+                self.persist_pane_widths();
             }
             MouseEventKind::ScrollDown => match self.mouse_target(mouse.column, mouse.row) {
                 Some(MouseTarget::LeftRow(_)) => {
@@ -3961,6 +3970,42 @@ impl App {
                 &self.worker_tx,
             );
         }
+    }
+
+    /// Reset all state associated with interactive mode (agent or terminal)
+    /// and show a status message. Used by ExitInteractive key handling,
+    /// mouse-click-outside-overlay, and the loading-phase exit path.
+    pub(crate) fn exit_interactive_mode(&mut self) {
+        let return_to_terminal_list =
+            matches!(self.input_target, InputTarget::Terminal) && self.terminal_return_to_list;
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.session_surface = SessionSurface::Agent;
+        self.terminal_selection = None;
+        self.raw_input_buf.clear();
+        self.loading_input_buf.clear();
+        if return_to_terminal_list {
+            self.left_section = LeftSection::Terminals;
+            self.clamp_terminal_cursor();
+            self.focus = FocusPane::Left;
+        }
+        self.set_info("Exited interactive mode.");
+    }
+
+    /// Scan `loading_input_buf` for an ExitInteractive sequence. Returns
+    /// `true` if the binding was found and interactive mode was exited. Used
+    /// during the loading phase when all other input is suppressed.
+    pub(crate) fn scan_exit_interactive(&mut self) -> bool {
+        let (sequences, _) = crate::raw_input::split_sequences(&self.loading_input_buf);
+        for seq in &sequences {
+            if let Some((Action::ExitInteractive, _)) =
+                self.interactive_patterns.match_sequence(seq)
+            {
+                self.exit_interactive_mode();
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -4142,6 +4187,7 @@ mod tests {
                 bindings: Vec::new(),
             },
             raw_input_buf: Vec::new(),
+            loading_input_buf: Vec::new(),
             macro_bar: None,
             sigwinch_flag: Arc::new(AtomicBool::new(false)),
             force_redraw: false,
@@ -7302,6 +7348,170 @@ mod tests {
             FullscreenOverlay::None,
             "clicking outside overlay must dismiss fullscreen even when scrolled back"
         );
+    }
+
+    // ── Loading-phase ExitInteractive tests ─────────────────────────
+
+    #[test]
+    fn loading_phase_exit_interactive_single_byte_binding() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.session_surface = SessionSurface::Agent;
+
+        // Default ExitInteractive is Ctrl-G (0x07). Put it in loading_input_buf
+        // as scan_exit_interactive reads from there.
+        app.loading_input_buf = vec![0x07];
+        assert!(
+            app.scan_exit_interactive(),
+            "scan_exit_interactive must detect Ctrl-G"
+        );
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    #[test]
+    fn loading_phase_exit_interactive_multi_byte_binding() {
+        // Rebind ExitInteractive to Home (ESC [ H) — a multi-byte sequence.
+        let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["home"])]);
+        let mut app = test_app(bindings);
+
+        // Verify the binding was registered as an interactive byte pattern.
+        let result = app.interactive_patterns.match_sequence(&[0x1b, b'[', b'H']);
+        assert_eq!(
+            result.map(|(a, _)| a),
+            Some(Action::ExitInteractive),
+            "ESC [ H must resolve to ExitInteractive in interactive patterns"
+        );
+
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.session_surface = SessionSurface::Agent;
+
+        // Full sequence in one buffer.
+        app.loading_input_buf = b"\x1b[H".to_vec();
+        assert!(
+            app.scan_exit_interactive(),
+            "scan_exit_interactive must detect multi-byte ExitInteractive"
+        );
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    #[test]
+    fn loading_phase_exit_interactive_fragmented_across_reads() {
+        // Rebind ExitInteractive to Home (ESC [ H) — a multi-byte sequence.
+        let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["home"])]);
+        let mut app = test_app(bindings);
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.session_surface = SessionSurface::Agent;
+
+        // First "read" delivers only the ESC byte — not a complete sequence.
+        app.loading_input_buf = vec![0x1b];
+        assert!(
+            !app.scan_exit_interactive(),
+            "incomplete sequence must not trigger exit"
+        );
+        assert_eq!(
+            app.input_target,
+            InputTarget::Agent,
+            "should still be in interactive mode"
+        );
+
+        // Simulate the remainder trimming that poll_and_forward_raw_input
+        // does: keep only the incomplete remainder.
+        let (_, remainder) = crate::raw_input::split_sequences(&app.loading_input_buf);
+        let keep = remainder.len();
+        let start = app.loading_input_buf.len() - keep;
+        app.loading_input_buf = app.loading_input_buf[start..].to_vec();
+
+        // Second "read" delivers the rest of the sequence.
+        app.loading_input_buf.extend_from_slice(b"[H");
+        assert!(
+            app.scan_exit_interactive(),
+            "completed sequence across reads must trigger exit"
+        );
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    #[test]
+    fn loading_phase_ignores_non_exit_input() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.session_surface = SessionSurface::Agent;
+
+        // Regular ASCII input should not trigger exit.
+        app.loading_input_buf = b"hello".to_vec();
+        assert!(
+            !app.scan_exit_interactive(),
+            "regular input must not trigger exit"
+        );
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+    }
+
+    #[test]
+    fn append_capped_keeps_trailing_bytes_on_large_chunk() {
+        let mut buf = b"prefix".to_vec();
+        let big: Vec<u8> = (0..200u8).collect();
+        super::append_capped(&mut buf, &big, super::LOADING_INPUT_BUF_MAX);
+        assert_eq!(
+            buf.len(),
+            super::LOADING_INPUT_BUF_MAX,
+            "buffer must be capped to the configured maximum"
+        );
+        // When the incoming chunk alone exceeds the cap, prior prefix is
+        // discarded and only the trailing window of the new chunk remains.
+        let expected_tail: Vec<u8> = (200 - super::LOADING_INPUT_BUF_MAX as u8..200u8).collect();
+        assert_eq!(buf, expected_tail);
+    }
+
+    #[test]
+    fn append_capped_drops_oldest_bytes_on_incremental_overflow() {
+        // Fill exactly to cap with distinct leading bytes.
+        let mut buf: Vec<u8> = (0..super::LOADING_INPUT_BUF_MAX as u8).collect();
+        // Append 5 more bytes — should drop the first 5.
+        super::append_capped(
+            &mut buf,
+            &[0xA, 0xB, 0xC, 0xD, 0xE],
+            super::LOADING_INPUT_BUF_MAX,
+        );
+        assert_eq!(buf.len(), super::LOADING_INPUT_BUF_MAX);
+        assert_eq!(
+            &buf[buf.len() - 5..],
+            &[0xA, 0xB, 0xC, 0xD, 0xE],
+            "most recent bytes must be preserved at the tail"
+        );
+        assert_eq!(
+            buf[0], 5,
+            "first 5 original bytes (0..=4) must have been dropped"
+        );
+    }
+
+    #[test]
+    fn loading_phase_cap_still_matches_exit_interactive_at_tail() {
+        // Ensure that after a large paste, a trailing single-byte
+        // ExitInteractive (Ctrl-G) still triggers exit.
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.session_surface = SessionSurface::Agent;
+
+        // Fill the buffer with filler past the cap, then put Ctrl-G at the
+        // tail. append_capped would have done the same; we prepare the
+        // post-cap state directly here.
+        let mut filler: Vec<u8> = vec![b'x'; super::LOADING_INPUT_BUF_MAX - 1];
+        filler.push(0x07);
+        app.loading_input_buf = filler;
+        assert!(
+            app.scan_exit_interactive(),
+            "Ctrl-G at the tail of a capped buffer must still trigger exit"
+        );
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
     }
 
     // ---------------------------------------------------------------

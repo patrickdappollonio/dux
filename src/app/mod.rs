@@ -123,6 +123,10 @@ pub struct App {
     pub(crate) last_mouse_click: Option<RecentMouseClick>,
     pub(crate) interactive_patterns: InteractiveBytePatterns,
     pub(crate) raw_input_buf: Vec<u8>,
+    /// Separate buffer for scanning ExitInteractive during the loading phase.
+    /// Kept independent of `raw_input_buf` so that suppressed keystrokes
+    /// cannot leak into the first post-loading `process_raw_input_bytes` call.
+    pub(crate) loading_input_buf: Vec<u8>,
     pub(crate) macro_bar: Option<MacroBarState>,
     pub(crate) sigwinch_flag: Arc<AtomicBool>,
     pub(crate) force_redraw: bool,
@@ -997,6 +1001,7 @@ impl App {
             last_mouse_click: None,
             interactive_patterns,
             raw_input_buf: Vec::new(),
+            loading_input_buf: Vec::new(),
             macro_bar: None,
             sigwinch_flag,
             force_redraw: false,
@@ -1622,14 +1627,14 @@ impl App {
 
     pub(crate) fn sort_sessions_by_updated(&mut self) {
         self.sessions
-            .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            .sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         self.rebuild_left_items();
         self.set_info("Agents sorted by most recently updated.");
     }
 
     pub(crate) fn sort_sessions_by_created(&mut self) {
         self.sessions
-            .sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            .sort_by_key(|b| std::cmp::Reverse(b.created_at));
         self.rebuild_left_items();
         self.set_info("Agents sorted by creation date (newest first).");
     }
@@ -2201,7 +2206,7 @@ fn aggregate_tree(
             });
         }
     }
-    children.sort_by(|a, b| b.rss_bytes.cmp(&a.rss_bytes));
+    children.sort_by_key(|b| std::cmp::Reverse(b.rss_bytes));
     children.truncate(10);
     (cpu, rss, count, children)
 }
