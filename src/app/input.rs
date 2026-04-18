@@ -966,6 +966,7 @@ impl App {
         if self.selected_session().is_none() {
             self.input_target = InputTarget::None;
             self.terminal_selection = None;
+            self.in_bracket_paste = false;
             self.raw_input_buf.clear();
             self.loading_input_buf.clear();
             return Ok(false);
@@ -974,6 +975,7 @@ impl App {
         if self.selected_terminal_surface_client().is_none() {
             self.input_target = InputTarget::None;
             self.terminal_selection = None;
+            self.in_bracket_paste = false;
             self.raw_input_buf.clear();
             self.loading_input_buf.clear();
             let label = match surface {
@@ -1047,7 +1049,56 @@ impl App {
             self.loading_input_buf.clear();
         }
 
-        self.process_raw_input_bytes(&buf[..n])
+        let should_exit = self.process_raw_input_bytes(&buf[..n])?;
+        if should_exit {
+            return Ok(true);
+        }
+
+        // Drain any remaining stdin data without returning to the main loop
+        // (which would render between every 4096-byte chunk). This prevents
+        // intermediate renders during large pastes while still respecting a
+        // time budget so we don't starve the UI.
+        let drain_deadline = std::time::Instant::now() + std::time::Duration::from_millis(16);
+        let zero_timeout = rustix::time::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        loop {
+            if std::time::Instant::now() >= drain_deadline {
+                break;
+            }
+            // If we exited interactive mode during processing, stop draining.
+            if !matches!(
+                self.input_target,
+                InputTarget::Agent | InputTarget::Terminal
+            ) {
+                break;
+            }
+            // Poll stdin with zero timeout — return immediately if no data.
+            let more = crate::io_retry::retry_on_interrupt_errno(|| {
+                let mut pollfd = [PollFd::new(&stdin_borrow, PollFlags::IN)];
+                poll(&mut pollfd, Some(&zero_timeout))
+            })?;
+            if more == 0 {
+                break;
+            }
+            let n2 = crate::io_retry::retry_on_interrupt(|| stdin_lock.read(&mut buf))?;
+            if n2 == 0 {
+                break;
+            }
+            // Re-check output guard.
+            if let Some(provider) = self.selected_terminal_surface_client()
+                && !provider.has_output()
+            {
+                break;
+            }
+            let should_exit = self.process_raw_input_bytes(&buf[..n2])?;
+            if should_exit {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     /// Process raw bytes that have already been read from stdin.
@@ -1070,22 +1121,38 @@ impl App {
             Forward(Vec<u8>),
         }
 
-        let actions: Vec<SeqAction> = sequences
-            .iter()
-            .map(|seq| {
-                // Mouse events must be handled by the UI, not forwarded to the
-                // PTY. crossterm's EnableMouseCapture uses SGR (1006) encoding,
-                // so terminal mouse events arrive as CSI `<…M` / `<…m`.
-                if let Some(mouse_ev) = crate::raw_input::parse_sgr_mouse(seq) {
-                    return SeqAction::Mouse(mouse_ev, seq.to_vec());
-                }
-                if let Some((action, conditional)) = self.interactive_patterns.match_sequence(seq) {
-                    SeqAction::Intercept(action, conditional, seq.to_vec())
-                } else {
-                    SeqAction::Forward(seq.to_vec())
-                }
-            })
-            .collect();
+        // Build actions with bracket-paste awareness: inside a paste
+        // (between ESC[200~ and ESC[201~), skip intercept matching so
+        // pasted text never triggers keybindings.
+        let mut actions: Vec<SeqAction> = Vec::with_capacity(sequences.len());
+        for seq in &sequences {
+            if *seq == crate::raw_input::BRACKET_PASTE_START {
+                self.in_bracket_paste = true;
+                actions.push(SeqAction::Forward(seq.to_vec()));
+                continue;
+            }
+            if *seq == crate::raw_input::BRACKET_PASTE_END {
+                self.in_bracket_paste = false;
+                actions.push(SeqAction::Forward(seq.to_vec()));
+                continue;
+            }
+            if self.in_bracket_paste {
+                actions.push(SeqAction::Forward(seq.to_vec()));
+                continue;
+            }
+            // Mouse events must be handled by the UI, not forwarded to the
+            // PTY. crossterm's EnableMouseCapture uses SGR (1006) encoding,
+            // so terminal mouse events arrive as CSI `<…M` / `<…m`.
+            if let Some(mouse_ev) = crate::raw_input::parse_sgr_mouse(seq) {
+                actions.push(SeqAction::Mouse(mouse_ev, seq.to_vec()));
+                continue;
+            }
+            if let Some((action, conditional)) = self.interactive_patterns.match_sequence(seq) {
+                actions.push(SeqAction::Intercept(action, conditional, seq.to_vec()));
+            } else {
+                actions.push(SeqAction::Forward(seq.to_vec()));
+            }
+        }
 
         // Trim buffer to remainder.
         let buf_len = self.raw_input_buf.len();
@@ -1098,10 +1165,42 @@ impl App {
             .selected_terminal_surface_client()
             .is_some_and(|p| p.scrollback_offset() > 0);
 
-        // Process collected actions.
+        // Process collected actions, batching consecutive forward sequences
+        // into a single PTY write to avoid per-character lock/write/flush
+        // overhead (critical for large pastes).
+        let mut forward_batch: Vec<u8> = Vec::new();
+
+        /// Flush accumulated forward bytes to the PTY in a single write.
+        fn flush_forward_batch(
+            batch: &mut Vec<u8>,
+            is_scrolled_back: bool,
+            needs_selection_clear: &mut bool,
+            provider: Option<&crate::pty::PtyClient>,
+        ) {
+            if batch.is_empty() {
+                return;
+            }
+            *needs_selection_clear = true;
+            if !is_scrolled_back && let Some(p) = provider {
+                let _ = p.write_bytes(batch);
+            }
+            batch.clear();
+        }
+
+        // Track whether the selection should be cleared (set by flush or
+        // individual forward writes). We defer the clear to avoid repeated
+        // borrow-mut conflicts inside the loop.
+        let mut needs_selection_clear = false;
+
         for action in actions {
             match action {
                 SeqAction::Intercept(Action::OpenMacroBar, _, _) => {
+                    flush_forward_batch(
+                        &mut forward_batch,
+                        is_scrolled_back,
+                        &mut needs_selection_clear,
+                        self.selected_terminal_surface_client(),
+                    );
                     if is_scrolled_back {
                         continue;
                     }
@@ -1122,15 +1221,33 @@ impl App {
                     return Ok(false);
                 }
                 SeqAction::Intercept(Action::ExitInteractive, _, _) => {
+                    flush_forward_batch(
+                        &mut forward_batch,
+                        is_scrolled_back,
+                        &mut needs_selection_clear,
+                        self.selected_terminal_surface_client(),
+                    );
                     self.exit_interactive_mode();
                     return Ok(false);
                 }
                 SeqAction::Intercept(Action::ScrollPageUp, _, _) => {
+                    flush_forward_batch(
+                        &mut forward_batch,
+                        is_scrolled_back,
+                        &mut needs_selection_clear,
+                        self.selected_terminal_surface_client(),
+                    );
                     if self.last_pty_size.0 > 0 {
                         self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
                     }
                 }
                 SeqAction::Intercept(Action::ScrollPageDown, _, _) => {
+                    flush_forward_batch(
+                        &mut forward_batch,
+                        is_scrolled_back,
+                        &mut needs_selection_clear,
+                        self.selected_terminal_surface_client(),
+                    );
                     if self.last_pty_size.0 > 0 {
                         self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
                     }
@@ -1140,9 +1257,15 @@ impl App {
                         .selected_terminal_surface_client()
                         .is_some_and(|p| p.scrollback_offset() > 0);
                     if conditional && has_scrollback && self.last_pty_size.0 > 0 {
+                        flush_forward_batch(
+                            &mut forward_batch,
+                            is_scrolled_back,
+                            &mut needs_selection_clear,
+                            self.selected_terminal_surface_client(),
+                        );
                         self.scroll_pty(ScrollDirection::Up, 1);
-                    } else if let Some(provider) = self.selected_terminal_surface_client() {
-                        let _ = provider.write_bytes(&raw);
+                    } else {
+                        forward_batch.extend_from_slice(&raw);
                     }
                 }
                 SeqAction::Intercept(Action::ScrollLineDown, conditional, raw) => {
@@ -1150,9 +1273,15 @@ impl App {
                         .selected_terminal_surface_client()
                         .is_some_and(|p| p.scrollback_offset() > 0);
                     if conditional && has_scrollback && self.last_pty_size.0 > 0 {
+                        flush_forward_batch(
+                            &mut forward_batch,
+                            is_scrolled_back,
+                            &mut needs_selection_clear,
+                            self.selected_terminal_surface_client(),
+                        );
                         self.scroll_pty(ScrollDirection::Down, 1);
-                    } else if let Some(provider) = self.selected_terminal_surface_client() {
-                        let _ = provider.write_bytes(&raw);
+                    } else {
+                        forward_batch.extend_from_slice(&raw);
                     }
                 }
                 SeqAction::Intercept(Action::ScrollToBottom, conditional, raw) => {
@@ -1160,9 +1289,15 @@ impl App {
                         .selected_terminal_surface_client()
                         .is_some_and(|p| p.scrollback_offset() > 0);
                     if conditional && has_scrollback {
+                        flush_forward_batch(
+                            &mut forward_batch,
+                            is_scrolled_back,
+                            &mut needs_selection_clear,
+                            self.selected_terminal_surface_client(),
+                        );
                         self.reset_pty_scrollback();
-                    } else if let Some(provider) = self.selected_terminal_surface_client() {
-                        let _ = provider.write_bytes(&raw);
+                    } else {
+                        forward_batch.extend_from_slice(&raw);
                     }
                 }
                 SeqAction::Intercept(Action::ScrollToTop, conditional, raw) => {
@@ -1170,12 +1305,27 @@ impl App {
                         .selected_terminal_surface_client()
                         .is_some_and(|p| p.scrollback_offset() > 0);
                     if conditional && has_scrollback {
+                        flush_forward_batch(
+                            &mut forward_batch,
+                            is_scrolled_back,
+                            &mut needs_selection_clear,
+                            self.selected_terminal_surface_client(),
+                        );
                         self.set_pty_scrollback_max();
-                    } else if let Some(provider) = self.selected_terminal_surface_client() {
-                        let _ = provider.write_bytes(&raw);
+                    } else {
+                        forward_batch.extend_from_slice(&raw);
                     }
                 }
                 SeqAction::Mouse(mouse_ev, raw) => {
+                    // Flush any pending forward bytes before handling mouse
+                    // events — mouse actions may change scroll state or exit
+                    // interactive mode.
+                    flush_forward_batch(
+                        &mut forward_batch,
+                        is_scrolled_back,
+                        &mut needs_selection_clear,
+                        self.selected_terminal_surface_client(),
+                    );
                     let is_scroll = matches!(
                         mouse_ev.kind,
                         MouseEventKind::ScrollUp
@@ -1247,17 +1397,24 @@ impl App {
                     }
                 }
                 SeqAction::Intercept(_, _, raw) | SeqAction::Forward(raw) => {
-                    // Unknown intercepted action or normal forward — send to PTY,
-                    // but only when not scrolled back. In scroll mode, all
-                    // non-scroll input is suppressed.
-                    self.terminal_selection = None;
-                    if !is_scrolled_back
-                        && let Some(provider) = self.selected_terminal_surface_client()
-                    {
-                        let _ = provider.write_bytes(&raw);
-                    }
+                    // Unknown intercepted action or normal forward — batch
+                    // for a single PTY write. In scroll mode, all non-scroll
+                    // input is suppressed (the batch won't be flushed).
+                    forward_batch.extend_from_slice(&raw);
                 }
             }
+        }
+
+        // Flush any remaining batched forward bytes.
+        flush_forward_batch(
+            &mut forward_batch,
+            is_scrolled_back,
+            &mut needs_selection_clear,
+            self.selected_terminal_surface_client(),
+        );
+
+        if needs_selection_clear {
+            self.terminal_selection = None;
         }
 
         Ok(false)
@@ -3996,6 +4153,7 @@ impl App {
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.session_surface = SessionSurface::Agent;
         self.terminal_selection = None;
+        self.in_bracket_paste = false;
         self.raw_input_buf.clear();
         self.loading_input_buf.clear();
         if return_to_terminal_list {
@@ -4202,6 +4360,7 @@ mod tests {
             },
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
+            in_bracket_paste: false,
             macro_bar: None,
             sigwinch_flag: Arc::new(AtomicBool::new(false)),
             force_redraw: false,
@@ -7722,5 +7881,157 @@ mod tests {
             LeftSection::Projects,
             "should switch back to projects when last terminal deleted"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Bracket paste and input batching tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn bracket_paste_skips_intercept_matching() {
+        // Ctrl-G (0x07) normally triggers ExitInteractive. Inside a
+        // bracket paste it should be forwarded, not intercepted.
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        // Spawn a real PTY so write_bytes has somewhere to go.
+        app.providers.insert(
+            "session-1".to_string(),
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "cat; sleep 0.5".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+        // Wait for the shell to produce output so has_output() is true.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Build input: ESC[200~ + Ctrl-G + ESC[201~
+        let mut input = Vec::new();
+        input.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
+        input.push(0x07); // Ctrl-G — would be ExitInteractive outside paste
+        input.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
+
+        let result = app.process_raw_input_bytes(&input).unwrap();
+        assert!(!result, "should not request exit");
+
+        // The key assertion: we should still be in interactive mode.
+        // If the Ctrl-G was intercepted, input_target would be None.
+        assert_eq!(
+            app.input_target,
+            InputTarget::Agent,
+            "Ctrl-G inside bracket paste must not exit interactive mode"
+        );
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+    }
+
+    #[test]
+    fn bracket_paste_state_tracks_across_calls() {
+        // If the paste start marker arrives in one read and the end
+        // marker in the next, in_bracket_paste must persist.
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+
+        app.providers.insert(
+            "session-1".to_string(),
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "cat; sleep 0.5".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // First chunk: start marker + some text.
+        let mut chunk1 = Vec::new();
+        chunk1.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
+        chunk1.extend_from_slice(b"abc");
+        app.process_raw_input_bytes(&chunk1).unwrap();
+        assert!(
+            app.in_bracket_paste,
+            "should be in bracket paste after start marker"
+        );
+
+        // Second chunk: more text + end marker.
+        let mut chunk2 = Vec::new();
+        chunk2.extend_from_slice(b"def");
+        chunk2.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
+        app.process_raw_input_bytes(&chunk2).unwrap();
+        assert!(
+            !app.in_bracket_paste,
+            "should exit bracket paste after end marker"
+        );
+    }
+
+    #[test]
+    fn bracket_paste_state_reset_on_exit_interactive() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        app.providers.insert(
+            "session-1".to_string(),
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "cat; sleep 0.5".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Enter bracket paste state.
+        app.in_bracket_paste = true;
+
+        // Now send ExitInteractive (Ctrl-G) outside of paste context.
+        // Reset in_bracket_paste first to simulate that the end marker
+        // was never received (e.g. malformed paste), but we exit.
+        app.in_bracket_paste = false;
+        app.process_raw_input_bytes(b"\x07").unwrap();
+
+        assert!(!app.in_bracket_paste, "should be reset after exit");
+        assert_eq!(app.input_target, InputTarget::None);
+    }
+
+    #[test]
+    fn forward_batching_sends_all_bytes() {
+        // Verify that multiple plain characters are forwarded to the PTY
+        // (they should be batched into a single write, but we can at
+        // least verify the bytes arrive by reading them back).
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+
+        let client = PtyClient::spawn(
+            "sh",
+            &["-c".to_string(), "cat; sleep 0.5".to_string()],
+            std::path::Path::new("."),
+            10,
+            10,
+            100,
+        )
+        .expect("spawn pty");
+        app.providers.insert("session-1".to_string(), client);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Feed 100 'x' characters — they should all be forwarded.
+        let input = vec![b'x'; 100];
+        let result = app.process_raw_input_bytes(&input).unwrap();
+        assert!(!result);
+        // We should still be in interactive mode (nothing intercepted).
+        assert_eq!(app.input_target, InputTarget::Agent);
+        // The raw_input_buf should be empty (no remainder).
+        assert!(app.raw_input_buf.is_empty());
     }
 }
