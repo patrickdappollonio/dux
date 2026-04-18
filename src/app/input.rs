@@ -66,6 +66,8 @@ enum PromptMouseTarget {
     ConfirmDeleteConfirm,
     ConfirmDeleteTerminalCancel,
     ConfirmDeleteTerminalConfirm,
+    ConfirmDeleteMacroCancel,
+    ConfirmDeleteMacroConfirm,
     ConfirmQuitCancel,
     ConfirmQuitConfirm,
     ConfirmDiscardCancel,
@@ -2295,10 +2297,21 @@ impl App {
     }
 
     fn handle_edit_macros_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if matches!(
+            self.prompt,
+            PromptState::EditMacros {
+                pending_delete: Some(_),
+                ..
+            }
+        ) {
+            return self.handle_confirm_delete_macro_key(key);
+        }
+
         let PromptState::EditMacros {
             entries,
             selected,
             editing,
+            ..
         } = &mut self.prompt
         else {
             return Ok(false);
@@ -2389,12 +2402,17 @@ impl App {
                         entries.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
 
                         // Persist
-                        let _ = crate::config::save_config(
+                        if let Err(err) = crate::config::save_config(
                             &self.paths.config_path,
                             &self.config,
                             &self.bindings,
-                        );
-                        self.set_info(format!("Macro \"{name}\" saved."));
+                        ) {
+                            self.set_error(format!(
+                                "Couldn't save macro \"{name}\" to config: {err:#}"
+                            ));
+                        } else {
+                            self.set_info(format!("Macro \"{name}\" saved."));
+                        }
                         return Ok(false);
                     }
                     // In multiline mode, TextInput handles Enter/Up/Down
@@ -2443,33 +2461,90 @@ impl App {
                 });
             }
             KeyCode::Char('d') | KeyCode::Delete => {
-                // Delete selected macro
+                // Stage confirmation for deleting the selected macro.
                 if let Some((name, _, _)) = entries.get(*selected) {
                     let name = name.clone();
-                    self.config.macros.entries.shift_remove(&name);
-
-                    let PromptState::EditMacros {
-                        entries, selected, ..
-                    } = &mut self.prompt
-                    else {
+                    let PromptState::EditMacros { pending_delete, .. } = &mut self.prompt else {
                         return Ok(false);
                     };
-                    entries.retain(|(n, _, _)| *n != name);
-                    if *selected > 0 && *selected >= entries.len() {
-                        *selected = entries.len().saturating_sub(1);
-                    }
-
-                    let _ = crate::config::save_config(
-                        &self.paths.config_path,
-                        &self.config,
-                        &self.bindings,
-                    );
-                    self.set_info(format!("Macro \"{name}\" deleted."));
+                    *pending_delete = Some(PendingMacroDelete {
+                        name,
+                        confirm_selected: false,
+                    });
                 }
             }
             _ => {}
         }
         Ok(false)
+    }
+
+    fn handle_confirm_delete_macro_key(&mut self, key: KeyEvent) -> Result<bool> {
+        let action = self.bindings.lookup(&key, BindingScope::Dialog);
+        let is_space = key.code == KeyCode::Char(' ');
+        let activate = matches!(action, Some(Action::Confirm)) || is_space;
+
+        let confirm = {
+            let PromptState::EditMacros { pending_delete, .. } = &mut self.prompt else {
+                return Ok(false);
+            };
+            let Some(pending) = pending_delete else {
+                return Ok(false);
+            };
+
+            if matches!(action, Some(Action::CloseOverlay)) {
+                *pending_delete = None;
+                return Ok(false);
+            }
+            if matches!(action, Some(Action::ToggleSelection)) {
+                pending.confirm_selected = !pending.confirm_selected;
+                return Ok(false);
+            }
+            if !activate {
+                return Ok(false);
+            }
+            pending.confirm_selected
+        };
+
+        self.resolve_confirm_delete_macro(confirm);
+        Ok(false)
+    }
+
+    pub(super) fn resolve_confirm_delete_macro(&mut self, confirm: bool) -> bool {
+        let PromptState::EditMacros { pending_delete, .. } = &mut self.prompt else {
+            return false;
+        };
+        let Some(pending) = pending_delete.take() else {
+            return false;
+        };
+
+        if !confirm {
+            return false;
+        }
+
+        let name = pending.name;
+        self.config.macros.entries.shift_remove(&name);
+
+        let PromptState::EditMacros {
+            entries, selected, ..
+        } = &mut self.prompt
+        else {
+            return false;
+        };
+        entries.retain(|(n, _, _)| n != &name);
+        if *selected > 0 && *selected >= entries.len() {
+            *selected = entries.len().saturating_sub(1);
+        }
+
+        if let Err(err) =
+            crate::config::save_config(&self.paths.config_path, &self.config, &self.bindings)
+        {
+            self.set_error(format!(
+                "Couldn't persist deletion of macro \"{name}\" to config: {err:#}"
+            ));
+        } else {
+            self.set_info(format!("Macro \"{name}\" deleted."));
+        }
+        false
     }
 
     fn handle_resize_key(&mut self, key: KeyEvent) {
@@ -2618,6 +2693,18 @@ impl App {
                     Some(PromptMouseTarget::ConfirmDeleteTerminalCancel)
                 } else if contains_point(delete_button, column, row) {
                     Some(PromptMouseTarget::ConfirmDeleteTerminalConfirm)
+                } else {
+                    None
+                }
+            }
+            OverlayMouseLayout::ConfirmDeleteMacro {
+                cancel_button,
+                delete_button,
+            } => {
+                if contains_point(cancel_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmDeleteMacroCancel)
+                } else if contains_point(delete_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmDeleteMacroConfirm)
                 } else {
                     None
                 }
@@ -3557,6 +3644,12 @@ impl App {
             PromptMouseTarget::ConfirmDeleteTerminalConfirm => {
                 return self.resolve_confirm_delete_terminal(true);
             }
+            PromptMouseTarget::ConfirmDeleteMacroCancel => {
+                return self.resolve_confirm_delete_macro(false);
+            }
+            PromptMouseTarget::ConfirmDeleteMacroConfirm => {
+                return self.resolve_confirm_delete_macro(true);
+            }
             PromptMouseTarget::ConfirmQuitCancel => return self.resolve_confirm_quit(false),
             PromptMouseTarget::ConfirmQuitConfirm => return self.resolve_confirm_quit(true),
             PromptMouseTarget::ConfirmDiscardCancel => {
@@ -3877,7 +3970,9 @@ impl App {
             self.config.ui.terminal_pane_height_pct = self.terminal_pane_height_pct;
             self.config.ui.staged_pane_height_pct = self.staged_pane_height_pct;
             self.config.ui.commit_pane_height_pct = self.commit_pane_height_pct;
-            let _ = save_config(&self.paths.config_path, &self.config, &self.bindings);
+            if let Err(err) = save_config(&self.paths.config_path, &self.config, &self.bindings) {
+                self.set_error(format!("Couldn't persist pane sizes to config: {err:#}"));
+            }
         }
     }
 
@@ -8122,5 +8217,198 @@ mod tests {
         assert_eq!(app.input_target, InputTarget::Agent);
         // The raw_input_buf should be empty (no remainder).
         assert!(app.raw_input_buf.is_empty());
+    }
+
+    fn app_with_two_macros() -> App {
+        let mut app = test_app(default_bindings());
+        app.config.macros.entries.insert(
+            "greet".to_string(),
+            crate::config::MacroEntry {
+                text: "hello".to_string(),
+                surface: crate::config::MacroSurface::Agent,
+            },
+        );
+        app.config.macros.entries.insert(
+            "farewell".to_string(),
+            crate::config::MacroEntry {
+                text: "goodbye".to_string(),
+                surface: crate::config::MacroSurface::Agent,
+            },
+        );
+        app.open_edit_macros();
+        app
+    }
+
+    fn pending_delete_state(app: &App) -> Option<(&str, bool)> {
+        if let PromptState::EditMacros {
+            pending_delete: Some(pending),
+            ..
+        } = &app.prompt
+        {
+            Some((pending.name.as_str(), pending.confirm_selected))
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn macro_delete_key_stages_confirmation_without_mutating_config() {
+        let mut app = app_with_two_macros();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .expect("handle d");
+
+        assert_eq!(pending_delete_state(&app), Some(("greet", false)));
+        assert_eq!(
+            app.config.macros.entries.len(),
+            2,
+            "macro must not be removed from config until confirmed"
+        );
+        assert!(app.config.macros.entries.contains_key("greet"));
+    }
+
+    #[test]
+    fn macro_delete_esc_clears_pending_without_deleting() {
+        let mut app = app_with_two_macros();
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .expect("handle d");
+        assert!(pending_delete_state(&app).is_some());
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("handle esc");
+
+        assert!(pending_delete_state(&app).is_none());
+        assert!(
+            matches!(app.prompt, PromptState::EditMacros { .. }),
+            "macro editor should remain open after dismissing the confirm dialog"
+        );
+        assert_eq!(app.config.macros.entries.len(), 2);
+    }
+
+    #[test]
+    fn macro_delete_tab_toggles_confirm_button_focus() {
+        let mut app = app_with_two_macros();
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .expect("handle d");
+        assert_eq!(pending_delete_state(&app), Some(("greet", false)));
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .expect("handle tab");
+        assert_eq!(pending_delete_state(&app), Some(("greet", true)));
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .expect("handle tab");
+        assert_eq!(pending_delete_state(&app), Some(("greet", false)));
+    }
+
+    #[test]
+    fn macro_delete_enter_on_cancel_is_noop() {
+        let mut app = app_with_two_macros();
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .expect("handle d");
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("handle enter");
+
+        assert!(pending_delete_state(&app).is_none());
+        assert_eq!(app.config.macros.entries.len(), 2);
+        assert!(app.config.macros.entries.contains_key("greet"));
+    }
+
+    #[test]
+    fn macro_delete_enter_on_delete_removes_and_persists() {
+        let mut app = app_with_two_macros();
+        let config_path = app.paths.config_path.clone();
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .expect("handle d");
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .expect("handle tab");
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("handle enter");
+
+        assert!(pending_delete_state(&app).is_none());
+        assert!(
+            !app.config.macros.entries.contains_key("greet"),
+            "macro should be removed from in-memory config"
+        );
+        assert_eq!(app.config.macros.entries.len(), 1);
+
+        if let PromptState::EditMacros { entries, .. } = &app.prompt {
+            assert!(
+                entries.iter().all(|(n, _, _)| n != "greet"),
+                "EditMacros snapshot should reflect the deletion"
+            );
+        } else {
+            panic!("expected EditMacros prompt after resolving delete");
+        }
+
+        assert!(
+            config_path.exists(),
+            "config file should have been written to disk"
+        );
+        let disk = std::fs::read_to_string(&config_path).expect("read config");
+        assert!(
+            !disk.contains("greet"),
+            "deleted macro should not appear in saved config"
+        );
+    }
+
+    #[test]
+    fn macro_delete_surfaces_save_failure_on_status_line() {
+        let mut app = app_with_two_macros();
+        // Point config_path at a directory that doesn't exist so save_config fails.
+        app.paths.config_path = app
+            .paths
+            .root
+            .join("nope")
+            .join("missing")
+            .join("config.toml");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .expect("handle d");
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .expect("handle tab");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("handle enter");
+
+        assert_eq!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Error,
+            "save failure should produce an error-toned status message"
+        );
+        let msg = app.status.message();
+        assert!(
+            msg.contains("greet"),
+            "status message should name the affected macro, got: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("config"),
+            "status message should mention config, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn macro_delete_space_activates_focused_button() {
+        let mut app = app_with_two_macros();
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .expect("handle d");
+
+        // Space on Cancel (default focus) should cancel without deleting.
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .expect("handle space");
+        assert!(pending_delete_state(&app).is_none());
+        assert_eq!(app.config.macros.entries.len(), 2);
+
+        // Now re-open and focus Delete, then Space should remove.
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .expect("handle d");
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .expect("handle tab");
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .expect("handle space");
+
+        assert!(pending_delete_state(&app).is_none());
+        assert!(!app.config.macros.entries.contains_key("greet"));
     }
 }
