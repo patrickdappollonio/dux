@@ -1243,7 +1243,7 @@ fn default_terminal_args() -> Vec<String> {
     vec!["-l".to_string()]
 }
 
-fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4] {
+fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 5] {
     [
         (
             "claude",
@@ -1308,6 +1308,22 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4] {
                 oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("npm install -g opencode-ai".to_string()),
                 forward_scroll: true,
+            },
+        ),
+        (
+            "copilot",
+            ProviderCommandConfig {
+                command: "copilot".to_string(),
+                args: Vec::new(),
+                resume_args: Some(vec!["--continue".to_string()]),
+                oneshot_args: vec![
+                    "-p".to_string(),
+                    "{prompt}".to_string(),
+                    "--allow-all-tools".to_string(),
+                ],
+                oneshot_output: OneshotOutput::Stdout,
+                install_hint: Some("npm install -g @github/copilot".to_string()),
+                forward_scroll: false,
             },
         ),
     ]
@@ -1602,6 +1618,7 @@ mod tests {
         assert!(rendered.contains("provider = \"claude\""));
         assert!(rendered.contains("[providers.claude]"));
         assert!(rendered.contains("[providers.codex]"));
+        assert!(rendered.contains("[providers.copilot]"));
         assert!(rendered.contains("oneshot_args = "));
         assert!(rendered.contains("oneshot_output = "));
         assert!(rendered.contains("resume_args = "));
@@ -2128,6 +2145,24 @@ oneshot_output = "stdout"
     }
 
     #[test]
+    fn default_copilot_oneshot_uses_prompt_flag_with_allow_all_tools() {
+        let providers = default_provider_commands();
+        let copilot = providers.iter().find(|(n, _)| *n == "copilot").unwrap();
+        let cfg = &copilot.1;
+        assert_eq!(cfg.command, "copilot");
+        assert_eq!(
+            cfg.oneshot_args,
+            vec!["-p", "{prompt}", "--allow-all-tools"]
+        );
+        assert!(matches!(cfg.oneshot_output, OneshotOutput::Stdout));
+        assert_eq!(
+            cfg.resume_args.clone(),
+            Some(vec!["--continue".to_string()])
+        );
+        assert!(cfg.supports_session_resume());
+    }
+
+    #[test]
     fn ensure_defaults_adds_opencode_and_gemini() {
         let mut providers = ProvidersConfig {
             commands: indexmap::IndexMap::from([(
@@ -2152,8 +2187,13 @@ oneshot_output = "stdout"
         );
         assert!(providers.get("gemini").is_some(), "gemini should be added");
         assert!(providers.get("codex").is_some(), "codex should be added");
+        assert!(
+            providers.get("copilot").is_some(),
+            "copilot should be added"
+        );
         assert_eq!(providers.get("opencode").unwrap().command, "opencode");
         assert_eq!(providers.get("gemini").unwrap().command, "gemini");
+        assert_eq!(providers.get("copilot").unwrap().command, "copilot");
     }
 
     #[test]
