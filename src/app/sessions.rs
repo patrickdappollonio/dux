@@ -822,11 +822,12 @@ impl App {
             .map(|name| {
                 let provider = ProviderKind::new(name.clone());
                 let cfg = provider_config(&self.config, &provider);
-                let resume_available =
-                    cfg.supports_session_resume() && session.has_started_provider(&provider);
+                let supports_resume = cfg.supports_session_resume();
+                let resume_available = supports_resume && session.has_started_provider(&provider);
                 ChangeAgentProviderOption {
                     is_current: provider == session.provider,
                     provider,
+                    supports_resume,
                     resume_available,
                 }
             })

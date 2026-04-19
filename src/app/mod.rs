@@ -413,6 +413,11 @@ pub(crate) struct KillRunningPrompt {
 #[derive(Clone, Debug)]
 pub(crate) struct ChangeAgentProviderOption {
     pub(crate) provider: ProviderKind,
+    /// True when this provider's config has `resume_args`. Providers
+    /// without resume support (e.g. Copilot CLI) always start fresh.
+    pub(crate) supports_resume: bool,
+    /// True when `supports_resume` AND this provider has been launched on
+    /// this worktree before, so the next launch will actually resume.
     pub(crate) resume_available: bool,
     pub(crate) is_current: bool,
 }

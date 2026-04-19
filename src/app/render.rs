@@ -2557,6 +2557,8 @@ impl App {
                             "current"
                         } else if option.resume_available {
                             "a previous session was found; it'll be continued"
+                        } else if !option.supports_resume {
+                            "this provider doesn't support resume; it'll start fresh every time"
                         } else {
                             "no prior session; will start fresh"
                         };

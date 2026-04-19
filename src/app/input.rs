@@ -6975,6 +6975,54 @@ mod tests {
     }
 
     #[test]
+    fn change_agent_provider_marks_providers_without_resume_support() {
+        let mut app = test_app(default_bindings());
+        app.sessions[0].provider = ProviderKind::from_str("codex");
+        app.sessions[0].status = SessionStatus::Detached;
+        // Pretend copilot was launched earlier — it still shouldn't advertise
+        // resume because copilot's config has `resume_args: None`.
+        app.sessions[0].started_providers = vec!["copilot".to_string()];
+
+        app.rebuild_left_items();
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(index) if *index == 0))
+            .expect("select the seeded session");
+
+        app.open_change_agent_provider_prompt()
+            .expect("open picker");
+        match &app.prompt {
+            PromptState::ChangeAgentProvider(prompt) => {
+                let copilot = prompt
+                    .options
+                    .iter()
+                    .find(|option| option.provider.as_str() == "copilot")
+                    .expect("copilot option present");
+                assert!(
+                    !copilot.supports_resume,
+                    "copilot is configured without resume_args, so supports_resume must be false"
+                );
+                assert!(
+                    !copilot.resume_available,
+                    "even with prior launches, copilot cannot resume"
+                );
+
+                let codex = prompt
+                    .options
+                    .iter()
+                    .find(|option| option.provider.as_str() == "codex")
+                    .expect("codex option present");
+                assert!(
+                    codex.supports_resume,
+                    "codex supports resume via resume_args"
+                );
+            }
+            other => panic!("expected change-agent-provider prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn launch_companion_terminal_sets_runtime_state_and_overlay() {
         let mut app = test_app(default_bindings());
 
