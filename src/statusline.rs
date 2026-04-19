@@ -50,9 +50,7 @@ impl StatusLine {
     pub fn text(&self) -> String {
         match self.tone {
             StatusTone::Busy => format!("{} {}", self.spinner_frame(), self.message),
-            StatusTone::Warning => format!("[warning] {}", self.message),
-            StatusTone::Error => format!("[error] {}", self.message),
-            StatusTone::Info => self.message.clone(),
+            StatusTone::Info | StatusTone::Warning | StatusTone::Error => self.message.clone(),
         }
     }
 
@@ -77,10 +75,11 @@ mod tests {
     use super::{StatusLine, StatusTone};
 
     #[test]
-    fn warning_tone_formats_with_warning_prefix() {
+    fn warning_tone_keeps_message_plain() {
         let mut status = StatusLine::new("ready");
         status.warning("something changed");
         assert_eq!(status.tone(), StatusTone::Warning);
-        assert_eq!(status.text(), "[warning] something changed");
+        // The warning colour carries the meaning — no "[warning]" prefix.
+        assert_eq!(status.text(), "something changed");
     }
 }

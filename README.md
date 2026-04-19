@@ -74,7 +74,14 @@ resume_args = ["--continue"]
 
 Set `resume_args` and dux can reconnect to detached or crashed sessions. Omit it if your CLI doesn't support resuming; dux will just relaunch it.
 
-Cycle through providers on the fly with a single keypress, or set a default per-project.
+Switch providers from the command palette. dux sticks to one agent per worktree, so provider changes happen in place:
+
+- **`change-agent-provider`** swaps the *selected* worktree's provider on next launch. If the agent is still running, dux records your choice and warns you — the running agent keeps going until you exit and relaunch it, at which point it spawns with the new provider. If you've used that provider on this worktree before, dux passes its `resume_args` so you pick up the previous conversation instead of starting fresh.
+- **`change-default-provider`** picks which provider *new* agent sessions should spawn with. Existing agents keep their current provider; to move a running one, use `change-agent-provider` after stopping it.
+
+The header shows `default provider: …` for the project and adds `current provider: …` when the selected agent is using a different one, so you always know which CLI you're talking to.
+
+You can also set a default per-project in the config file, which wins over the global default for that one project.
 
 ### Macros
 

@@ -91,6 +91,11 @@ pub struct App {
     pub(crate) worker_tx: Sender<WorkerEvent>,
     pub(crate) worker_rx: Receiver<WorkerEvent>,
     pub(crate) providers: HashMap<String, PtyClient>,
+    /// When a provider swap happens while the agent's PTY is still running,
+    /// the currently-spawned provider is pinned here so UI labels keep
+    /// showing what's actually running until the user exits and relaunches
+    /// the agent. Cleared whenever the PTY is torn down.
+    pub(crate) running_provider_pins: HashMap<String, ProviderKind>,
     pub(crate) companion_terminals: HashMap<String, CompanionTerminal>,
     pub(crate) active_terminal_id: Option<String>,
     pub(crate) terminal_return_to_list: bool,
@@ -388,6 +393,13 @@ pub(crate) enum KillRunningFocus {
     Footer(KillRunningFooterAction),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChangeAgentProviderFocus {
+    List,
+    Cancel,
+    Apply,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct KillRunningPrompt {
     pub(crate) runtimes: Vec<KillableRuntime>,
@@ -396,6 +408,49 @@ pub(crate) struct KillRunningPrompt {
     pub(crate) hovered_visible_index: usize,
     pub(crate) selected_ids: HashSet<RuntimeTargetId>,
     pub(crate) focus: KillRunningFocus,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ChangeAgentProviderOption {
+    pub(crate) provider: ProviderKind,
+    /// True when this provider's config has `resume_args`. Providers
+    /// without resume support (e.g. Copilot CLI) always start fresh.
+    pub(crate) supports_resume: bool,
+    /// True when `supports_resume` AND this provider has been launched on
+    /// this worktree before, so the next launch will actually resume.
+    pub(crate) resume_available: bool,
+    pub(crate) is_current: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ChangeAgentProviderPrompt {
+    pub(crate) session_id: String,
+    pub(crate) session_label: String,
+    pub(crate) worktree_path: String,
+    pub(crate) options: Vec<ChangeAgentProviderOption>,
+    pub(crate) selected: usize,
+    pub(crate) focus: ChangeAgentProviderFocus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChangeDefaultProviderFocus {
+    List,
+    Cancel,
+    Apply,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ChangeDefaultProviderOption {
+    pub(crate) provider: ProviderKind,
+    pub(crate) is_current: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ChangeDefaultProviderPrompt {
+    pub(crate) current: ProviderKind,
+    pub(crate) options: Vec<ChangeDefaultProviderOption>,
+    pub(crate) selected: usize,
+    pub(crate) focus: ChangeDefaultProviderFocus,
 }
 
 #[derive(Clone, Debug)]
@@ -434,6 +489,8 @@ pub(crate) enum PromptState {
         tab_completions: Vec<String>,
         tab_index: usize,
     },
+    ChangeAgentProvider(ChangeAgentProviderPrompt),
+    ChangeDefaultProvider(ChangeDefaultProviderPrompt),
     KillRunning(KillRunningPrompt),
     ConfirmKillRunning(ConfirmKillRunningPrompt),
     ConfirmDeleteAgent {
@@ -728,6 +785,20 @@ pub(crate) enum OverlayMouseLayout {
         items: usize,
         offset: usize,
     },
+    ChangeAgentProvider {
+        list: Rect,
+        items: usize,
+        offset: usize,
+        cancel_button: Rect,
+        apply_button: Rect,
+    },
+    ChangeDefaultProvider {
+        list: Rect,
+        items: usize,
+        offset: usize,
+        cancel_button: Rect,
+        apply_button: Rect,
+    },
     PickEditor {
         list: Rect,
         items: usize,
@@ -849,11 +920,6 @@ pub(crate) enum CreateAgentRequest {
         source_session: Box<AgentSession>,
         source_label: String,
         custom_name: Option<String>,
-    },
-    NewProviderSession {
-        project: Project,
-        source_session: Box<AgentSession>,
-        provider: ProviderKind,
     },
 }
 
@@ -1006,6 +1072,7 @@ impl App {
             worker_tx,
             worker_rx,
             providers: HashMap::new(),
+            running_provider_pins: HashMap::new(),
             companion_terminals: HashMap::new(),
             active_terminal_id: None,
             terminal_return_to_list: false,
@@ -1441,8 +1508,8 @@ impl App {
         match command {
             "new-agent" => self.create_agent_for_selected_project(),
             "fork-agent" => self.fork_selected_session(),
-            "new-provider-session" => self.create_provider_session_on_worktree(),
-            "provider" => self.cycle_selected_project_provider(),
+            "change-agent-provider" => self.open_change_agent_provider_prompt(),
+            "change-default-provider" => self.open_change_default_provider_prompt(),
             "pull-project" => self.refresh_selected_project(),
             "delete-project" => self.delete_selected_project(),
             "remove-project" => self.remove_selected_project(),
@@ -1758,6 +1825,17 @@ impl App {
             .find(|p| p.id == session.project_id)
             .map(|p| p.name.clone())
             .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    /// Provider currently driving the session's live PTY, if any. After an
+    /// in-place provider swap while the agent is still running, this returns
+    /// the *original* provider until the user exits and relaunches — so the
+    /// pane title doesn't lie about what's actually on screen.
+    pub(crate) fn running_provider_for(&self, session: &AgentSession) -> ProviderKind {
+        self.running_provider_pins
+            .get(&session.id)
+            .cloned()
+            .unwrap_or_else(|| session.provider.clone())
     }
 
     pub(crate) fn reload_changed_files(&mut self) {
@@ -2134,6 +2212,22 @@ impl App {
         } else {
             false
         }
+    }
+}
+
+/// Re-resolve the in-memory `default_provider` for each project against the
+/// current config. Projects with an explicit `default_provider` keep their
+/// override; projects without one pick up the new global default.
+pub(crate) fn refresh_project_defaults(projects: &mut [Project], config: &Config) {
+    let fallback = config.default_provider();
+    for project in projects.iter_mut() {
+        let explicit = config
+            .projects
+            .iter()
+            .find(|cfg| cfg.id == project.id)
+            .and_then(|cfg| cfg.default_provider.as_deref())
+            .map(ProviderKind::from_str);
+        project.default_provider = explicit.unwrap_or_else(|| fallback.clone());
     }
 }
 

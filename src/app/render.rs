@@ -106,9 +106,18 @@ const WELCOME_TIPS: &[fn(&RuntimeBindings) -> String] = &[
     },
     |b| {
         format!(
-            "`{}` cycles through providers. Claude today, Codex tomorrow; your call.",
-            b.label_for(Action::CycleProvider)
+            "Open the palette with `{}` and run `change-agent-provider` to swap a worktree's CLI. Been here before? dux resumes that provider's last session automatically.",
+            b.label_for(Action::OpenPalette)
         )
+    },
+    |_b| {
+        "dux remembers which providers you've run on each worktree. Swap away and back, and each one picks up right where you left it.".into()
+    },
+    |_b| {
+        "New agents spawning with the wrong CLI? Run `change-default-provider` in the palette to swap the default. Existing agents stay on their current brain.".into()
+    },
+    |_b| {
+        "Swapped providers while an agent was still running? The sidebar shows `(old → new)` until you exit and relaunch. dux queues the swap, you run the show.".into()
     },
     // --- new tips ---
     |_b| {
@@ -426,13 +435,26 @@ impl App {
             }
             spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
             spans.push(Span::styled(
-                "provider: ",
+                "default provider: ",
                 Style::default().fg(label_fg).bg(bg),
             ));
             spans.push(Span::styled(
                 project.default_provider.as_str().to_string(),
                 Style::default().fg(self.theme.branch_fg).bg(bg),
             ));
+            if let Some(session) = self.selected_session()
+                && session.provider != project.default_provider
+            {
+                spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
+                spans.push(Span::styled(
+                    "current provider: ",
+                    Style::default().fg(label_fg).bg(bg),
+                ));
+                spans.push(Span::styled(
+                    session.provider.as_str().to_string(),
+                    Style::default().fg(self.theme.branch_fg).bg(bg),
+                ));
+            }
             let running_terminals = self.running_companion_terminal_count();
             if running_terminals > 0 {
                 spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
@@ -631,13 +653,26 @@ impl App {
                     } else {
                         Style::default().fg(label_color)
                     };
+                    let running_provider = self.running_provider_for(session);
+                    let provider_label = if running_provider != session.provider {
+                        // Swap is pending: agent is still running the old
+                        // provider but will spawn with session.provider on
+                        // next launch. Show both so the sidebar doesn't lie.
+                        format!(
+                            " ({} → {})",
+                            running_provider.as_str(),
+                            session.provider.as_str(),
+                        )
+                    } else {
+                        format!(" ({})", session.provider.as_str())
+                    };
                     ListItem::new(Line::from(
                         vec![
                             Span::styled(connector, Style::default().fg(self.theme.project_icon)),
                             Span::styled(format!("{dot} "), label_style),
                             Span::styled(label, label_style),
                             Span::styled(
-                                format!(" ({})", session.provider.as_str()),
+                                provider_label,
                                 if deleting {
                                     label_style
                                 } else {
@@ -1065,7 +1100,7 @@ impl App {
         let session_provider_name = match active_surface {
             SessionSurface::Agent => self
                 .selected_session()
-                .map(|s| s.provider.as_str().to_owned()),
+                .map(|s| self.running_provider_for(s).as_str().to_owned()),
             SessionSurface::Terminal => Some(
                 self.config
                     .terminal
@@ -2448,6 +2483,419 @@ impl App {
                         offset: state.offset(),
                     };
                 }
+            }
+            PromptState::ChangeAgentProvider(prompt) => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(72, 42, frame.area());
+                Clear.render(area, frame.buffer_mut());
+
+                let move_down = self.bindings.label_for(Action::MoveDown);
+                let move_up = self.bindings.label_for(Action::MoveUp);
+                let toggle_key = self.bindings.label_for(Action::ToggleSelection);
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+
+                let mut bottom_spans = vec![Span::raw(" ")];
+                bottom_spans.extend(self.theme.key_badge_default(&move_down));
+                bottom_spans.push(Span::styled(
+                    " down  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&move_up));
+                bottom_spans.push(Span::styled(
+                    " up  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&toggle_key));
+                bottom_spans.push(Span::styled(
+                    " buttons  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
+                bottom_spans.push(Span::styled(
+                    " choose  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&close_key));
+                bottom_spans.push(Span::styled(
+                    " cancel",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+
+                let [details_area, list_area, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(4),
+                        Constraint::Min(6),
+                        Constraint::Length(3),
+                    ])
+                    .areas(area);
+
+                let detail_lines = vec![
+                    Line::from(vec![
+                        Span::styled(" Agent: ", Style::default().fg(self.theme.hint_desc_fg)),
+                        Span::styled(
+                            prompt.session_label.as_str(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(" Path: ", Style::default().fg(self.theme.hint_desc_fg)),
+                        Span::raw(prompt.worktree_path.as_str()),
+                    ]),
+                ];
+                Paragraph::new(detail_lines)
+                    .block(
+                        self.themed_overlay_block("Change Agent Provider")
+                            .title_bottom(Line::from(bottom_spans)),
+                    )
+                    .render(details_area, frame.buffer_mut());
+
+                let provider_col = prompt
+                    .options
+                    .iter()
+                    .map(|option| option.provider.as_str().chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    .max(8);
+                let items = prompt
+                    .options
+                    .iter()
+                    .map(|option| {
+                        let status = if option.is_current {
+                            "current"
+                        } else if option.resume_available {
+                            "a previous session was found; it'll be continued"
+                        } else if !option.supports_resume {
+                            "this provider doesn't support resume; it'll start fresh every time"
+                        } else {
+                            "no prior session; will start fresh"
+                        };
+                        let name =
+                            format!("{:width$}", option.provider.as_str(), width = provider_col);
+                        ListItem::new(Line::from(vec![
+                            Span::styled(
+                                name,
+                                Style::default()
+                                    .fg(self.theme.help_section_header_fg)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("  {status}"),
+                                Style::default().fg(self.theme.hint_desc_fg),
+                            ),
+                        ]))
+                    })
+                    .collect::<Vec<_>>();
+                let mut state = ListState::default().with_selected(Some(
+                    prompt.selected.min(prompt.options.len().saturating_sub(1)),
+                ));
+                let list_block = Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                    .border_style(Style::default().fg(self.theme.overlay_border));
+                let list_inner = list_block.inner(list_area);
+                let highlight_style = if matches!(prompt.focus, ChangeAgentProviderFocus::List) {
+                    self.theme.selection_style()
+                } else {
+                    Style::default()
+                        .fg(self.theme.help_section_header_fg)
+                        .add_modifier(Modifier::BOLD)
+                };
+                StatefulWidget::render(
+                    List::new(items)
+                        .block(list_block)
+                        .highlight_style(highlight_style),
+                    list_area,
+                    frame.buffer_mut(),
+                    &mut state,
+                );
+
+                let btn_width = 18u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let apply_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                let (cancel_border, cancel_fg) =
+                    if matches!(prompt.focus, ChangeAgentProviderFocus::Cancel) {
+                        (
+                            self.theme.button_confirm_border,
+                            self.theme.button_active_fg,
+                        )
+                    } else {
+                        (self.theme.border_normal, self.theme.hint_desc_fg)
+                    };
+                let apply_enabled = prompt
+                    .options
+                    .get(prompt.selected)
+                    .map(|option| !option.is_current)
+                    .unwrap_or(false);
+                let (apply_border, apply_fg) =
+                    if matches!(prompt.focus, ChangeAgentProviderFocus::Apply) && apply_enabled {
+                        (
+                            self.theme.button_confirm_border,
+                            self.theme.button_active_fg,
+                        )
+                    } else if !apply_enabled {
+                        (self.theme.border_normal, self.theme.hint_dim_desc_fg)
+                    } else {
+                        (self.theme.border_normal, self.theme.hint_desc_fg)
+                    };
+
+                Paragraph::new(Line::from(Span::styled(
+                    "Cancel",
+                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED)
+                        .border_style(Style::default().fg(cancel_border)),
+                )
+                .render(cancel_area, frame.buffer_mut());
+
+                Paragraph::new(Line::from(Span::styled(
+                    "Use Provider",
+                    if apply_enabled {
+                        Style::default().fg(apply_fg).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(apply_fg)
+                    },
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED)
+                        .border_style(Style::default().fg(apply_border)),
+                )
+                .render(apply_area, frame.buffer_mut());
+
+                self.overlay_layout.active = OverlayMouseLayout::ChangeAgentProvider {
+                    list: list_inner,
+                    items: prompt.options.len(),
+                    offset: state.offset(),
+                    cancel_button: cancel_area,
+                    apply_button: apply_area,
+                };
+            }
+            PromptState::ChangeDefaultProvider(prompt) => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(72, 42, frame.area());
+                Clear.render(area, frame.buffer_mut());
+
+                let move_down = self.bindings.label_for(Action::MoveDown);
+                let move_up = self.bindings.label_for(Action::MoveUp);
+                let toggle_key = self.bindings.label_for(Action::ToggleSelection);
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+
+                let mut bottom_spans = vec![Span::raw(" ")];
+                bottom_spans.extend(self.theme.key_badge_default(&move_down));
+                bottom_spans.push(Span::styled(
+                    " down  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&move_up));
+                bottom_spans.push(Span::styled(
+                    " up  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&toggle_key));
+                bottom_spans.push(Span::styled(
+                    " buttons  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
+                bottom_spans.push(Span::styled(
+                    " choose  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&close_key));
+                bottom_spans.push(Span::styled(
+                    " cancel",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+
+                let [details_area, list_area, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(4),
+                        Constraint::Min(6),
+                        Constraint::Length(3),
+                    ])
+                    .areas(area);
+
+                let detail_lines = vec![
+                    Line::from(vec![
+                        Span::styled(
+                            " Current default: ",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ),
+                        Span::styled(
+                            prompt.current.as_str().to_string(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(vec![Span::styled(
+                        " New sessions will use the chosen provider. Existing agents keep their current provider.",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )]),
+                ];
+                Paragraph::new(detail_lines)
+                    .block(
+                        self.themed_overlay_block("Change Default Provider")
+                            .title_bottom(Line::from(bottom_spans)),
+                    )
+                    .render(details_area, frame.buffer_mut());
+
+                let provider_col = prompt
+                    .options
+                    .iter()
+                    .map(|option| option.provider.as_str().chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    .max(8);
+                let items = prompt
+                    .options
+                    .iter()
+                    .map(|option| {
+                        let status = if option.is_current {
+                            "current default"
+                        } else {
+                            "available"
+                        };
+                        let name =
+                            format!("{:width$}", option.provider.as_str(), width = provider_col);
+                        ListItem::new(Line::from(vec![
+                            Span::styled(
+                                name,
+                                Style::default()
+                                    .fg(self.theme.help_section_header_fg)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("  {status}"),
+                                Style::default().fg(self.theme.hint_desc_fg),
+                            ),
+                        ]))
+                    })
+                    .collect::<Vec<_>>();
+                let mut state = ListState::default().with_selected(Some(
+                    prompt.selected.min(prompt.options.len().saturating_sub(1)),
+                ));
+                let list_block = Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                    .border_style(Style::default().fg(self.theme.overlay_border));
+                let list_inner = list_block.inner(list_area);
+                let highlight_style = if matches!(prompt.focus, ChangeDefaultProviderFocus::List) {
+                    self.theme.selection_style()
+                } else {
+                    Style::default()
+                        .fg(self.theme.help_section_header_fg)
+                        .add_modifier(Modifier::BOLD)
+                };
+                StatefulWidget::render(
+                    List::new(items)
+                        .block(list_block)
+                        .highlight_style(highlight_style),
+                    list_area,
+                    frame.buffer_mut(),
+                    &mut state,
+                );
+
+                let btn_width = 18u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let apply_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                let (cancel_border, cancel_fg) =
+                    if matches!(prompt.focus, ChangeDefaultProviderFocus::Cancel) {
+                        (
+                            self.theme.button_confirm_border,
+                            self.theme.button_active_fg,
+                        )
+                    } else {
+                        (self.theme.border_normal, self.theme.hint_desc_fg)
+                    };
+                let apply_enabled = prompt
+                    .options
+                    .get(prompt.selected)
+                    .map(|option| !option.is_current)
+                    .unwrap_or(false);
+                let (apply_border, apply_fg) =
+                    if matches!(prompt.focus, ChangeDefaultProviderFocus::Apply) && apply_enabled {
+                        (
+                            self.theme.button_confirm_border,
+                            self.theme.button_active_fg,
+                        )
+                    } else if !apply_enabled {
+                        (self.theme.border_normal, self.theme.hint_dim_desc_fg)
+                    } else {
+                        (self.theme.border_normal, self.theme.hint_desc_fg)
+                    };
+
+                Paragraph::new(Line::from(Span::styled(
+                    "Cancel",
+                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED)
+                        .border_style(Style::default().fg(cancel_border)),
+                )
+                .render(cancel_area, frame.buffer_mut());
+
+                Paragraph::new(Line::from(Span::styled(
+                    "Set Default",
+                    if apply_enabled {
+                        Style::default().fg(apply_fg).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(apply_fg)
+                    },
+                )))
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED)
+                        .border_style(Style::default().fg(apply_border)),
+                )
+                .render(apply_area, frame.buffer_mut());
+
+                self.overlay_layout.active = OverlayMouseLayout::ChangeDefaultProvider {
+                    list: list_inner,
+                    items: prompt.options.len(),
+                    offset: state.offset(),
+                    cancel_button: cancel_area,
+                    apply_button: apply_area,
+                };
             }
             PromptState::PickEditor {
                 session_label,
@@ -4453,7 +4901,7 @@ impl App {
         Clear.render(area, frame.buffer_mut());
         let title = match self.selected_session() {
             Some(session) => {
-                let provider = capitalize(session.provider.as_str());
+                let provider = capitalize(self.running_provider_for(session).as_str());
                 let name = session.title.as_deref().unwrap_or(&session.branch_name);
                 let pr_suffix = self
                     .pr_statuses
@@ -4648,7 +5096,7 @@ impl App {
 
     fn center_pane_agent_title(&self) -> String {
         if let Some(session) = self.selected_session() {
-            let provider = capitalize(session.provider.as_str());
+            let provider = capitalize(self.running_provider_for(session).as_str());
             let base = format!("{provider} agent");
             let count = self.session_terminal_count(&session.id);
             if count == 1 {

@@ -707,6 +707,7 @@ impl App {
         self.session_store.delete_session(&session.id)?;
 
         self.providers.remove(&session.id);
+        self.running_provider_pins.remove(&session.id);
         self.last_pty_activity.remove(&session.id);
         self.resume_fallback_candidates.remove(&session.id);
         self.clear_companion_terminals_for_session(&session.id);
@@ -810,53 +811,206 @@ impl App {
         }
     }
 
-    pub(crate) fn cycle_selected_project_provider(&mut self) -> Result<()> {
-        let Some(project) = self.selected_project().cloned() else {
-            self.set_error("Select a project first.");
+    fn change_agent_provider_options(
+        &self,
+        session: &AgentSession,
+    ) -> Vec<ChangeAgentProviderOption> {
+        self.config
+            .providers
+            .commands
+            .keys()
+            .map(|name| {
+                let provider = ProviderKind::new(name.clone());
+                let cfg = provider_config(&self.config, &provider);
+                let supports_resume = cfg.supports_session_resume();
+                let resume_available = supports_resume && session.has_started_provider(&provider);
+                ChangeAgentProviderOption {
+                    is_current: provider == session.provider,
+                    provider,
+                    supports_resume,
+                    resume_available,
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn open_change_agent_provider_prompt(&mut self) -> Result<()> {
+        let Some(session) = self.selected_session().cloned() else {
+            self.set_error("Select an agent session first.");
             return Ok(());
         };
-        let provider_names: Vec<&String> = self.config.providers.commands.keys().collect();
-        if provider_names.is_empty() {
-            self.set_error("No providers configured.");
+        if self.config.providers.commands.is_empty() {
+            self.set_error("No providers are configured.");
             return Ok(());
         }
-        let current = project.default_provider.as_str();
-        let current_idx = provider_names
-            .iter()
-            .position(|n| n.as_str() == current)
-            .unwrap_or(0);
-        let next_idx = (current_idx + 1) % provider_names.len();
-        let next = ProviderKind::new(provider_names[next_idx].clone());
-        if let Some(existing) = self
-            .projects
-            .iter_mut()
-            .find(|candidate| candidate.id == project.id)
-        {
-            existing.default_provider = next.clone();
-        }
-        if let Some(project_config) = self
-            .config
-            .projects
-            .iter_mut()
-            .find(|candidate| Path::new(&candidate.path) == Path::new(&project.path))
-        {
-            project_config.default_provider = Some(next.as_str().to_string());
-        }
-        save_config(&self.paths.config_path, &self.config, &self.bindings)?;
-        for session in self
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.prompt = PromptState::ChangeAgentProvider(ChangeAgentProviderPrompt {
+            session_id: session.id.clone(),
+            session_label: self.session_label(&session),
+            worktree_path: session.worktree_path.clone(),
+            options: self.change_agent_provider_options(&session),
+            selected: 0,
+            focus: ChangeAgentProviderFocus::List,
+        });
+        self.set_info(
+            "Choose a provider for this worktree. The change takes effect on the next launch; dux resumes each provider's prior session on this worktree when available.",
+        );
+        Ok(())
+    }
+
+    pub(crate) fn apply_change_agent_provider(&mut self) -> Result<()> {
+        let prompt = match &self.prompt {
+            PromptState::ChangeAgentProvider(prompt) => prompt.clone(),
+            _ => return Ok(()),
+        };
+        let Some(selected) = prompt.options.get(prompt.selected).cloned() else {
+            self.prompt = PromptState::None;
+            self.set_error("Select a provider first.");
+            return Ok(());
+        };
+        let Some(session_index) = self
             .sessions
-            .iter_mut()
-            // Active is currently the only running session state. If SessionStatus
-            // gains additional running variants, update this filter to keep
-            // provider cycling limited to new and non-running agents.
-            .filter(|s| s.project_id == project.id && !matches!(s.status, SessionStatus::Active))
-        {
-            session.provider = next.clone();
-            self.session_store.upsert_session(session)?;
+            .iter()
+            .position(|session| session.id == prompt.session_id)
+        else {
+            self.prompt = PromptState::None;
+            self.set_error("The selected agent is no longer available.");
+            return Ok(());
+        };
+
+        if selected.is_current {
+            self.prompt = PromptState::None;
+            self.set_info(format!(
+                "Agent \"{}\" already uses {}. Pick another provider to swap.",
+                prompt.session_label,
+                selected.provider.as_str(),
+            ));
+            return Ok(());
         }
+
+        self.prompt = PromptState::None;
+
+        let session_id = self.sessions[session_index].id.clone();
+        let running = self.providers.contains_key(&session_id);
+        let previous_provider = self.sessions[session_index].provider.clone();
+
+        let session = &mut self.sessions[session_index];
+        session.provider = selected.provider.clone();
+        session.updated_at = Utc::now();
+        let updated = session.clone();
+        self.session_store.upsert_session(&updated)?;
+
+        // Pin the still-running provider so UI labels stay truthful until
+        // the user exits and relaunches the agent. Only set on the first
+        // swap-while-running — later swaps don't change what's spawned.
+        if running {
+            self.running_provider_pins
+                .entry(session_id.clone())
+                .or_insert(previous_provider.clone());
+        }
+        self.rebuild_left_items();
+
+        let reconnect_key = self.bindings.label_for(Action::ReconnectAgent);
+        if running {
+            self.set_warning(format!(
+                "Worktree \"{}\" is set to {}, but the {} agent is still running. Exit it and press {} to relaunch with {}.",
+                prompt.session_label,
+                selected.provider.as_str(),
+                previous_provider.as_str(),
+                reconnect_key,
+                selected.provider.as_str(),
+            ));
+        } else {
+            let resume_note = if selected.resume_available {
+                " dux will resume its prior session on this worktree."
+            } else {
+                " This provider hasn't run on this worktree yet, so it'll start a fresh session."
+            };
+            self.set_info(format!(
+                "Worktree \"{}\" will use {} next launch. Press {} to start it.{}",
+                prompt.session_label,
+                selected.provider.as_str(),
+                reconnect_key,
+                resume_note,
+            ));
+        }
+        Ok(())
+    }
+
+    fn change_default_provider_options(&self) -> Vec<ChangeDefaultProviderOption> {
+        let current = self.config.default_provider();
+        self.config
+            .providers
+            .commands
+            .keys()
+            .map(|name| {
+                let provider = ProviderKind::new(name.clone());
+                ChangeDefaultProviderOption {
+                    is_current: provider == current,
+                    provider,
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn open_change_default_provider_prompt(&mut self) -> Result<()> {
+        if self.config.providers.commands.is_empty() {
+            self.set_error("No providers are configured.");
+            return Ok(());
+        }
+        let options = self.change_default_provider_options();
+        let selected = options
+            .iter()
+            .position(|option| option.is_current)
+            .unwrap_or(0);
+        let current = self.config.default_provider();
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.prompt = PromptState::ChangeDefaultProvider(ChangeDefaultProviderPrompt {
+            current,
+            options,
+            selected,
+            focus: ChangeDefaultProviderFocus::List,
+        });
+        self.set_info(
+            "Choose the default provider for newly created agent sessions. Existing agents keep their current provider.",
+        );
+        Ok(())
+    }
+
+    pub(crate) fn apply_change_default_provider(&mut self) -> Result<()> {
+        let prompt = match &self.prompt {
+            PromptState::ChangeDefaultProvider(prompt) => prompt.clone(),
+            _ => return Ok(()),
+        };
+        let Some(selected) = prompt.options.get(prompt.selected).cloned() else {
+            self.prompt = PromptState::None;
+            self.set_error("Select a provider first.");
+            return Ok(());
+        };
+        self.prompt = PromptState::None;
+        if selected.is_current {
+            self.set_info(format!(
+                "{} is already the default provider. Pick a different one to change it.",
+                selected.provider.as_str(),
+            ));
+            return Ok(());
+        }
+        let previous = self.config.defaults.provider.clone();
+        self.config.defaults.provider = selected.provider.as_str().to_string();
+        if let Err(err) = save_config(&self.paths.config_path, &self.config, &self.bindings) {
+            self.config.defaults.provider = previous;
+            self.set_error(format!(
+                "Couldn't persist the default provider change: {err:#}"
+            ));
+            return Ok(());
+        }
+        refresh_project_defaults(&mut self.projects, &self.config);
+        self.rebuild_left_items();
         self.set_info(format!(
-            "Changed default CLI agent to \"{}\" for new and stopped agents",
-            next.as_str()
+            "Default provider changed to {}. New agent sessions will use it; existing agents keep their current provider. Use \"change-agent-provider\" on a session to switch providers for an existing worktree.",
+            selected.provider.as_str(),
         ));
         Ok(())
     }
@@ -962,6 +1116,7 @@ impl App {
         }
         // Kill existing PTY if the agent is still active.
         self.providers.remove(&session.id);
+        self.running_provider_pins.remove(&session.id);
         self.last_pty_activity.remove(&session.id);
         self.resume_fallback_candidates.remove(&session.id);
 
@@ -1468,6 +1623,7 @@ impl App {
             match target_id {
                 RuntimeTargetId::Agent(session_id) => {
                     if self.providers.remove(session_id).is_some() {
+                        self.running_provider_pins.remove(session_id);
                         self.last_pty_activity.remove(session_id);
                         self.mark_session_status(session_id, SessionStatus::Detached);
                         killed_agents += 1;
@@ -1516,70 +1672,6 @@ impl App {
             .unwrap_or_else(|| session.branch_name.clone())
     }
 
-    /// Creates a new session on the same worktree as the selected session but
-    /// using the project's current default provider.
-    pub(crate) fn create_provider_session_on_worktree(&mut self) -> Result<()> {
-        let Some(session) = self.selected_session().cloned() else {
-            self.set_error("Select an agent first.");
-            return Ok(());
-        };
-        let Some(project) = self
-            .projects
-            .iter()
-            .find(|p| p.id == session.project_id)
-            .cloned()
-        else {
-            self.set_error("Project not found for the selected agent.");
-            return Ok(());
-        };
-        if self.providers.contains_key(&session.id) {
-            self.set_error(
-                "The selected agent is still running. Stop it before creating a new provider session.",
-            );
-            return Ok(());
-        }
-        if project.default_provider == session.provider {
-            self.set_error(format!(
-                "The selected agent already uses {}. Change the default provider first with the \"provider\" command.",
-                session.provider.as_str(),
-            ));
-            return Ok(());
-        }
-        // Prevent creating a duplicate session with the same provider on
-        // the same worktree.
-        let target_provider = project.default_provider.clone();
-        let duplicate = self.sessions.iter().any(|s| {
-            s.id != session.id
-                && s.worktree_path == session.worktree_path
-                && s.provider == target_provider
-        });
-        if duplicate {
-            self.set_error(format!(
-                "A {} session already exists on this worktree. Select it from the session list instead.",
-                target_provider.as_str(),
-            ));
-            return Ok(());
-        }
-        if self.create_agent_in_flight {
-            self.set_error("Another agent is being created. Wait for it to finish.");
-            return Ok(());
-        }
-        self.create_agent_in_flight = true;
-        let request = CreateAgentRequest::NewProviderSession {
-            project,
-            source_session: Box::new(session),
-            provider: target_provider,
-        };
-        let paths = self.paths.clone();
-        let config = self.config.clone();
-        let tx = self.worker_tx.clone();
-        let term_size = self.last_pty_size;
-        std::thread::spawn(move || {
-            super::workers::run_create_agent_job(request, paths, config, tx, term_size);
-        });
-        Ok(())
-    }
-
     /// If another session on the same worktree has a running PTY, detach it
     /// (kill the PTY and mark the session as `Detached`).  Returns the
     /// human-readable label of the detached session, if any.
@@ -1601,6 +1693,7 @@ impl App {
         let label = self.session_label(&conflicting);
         let provider = conflicting.provider.as_str().to_string();
         self.providers.remove(&conflicting.id);
+        self.running_provider_pins.remove(&conflicting.id);
         self.last_pty_activity.remove(&conflicting.id);
         self.resume_fallback_candidates.remove(&conflicting.id);
         self.mark_session_status(&conflicting.id, SessionStatus::Detached);
@@ -1700,6 +1793,7 @@ mod tests {
             worker_tx,
             worker_rx,
             providers: std::collections::HashMap::new(),
+            running_provider_pins: std::collections::HashMap::new(),
             companion_terminals: std::collections::HashMap::new(),
             active_terminal_id: None,
             terminal_return_to_list: false,
@@ -1850,59 +1944,6 @@ mod tests {
         assert!(!app.providers.contains_key("s1"));
         let s1_session = app.sessions.iter().find(|s| s.id == "s1").unwrap();
         assert_eq!(s1_session.status, SessionStatus::Detached);
-    }
-
-    #[test]
-    fn create_provider_session_rejects_running_agent() {
-        let s1 = make_session("s1", "claude", "/tmp/wt/a");
-        let project = make_project("project-1", "codex");
-        let mut app = test_app_with_sessions(vec![s1], vec![project]);
-        app.selected_left = app
-            .left_items()
-            .iter()
-            .position(|item| matches!(item, LeftItem::Session(_)))
-            .unwrap_or(0);
-        mark_active(&mut app, "s1");
-
-        app.create_provider_session_on_worktree().unwrap();
-        assert!(app.status.text().contains("still running"));
-    }
-
-    #[test]
-    fn create_provider_session_rejects_same_provider() {
-        let s1 = make_session("s1", "claude", "/tmp/wt/a");
-        let project = make_project("project-1", "claude");
-        let mut app = test_app_with_sessions(vec![s1], vec![project]);
-        // Select the session in the left pane.
-        app.selected_left = app
-            .left_items()
-            .iter()
-            .position(|item| matches!(item, LeftItem::Session(_)))
-            .unwrap_or(0);
-
-        app.create_provider_session_on_worktree().unwrap();
-        // Should have set an error because the session already uses claude.
-        assert!(app.status.text().contains("already uses"));
-    }
-
-    #[test]
-    fn create_provider_session_rejects_duplicate() {
-        let s1 = make_session("s1", "claude", "/tmp/wt/a");
-        let s2 = make_session("s2", "codex", "/tmp/wt/a");
-        let project = make_project("project-1", "codex");
-        let mut app = test_app_with_sessions(vec![s1, s2], vec![project]);
-        // Select s1 (the claude session).
-        app.selected_left = app
-            .left_items()
-            .iter()
-            .position(|item| {
-                matches!(item, LeftItem::Session(i) if app.sessions.get(*i).map(|s| s.id.as_str()) == Some("s1"))
-            })
-            .unwrap_or(0);
-
-        app.create_provider_session_on_worktree().unwrap();
-        // Should reject because s2 already uses codex on the same worktree.
-        assert!(app.status.text().contains("already exists"));
     }
 
     #[test]
