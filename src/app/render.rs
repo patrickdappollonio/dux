@@ -106,9 +106,18 @@ const WELCOME_TIPS: &[fn(&RuntimeBindings) -> String] = &[
     },
     |b| {
         format!(
-            "`{}` opens the command palette so you can switch a worktree between provider sessions. Memory stays with the provider.",
+            "Open the palette with `{}` and run `change-agent-provider` to swap a worktree's CLI. Been here before? dux resumes that provider's last session automatically.",
             b.label_for(Action::OpenPalette)
         )
+    },
+    |_b| {
+        "dux remembers which providers you've run on each worktree. Swap away and back, and each one picks up right where you left it.".into()
+    },
+    |_b| {
+        "New agents spawning with the wrong CLI? Run `change-default-provider` in the palette to swap the default. Existing agents stay on their current brain.".into()
+    },
+    |_b| {
+        "Swapped providers while an agent was still running? The sidebar shows `(old → new)` until you exit and relaunch. dux queues the swap, you run the show.".into()
     },
     // --- new tips ---
     |_b| {
