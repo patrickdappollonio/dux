@@ -9237,12 +9237,40 @@ mod tests {
             "pane title should NOT claim Gemini is running yet, got: {rendered}"
         );
 
+        // Sidebar entry should show the running → queued transition.
+        assert!(
+            rendered.contains("(codex → gemini)"),
+            "sidebar should show running provider → next provider, got: {rendered}"
+        );
+
         // Tearing down the PTY clears the pin — the next launch will be gemini.
         app.providers.remove(&session_id);
         app.running_provider_pins.remove(&session_id);
         assert_eq!(
             app.running_provider_for(&app.sessions[0]).as_str(),
             "gemini"
+        );
+
+        // After the PTY is gone, the sidebar collapses back to a single label.
+        let backend = TestBackend::new(200, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            rendered.contains("(gemini)"),
+            "sidebar should collapse to plain (gemini) after the PTY exits, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("→"),
+            "arrow should disappear once no swap is pending, got: {rendered}"
         );
     }
 }

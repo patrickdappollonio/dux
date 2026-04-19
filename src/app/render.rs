@@ -644,13 +644,26 @@ impl App {
                     } else {
                         Style::default().fg(label_color)
                     };
+                    let running_provider = self.running_provider_for(session);
+                    let provider_label = if running_provider != session.provider {
+                        // Swap is pending: agent is still running the old
+                        // provider but will spawn with session.provider on
+                        // next launch. Show both so the sidebar doesn't lie.
+                        format!(
+                            " ({} → {})",
+                            running_provider.as_str(),
+                            session.provider.as_str(),
+                        )
+                    } else {
+                        format!(" ({})", session.provider.as_str())
+                    };
                     ListItem::new(Line::from(
                         vec![
                             Span::styled(connector, Style::default().fg(self.theme.project_icon)),
                             Span::styled(format!("{dot} "), label_style),
                             Span::styled(label, label_style),
                             Span::styled(
-                                format!(" ({})", session.provider.as_str()),
+                                provider_label,
                                 if deleting {
                                     label_style
                                 } else {
@@ -2543,9 +2556,9 @@ impl App {
                         let status = if option.is_current {
                             "current"
                         } else if option.resume_available {
-                            "resume available"
+                            "a previous session was found; it'll be continued"
                         } else {
-                            "available"
+                            "no prior session; will start fresh"
                         };
                         let name =
                             format!("{:width$}", option.provider.as_str(), width = provider_col);
