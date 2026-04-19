@@ -386,6 +386,7 @@ impl App {
                 continue;
             };
             self.providers.remove(session_id);
+            self.running_provider_pins.remove(session_id);
             self.last_pty_activity.remove(session_id);
             logger::info(&format!(
                 "resume args exited without output for agent \"{}\", retrying with regular args",
@@ -420,6 +421,7 @@ impl App {
                 continue;
             }
             self.providers.remove(session_id);
+            self.running_provider_pins.remove(session_id);
             self.last_pty_activity.remove(session_id);
             self.mark_session_status(session_id, SessionStatus::Detached);
         }
@@ -838,6 +840,7 @@ impl App {
                 continue;
             };
             self.providers.remove(&session_id);
+            self.running_provider_pins.remove(&session_id);
             self.last_pty_activity.remove(&session_id);
             logger::info(&format!(
                 "resume args produced no visible output for agent \"{}\" within timeout, retrying with regular args",

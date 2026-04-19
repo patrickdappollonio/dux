@@ -11,8 +11,8 @@ pub enum Action {
     ToggleProject,
     NewAgent,
     ForkAgent,
-    NewProviderSession,
     ChangeAgentProvider,
+    ChangeDefaultProvider,
     FocusAgent,
     OpenProjectBrowser,
     CopyPath,
@@ -185,8 +185,8 @@ impl Action {
             Action::ToggleProject => "toggle_project",
             Action::NewAgent => "new_agent",
             Action::ForkAgent => "fork_agent",
-            Action::NewProviderSession => "new_provider_session",
             Action::ChangeAgentProvider => "change_agent_provider",
+            Action::ChangeDefaultProvider => "change_default_provider",
             Action::FocusAgent => "focus_agent",
             Action::OpenProjectBrowser => "open_project_browser",
             Action::CopyPath => "copy_path",
@@ -265,11 +265,11 @@ impl Action {
             Action::ToggleProject => "Collapse or expand the selected project.",
             Action::NewAgent => "Create a new agent session (worktree).",
             Action::ForkAgent => "Fork the selected agent into a fresh worktree and session.",
-            Action::NewProviderSession => {
-                "Create a new session with a different provider on the selected agent's worktree."
-            }
             Action::ChangeAgentProvider => {
-                "Switch the selected agent worktree to a different provider session."
+                "Swap the selected agent worktree to a different provider."
+            }
+            Action::ChangeDefaultProvider => {
+                "Change the default provider used when creating new agent sessions."
             }
             Action::FocusAgent => "Focus the selected agent's output pane.",
             Action::OpenProjectBrowser => "Open the project browser.",
@@ -359,7 +359,6 @@ impl Action {
             | Action::ToggleProject
             | Action::NewAgent
             | Action::ForkAgent
-            | Action::NewProviderSession
             | Action::ChangeAgentProvider
             | Action::FocusAgent
             | Action::OpenProjectBrowser
@@ -426,7 +425,8 @@ impl Action {
             | Action::ToggleGithubIntegration
             | Action::TogglePromptForName
             | Action::TogglePrBannerPosition
-            | Action::ForceReconnectAgent => None,
+            | Action::ForceReconnectAgent
+            | Action::ChangeDefaultProvider => None,
         }
     }
 }
@@ -545,17 +545,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         }),
     },
     BindingDef {
-        action: Action::NewProviderSession,
-        default_keys: &[],
-        scopes: &[BindingScope::Left],
-        help: None,
-        hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "new-provider-session",
-            description: "Create a new session with a different provider on this worktree",
-        }),
-    },
-    BindingDef {
         action: Action::ChangeAgentProvider,
         default_keys: &[],
         scopes: &[],
@@ -563,7 +552,18 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
         palette: Some(PaletteEntry {
             name: "change-agent-provider",
-            description: "Switch this worktree to a different provider session",
+            description: "Swap this worktree's provider",
+        }),
+    },
+    BindingDef {
+        action: Action::ChangeDefaultProvider,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "change-default-provider",
+            description: "Change the default provider used when creating new sessions",
         }),
     },
     BindingDef {

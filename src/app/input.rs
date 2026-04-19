@@ -57,6 +57,9 @@ enum PromptMouseTarget {
     ChangeAgentProviderItem(usize),
     ChangeAgentProviderCancel,
     ChangeAgentProviderApply,
+    ChangeDefaultProviderItem(usize),
+    ChangeDefaultProviderCancel,
+    ChangeDefaultProviderApply,
     RuntimeKillInput,
     RuntimeKillItem(usize),
     RuntimeKillCancel,
@@ -412,7 +415,6 @@ impl App {
                 }
                 Action::NewAgent => self.create_agent_for_selected_project()?,
                 Action::ForkAgent => self.fork_selected_session()?,
-                Action::NewProviderSession => self.create_provider_session_on_worktree()?,
                 Action::RefreshProject => self.refresh_selected_project()?,
                 Action::ShowTerminal => self.show_or_open_first_terminal()?,
                 Action::DeleteSession => self.confirm_delete_selected_session()?,
@@ -2026,6 +2028,59 @@ impl App {
             return Ok(false);
         }
 
+        if let PromptState::ChangeDefaultProvider(prompt) = &mut self.prompt {
+            let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
+            let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
+            let is_space = key.code == KeyCode::Char(' ');
+            let reverse_tab = key.code == KeyCode::BackTab;
+
+            if matches!(palette_action.or(dialog_action), Some(Action::CloseOverlay)) {
+                self.prompt = PromptState::None;
+                return Ok(false);
+            }
+
+            if reverse_tab {
+                prompt.focus = Self::next_change_default_provider_focus(prompt.focus, false);
+                return Ok(false);
+            }
+
+            match prompt.focus {
+                ChangeDefaultProviderFocus::List => match palette_action.or(dialog_action) {
+                    Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
+                        prompt.selected += 1;
+                    }
+                    Some(Action::MoveUp) if prompt.selected > 0 => {
+                        prompt.selected -= 1;
+                    }
+                    Some(Action::Confirm) => {
+                        self.apply_change_default_provider()?;
+                    }
+                    Some(Action::ToggleSelection) => {
+                        prompt.focus = Self::next_change_default_provider_focus(prompt.focus, true);
+                    }
+                    _ => {}
+                },
+                ChangeDefaultProviderFocus::Cancel | ChangeDefaultProviderFocus::Apply => {
+                    if matches!(dialog_action, Some(Action::ToggleSelection)) {
+                        prompt.focus = Self::next_change_default_provider_focus(prompt.focus, true);
+                        return Ok(false);
+                    }
+                    if matches!(dialog_action, Some(Action::Confirm)) || is_space {
+                        match prompt.focus {
+                            ChangeDefaultProviderFocus::Cancel => {
+                                self.prompt = PromptState::None;
+                            }
+                            ChangeDefaultProviderFocus::Apply => {
+                                self.apply_change_default_provider()?;
+                            }
+                            ChangeDefaultProviderFocus::List => {}
+                        }
+                    }
+                }
+            }
+            return Ok(false);
+        }
+
         if let PromptState::ConfirmKillRunning(confirm_prompt) = &mut self.prompt {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => {
@@ -2701,6 +2756,23 @@ impl App {
                     None
                 }
             }
+            OverlayMouseLayout::ChangeDefaultProvider {
+                list,
+                items,
+                offset,
+                cancel_button,
+                apply_button,
+            } => {
+                if let Some(index) = Self::overlay_row_at(list, offset, items, column, row) {
+                    Some(PromptMouseTarget::ChangeDefaultProviderItem(index))
+                } else if contains_point(cancel_button, column, row) {
+                    Some(PromptMouseTarget::ChangeDefaultProviderCancel)
+                } else if contains_point(apply_button, column, row) {
+                    Some(PromptMouseTarget::ChangeDefaultProviderApply)
+                } else {
+                    None
+                }
+            }
             OverlayMouseLayout::KillRunning {
                 input,
                 list,
@@ -3368,6 +3440,34 @@ impl App {
         }
     }
 
+    fn next_change_default_provider_focus(
+        current: ChangeDefaultProviderFocus,
+        forward: bool,
+    ) -> ChangeDefaultProviderFocus {
+        match (current, forward) {
+            (ChangeDefaultProviderFocus::List, true) => ChangeDefaultProviderFocus::Cancel,
+            (ChangeDefaultProviderFocus::Cancel, true) => ChangeDefaultProviderFocus::Apply,
+            (ChangeDefaultProviderFocus::Apply, true) => ChangeDefaultProviderFocus::List,
+            (ChangeDefaultProviderFocus::List, false) => ChangeDefaultProviderFocus::Apply,
+            (ChangeDefaultProviderFocus::Apply, false) => ChangeDefaultProviderFocus::Cancel,
+            (ChangeDefaultProviderFocus::Cancel, false) => ChangeDefaultProviderFocus::List,
+        }
+    }
+
+    fn set_change_default_provider_selection(&mut self, index: usize) {
+        let count = match &self.prompt {
+            PromptState::ChangeDefaultProvider(prompt) => prompt.options.len(),
+            _ => 0,
+        };
+        if count == 0 {
+            return;
+        }
+        if let PromptState::ChangeDefaultProvider(prompt) = &mut self.prompt {
+            prompt.selected = index.min(count.saturating_sub(1));
+            prompt.focus = ChangeDefaultProviderFocus::List;
+        }
+    }
+
     fn resolve_confirm_delete_agent(&mut self, confirm: bool) -> bool {
         let (session_id, delete_worktree) = match &self.prompt {
             PromptState::ConfirmDeleteAgent {
@@ -3701,6 +3801,22 @@ impl App {
             }
             PromptMouseTarget::ChangeAgentProviderApply => {
                 if let Err(err) = self.apply_change_agent_provider() {
+                    self.set_error(format!("{err:#}"));
+                }
+            }
+            PromptMouseTarget::ChangeDefaultProviderItem(index) => {
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                self.set_change_default_provider_selection(index);
+                if double_click && let Err(err) = self.apply_change_default_provider() {
+                    self.set_error(format!("{err:#}"));
+                }
+            }
+            PromptMouseTarget::ChangeDefaultProviderCancel => {
+                self.prompt = PromptState::None;
+            }
+            PromptMouseTarget::ChangeDefaultProviderApply => {
+                if let Err(err) = self.apply_change_default_provider() {
                     self.set_error(format!("{err:#}"));
                 }
             }
@@ -4590,6 +4706,7 @@ mod tests {
             worker_tx,
             worker_rx,
             providers: std::collections::HashMap::new(),
+            running_provider_pins: std::collections::HashMap::new(),
             companion_terminals: std::collections::HashMap::new(),
             active_terminal_id: None,
             terminal_return_to_list: false,
@@ -6687,146 +6804,173 @@ mod tests {
     }
 
     #[test]
-    fn change_agent_provider_switches_to_existing_sibling_session() {
+    fn change_agent_provider_swaps_in_place_when_stopped() {
         let mut app = test_app(default_bindings());
-        let root = PathBuf::from(&app.projects[0].path);
-        let now = Utc::now();
-
-        app.config.projects.push(ProjectConfig {
-            id: app.projects[0].id.clone(),
-            path: app.projects[0].path.clone(),
-            name: Some(app.projects[0].name.clone()),
-            default_provider: Some(app.projects[0].default_provider.as_str().to_string()),
-            commit_prompt: None,
-        });
-
+        let original_session_id = app.sessions[0].id.clone();
+        let original_worktree = app.sessions[0].worktree_path.clone();
         app.sessions[0].provider = ProviderKind::from_str("codex");
-        app.sessions[0].status = SessionStatus::Active;
+        app.sessions[0].status = SessionStatus::Detached;
         app.session_store
             .upsert_session(&app.sessions[0])
-            .expect("persist active session");
-
-        let detached = AgentSession {
-            id: "session-2".to_string(),
-            project_id: app.projects[0].id.clone(),
-            project_path: Some(app.projects[0].path.clone()),
-            provider: ProviderKind::from_str("codex"),
-            source_branch: "main".to_string(),
-            branch_name: "detached-branch".to_string(),
-            worktree_path: app
-                .paths
-                .worktrees_root
-                .join("detached")
-                .display()
-                .to_string(),
-            title: None,
-            started_providers: vec!["codex".to_string()],
-            status: SessionStatus::Detached,
-            created_at: now,
-            updated_at: now,
-        };
-        let exited = AgentSession {
-            id: "session-3".to_string(),
-            project_id: app.projects[0].id.clone(),
-            project_path: Some(app.projects[0].path.clone()),
-            provider: ProviderKind::from_str("gemini"),
-            source_branch: "main".to_string(),
-            branch_name: "exited-branch".to_string(),
-            worktree_path: app.sessions[0].worktree_path.clone(),
-            title: None,
-            started_providers: vec!["codex".to_string()],
-            status: SessionStatus::Exited,
-            created_at: now,
-            updated_at: now,
-        };
-        let other_project = Project {
-            id: "project-2".to_string(),
-            name: "other".to_string(),
-            path: root.join("other-project").display().to_string(),
-            default_provider: ProviderKind::from_str("codex"),
-            current_branch: "main".to_string(),
-            path_missing: false,
-        };
-        let other_session = AgentSession {
-            id: "session-4".to_string(),
-            project_id: other_project.id.clone(),
-            project_path: Some(other_project.path.clone()),
-            provider: ProviderKind::from_str("codex"),
-            source_branch: "main".to_string(),
-            branch_name: "other-branch".to_string(),
-            worktree_path: app.paths.worktrees_root.join("other").display().to_string(),
-            title: None,
-            started_providers: vec!["codex".to_string()],
-            status: SessionStatus::Detached,
-            created_at: now,
-            updated_at: now,
-        };
-
-        app.config.projects.push(ProjectConfig {
-            id: other_project.id.clone(),
-            path: other_project.path.clone(),
-            name: Some(other_project.name.clone()),
-            default_provider: Some(other_project.default_provider.as_str().to_string()),
-            commit_prompt: None,
-        });
-        app.projects.push(other_project);
-        app.sessions.push(detached);
-        app.sessions.push(exited);
-        app.sessions.push(other_session);
-        for session in &app.sessions[1..] {
-            app.session_store
-                .upsert_session(session)
-                .expect("persist session");
-        }
+            .expect("persist session");
 
         app.rebuild_left_items();
         app.selected_left = app
             .left_items()
             .iter()
-            .position(|item| {
-                matches!(item, LeftItem::Session(index) if app.sessions.get(*index).map(|session| session.id.as_str()) == Some("session-1"))
-            })
-            .expect("selected session");
+            .position(|item| matches!(item, LeftItem::Session(index) if *index == 0))
+            .expect("select the seeded session");
 
         app.open_change_agent_provider_prompt()
             .expect("open provider picker");
-        if let PromptState::ChangeAgentProvider(prompt) = &mut app.prompt {
-            prompt.selected = prompt
-                .options
-                .iter()
-                .position(|option| option.provider.as_str() == "gemini")
-                .expect("gemini option");
-        } else {
-            panic!("expected change-agent-provider prompt");
+        match &mut app.prompt {
+            PromptState::ChangeAgentProvider(prompt) => {
+                prompt.selected = prompt
+                    .options
+                    .iter()
+                    .position(|option| option.provider.as_str() == "gemini")
+                    .expect("gemini option");
+            }
+            other => panic!("expected change-agent-provider prompt, got {other:?}"),
         }
 
         app.apply_change_agent_provider()
-            .expect("apply provider switch");
+            .expect("apply provider swap");
 
-        assert_eq!(
-            app.selected_session().map(|session| session.id.as_str()),
-            Some("session-3")
-        );
-        // The current session keeps its original provider-specific history.
-        assert_eq!(app.sessions[0].provider.as_str(), "codex");
-        // Existing sibling session is reused instead of being overwritten.
-        assert_eq!(app.sessions[2].provider.as_str(), "gemini");
+        // Exactly one session still exists; its provider was mutated in place.
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.sessions[0].id, original_session_id);
+        assert_eq!(app.sessions[0].provider.as_str(), "gemini");
+        assert_eq!(app.sessions[0].worktree_path, original_worktree);
+        assert!(matches!(app.prompt, PromptState::None));
 
         let persisted = app.session_store.load_sessions().expect("load sessions");
-        let started_providers_for = |id: &str| {
-            persisted
-                .iter()
-                .find(|session| session.id == id)
-                .map(|session| session.started_providers.clone())
-        };
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].provider.as_str(), "gemini");
+
+        assert!(app.status.text().contains("will use gemini next launch"));
+    }
+
+    #[test]
+    fn change_agent_provider_swaps_but_warns_when_agent_is_running() {
+        let mut app = test_app(default_bindings());
+        app.sessions[0].provider = ProviderKind::from_str("codex");
+        app.sessions[0].status = SessionStatus::Active;
+        let session_id = app.sessions[0].id.clone();
+
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let provider = PtyClient::spawn(
+            "/bin/sh",
+            &["-c".to_string(), "sleep 5".to_string()],
+            worktree,
+            24,
+            80,
+            1_000,
+        )
+        .expect("spawn test agent");
+        app.providers.insert(session_id.clone(), provider);
+
+        app.rebuild_left_items();
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(index) if *index == 0))
+            .expect("select the running session");
+
+        app.open_change_agent_provider_prompt()
+            .expect("open provider picker");
+        match &mut app.prompt {
+            PromptState::ChangeAgentProvider(prompt) => {
+                prompt.selected = prompt
+                    .options
+                    .iter()
+                    .position(|option| option.provider.as_str() == "gemini")
+                    .expect("gemini option");
+            }
+            other => panic!("expected change-agent-provider prompt, got {other:?}"),
+        }
+
+        app.apply_change_agent_provider()
+            .expect("apply provider swap");
+
+        // Provider is swapped now; the warning just tells the user the running
+        // PTY hasn't caught up yet.
+        assert_eq!(app.sessions[0].provider.as_str(), "gemini");
+        let persisted = app.session_store.load_sessions().expect("load sessions");
+        assert_eq!(persisted[0].provider.as_str(), "gemini");
+        assert!(
+            app.providers.contains_key(&session_id),
+            "the old PTY keeps running until the user exits it"
+        );
         assert_eq!(
-            started_providers_for("session-3"),
-            Some(vec!["codex".to_string()])
+            app.status.tone(),
+            crate::statusline::StatusTone::Warning,
+            "status should be a warning, not an error"
+        );
+        let message = app.status.message().to_string();
+        assert!(
+            message.contains("still running") && message.contains("gemini"),
+            "status should explain the agent still runs the old provider, got: {message}"
+        );
+        assert!(matches!(app.prompt, PromptState::None));
+
+        // Clean up so the PTY doesn't outlive the test.
+        app.providers.remove(&session_id);
+    }
+
+    #[test]
+    fn change_agent_provider_preserves_resume_for_previously_started_provider() {
+        let mut app = test_app(default_bindings());
+        app.sessions[0].provider = ProviderKind::from_str("claude");
+        app.sessions[0].status = SessionStatus::Detached;
+        app.sessions[0].started_providers = vec!["codex".to_string(), "claude".to_string()];
+        app.session_store
+            .upsert_session(&app.sessions[0])
+            .expect("persist session with history");
+
+        app.rebuild_left_items();
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(index) if *index == 0))
+            .expect("select the seeded session");
+
+        app.open_change_agent_provider_prompt()
+            .expect("open provider picker");
+        match &mut app.prompt {
+            PromptState::ChangeAgentProvider(prompt) => {
+                let codex_option = prompt
+                    .options
+                    .iter()
+                    .find(|option| option.provider.as_str() == "codex")
+                    .expect("codex option present");
+                assert!(
+                    codex_option.resume_available,
+                    "codex was started earlier — picker should advertise resume"
+                );
+                prompt.selected = prompt
+                    .options
+                    .iter()
+                    .position(|option| option.provider.as_str() == "codex")
+                    .expect("codex option");
+            }
+            other => panic!("expected change-agent-provider prompt, got {other:?}"),
+        }
+
+        app.apply_change_agent_provider()
+            .expect("swap back to codex");
+
+        assert_eq!(app.sessions[0].provider.as_str(), "codex");
+        // should_resume_session uses started_providers + config's resume_args.
+        let session = app.sessions[0].clone();
+        assert!(
+            app.should_resume_session(&session),
+            "codex was launched on this worktree earlier, so resume must be active"
         );
         assert!(
-            app.status
-                .text()
-                .contains("Switched to the existing gemini session")
+            app.status.text().contains("resume its prior session"),
+            "status should note resume is happening, got: {}",
+            app.status.text()
         );
     }
 
@@ -8831,5 +8975,274 @@ mod tests {
 
         assert!(pending_delete_state(&app).is_none());
         assert!(!app.config.macros.entries.contains_key("greet"));
+    }
+
+    #[test]
+    fn change_default_provider_updates_config_and_refreshes_projects() {
+        let mut app = test_app(default_bindings());
+        app.config.defaults.provider = "codex".to_string();
+
+        // project-1 inherits the global default (no explicit override).
+        app.config.projects.push(ProjectConfig {
+            id: app.projects[0].id.clone(),
+            path: app.projects[0].path.clone(),
+            name: Some(app.projects[0].name.clone()),
+            default_provider: None,
+            commit_prompt: None,
+        });
+
+        // project-2 pins itself to "gemini" and must not be touched.
+        let pinned = Project {
+            id: "project-2".to_string(),
+            name: "pinned".to_string(),
+            path: app.paths.root.join("pinned").display().to_string(),
+            default_provider: ProviderKind::from_str("gemini"),
+            current_branch: "main".to_string(),
+            path_missing: false,
+        };
+        app.config.projects.push(ProjectConfig {
+            id: pinned.id.clone(),
+            path: pinned.path.clone(),
+            name: Some(pinned.name.clone()),
+            default_provider: Some("gemini".to_string()),
+            commit_prompt: None,
+        });
+        app.projects.push(pinned);
+
+        let original_session_provider = app.sessions[0].provider.clone();
+
+        app.open_change_default_provider_prompt()
+            .expect("open default provider picker");
+        match &mut app.prompt {
+            PromptState::ChangeDefaultProvider(prompt) => {
+                prompt.selected = prompt
+                    .options
+                    .iter()
+                    .position(|option| option.provider.as_str() == "claude")
+                    .expect("claude option present");
+            }
+            other => panic!("expected change-default-provider prompt, got {other:?}"),
+        }
+
+        app.apply_change_default_provider()
+            .expect("apply default provider");
+
+        // Config was updated in memory and on disk.
+        assert_eq!(app.config.defaults.provider, "claude");
+        let persisted = crate::config::ensure_config(&app.paths).expect("reload config");
+        assert_eq!(persisted.defaults.provider, "claude");
+
+        // Inherited project picks up the new default.
+        let inherited = app
+            .projects
+            .iter()
+            .find(|project| project.id == "project-1")
+            .expect("inherited project present");
+        assert_eq!(inherited.default_provider.as_str(), "claude");
+
+        // Pinned project keeps its explicit override.
+        let pinned = app
+            .projects
+            .iter()
+            .find(|project| project.id == "project-2")
+            .expect("pinned project present");
+        assert_eq!(pinned.default_provider.as_str(), "gemini");
+
+        // Existing sessions are untouched — provider is frozen at creation.
+        assert_eq!(app.sessions[0].provider, original_session_provider);
+
+        assert!(matches!(app.prompt, PromptState::None));
+        assert!(
+            app.status
+                .text()
+                .contains("Default provider changed to claude")
+        );
+    }
+
+    #[test]
+    fn change_default_provider_rejects_current_selection_without_mutating_config() {
+        let mut app = test_app(default_bindings());
+        app.config.defaults.provider = "codex".to_string();
+
+        app.open_change_default_provider_prompt()
+            .expect("open default provider picker");
+        match &mut app.prompt {
+            PromptState::ChangeDefaultProvider(prompt) => {
+                prompt.selected = prompt
+                    .options
+                    .iter()
+                    .position(|option| option.is_current)
+                    .expect("current option present");
+            }
+            other => panic!("expected change-default-provider prompt, got {other:?}"),
+        }
+
+        app.apply_change_default_provider()
+            .expect("apply no-op selection");
+
+        assert_eq!(app.config.defaults.provider, "codex");
+        assert!(matches!(app.prompt, PromptState::None));
+        assert!(
+            app.status
+                .text()
+                .contains("is already the default provider")
+        );
+    }
+
+    #[test]
+    fn header_shows_current_provider_when_it_differs_from_project_default() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.projects[0].default_provider = ProviderKind::from_str("codex");
+        app.sessions[0].provider = ProviderKind::from_str("gemini");
+        app.rebuild_left_items();
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(index) if *index == 0))
+            .expect("select the seeded session");
+
+        let backend = TestBackend::new(200, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(
+            rendered.contains("default provider: codex"),
+            "expected default provider label, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("current provider: gemini"),
+            "expected current provider label, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn header_omits_current_provider_when_session_matches_project_default() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.projects[0].default_provider = ProviderKind::from_str("codex");
+        app.sessions[0].provider = ProviderKind::from_str("codex");
+        app.rebuild_left_items();
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(index) if *index == 0))
+            .expect("select the seeded session");
+
+        let backend = TestBackend::new(200, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(
+            rendered.contains("default provider: codex"),
+            "expected default provider label, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("current provider:"),
+            "current provider label should be hidden when identical, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn agent_pane_title_keeps_running_provider_after_swap_while_running() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.projects[0].default_provider = ProviderKind::from_str("codex");
+        app.sessions[0].provider = ProviderKind::from_str("codex");
+        app.sessions[0].status = SessionStatus::Active;
+        let session_id = app.sessions[0].id.clone();
+
+        // Spawn a real PTY so the session looks live.
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let pty = PtyClient::spawn(
+            "/bin/sh",
+            &["-c".to_string(), "sleep 5".to_string()],
+            worktree,
+            24,
+            80,
+            1_000,
+        )
+        .expect("spawn test agent");
+        app.providers.insert(session_id.clone(), pty);
+
+        app.rebuild_left_items();
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(index) if *index == 0))
+            .expect("select the running session");
+
+        // Swap provider while the agent is still running.
+        app.open_change_agent_provider_prompt()
+            .expect("open picker");
+        match &mut app.prompt {
+            PromptState::ChangeAgentProvider(prompt) => {
+                prompt.selected = prompt
+                    .options
+                    .iter()
+                    .position(|option| option.provider.as_str() == "gemini")
+                    .expect("gemini option");
+            }
+            other => panic!("expected picker, got {other:?}"),
+        }
+        app.apply_change_agent_provider().expect("apply swap");
+
+        // session.provider is now gemini, but the PTY is still running codex;
+        // running_provider_for should reflect that.
+        assert_eq!(app.sessions[0].provider.as_str(), "gemini");
+        assert_eq!(app.running_provider_for(&app.sessions[0]).as_str(), "codex");
+
+        let backend = TestBackend::new(200, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            rendered.contains("Codex agent"),
+            "pane title should still say Codex (running) after the swap, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("Gemini agent"),
+            "pane title should NOT claim Gemini is running yet, got: {rendered}"
+        );
+
+        // Tearing down the PTY clears the pin — the next launch will be gemini.
+        app.providers.remove(&session_id);
+        app.running_provider_pins.remove(&session_id);
+        assert_eq!(
+            app.running_provider_for(&app.sessions[0]).as_str(),
+            "gemini"
+        );
     }
 }
