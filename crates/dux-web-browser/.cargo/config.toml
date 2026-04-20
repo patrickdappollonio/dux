@@ -1,0 +1,18 @@
+# Flags applied only when building for wasm32, so native workspace
+# builds are unaffected.
+#
+# --cfg getrandom_backend="wasm_js": selects the Web Crypto-backed
+#   randomness source in getrandom 0.3 (required by iroh's TLS + our
+#   own PairingSecret/PIN generation once the host feature is off).
+#
+# -C target-feature=+<…>: lets LLVM emit post-MVP WebAssembly
+#   instructions that all modern browsers support. These shrink the
+#   output by letting rustc/LLVM emit one-instruction sign-extensions,
+#   direct float-to-int conversions, bulk memory copies, etc. — all of
+#   which replace longer polyfill sequences. Universally supported in
+#   Chrome/Edge/Firefox/Safari ≥ 2022.
+[target.wasm32-unknown-unknown]
+rustflags = [
+    '--cfg', 'getrandom_backend="wasm_js"',
+    '-C', 'target-feature=+bulk-memory,+mutable-globals,+nontrapping-fptoint,+sign-ext,+reference-types',
+]

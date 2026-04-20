@@ -87,6 +87,12 @@ pub enum Action {
     TogglePromptForName,
     TogglePrBannerPosition,
     ForceReconnectAgent,
+    // Remote share
+    RemoteShareStart,
+    RemoteShareStop,
+    RemoteConnect,
+    RemoteTakeLead,
+    RemoteReleaseLead,
 }
 
 /// Where a binding's key combo is matched.
@@ -254,6 +260,11 @@ impl Action {
             Action::TogglePromptForName => "toggle_prompt_for_name",
             Action::TogglePrBannerPosition => "toggle_pr_banner_position",
             Action::ForceReconnectAgent => "force_reconnect_agent",
+            Action::RemoteShareStart => "remote_share_start",
+            Action::RemoteShareStop => "remote_share_stop",
+            Action::RemoteConnect => "remote_connect",
+            Action::RemoteTakeLead => "remote_take_lead",
+            Action::RemoteReleaseLead => "remote_release_lead",
         }
     }
 
@@ -346,6 +357,19 @@ impl Action {
                 "Move PR banner between top and bottom of agent pane."
             }
             Action::ForceReconnectAgent => "Restart the agent without resuming the prior session.",
+            Action::RemoteShareStart => {
+                "Start hosting a remote-share session and display the pairing code."
+            }
+            Action::RemoteShareStop => "Stop the active remote-share session.",
+            Action::RemoteConnect => {
+                "Open a prompt to paste a pairing code and connect to a remote dux."
+            }
+            Action::RemoteTakeLead => {
+                "Reclaim input control when a connected client is currently leading."
+            }
+            Action::RemoteReleaseLead => {
+                "Release the input lead so the connected client can drive the session."
+            }
         }
     }
 
@@ -424,7 +448,12 @@ impl Action {
             | Action::ToggleGithubIntegration
             | Action::TogglePromptForName
             | Action::TogglePrBannerPosition
-            | Action::ForceReconnectAgent => None,
+            | Action::ForceReconnectAgent
+            | Action::RemoteShareStart
+            | Action::RemoteShareStop
+            | Action::RemoteConnect
+            | Action::RemoteTakeLead
+            | Action::RemoteReleaseLead => None,
         }
     }
 }
@@ -1436,6 +1465,61 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "force-reconnect-agent",
             description: "Force-reconnect the agent with a fresh session (no --continue)",
+        }),
+    },
+    BindingDef {
+        action: Action::RemoteShareStart,
+        default_keys: &[],
+        scopes: &[BindingScope::Global],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "remote-share-start",
+            description: "Start hosting a remote-share session",
+        }),
+    },
+    BindingDef {
+        action: Action::RemoteShareStop,
+        default_keys: &[],
+        scopes: &[BindingScope::Global],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "remote-share-stop",
+            description: "Stop the active remote-share session",
+        }),
+    },
+    BindingDef {
+        action: Action::RemoteConnect,
+        default_keys: &[],
+        scopes: &[BindingScope::Global],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "remote-connect",
+            description: "Connect to another dux as a remote client (paste pairing code)",
+        }),
+    },
+    BindingDef {
+        action: Action::RemoteTakeLead,
+        default_keys: &[],
+        scopes: &[BindingScope::Global],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "remote-take-lead",
+            description: "Reclaim input control when a remote client is leading",
+        }),
+    },
+    BindingDef {
+        action: Action::RemoteReleaseLead,
+        default_keys: &[],
+        scopes: &[BindingScope::Global],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "remote-release-lead",
+            description: "Release input control so the connected remote client can drive",
         }),
     },
 ];

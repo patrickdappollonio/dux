@@ -1754,6 +1754,11 @@ mod tests {
             snapshot_buf: crate::pty::TerminalSnapshot::empty(),
             last_snapshot_id: None,
             terminal_selection: None,
+            remote_leader: crate::app::RemoteLeader::HostLeads,
+            remote_peer: None,
+            remote_pending_code: None,
+            remote_worker: None,
+            remote_inbound_rx: None,
             _single_instance_lock: single_instance_lock,
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();

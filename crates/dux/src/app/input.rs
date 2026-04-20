@@ -133,6 +133,28 @@ fn pct_from_columns(columns: u16, total_width: u16) -> u16 {
 
 impl App {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        // Pass-leader gate: when a remote client holds the lead, the
+        // host's local keystrokes are dropped. `Action::Quit` is the
+        // single escape hatch so the user can always exit dux even if
+        // the remote peer is misbehaving. Remote-originated keys bypass
+        // this gate via `handle_remote_key`.
+        if self.remote_leader == super::RemoteLeader::ClientLeads
+            && self.bindings.lookup(&key, BindingScope::Global) != Some(Action::Quit)
+        {
+            return Ok(false);
+        }
+        self.handle_key_dispatch(key)
+    }
+
+    /// Dispatch a key that arrived from a connected remote peer. Bypasses
+    /// the leader gate (the caller already verified the client holds the
+    /// lead) but otherwise goes through the exact same input pipeline as
+    /// local keystrokes.
+    pub(crate) fn handle_remote_key(&mut self, key: KeyEvent) -> Result<bool> {
+        self.handle_key_dispatch(key)
+    }
+
+    fn handle_key_dispatch(&mut self, key: KeyEvent) -> Result<bool> {
         // Prompts take precedence over every other input target so modal text
         // fields can safely capture keystrokes even when other modes were
         // previously active.
@@ -1424,6 +1446,30 @@ impl App {
     }
 
     fn handle_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
+        // Remote-share pairing-code modal: Esc closes (and stops the share),
+        // 'c' copies the code to the clipboard.
+        if let PromptState::RemoteShare { code, copied, .. } = &mut self.prompt {
+            match key.code {
+                KeyCode::Esc => {
+                    self.prompt = PromptState::None;
+                    self.stop_remote_share();
+                    return Ok(false);
+                }
+                KeyCode::Char('c') | KeyCode::Char('C') => {
+                    let code = code.clone();
+                    *copied = true;
+                    if let Err(err) =
+                        self.clipboard
+                            .copy_text(&code, "Pairing code copied.", &self.worker_tx)
+                    {
+                        self.set_error(format!("Clipboard copy failed: {err}"));
+                    }
+                    return Ok(false);
+                }
+                _ => return Ok(false),
+            }
+        }
+
         if let PromptState::ResourceMonitor {
             scroll_offset,
             selected_row,
@@ -4532,6 +4578,11 @@ mod tests {
             snapshot_buf: crate::pty::TerminalSnapshot::empty(),
             last_snapshot_id: None,
             terminal_selection: None,
+            remote_leader: crate::app::RemoteLeader::HostLeads,
+            remote_peer: None,
+            remote_pending_code: None,
+            remote_worker: None,
+            remote_inbound_rx: None,
             _single_instance_lock: single_instance_lock,
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();

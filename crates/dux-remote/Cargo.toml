@@ -1,0 +1,32 @@
+[package]
+name = "dux-remote"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["host"]
+# Host-only code: TTL tracking with std::time::Instant, iroh endpoint binding,
+# crossterm KeyEvent translation, anything that spawns tokio tasks directly.
+host = ["dep:tokio", "dep:crossterm"]
+# Browser/wasm build: narrower surface, no Instant, no direct tokio rt, no
+# crossterm (dux-web-browser translates keys in JS before they reach the wire).
+# Activates getrandom's wasm_js backend so iroh's crypto can source entropy
+# from the browser's Web Crypto API — also needs
+# `RUSTFLAGS='--cfg getrandom_backend="wasm_js"'` when building.
+wasm = ["getrandom/wasm_js"]
+
+[dependencies]
+anyhow = "1.0.98"
+serde = { version = "1.0.219", features = ["derive"] }
+bincode = { version = "2.0", features = ["serde"] }
+iroh = "0.98"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.9"
+data-encoding = "2"
+getrandom = "0.3"
+crossterm = { version = "0.29.0", features = ["serde"], optional = true }
+tokio = { version = "1", features = ["sync", "macros", "io-util"], optional = true }

@@ -109,6 +109,48 @@ See an agent going down the wrong path? Fork it. dux creates a new worktree with
 
 Press the palette key and you get fuzzy-searchable access to every action in dux, including features that don't have dedicated keybindings. Sort agents, toggle UI elements, open the resource monitor, rename sessions, edit macros, and more. If you forget a keybinding, just open the palette.
 
+### Remote Share
+
+Share a running dux session with a teammate (or your own laptop on the road) over an encrypted peer-to-peer link. No VPN, no SSH, no port forwarding — the connection is authenticated by a short pairing code and carried over QUIC via iroh's public relay mesh.
+
+```bash
+# On the machine running dux:
+dux remote share
+
+# A pairing code is printed; copy it and run on the other machine:
+dux remote connect <code>
+```
+
+**Pass-leader control.** When a client connects, it takes the input lead: keystrokes typed on the client drive the host's dux session, while the host becomes view-only. The host's `Quit` keybinding is the one local escape hatch, so you can always exit. The host can reclaim the lead at any time with the `remote-take-lead` palette action, and can hand it back with `remote-release-lead`. When the client disconnects, the host regains control automatically. Set `client_leads_on_connect = false` in `[remote]` to keep the host in control on connect; set `allow_remote_input = false` to make every connection view-only regardless. If a client sends a lead-request while the host is driving, dux surfaces a status-bar notice — the host must explicitly release the lead to grant it; there is no automatic hand-off.
+
+**Encryption and pairing.** Every byte on the wire is end-to-end encrypted by iroh's QUIC session, keyed by the host's ephemeral iroh identity. The pairing code bundles that identity with a 16-byte PIN the client must prove via HKDF-SHA256 before the host accepts input. The PIN itself never crosses the wire and is never written to `dux.log`. Pairing codes are single-use by construction — the host's endpoint accepts exactly one handshake attempt per code, then tears down — and `code_ttl_secs` (default 120s) bounds the accept/handshake wait, so a code that sits unused expires with `CodeExpired` rather than waiting indefinitely. Reusing a consumed code is refused because the old endpoint is gone.
+
+**Headless hosts.** For a home server or unattended box, run `dux serve` — it prints the pairing code on stdout and has no TUI. Use `--code-file <path>` to write the code to a shared location instead of logs. Clients connect the same way with `dux remote connect <code>` from another machine.
+
+**Browser clients.** Chromebooks, Android tablets with an external keyboard, and any other device that can't run a native `dux` binary connect through the browser client — a small static SPA that embeds an iroh endpoint as WebAssembly. The browser dials the host directly over iroh's relay mesh; there is no gateway, and no server of ours ever sees plaintext — the iroh QUIC session is end-to-end encrypted exactly as it is between two native dux peers.
+
+Host the static bundle however you like:
+
+- **Download** `dux-web-<version>.tar.gz` from the [Releases](https://github.com/patrickdappollonio/dux/releases) page and drop it on Netlify, Cloudflare Pages, S3, GitHub Pages, or any other static host.
+- **Container (pre-built)** — `docker run -p 8080:80 ghcr.io/patrickdappollonio/dux-web:latest`. Published as a multi-arch image (`linux/amd64` + `linux/arm64`) so it runs natively on both Intel and Apple Silicon hosts via Docker Desktop.
+- **Container (build from source)** — `docker build -t dux-web .` at the repo root. The top-level `Dockerfile` is a self-contained multi-stage build (Rust + wasm-pack for the bundle, nginx for the runtime) so you only need Docker installed locally; no Rust or clang on the host.
+- **Build from source (native)** — `crates/dux-web-browser/build.sh` produces `dist/` locally. Faster than the Docker path but requires `wasm-pack` and `clang` on `$PATH`.
+
+Open the hosted URL, paste a code from `dux remote share`, and type. The browser captures system shortcuts like Ctrl-W and Ctrl-T via the Keyboard Lock API (Chromium-based browsers) and forwards them to the host. Hold `Esc` for 500 ms to release the keyboard lock and disconnect.
+
+**Config.** The `[remote]` section in `config.toml` exposes every knob:
+
+```toml
+[remote]
+enabled = true                     # master switch for the subsystem
+code_ttl_secs = 120                # pairing code validity window
+allow_remote_input = true          # false = view-only sharing
+client_leads_on_connect = true     # false = host keeps the lead on connect
+# relay_url = "https://relay..."   # optional self-hosted relay override
+```
+
+The feature ships in the default build — there's no Cargo feature flag. Set `enabled = false` on machines that should never host a share.
+
 ### Configuration
 
 The config file at `~/.config/dux/config.toml` (Linux) or `~/.dux/config.toml` (macOS) is exhaustively commented. Every setting is explained inline, so you should never need to leave the file to understand an option. Every keybinding is rebindable. Every pane width, scrollback limit, and default provider is configurable.

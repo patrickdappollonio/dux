@@ -1,0 +1,15 @@
+# Keep the Docker build context minimal — only what the Dockerfile's
+# `COPY Cargo.toml Cargo.lock` and `COPY crates` instructions read.
+*
+
+!Cargo.toml
+!Cargo.lock
+!crates
+!Dockerfile
+
+# Build artefacts inside `crates` must still be excluded — rebuilding
+# them inside the container is the whole point.
+crates/*/target/
+crates/dux-web-browser/pkg/
+crates/dux-web-browser/dist/
+target/

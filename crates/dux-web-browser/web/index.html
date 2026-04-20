@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dux — remote</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main id="pair-screen">
+    <div class="card">
+      <h1>dux</h1>
+      <p class="subtitle">Paste a pairing code to connect to a dux host.</p>
+      <form id="pair-form" autocomplete="off">
+        <input id="code" type="text" placeholder="pairing code" autofocus spellcheck="false">
+        <button id="connect" type="submit">Connect</button>
+      </form>
+      <p id="pair-status" role="status"></p>
+      <p class="hint">
+        On the dux host, run <code>dux remote share</code> and copy the printed code.
+      </p>
+    </div>
+  </main>
+
+  <main id="terminal-screen" hidden>
+    <div id="grid" aria-label="remote terminal"></div>
+    <div id="statusbar">
+      <span id="leader">connecting…</span>
+      <span class="hint"><kbd>Esc</kbd> hold 500 ms to disconnect</span>
+    </div>
+  </main>
+
+  <div id="modal" role="dialog" aria-modal="true" hidden>
+    <div class="modal-card">
+      <p id="modal-text">Disconnect from the host?</p>
+      <div class="modal-buttons">
+        <button id="modal-confirm" type="button">Yes, disconnect</button>
+        <button id="modal-cancel" type="button" autofocus>Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="banner" hidden></div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

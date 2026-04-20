@@ -1,43 +1,23 @@
-[package]
-name = "dux"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-anyhow = "1.0.98"
-arboard = "3.4.1"
-chrono = { version = "0.4.41", features = ["serde"] }
-content_inspector = "0.2.4"
-crossterm = "0.29.0"
-home = "0.5.11"
-ratatui = "0.30.0"
-rusqlite = { version = "0.39.0", features = ["bundled", "chrono"] }
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
-toml = { version = "1.1.2", features = ["preserve_order"] }
-toml_edit = "0.25"
-uuid = { version = "1.17.0", features = ["v4"] }
-portable-pty = "0.9"
-rustix = { version = "1.1", features = ["termios", "process", "event", "stdio", "fs"] }
-signal-hook = "0.4"
-alacritty_terminal = "0.26.0"
-petname = { version = "3.0.0", default-features = false, features = ["default-rng", "default-words"] }
-similar = "3"
-syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }
-crokey = "1.4.0"
-indexmap = { version = "2.13.0", features = ["serde"] }
-compact_str = "0.9"
-sysinfo = "0.35"
-notify = "7"
-
-[dev-dependencies]
-tempfile = "3.20.0"
+[workspace]
+resolver = "3"
+members = ["crates/dux", "crates/dux-remote", "crates/dux-web-browser"]
+# dux-web-browser only builds for wasm32-unknown-unknown. Keep it out of the
+# default set so `cargo build --workspace` on a native host stays green;
+# build it explicitly with `cargo build -p dux-web-browser --target
+# wasm32-unknown-unknown --no-default-features` (or via wasm-pack).
+default-members = ["crates/dux", "crates/dux-remote"]
 
 [profile.release]
 opt-level = "z"   # Optimize for size.
 lto = true        # Enable link time optimization.
 codegen-units = 1 # Reduce parallel code generation units.
 debug = 0         # No debug information
+# Abort on panic — the native TUI has a panic hook at main.rs and app/mod.rs
+# that restores terminal state before the process dies, and the WASM crate
+# never relies on unwinding.  Drops panic-formatting code from both binaries
+# and shrinks the WASM .wasm output by several hundred KB.
+panic = "abort"
+strip = "symbols" # Drop debug symbols + name section at link time.
 
 [profile.profiling]
 inherits = "release"

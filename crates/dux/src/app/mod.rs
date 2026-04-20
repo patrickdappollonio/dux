@@ -182,11 +182,41 @@ pub struct App {
     last_snapshot_id: Option<String>,
     /// Active text selection in the terminal viewport, if any.
     pub(crate) terminal_selection: Option<TerminalSelection>,
+    /// Who holds the input lead when a remote share is active. Set to
+    /// `ClientLeads` on `RemotePaired` and back to `HostLeads` on
+    /// `RemoteDisconnected` (or when no client is connected).
+    pub(crate) remote_leader: RemoteLeader,
+    /// Label of the connected remote peer, if any. `None` when no client
+    /// is paired.
+    pub(crate) remote_peer: Option<String>,
+    /// Current pairing code, surfaced after `RemoteShareStart` and cleared
+    /// when a peer pairs or the share is stopped.
+    pub(crate) remote_pending_code: Option<RemotePendingCode>,
+    /// Optional runtime-owned remote worker. Present when
+    /// `[remote].enabled = true`. Drop on app shutdown to tear down the
+    /// tokio runtime and iroh endpoints.
+    pub(crate) remote_worker: Option<crate::remote::RemoteWorker>,
+    /// The receiver half of the remote worker's inbound channel. Polled
+    /// from `drain_events` so remote events flow through the same path
+    /// as every other background event.
+    pub(crate) remote_inbound_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<crate::remote::worker::RemoteInboundEvent>>,
     /// Exclusive lock held for the lifetime of this `App` so only one dux
     /// instance runs against a given config directory. Released
     /// automatically on drop (including crashes), so there is nothing to
     /// clean up on exit.
     _single_instance_lock: SingleInstanceLock,
+}
+
+/// Information the App holds about a pending pairing code (post-Start,
+/// pre-peer-connect). Used by the status line, the modal, and clipboard
+/// copy actions. `code` is kept so future features (e.g. re-opening the
+/// modal from the palette) can show the same code without re-binding.
+#[derive(Clone, Debug)]
+pub(crate) struct RemotePendingCode {
+    #[allow(dead_code)]
+    pub code: String,
+    pub expires_at: Instant,
 }
 
 /// Snapshot of session data shared with the branch-sync background worker.
@@ -506,6 +536,16 @@ pub(crate) enum PromptState {
         expanded: HashSet<u32>,
         last_refresh: Instant,
         first_sample: bool,
+    },
+    /// Modal showing the current pairing code while waiting for a client.
+    /// Opened by `remote-share-start`, closed when the share is stopped or
+    /// a peer pairs.
+    RemoteShare {
+        code: String,
+        expires_at: Instant,
+        /// `true` once the user has copied the code (or clipboard was
+        /// attempted). Controls the modal's status line text.
+        copied: bool,
     },
 }
 
@@ -902,6 +942,44 @@ pub(crate) enum WorkerEvent {
         session_id: String,
         result: Result<bool, String>,
     },
+    /// A pairing code is ready to show to the user. Host-side.
+    #[allow(dead_code)]
+    RemotePairingCodeReady {
+        code: String,
+        expires_at: std::time::Instant,
+    },
+    /// A remote peer has successfully paired and the session is live.
+    RemotePaired {
+        peer_label: String,
+    },
+    /// The remote peer disconnected (graceful or error).
+    RemoteDisconnected {
+        reason: String,
+    },
+    /// Input bytes received from the remote peer. Reserved for future use
+    /// (paste events, multi-byte escape sequences). Host drops these
+    /// unless the leader is `Client` and `[remote].allow_remote_input`
+    /// is true.
+    #[allow(dead_code)]
+    RemoteInput(Vec<u8>),
+    /// A structured key event from the remote peer. Funneled through
+    /// `handle_key` when the client holds the lead.
+    RemoteInputKey(crossterm::event::KeyEvent),
+    /// The client has asked the host for the input lead. Host should prompt
+    /// the user to approve or deny.
+    #[allow(dead_code)]
+    RemoteLeadRequested,
+}
+
+/// Who currently holds the input lead in a remote-share session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum RemoteLeader {
+    /// Host is driving (default, and whenever no client is connected).
+    #[default]
+    HostLeads,
+    /// Client is driving; host's local keystrokes are dropped except for
+    /// the universal quit action.
+    ClientLeads,
 }
 
 #[derive(Clone, Debug)]
@@ -1061,6 +1139,11 @@ impl App {
             snapshot_buf: TerminalSnapshot::empty(),
             last_snapshot_id: None,
             terminal_selection: None,
+            remote_leader: RemoteLeader::HostLeads,
+            remote_peer: None,
+            remote_pending_code: None,
+            remote_worker: None,
+            remote_inbound_rx: None,
             _single_instance_lock: single_instance_lock,
         };
         app.restore_sessions();
@@ -1072,10 +1155,323 @@ impl App {
     }
 
     pub fn run(&mut self) -> Result<()> {
+        if self.config.remote.enabled && self.remote_worker.is_none() {
+            // Enable the remote subsystem: always wrap the ratatui
+            // terminal in a `TeeBackend` so palette-driven share/stop
+            // works without having to rebuild the terminal mid-run. When
+            // no client is paired, the capture channel is drained and
+            // discarded by the worker with near-zero overhead.
+            let worker = crate::remote::RemoteWorker::spawn();
+            let capture_tx = worker.capture_sender();
+            self.attach_remote_worker(worker);
+
+            use crossterm::execute;
+            use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
+            use ratatui::Terminal;
+            use ratatui::backend::CrosstermBackend;
+            enable_raw_mode()?;
+            execute!(std::io::stdout(), EnterAlternateScreen)?;
+            let default_panic = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                let _ = crossterm::terminal::disable_raw_mode();
+                let _ = crossterm::execute!(
+                    std::io::stdout(),
+                    crossterm::terminal::LeaveAlternateScreen
+                );
+                default_panic(info);
+            }));
+            let raw = CrosstermBackend::new(std::io::stdout());
+            let tee = crate::remote::TeeBackend::new(raw, capture_tx);
+            let terminal = Terminal::new(tee)?;
+            let result = self.run_with_terminal(terminal);
+            let _ = execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+            let _ = crossterm::terminal::disable_raw_mode();
+            // Drop the worker so the tokio runtime and iroh endpoint shut
+            // down cleanly before the App returns.
+            self.remote_worker.take();
+            return result;
+        }
+
+        let terminal = ratatui::init();
+        let result = self.run_with_terminal(terminal);
+        ratatui::restore();
+        result
+    }
+
+    /// Expose a copy of the remote-share config so callers (e.g. `dux
+    /// remote share`) can honor `code_ttl_secs`, `allow_remote_input`,
+    /// etc. without reaching into the full `Config`.
+    pub fn remote_config_snapshot(&self) -> crate::config::RemoteConfig {
+        self.config.remote.clone()
+    }
+
+    /// Clone the sender side of the app's `WorkerEvent` channel so
+    /// async-runtime-owned tasks (notably the remote-share session) can
+    /// push events back into the main drain loop.
+    pub fn worker_tx_clone(&self) -> Sender<WorkerEvent> {
+        self.worker_tx.clone()
+    }
+
+    /// Attach a `RemoteWorker` that the App will manage for its lifetime.
+    /// Called by launchers (`dux` main) when `[remote].enabled` is true.
+    /// The worker's inbound receiver is taken during attach so
+    /// `drain_events` can poll it each tick.
+    pub fn attach_remote_worker(&mut self, mut worker: crate::remote::RemoteWorker) {
+        self.remote_inbound_rx = worker.take_inbound_rx();
+        self.remote_worker = Some(worker);
+    }
+
+    /// Trigger the `StartShare` command on the remote worker. Invoked by
+    /// the `remote-share-start` palette entry.
+    pub(crate) fn start_remote_share(&mut self) {
+        let Some(worker) = self.remote_worker.as_ref() else {
+            self.set_error("Remote subsystem is disabled. Set [remote].enabled = true in config.");
+            return;
+        };
+        if self.remote_peer.is_some() {
+            self.set_info("A remote client is already connected. Stop the current share first.");
+            return;
+        }
+        let cfg = self.config.remote.clone();
+        let label = hostname_label();
+        if worker
+            .send(crate::remote::RemoteCommand::StartShare {
+                ttl_secs: cfg.code_ttl_secs,
+                host_label: label,
+                relay_url: cfg.relay_url.clone(),
+            })
+            .is_err()
+        {
+            self.set_error("Remote worker is not responding.");
+            return;
+        }
+        self.set_info(format!(
+            "Generating pairing code (valid for {}s)…",
+            cfg.code_ttl_secs
+        ));
+    }
+
+    /// Trigger the `StopShare` command on the remote worker.
+    pub(crate) fn stop_remote_share(&mut self) {
+        let Some(worker) = self.remote_worker.as_ref() else {
+            return;
+        };
+        let _ = worker.send(crate::remote::RemoteCommand::StopShare);
+        self.remote_pending_code = None;
+        self.remote_peer = None;
+        self.remote_leader = RemoteLeader::HostLeads;
+        self.set_info("Remote share stopped. Endpoint dropped; code invalidated.");
+    }
+
+    /// Reclaim the input lead from the connected client.
+    pub(crate) fn take_remote_lead(&mut self) {
+        if self.remote_peer.is_none() {
+            return;
+        }
+        if self.remote_leader == RemoteLeader::HostLeads {
+            return;
+        }
+        self.remote_leader = RemoteLeader::HostLeads;
+        self.set_info(
+            "You now hold the input lead. The remote client is view-only until you release it.",
+        );
+    }
+
+    /// Explicitly release the input lead to the connected client. Counterpart
+    /// to `take_remote_lead`, and the only path the host has for granting a
+    /// `RemoteLeadRequested` from the client.
+    pub(crate) fn release_remote_lead(&mut self) {
+        let Some(peer) = self.remote_peer.as_ref() else {
+            self.set_info("No remote client is connected; nothing to release.");
+            return;
+        };
+        if self.remote_leader == RemoteLeader::ClientLeads {
+            self.set_info("Client already holds the lead.");
+            return;
+        }
+        if !self.config.remote.allow_remote_input {
+            self.set_error(
+                "Cannot release lead: [remote].allow_remote_input is disabled. \
+                 This share is view-only.",
+            );
+            return;
+        }
+        let peer = peer.clone();
+        self.remote_leader = RemoteLeader::ClientLeads;
+        let take_key = self.bindings.label_for(Action::RemoteTakeLead);
+        self.set_info(format!(
+            "Released input lead to '{peer}'. Press {take_key} to take it back."
+        ));
+    }
+
+    /// Drain events from the remote worker's inbound channel, if attached.
+    /// Called from `drain_events` each tick so remote-share lifecycle events
+    /// (pairing code ready, peer connected, peer disconnected, input keys)
+    /// flow through the standard `WorkerEvent::Remote*` dispatch.
+    pub(crate) fn drain_remote_inbound(&mut self) {
+        // Drain into a Vec so we don't hold a mutable borrow on
+        // `self.remote_inbound_rx` while we need `&mut self` again to
+        // call status-line helpers and send on the worker channel.
+        let mut batch = Vec::new();
+        if let Some(rx) = self.remote_inbound_rx.as_mut() {
+            while let Ok(event) = rx.try_recv() {
+                batch.push(event);
+            }
+        }
+        for event in batch {
+            use crate::remote::worker::RemoteInboundEvent;
+            match event {
+                RemoteInboundEvent::PairingCodeReady { code, expires_at } => {
+                    // Never write the code itself to the log: it embeds the
+                    // PIN, and the log is copy-pastable to anyone with disk
+                    // access. Log only the fact that a code was generated
+                    // and the TTL so operators can correlate with modal
+                    // display time. The full code is surfaced to the user
+                    // via the in-app modal and (for `dux serve`) stdout.
+                    let ttl_secs = expires_at
+                        .saturating_duration_since(Instant::now())
+                        .as_secs();
+                    logger::info(&format!(
+                        "remote: pairing code generated ({} chars, valid for {ttl_secs}s)",
+                        code.chars().count()
+                    ));
+                    self.remote_pending_code = Some(RemotePendingCode {
+                        code: code.clone(),
+                        expires_at,
+                    });
+                    // Pop the modal so the user can copy the code. If the
+                    // user is in the middle of another modal, the new one
+                    // replaces it — we explicitly want the code surfaced.
+                    self.prompt = PromptState::RemoteShare {
+                        code,
+                        expires_at,
+                        copied: false,
+                    };
+                }
+                RemoteInboundEvent::Paired { peer } => {
+                    self.remote_pending_code = None;
+                    // Close the pairing-code modal — the code is now spent.
+                    if matches!(self.prompt, PromptState::RemoteShare { .. }) {
+                        self.prompt = PromptState::None;
+                    }
+                    let _ = self
+                        .worker_tx
+                        .send(WorkerEvent::RemotePaired { peer_label: peer });
+                }
+                RemoteInboundEvent::Disconnected { reason } => {
+                    let _ = self
+                        .worker_tx
+                        .send(WorkerEvent::RemoteDisconnected { reason });
+                }
+                RemoteInboundEvent::InputKey(k) => {
+                    let _ = self.worker_tx.send(WorkerEvent::RemoteInputKey(k));
+                }
+                RemoteInboundEvent::LeadRequested => {
+                    let _ = self.worker_tx.send(WorkerEvent::RemoteLeadRequested);
+                }
+                RemoteInboundEvent::Error(msg) => {
+                    self.set_error(format!("Remote: {msg}"));
+                }
+            }
+        }
+    }
+}
+
+/// Resolve a short host label used when advertising the pairing code and
+/// displaying the connected peer. Falls back to "dux" when the OS
+/// hostname lookup fails.
+pub(crate) fn hostname_label() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .or_else(|| {
+            rustix::system::uname()
+                .nodename()
+                .to_str()
+                .ok()
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "dux".to_string())
+}
+
+impl App {
+    /// Run a headless loop against a caller-provided `Terminal`. No stdin,
+    /// no mouse capture, no crossterm event polling. Used by `dux serve`:
+    /// the only input comes via `WorkerEvent::RemoteInputKey` and the only
+    /// output goes through the `TeeBackend` to the connected remote client.
+    ///
+    /// `shutdown` is a flag set by the caller (typically by a SIGTERM
+    /// handler) that causes the loop to exit cleanly.
+    pub fn run_headless_with_terminal<B>(
+        &mut self,
+        mut terminal: ratatui::Terminal<B>,
+        shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<()>
+    where
+        B: ratatui::backend::Backend<Error = std::io::Error>,
+    {
         self.spawn_changed_files_poller();
         self.spawn_branch_sync_worker();
         self.spawn_gh_status_check();
-        let mut terminal = ratatui::init();
+
+        loop {
+            if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                logger::info("remote: headless server shutting down");
+                break;
+            }
+
+            self.drain_events();
+            self.poll_pty_activity();
+            self.tick_count = self.tick_count.wrapping_add(1);
+
+            if self.force_redraw {
+                self.force_redraw = false;
+                if let Err(err) = terminal.clear() {
+                    self.report_runtime_error("headless redraw failed", &err);
+                }
+            }
+
+            if let Err(err) = terminal.draw(|frame| self.render(frame)) {
+                self.report_runtime_error("headless draw failed", &err);
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+
+            // Headless mode does not support interactive raw-stdin
+            // passthrough: there is no local stdin to read from. If a
+            // remote-driven action flipped the app into interactive mode,
+            // flip it back. The remote peer can still see and drive the
+            // non-interactive surfaces.
+            if matches!(
+                self.input_target,
+                InputTarget::Agent | InputTarget::Terminal
+            ) {
+                self.input_target = InputTarget::None;
+            }
+
+            // Tick pacing. Remote input events drain via `drain_events`
+            // at the top of the loop, so this sleep only controls refresh
+            // cadence for background state (status, branch sync, etc.).
+            thread::sleep(Duration::from_millis(100));
+        }
+        Ok(())
+    }
+
+    /// Run the TUI with a caller-provided `Terminal`. Lets callers wrap the
+    /// backend (e.g. with `TeeBackend` for remote share) without caring
+    /// about the rest of the run loop. The caller is responsible for
+    /// restoring the terminal after this returns.
+    ///
+    /// We constrain the backend to one that reports `io::Error` because the
+    /// retry-on-EINTR helper used inside the loop only understands that
+    /// error type. Every backend dux actually uses (`CrosstermBackend` and
+    /// `TeeBackend<CrosstermBackend>`) satisfies this.
+    pub fn run_with_terminal<B>(&mut self, mut terminal: ratatui::Terminal<B>) -> Result<()>
+    where
+        B: ratatui::backend::Backend<Error = std::io::Error>,
+    {
+        self.spawn_changed_files_poller();
+        self.spawn_branch_sync_worker();
+        self.spawn_gh_status_check();
         execute!(stdout(), EnableMouseCapture)?;
 
         let result: Result<()> = {
@@ -1214,7 +1610,6 @@ impl App {
         };
 
         let _ = execute!(stdout(), DisableMouseCapture);
-        ratatui::restore();
         result
     }
 
@@ -1606,6 +2001,28 @@ impl App {
             "force-redraw" => {
                 self.force_redraw = true;
                 self.set_info("Interface redrawn. All screen contents have been repainted.");
+                Ok(())
+            }
+            "remote-share-start" => {
+                self.start_remote_share();
+                Ok(())
+            }
+            "remote-share-stop" => {
+                self.stop_remote_share();
+                Ok(())
+            }
+            "remote-connect" => {
+                self.set_info(
+                    "To connect as a remote client, exit dux and run `dux remote connect <code>`.",
+                );
+                Ok(())
+            }
+            "remote-take-lead" => {
+                self.take_remote_lead();
+                Ok(())
+            }
+            "remote-release-lead" => {
+                self.release_remote_lead();
                 Ok(())
             }
             "" => Ok(()),

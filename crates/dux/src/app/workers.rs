@@ -2,6 +2,11 @@ use super::*;
 
 impl App {
     pub(crate) fn drain_events(&mut self) {
+        // Pull in any events from the remote worker first so they are
+        // translated into `WorkerEvent::Remote*` before the main match
+        // below consumes them.
+        self.drain_remote_inbound();
+
         while let Ok(event) = self.worker_rx.try_recv() {
             match event {
                 WorkerEvent::CreateAgentProgress(message) => self.set_busy(message),
@@ -350,6 +355,97 @@ impl App {
                             *selected_row = max_row;
                         }
                     }
+                }
+                // Remote-share events. Pairing-code display and lead-
+                // handoff modals are Phase 10 polish; here we handle the
+                // runtime state transitions + input routing.
+                WorkerEvent::RemotePairingCodeReady { .. } => {
+                    // Phase 10 will open a modal. For now it's logged
+                    // separately by the caller.
+                }
+                WorkerEvent::RemotePaired { peer_label } => {
+                    self.remote_peer = Some(peer_label.clone());
+                    // Client takes the lead on connect when the config
+                    // permits it; otherwise the host stays in control
+                    // and the session is view-only for the client.
+                    if self.config.remote.client_leads_on_connect
+                        && self.config.remote.allow_remote_input
+                    {
+                        self.remote_leader = RemoteLeader::ClientLeads;
+                    } else {
+                        self.remote_leader = RemoteLeader::HostLeads;
+                    }
+                    logger::info(&format!(
+                        "remote: '{peer_label}' connected (leader: {:?})",
+                        self.remote_leader
+                    ));
+                    self.set_info(format!("Remote '{peer_label}' connected."));
+                }
+                WorkerEvent::RemoteDisconnected { reason } => {
+                    let prev = self.remote_peer.take();
+                    self.remote_leader = RemoteLeader::HostLeads;
+                    logger::info(&format!(
+                        "remote: peer {} disconnected: {reason}",
+                        prev.as_deref().unwrap_or("<unknown>")
+                    ));
+                    self.set_info(format!(
+                        "Remote disconnected ({reason}). Input control restored."
+                    ));
+                }
+                WorkerEvent::RemoteInput(_) => {
+                    // Raw-byte variant reserved for future use; phase 7
+                    // only uses the structured `RemoteInputKey` path.
+                }
+                WorkerEvent::RemoteInputKey(key) => {
+                    if !self.config.remote.allow_remote_input {
+                        continue;
+                    }
+                    if self.remote_leader != RemoteLeader::ClientLeads {
+                        // Host is still leading (pre-handoff). Drop.
+                        continue;
+                    }
+                    // Forward remote keys through the host's normal key
+                    // dispatch. Errors during remote-originated key
+                    // handling must not kill the session; log and move
+                    // on so the local user can still operate.
+                    if let Err(err) = self.handle_remote_key(key) {
+                        logger::error(&format!(
+                            "remote: handle_key failed for remote input: {err:#}"
+                        ));
+                    }
+                }
+                WorkerEvent::RemoteLeadRequested => {
+                    // Never auto-grant the lead. The pass-leader contract
+                    // requires an explicit host action to hand control
+                    // over. See docs/followups/remote-lead-handoff-modal.md
+                    // for the planned dedicated modal UX.
+                    //
+                    // When `allow_remote_input = false`, the request is a
+                    // silent no-op (view-only shares cannot ever switch
+                    // to client control).
+                    if !self.config.remote.allow_remote_input {
+                        logger::info(
+                            "remote: lead request ignored (allow_remote_input = false)",
+                        );
+                        continue;
+                    }
+                    // Already leading: nothing to do.
+                    if self.remote_leader == RemoteLeader::ClientLeads {
+                        continue;
+                    }
+                    let peer = self
+                        .remote_peer
+                        .clone()
+                        .unwrap_or_else(|| "remote".to_string());
+                    logger::info(&format!(
+                        "remote: '{peer}' requested the input lead; awaiting host action"
+                    ));
+                    let release_key = self.bindings.label_for(Action::RemoteReleaseLead);
+                    self.set_info(format!(
+                        "'{peer}' is requesting input control. \
+                         Use the palette's remote-release-lead action ({release_key}) to grant it, \
+                         or ignore the request to keep the lead."
+                    ));
                 }
             }
         }

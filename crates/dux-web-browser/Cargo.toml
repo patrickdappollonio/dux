@@ -1,0 +1,47 @@
+[package]
+name = "dux-web-browser"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Browser-side iroh client for dux remote share. Compiles to WASM via wasm-bindgen."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# wasm-pack runs wasm-opt after Rust's own optimisation pass. Override
+# the default flags so the feature proposals emitted by modern rustc
+# (bulk-memory, nontrapping-fptoint, sign-ext) are understood, and the
+# producers + debug sections are stripped for smaller bundles.
+#
+# --converge re-runs -Oz until the size stops shrinking (Binaryen
+# cookbook recommendation for modules > 1 MB). --vacuum removes dead
+# code blocks the other passes couldn't reach. --strip-dwarf drops any
+# DWARF debug sections that slip through when Cargo's `strip = symbols`
+# misses them.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = [
+    "-Oz",
+    "--converge",
+    "--vacuum",
+    "--enable-bulk-memory",
+    "--enable-nontrapping-float-to-int",
+    "--enable-sign-ext",
+    "--enable-reference-types",
+    "--enable-mutable-globals",
+    "--strip-debug",
+    "--strip-dwarf",
+    "--strip-producers",
+]
+
+[dependencies]
+dux-remote = { path = "../dux-remote", default-features = false, features = ["wasm"] }
+anyhow = "1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+console_error_panic_hook = "0.1"
+iroh = { version = "0.98", default-features = false, features = ["tls-ring"] }
+tokio = { version = "1", features = ["sync", "macros"] }
+getrandom = { version = "0.3", features = ["wasm_js"] }

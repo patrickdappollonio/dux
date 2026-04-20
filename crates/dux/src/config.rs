@@ -37,6 +37,7 @@ pub struct Config {
     pub editor: EditorConfig,
     pub keys: KeysConfig,
     pub macros: MacrosConfig,
+    pub remote: RemoteConfig,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -184,6 +185,16 @@ fn new_project_id() -> String {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
+pub struct RemoteConfig {
+    pub enabled: bool,
+    pub code_ttl_secs: u64,
+    pub allow_remote_input: bool,
+    pub client_leads_on_connect: bool,
+    pub relay_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct UiConfig {
     pub left_width_pct: u16,
     pub right_width_pct: u16,
@@ -225,6 +236,24 @@ impl Default for Config {
             editor: EditorConfig::default(),
             keys: KeysConfig::default(),
             macros: MacrosConfig::default(),
+            remote: RemoteConfig::default(),
+        }
+    }
+}
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        Self {
+            // The subsystem is dormant at startup — no ports open, no relay
+            // traffic — but discovery/sharing is available on demand via
+            // `dux remote share` / `dux remote connect`. Set to false on
+            // machines that should never be reachable even when the user
+            // invokes a share command.
+            enabled: true,
+            code_ttl_secs: 120,
+            allow_remote_input: true,
+            client_leads_on_connect: true,
+            relay_url: None,
         }
     }
 }
@@ -644,6 +673,54 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Str(c.editor.default.clone()),
         },
         ConfigEntry::Blank,
+        ConfigEntry::Section("remote"),
+        ConfigEntry::Field {
+            key: "enabled",
+            comment: Some(CommentSource::Static(
+                "# Enable the remote-share subsystem. When false, pairing commands\n\
+                 # are no-ops and no network endpoint is ever started. Set to false\n\
+                 # on machines that should never be reachable.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.remote.enabled),
+        },
+        ConfigEntry::Field {
+            key: "code_ttl_secs",
+            comment: Some(CommentSource::Static(
+                "# How long a generated pairing code stays valid, in seconds.\n\
+                 # Pairing codes are single-use; this TTL bounds the window for\n\
+                 # unused codes before they are rotated out.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.remote.code_ttl_secs as usize),
+        },
+        ConfigEntry::Field {
+            key: "allow_remote_input",
+            comment: Some(CommentSource::Static(
+                "# Whether a connected client is ever allowed to hold the input\n\
+                 # lead. When false, every connection is view-only regardless of\n\
+                 # pairing — useful for demos and observation without granting\n\
+                 # typing privileges.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.remote.allow_remote_input),
+        },
+        ConfigEntry::Field {
+            key: "client_leads_on_connect",
+            comment: Some(CommentSource::Static(
+                "# Whether the client takes the input lead automatically on\n\
+                 # connect. When false, the host keeps the lead; the client must\n\
+                 # request it explicitly and the host approves or denies.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.remote.client_leads_on_connect),
+        },
+        ConfigEntry::Field {
+            key: "relay_url",
+            comment: Some(CommentSource::Static(
+                "# Optional override for iroh relay selection. Leave empty to use\n\
+                 # the iroh public relay mesh. Set to your own relay URL to\n\
+                 # self-host traffic routing.",
+            )),
+            value_fn: |c| FieldValue::OptStr(c.remote.relay_url.clone()),
+        },
+        ConfigEntry::Blank,
         ConfigEntry::Keys,
         ConfigEntry::Blank,
         ConfigEntry::Macros,
@@ -864,6 +941,33 @@ pub fn save_config(
             keys_table[action] = toml_edit::value(arr);
         }
     }
+
+    // --- [remote] ---
+    patch_table_bool(&mut doc, "remote", "enabled", config.remote.enabled);
+    patch_table_usize(
+        &mut doc,
+        "remote",
+        "code_ttl_secs",
+        config.remote.code_ttl_secs as usize,
+    );
+    patch_table_bool(
+        &mut doc,
+        "remote",
+        "allow_remote_input",
+        config.remote.allow_remote_input,
+    );
+    patch_table_bool(
+        &mut doc,
+        "remote",
+        "client_leads_on_connect",
+        config.remote.client_leads_on_connect,
+    );
+    patch_table_opt_str(
+        &mut doc,
+        "remote",
+        "relay_url",
+        config.remote.relay_url.as_deref(),
+    );
 
     // --- [providers.*] ---
     patch_providers(&mut doc, &config.providers);

@@ -1805,17 +1805,51 @@ impl App {
         };
         let prefix = format!(" {dot} ");
         let prefix_w = prefix.chars().count();
+        let remote_chip = self.remote_status_chip();
+        let chip_w = remote_chip.as_ref().map(|s| s.chars().count()).unwrap_or(0);
         let max_status_chars = (status_area.width as usize) * (status_area.height as usize);
-        let available = max_status_chars.saturating_sub(prefix_w);
+        let available = max_status_chars
+            .saturating_sub(prefix_w)
+            .saturating_sub(chip_w);
         let truncated = truncate_status_text(&status_text, available);
-        let status_line = Line::from(vec![
+        let mut spans: Vec<Span> = vec![
             Span::styled(prefix, Style::default().fg(dot_color).bg(status_bg)),
             Span::styled(truncated, Style::default().fg(msg_color).bg(status_bg)),
-        ]);
-        Paragraph::new(status_line)
+        ];
+        if let Some(chip) = remote_chip {
+            spans.push(Span::styled(
+                chip,
+                Style::default()
+                    .fg(self.theme.help_section_header_fg)
+                    .bg(status_bg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        Paragraph::new(Line::from(spans))
             .style(Style::default().bg(status_bg))
             .wrap(Wrap { trim: false })
             .render(status_area, frame.buffer_mut());
+    }
+
+    /// Render the remote-share indicator for the status bar. Returns `None`
+    /// when no share-related state is worth surfacing (idle, no pending
+    /// code, no peer).
+    fn remote_status_chip(&self) -> Option<String> {
+        if let Some(peer) = &self.remote_peer {
+            let leader = match self.remote_leader {
+                super::RemoteLeader::HostLeads => "you leading",
+                super::RemoteLeader::ClientLeads => "client leading",
+            };
+            return Some(format!("  ● remote {peer} · {leader}"));
+        }
+        if let Some(pending) = &self.remote_pending_code {
+            let secs = pending
+                .expires_at
+                .saturating_duration_since(Instant::now())
+                .as_secs();
+            return Some(format!("  ◌ pairing ({secs}s)"));
+        }
+        None
     }
 
     fn render_help(&mut self, frame: &mut Frame) {
@@ -3924,6 +3958,76 @@ impl App {
                             .add_modifier(Modifier::DIM),
                     );
                 hint_para.render(hint_area, frame.buffer_mut());
+            }
+            PromptState::RemoteShare {
+                code,
+                expires_at,
+                copied,
+            } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect_exact(76, 14, frame.area());
+                Clear.render(area, frame.buffer_mut());
+
+                let outer = self.themed_overlay_block("Remote Share — pairing code");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [intro, _gap1, code_area, _gap2, hint_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(2),
+                        Constraint::Length(1),
+                        Constraint::Min(3),
+                        Constraint::Length(1),
+                        Constraint::Length(2),
+                    ])
+                    .areas(inner);
+
+                let now = Instant::now();
+                let secs_left = expires_at.saturating_duration_since(now).as_secs();
+                let intro_line = Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        " Share this code with your remote peer. Valid for ",
+                        Style::default().fg(self.theme.input_label_fg),
+                    ),
+                    Span::styled(
+                        format!("{secs_left}s"),
+                        Style::default()
+                            .fg(self.theme.help_section_header_fg)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(".", Style::default().fg(self.theme.input_label_fg)),
+                ]))
+                .wrap(Wrap { trim: true });
+                intro_line.render(intro, frame.buffer_mut());
+
+                // The code line — render wrapped so it survives long
+                // encoded payloads in the modal width.
+                let code_para = Paragraph::new(Span::styled(
+                    format!(" {code}"),
+                    Style::default()
+                        .fg(self.theme.help_section_header_fg)
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .wrap(Wrap { trim: false });
+                code_para.render(code_area, frame.buffer_mut());
+
+                let copy_key = self.bindings.label_for(Action::OpenPalette);
+                let hint_text = if *copied {
+                    format!("Copied to clipboard. Esc to close. (Palette: {copy_key})")
+                } else {
+                    format!(
+                        "Press c to copy. Esc to close. Peer runs: dux remote connect <code>.  (Palette: {copy_key})"
+                    )
+                };
+                let hint = Paragraph::new(Line::from(Span::styled(
+                    hint_text,
+                    Style::default()
+                        .fg(self.theme.hint_desc_fg)
+                        .add_modifier(Modifier::DIM),
+                )))
+                .wrap(Wrap { trim: true });
+                hint.render(hint_area, frame.buffer_mut());
             }
             PromptState::NameNewAgent { input, .. } => {
                 self.render_dim_overlay(frame);

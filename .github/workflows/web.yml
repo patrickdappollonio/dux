@@ -1,0 +1,130 @@
+name: Web bundle
+
+# Builds the dux browser-client and publishes it two ways on every release:
+#
+#   1. Tarball asset `dux-web-<version>.tar.gz` containing `dist/` — drop it
+#      on Netlify, Cloudflare Pages, S3, GitHub Pages, or any static host.
+#      Built on the amd64 runner only; WASM is arch-independent so the
+#      same bytes serve every client.
+#   2. Container image `ghcr.io/<owner>/dux-web:<version>` — a multi-arch
+#      (linux/amd64, linux/arm64) manifest built via the top-level
+#      Dockerfile, which is a self-contained multi-stage build. Users who
+#      prefer self-hosting can `docker run -p 8080:80 ...` with no Rust
+#      toolchain installed.
+#
+# Independent of `release.yml` on purpose. If the WASM build ever fails,
+# native binary releases still ship.
+
+on:
+  release:
+    types: [created]
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/${{ github.repository_owner }}/dux-web
+
+jobs:
+  build-tarball:
+    name: Publish static tarball
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `wasm32-unknown-unknown`'s `ring` build needs a C compiler. apt's
+      # `clang` is enough; no special LLVM config required.
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: web-tarball-wasm32
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked --version 0.14.0
+
+      - name: Install cargo-edit
+        run: cargo install cargo-edit --locked
+
+      - name: Set version from tag
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          cargo set-version "$VERSION"
+
+      - name: Build release bundle
+        run: crates/dux-web-browser/build.sh
+
+      - name: Package tarball
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          tar czf "dux-web-${VERSION}.tar.gz" -C crates/dux-web-browser/dist .
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          gh release upload "${{ github.event.release.tag_name }}" "dux-web-${VERSION}.tar.gz"
+
+  build-image:
+    name: Build and push multi-arch image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # QEMU is required so the amd64 runner can execute arm64 containers
+      # during `docker buildx build --platform linux/arm64,...`.  The
+      # builder stage (Rust compilation) is what runs under emulation;
+      # the runtime stage is just `COPY --from=builder` so it's fast.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: meta
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          TAGS="${{ env.IMAGE }}:${VERSION}"
+          if [[ "${{ github.event.release.prerelease }}" != "true" ]]; then
+            TAGS="${TAGS},${{ env.IMAGE }}:latest"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.title=dux-web
+            org.opencontainers.image.description=Static browser client for dux remote share — iroh-in-WASM, end-to-end encrypted.
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
