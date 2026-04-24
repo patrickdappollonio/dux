@@ -1,4 +1,6 @@
-use super::checkbox::{Checkbox, CheckboxState};
+use super::components::{
+    Button, ButtonKind, ButtonState, Checkbox, CheckboxState, shared_button_width,
+};
 use super::*;
 
 /// ASCII art logo displayed in the agent pane when no content is active.
@@ -269,36 +271,6 @@ fn wrapped_line_count(lines: &[Line<'_>], width: u16, trim: bool) -> u16 {
         total = total.saturating_add(line_count);
     }
     total
-}
-
-/// Standard minimum button width used across modal dialogs. Short labels
-/// like "Cancel" and "Delete" sit comfortably inside this with whitespace
-/// to spare, so most buttons in the app are this wide regardless of their
-/// label length. Buttons with longer labels grow past it via
-/// [`shared_button_width`].
-const MIN_BUTTON_WIDTH: u16 = 16;
-
-/// Width that fits `label` between two rounded borders with one column of
-/// padding on each side, never narrower than [`MIN_BUTTON_WIDTH`]. The
-/// formula is `label_chars + 1 left pad + 1 right pad + 2 borders`. Uses
-/// `chars().count()` so multi-byte characters (CJK, emoji, box-drawing)
-/// measure by visible width rather than UTF-8 byte length.
-fn button_width_for(label: &str) -> u16 {
-    let label_chars = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
-    MIN_BUTTON_WIDTH.max(label_chars.saturating_add(4))
-}
-
-/// Largest [`button_width_for`] across `labels`. Use this when several
-/// buttons share a row and must keep the same width so the layout doesn't
-/// shift if a label changes (e.g. a confirm button whose text depends on
-/// a checkbox state). Returns [`MIN_BUTTON_WIDTH`] when given an empty
-/// slice.
-fn shared_button_width(labels: &[&str]) -> u16 {
-    labels
-        .iter()
-        .map(|label| button_width_for(label))
-        .max()
-        .unwrap_or(MIN_BUTTON_WIDTH)
 }
 
 impl App {
@@ -4110,20 +4082,6 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) = if *focus == ConfirmNonDefaultBranchFocus::Cancel {
-                    (
-                        self.theme.button_confirm_border,
-                        self.theme.button_active_fg,
-                    )
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
-                let (add_border, add_fg) = if *focus == ConfirmNonDefaultBranchFocus::Add {
-                    (self.theme.button_danger_border, self.theme.button_active_fg)
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
-
                 // Swap the confirm button label so the user sees exactly what
                 // pressing it will do. When the checkbox is on and we know the
                 // default branch, the action is a two-step (switch + add),
@@ -4134,31 +4092,24 @@ impl App {
                     "Add Anyway"
                 };
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Cancel",
-                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(cancel_border)),
-                )
-                .render(cancel_area, frame.buffer_mut());
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(if *focus == ConfirmNonDefaultBranchFocus::Cancel {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, cancel_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    add_label,
-                    Style::default().fg(add_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(add_border)),
-                )
-                .render(add_area, frame.buffer_mut());
+                Button::new(add_label)
+                    .kind(ButtonKind::Danger)
+                    .state(if *focus == ConfirmNonDefaultBranchFocus::Add {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, add_area, &self.theme);
+
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmNonDefaultBranch {
                     cancel_button: cancel_area,
                     add_button: add_area,
@@ -5934,40 +5885,6 @@ mod tests {
         ])];
 
         assert!(wrapped_line_count(&lines, 20, false) > 1);
-    }
-
-    // ── Unit tests for button width helpers ───────────────────────
-
-    #[test]
-    fn button_width_for_short_label_clamps_to_min() {
-        // "Cancel" is 6 chars, would otherwise be 10 wide. Clamped to 16.
-        assert_eq!(button_width_for("Cancel"), MIN_BUTTON_WIDTH);
-        assert_eq!(button_width_for("Delete"), MIN_BUTTON_WIDTH);
-        assert_eq!(button_width_for("Add Anyway"), MIN_BUTTON_WIDTH);
-    }
-
-    #[test]
-    fn button_width_for_long_label_grows_past_min() {
-        // 15 chars + 4 (2 padding + 2 borders) = 19.
-        assert_eq!(button_width_for("Check Out & Add"), 19);
-    }
-
-    #[test]
-    fn button_width_for_uses_visible_width_not_bytes() {
-        // CJK character "世" is 3 UTF-8 bytes but 1 visible char.
-        // Helper must measure by visible width, not byte length.
-        assert_eq!(button_width_for("世界"), MIN_BUTTON_WIDTH);
-    }
-
-    #[test]
-    fn shared_button_width_picks_largest() {
-        let labels = ["Cancel", "Add Anyway", "Check Out & Add"];
-        assert_eq!(shared_button_width(&labels), 19);
-    }
-
-    #[test]
-    fn shared_button_width_falls_back_when_empty() {
-        assert_eq!(shared_button_width(&[]), MIN_BUTTON_WIDTH);
     }
 
     // ── Unit tests for capitalize ─────────────────────────────────

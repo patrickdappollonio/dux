@@ -1006,7 +1006,7 @@ pub(crate) enum PullTarget {
     Session,
 }
 
-mod checkbox;
+mod components;
 mod input;
 mod render;
 mod sessions;
