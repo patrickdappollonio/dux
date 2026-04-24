@@ -1374,6 +1374,17 @@ impl App {
         false
     }
 
+    /// Closes the diff overlay if one is open, leaving other state (focus,
+    /// input target, status line) untouched. Called when the left-pane
+    /// selection moves to a different item so the middle pane falls back
+    /// to the newly-selected agent's terminal. Silent by design: the user
+    /// moved a cursor, they did not dismiss a dialog.
+    pub(crate) fn close_diff_view(&mut self) {
+        if matches!(self.center_mode, CenterMode::Diff { .. }) {
+            self.center_mode = CenterMode::Agent;
+        }
+    }
+
     /// Returns the current braille spinner frame index based on wall-clock
     /// time (80ms per frame). Unlike `tick_count`, this stays constant-speed
     /// regardless of event loop frequency.
