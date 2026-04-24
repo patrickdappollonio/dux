@@ -134,21 +134,24 @@ pub fn pull_current_branch(repo_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Checks out `branch_name` in `repo_path`. Returns the raw git stderr on
-/// failure so callers can surface the concrete reason (e.g. conflicting
-/// unstaged changes) to the user.
-pub fn checkout_branch(repo_path: &Path, branch_name: &str) -> Result<()> {
+/// Switches `repo_path` to `branch_name`. Uses `git switch` rather than
+/// `git checkout` because `switch` is single-purpose (branch switching only)
+/// and rejects the detached-HEAD and file-restore surprises that `checkout`
+/// silently allows. Returns the raw git stderr on failure so callers can
+/// surface the concrete reason (e.g. conflicting unstaged changes) to the
+/// user. Requires git >= 2.23 (August 2019).
+pub fn switch_branch(repo_path: &Path, branch_name: &str) -> Result<()> {
     let output = Command::new("git")
         .args([
             "-C",
             repo_path.to_string_lossy().as_ref(),
-            "checkout",
+            "switch",
             branch_name,
         ])
         .output()?;
     if !output.status.success() {
         return Err(anyhow!(
-            "git checkout {branch_name} failed: {}",
+            "git switch {branch_name} failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
@@ -1653,37 +1656,37 @@ mod tests {
         assert_eq!(remote_default_branch(clone), Some("main".to_string()),);
     }
 
-    // ── checkout_branch tests ────────────────────────────────────
+    // ── switch_branch tests ──────────────────────────────────────
 
     #[test]
-    fn checkout_branch_switches_on_clean_tree() {
+    fn switch_branch_switches_on_clean_tree() {
         let repo = init_test_repo();
         run_git(repo.path(), &["branch", "feat"]);
         assert_eq!(current_branch(repo.path()).unwrap(), "main");
 
-        checkout_branch(repo.path(), "feat").unwrap();
+        switch_branch(repo.path(), "feat").unwrap();
 
         assert_eq!(current_branch(repo.path()).unwrap(), "feat");
     }
 
     #[test]
-    fn checkout_branch_errors_when_target_missing() {
+    fn switch_branch_errors_when_target_missing() {
         let repo = init_test_repo();
-        let err = checkout_branch(repo.path(), "does-not-exist").unwrap_err();
+        let err = switch_branch(repo.path(), "does-not-exist").unwrap_err();
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("git checkout does-not-exist failed"),
+            msg.contains("git switch does-not-exist failed"),
             "expected failure message, got: {msg}"
         );
     }
 
     #[test]
-    fn checkout_branch_preserves_unrelated_untracked_files() {
+    fn switch_branch_preserves_unrelated_untracked_files() {
         let repo = init_test_repo();
         run_git(repo.path(), &["branch", "feat"]);
         fs::write(repo.path().join("scratch.txt"), "unrelated\n").unwrap();
 
-        checkout_branch(repo.path(), "feat").unwrap();
+        switch_branch(repo.path(), "feat").unwrap();
 
         assert_eq!(current_branch(repo.path()).unwrap(), "feat");
         assert_eq!(
@@ -1693,23 +1696,25 @@ mod tests {
     }
 
     #[test]
-    fn checkout_branch_errors_when_unstaged_changes_would_be_overwritten() {
+    fn switch_branch_errors_when_unstaged_changes_would_be_overwritten() {
         let repo = init_test_repo();
         // Create a tracked file on main.
         fs::write(repo.path().join("a.txt"), "main-v1\n").unwrap();
         commit_all(repo.path(), "add a.txt on main");
 
-        // Fork feat branch with a different version of a.txt.
-        run_git(repo.path(), &["checkout", "-b", "feat"]);
+        // Fork feat branch with a different version of a.txt. Uses `switch
+        // -c` to both create and check out the branch; checkout_branch is not
+        // exercised here — that's the subject under test below.
+        run_git(repo.path(), &["switch", "-c", "feat"]);
         fs::write(repo.path().join("a.txt"), "feat-v1\n").unwrap();
         commit_all(repo.path(), "modify a.txt on feat");
 
         // Back on main, introduce unstaged changes to a.txt.
-        run_git(repo.path(), &["checkout", "main"]);
+        run_git(repo.path(), &["switch", "main"]);
         fs::write(repo.path().join("a.txt"), "dirty\n").unwrap();
 
-        // Checkout feat should refuse because switching would overwrite.
-        let err = checkout_branch(repo.path(), "feat").unwrap_err();
+        // Switching to feat should refuse because it would overwrite.
+        let err = switch_branch(repo.path(), "feat").unwrap_err();
         let msg = format!("{err:#}").to_lowercase();
         assert!(
             msg.contains("overwritten") || msg.contains("would be"),

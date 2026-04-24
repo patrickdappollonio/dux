@@ -922,8 +922,7 @@ pub(crate) fn run_add_project_checkout_job(
     target_branch: String,
     worker_tx: Sender<WorkerEvent>,
 ) {
-    let result =
-        git::checkout_branch(Path::new(&path), &target_branch).map_err(|e| format!("{e:#}"));
+    let result = git::switch_branch(Path::new(&path), &target_branch).map_err(|e| format!("{e:#}"));
     let _ = worker_tx.send(WorkerEvent::AddProjectCheckoutCompleted {
         path,
         name,
