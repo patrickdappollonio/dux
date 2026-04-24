@@ -351,6 +351,47 @@ impl App {
                         }
                     }
                 }
+                WorkerEvent::AddProjectCheckoutCompleted {
+                    path,
+                    name,
+                    target_branch,
+                    result,
+                } => match result {
+                    Ok(()) => {
+                        let display_name = if name.trim().is_empty() {
+                            std::path::Path::new(&path)
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("project")
+                                .to_string()
+                        } else {
+                            name.trim().to_string()
+                        };
+                        if let Err(e) =
+                            self.finish_add_project(path, name, target_branch.clone())
+                        {
+                            self.set_error(format!("{e:#}"));
+                        } else {
+                            // Override the generic "Added project" status from
+                            // finish_add_project with the more informative
+                            // two-step message.
+                            self.set_info(format!(
+                                "Checked out \"{target_branch}\" and added project \"{display_name}\" to workspace."
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        // Preserve the full git stderr in the log so
+                        // debugging stays possible after the status line
+                        // summary is overwritten by the next message.
+                        logger::error(&format!(
+                            "add-project checkout failed for {path}: {err}"
+                        ));
+                        self.set_error(format!(
+                            "Couldn't check out \"{target_branch}\" in {path} — resolve in your terminal and retry."
+                        ));
+                    }
+                },
             }
         }
         self.retry_hung_resume_sessions();
@@ -869,6 +910,26 @@ impl App {
             }
         }
     }
+}
+
+/// Background job for "Add Project" when the user opted to have dux check out
+/// the default branch first. Runs `git checkout <target_branch>` in the source
+/// repo and reports the outcome via `WorkerEvent::AddProjectCheckoutCompleted`
+/// so the main loop can either call `finish_add_project` or surface the error.
+pub(crate) fn run_add_project_checkout_job(
+    path: String,
+    name: String,
+    target_branch: String,
+    worker_tx: Sender<WorkerEvent>,
+) {
+    let result =
+        git::checkout_branch(Path::new(&path), &target_branch).map_err(|e| format!("{e:#}"));
+    let _ = worker_tx.send(WorkerEvent::AddProjectCheckoutCompleted {
+        path,
+        name,
+        target_branch,
+        result,
+    });
 }
 
 pub(crate) fn run_create_agent_job(

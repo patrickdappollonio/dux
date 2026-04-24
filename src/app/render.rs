@@ -3924,29 +3924,22 @@ impl App {
             PromptState::ConfirmNonDefaultBranch {
                 current_branch,
                 kind,
-                confirm_selected,
+                focus,
+                checkout_default,
                 ..
             } => {
                 self.render_dim_overlay(frame);
-                let area = centered_rect(60, 30, frame.area());
-                Clear.render(area, frame.buffer_mut());
-                let outer = self.themed_overlay_block("Non-Default Branch");
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
+                let dialog_width = 60u16.min(frame.area().width.max(1));
+                let inner_width = dialog_width.saturating_sub(2);
+                let has_checkbox = matches!(kind, BranchWarningKind::Known { .. });
 
-                let [body_area, _, buttons_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Min(1),
-                        Constraint::Length(1),
-                        Constraint::Length(3),
-                    ])
-                    .areas(inner);
-
-                let mut lines = vec![Line::from("")];
+                // Body: warning text + the "new worktrees branch from …" note,
+                // plus a dim info line on the heuristic path explaining why dux
+                // won't offer to switch branches automatically.
+                let mut body_lines = vec![Line::from("")];
                 match kind {
                     BranchWarningKind::Known { default_branch } => {
-                        lines.push(Line::from(vec![
+                        body_lines.push(Line::from(vec![
                             Span::raw(" This repository is on branch "),
                             Span::styled(
                                 current_branch.as_str(),
@@ -3954,7 +3947,7 @@ impl App {
                             ),
                             Span::raw(", but the"),
                         ]));
-                        lines.push(Line::from(vec![
+                        body_lines.push(Line::from(vec![
                             Span::raw(" remote default branch is "),
                             Span::styled(
                                 default_branch.as_str(),
@@ -3964,7 +3957,7 @@ impl App {
                         ]));
                     }
                     BranchWarningKind::Heuristic => {
-                        lines.push(Line::from(vec![
+                        body_lines.push(Line::from(vec![
                             Span::raw(" This repository is on branch "),
                             Span::styled(
                                 current_branch.as_str(),
@@ -3972,17 +3965,97 @@ impl App {
                             ),
                             Span::raw(","),
                         ]));
-                        lines.push(Line::from(" which doesn't appear to be the main branch."));
+                        body_lines.push(Line::from(" which doesn't appear to be the main branch."));
                     }
                 }
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
+                body_lines.push(Line::from(""));
+                body_lines.push(Line::from(Span::styled(
                     format!(" New worktrees will branch from \"{current_branch}\"."),
                     Style::default().fg(self.theme.warning_fg),
                 )));
-                Paragraph::new(lines)
+                if matches!(kind, BranchWarningKind::Heuristic) {
+                    body_lines.push(Line::from(""));
+                    body_lines.push(Line::from(Span::styled(
+                        " Dux can't confidently identify this repo's default",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )));
+                    body_lines.push(Line::from(Span::styled(
+                        " branch, so it won't change branches for you.",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )));
+                }
+                let body_height = wrapped_line_count(&body_lines, inner_width, false);
+
+                // Checkbox height is measured up-front so the outer rect can
+                // be sized exactly — mirrors the Delete Agent modal.
+                let checkbox_height = if let BranchWarningKind::Known { default_branch } = kind {
+                    let state = if *focus == ConfirmNonDefaultBranchFocus::Checkbox {
+                        CheckboxState::Focused
+                    } else {
+                        CheckboxState::Normal
+                    };
+                    let label = format!("Check out \"{default_branch}\" before adding");
+                    let checkbox = Checkbox::new(&label)
+                        .checked(*checkout_default)
+                        .state(state);
+                    checkbox
+                        .layout(
+                            inner_width,
+                            checkbox.marker_style(Style::default()),
+                            checkbox.label_style(Style::default()),
+                        )
+                        .height
+                } else {
+                    0
+                };
+                let checkbox_spacing = u16::from(has_checkbox);
+
+                let area = centered_rect_exact(
+                    dialog_width,
+                    2 + body_height + checkbox_spacing + checkbox_height + 3,
+                    frame.area(),
+                );
+                Clear.render(area, frame.buffer_mut());
+                let outer = self.themed_overlay_block("Non-Default Branch");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, checkbox_area, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(body_height),
+                        Constraint::Length(checkbox_spacing),
+                        Constraint::Length(checkbox_height),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                Paragraph::new(body_lines)
                     .wrap(Wrap { trim: false })
                     .render(body_area, frame.buffer_mut());
+
+                let checkbox_rect = if let BranchWarningKind::Known { default_branch } = kind {
+                    let checkbox_state = if *focus == ConfirmNonDefaultBranchFocus::Checkbox {
+                        CheckboxState::Focused
+                    } else {
+                        CheckboxState::Normal
+                    };
+                    let label = format!("Check out \"{default_branch}\" before adding");
+                    let (rect, _) = self.render_overlay_checkbox(
+                        frame,
+                        checkbox_area,
+                        &label,
+                        *checkout_default,
+                        checkbox_state,
+                        None,
+                    );
+                    Some(OverlayCheckbox {
+                        id: OverlayCheckboxId::NonDefaultBranchCheckoutDefault,
+                        rect,
+                    })
+                } else {
+                    None
+                };
 
                 let btn_width = 16u16;
                 let gap = 2u16;
@@ -4002,7 +4075,7 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) = if !confirm_selected {
+                let (cancel_border, cancel_fg) = if *focus == ConfirmNonDefaultBranchFocus::Cancel {
                     (
                         self.theme.button_confirm_border,
                         self.theme.button_active_fg,
@@ -4010,10 +4083,20 @@ impl App {
                 } else {
                     (self.theme.border_normal, self.theme.hint_desc_fg)
                 };
-                let (add_border, add_fg) = if *confirm_selected {
+                let (add_border, add_fg) = if *focus == ConfirmNonDefaultBranchFocus::Add {
                     (self.theme.button_danger_border, self.theme.button_active_fg)
                 } else {
                     (self.theme.border_normal, self.theme.hint_desc_fg)
+                };
+
+                // Swap the confirm button label so the user sees exactly what
+                // pressing it will do. When the checkbox is on and we know the
+                // default branch, the action is a two-step (checkout + add),
+                // otherwise it's the original "Add Anyway" add-as-is.
+                let add_label = if has_checkbox && *checkout_default {
+                    "Check Out & Add"
+                } else {
+                    "Add Anyway"
                 };
 
                 Paragraph::new(Line::from(Span::styled(
@@ -4030,7 +4113,7 @@ impl App {
                 .render(cancel_area, frame.buffer_mut());
 
                 Paragraph::new(Line::from(Span::styled(
-                    "Add Anyway",
+                    add_label,
                     Style::default().fg(add_fg).add_modifier(Modifier::BOLD),
                 )))
                 .alignment(ratatui::layout::Alignment::Center)
@@ -4044,6 +4127,7 @@ impl App {
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmNonDefaultBranch {
                     cancel_button: cancel_area,
                     add_button: add_area,
+                    checkbox: checkbox_rect,
                 };
             }
             PromptState::ConfirmUseExistingBranch {
