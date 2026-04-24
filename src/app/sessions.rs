@@ -221,7 +221,7 @@ impl App {
         )
     }
 
-    /// Spawns a background worker that runs `git checkout <target_branch>` in
+    /// Spawns a background worker that runs `git switch <target_branch>` in
     /// the source repo before registering the project. On success, the
     /// `WorkerEvent::AddProjectCheckoutCompleted` handler calls
     /// `finish_add_project`; on failure it surfaces the git error.

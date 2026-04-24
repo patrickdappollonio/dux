@@ -912,8 +912,8 @@ impl App {
     }
 }
 
-/// Background job for "Add Project" when the user opted to have dux check out
-/// the default branch first. Runs `git checkout <target_branch>` in the source
+/// Background job for "Add Project" when the user opted to have dux switch to
+/// the default branch first. Runs `git switch <target_branch>` in the source
 /// repo and reports the outcome via `WorkerEvent::AddProjectCheckoutCompleted`
 /// so the main loop can either call `finish_add_project` or surface the error.
 pub(crate) fn run_add_project_checkout_job(

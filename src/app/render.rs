@@ -4091,7 +4091,7 @@ impl App {
 
                 // Swap the confirm button label so the user sees exactly what
                 // pressing it will do. When the checkbox is on and we know the
-                // default branch, the action is a two-step (checkout + add),
+                // default branch, the action is a two-step (switch + add),
                 // otherwise it's the original "Add Anyway" add-as-is.
                 let add_label = if has_checkbox && *checkout_default {
                     "Check Out & Add"

@@ -555,7 +555,7 @@ pub(crate) enum PromptState {
         current_branch: String,
         kind: BranchWarningKind,
         focus: ConfirmNonDefaultBranchFocus,
-        /// When true and `kind == Known`, dux runs `git checkout
+        /// When true and `kind == Known`, dux runs `git switch
         /// <default_branch>` in the source repo before registering the project.
         /// Ignored for `BranchWarningKind::Heuristic` because we can't
         /// confidently identify the target.
@@ -985,7 +985,7 @@ pub(crate) enum WorkerEvent {
         session_id: String,
         result: Result<bool, String>,
     },
-    /// Background `git checkout <target_branch>` run from the "Add Project"
+    /// Background `git switch <target_branch>` run from the "Add Project"
     /// warning modal has finished. On `Ok`, the main loop proceeds with
     /// `finish_add_project` using `target_branch`. On `Err`, the formatted
     /// git error is surfaced and the project is not added.

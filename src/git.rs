@@ -1703,7 +1703,7 @@ mod tests {
         commit_all(repo.path(), "add a.txt on main");
 
         // Fork feat branch with a different version of a.txt. Uses `switch
-        // -c` to both create and check out the branch; checkout_branch is not
+        // -c` to both create and switch to the branch; switch_branch is not
         // exercised here — that's the subject under test below.
         run_git(repo.path(), &["switch", "-c", "feat"]);
         fs::write(repo.path().join("a.txt"), "feat-v1\n").unwrap();
