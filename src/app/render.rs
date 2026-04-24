@@ -2629,61 +2629,33 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) =
-                    if matches!(prompt.focus, ChangeAgentProviderFocus::Cancel) {
-                        (
-                            self.theme.button_confirm_border,
-                            self.theme.button_active_fg,
-                        )
-                    } else {
-                        (self.theme.border_normal, self.theme.hint_desc_fg)
-                    };
                 let apply_enabled = prompt
                     .options
                     .get(prompt.selected)
                     .map(|option| !option.is_current)
                     .unwrap_or(false);
-                let (apply_border, apply_fg) =
-                    if matches!(prompt.focus, ChangeAgentProviderFocus::Apply) && apply_enabled {
-                        (
-                            self.theme.button_confirm_border,
-                            self.theme.button_active_fg,
-                        )
-                    } else if !apply_enabled {
-                        (self.theme.border_normal, self.theme.hint_dim_desc_fg)
-                    } else {
-                        (self.theme.border_normal, self.theme.hint_desc_fg)
-                    };
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Cancel",
-                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(cancel_border)),
-                )
-                .render(cancel_area, frame.buffer_mut());
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(
+                        if matches!(prompt.focus, ChangeAgentProviderFocus::Cancel) {
+                            ButtonState::Focused
+                        } else {
+                            ButtonState::Normal
+                        },
+                    )
+                    .render(frame, cancel_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Use Provider",
-                    if apply_enabled {
-                        Style::default().fg(apply_fg).add_modifier(Modifier::BOLD)
+                Button::new("Use Provider")
+                    .kind(ButtonKind::Confirm)
+                    .state(if !apply_enabled {
+                        ButtonState::Disabled
+                    } else if matches!(prompt.focus, ChangeAgentProviderFocus::Apply) {
+                        ButtonState::Focused
                     } else {
-                        Style::default().fg(apply_fg)
-                    },
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(apply_border)),
-                )
-                .render(apply_area, frame.buffer_mut());
+                        ButtonState::Normal
+                    })
+                    .render(frame, apply_area, &self.theme);
 
                 self.overlay_layout.active = OverlayMouseLayout::ChangeAgentProvider {
                     list: list_inner,
@@ -2835,61 +2807,33 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) =
-                    if matches!(prompt.focus, ChangeDefaultProviderFocus::Cancel) {
-                        (
-                            self.theme.button_confirm_border,
-                            self.theme.button_active_fg,
-                        )
-                    } else {
-                        (self.theme.border_normal, self.theme.hint_desc_fg)
-                    };
                 let apply_enabled = prompt
                     .options
                     .get(prompt.selected)
                     .map(|option| !option.is_current)
                     .unwrap_or(false);
-                let (apply_border, apply_fg) =
-                    if matches!(prompt.focus, ChangeDefaultProviderFocus::Apply) && apply_enabled {
-                        (
-                            self.theme.button_confirm_border,
-                            self.theme.button_active_fg,
-                        )
-                    } else if !apply_enabled {
-                        (self.theme.border_normal, self.theme.hint_dim_desc_fg)
-                    } else {
-                        (self.theme.border_normal, self.theme.hint_desc_fg)
-                    };
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Cancel",
-                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(cancel_border)),
-                )
-                .render(cancel_area, frame.buffer_mut());
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(
+                        if matches!(prompt.focus, ChangeDefaultProviderFocus::Cancel) {
+                            ButtonState::Focused
+                        } else {
+                            ButtonState::Normal
+                        },
+                    )
+                    .render(frame, cancel_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Set Default",
-                    if apply_enabled {
-                        Style::default().fg(apply_fg).add_modifier(Modifier::BOLD)
+                Button::new("Set Default")
+                    .kind(ButtonKind::Confirm)
+                    .state(if !apply_enabled {
+                        ButtonState::Disabled
+                    } else if matches!(prompt.focus, ChangeDefaultProviderFocus::Apply) {
+                        ButtonState::Focused
                     } else {
-                        Style::default().fg(apply_fg)
-                    },
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(apply_border)),
-                )
-                .render(apply_area, frame.buffer_mut());
+                        ButtonState::Normal
+                    })
+                    .render(frame, apply_area, &self.theme);
 
                 self.overlay_layout.active = OverlayMouseLayout::ChangeDefaultProvider {
                     list: list_inner,
@@ -3231,7 +3175,16 @@ impl App {
                     KillRunningFooterAction::Visible,
                 ];
                 let gap = 2u16;
-                let button_widths = buttons.map(|action| action.button_label().len() as u16 + 6);
+                // This footer pre-dates the Button widget's standard sizing —
+                // its labels are long ("Kill Hovered" etc.) and it lays four
+                // buttons in a row. The wider per-label width (label_chars + 6)
+                // keeps the row visually balanced; Button still handles the
+                // colors and bold-when-enabled rules.
+                let button_widths = buttons.map(|action| {
+                    let label_chars =
+                        u16::try_from(action.button_label().chars().count()).unwrap_or(u16::MAX);
+                    label_chars.saturating_add(6)
+                });
                 let total_width = button_widths.iter().sum::<u16>() + gap * 3;
                 let start_x = buttons_area.x + buttons_area.width.saturating_sub(total_width) / 2;
                 let mut cursor_x = start_x;
@@ -3245,41 +3198,26 @@ impl App {
                     };
                     button_rects[index] = rect;
                     let enabled = Self::kill_running_footer_enabled(prompt, *action);
-                    let selected = enabled
-                        && matches!(prompt.focus, KillRunningFocus::Footer(current) if current == *action);
-                    let is_danger = enabled && !matches!(action, KillRunningFooterAction::Cancel);
-                    let border = if selected {
-                        if is_danger {
-                            self.theme.button_danger_border
-                        } else {
-                            self.theme.button_confirm_border
-                        }
+                    let focused = matches!(
+                        prompt.focus,
+                        KillRunningFocus::Footer(current) if current == *action
+                    );
+                    let kind = if matches!(action, KillRunningFooterAction::Cancel) {
+                        ButtonKind::Confirm
                     } else {
-                        self.theme.border_normal
+                        ButtonKind::Danger
                     };
-                    let fg = if selected {
-                        self.theme.button_active_fg
-                    } else if !enabled {
-                        self.theme.hint_dim_desc_fg
+                    let state = if !enabled {
+                        ButtonState::Disabled
+                    } else if focused {
+                        ButtonState::Focused
                     } else {
-                        self.theme.hint_desc_fg
+                        ButtonState::Normal
                     };
-                    Paragraph::new(Line::from(Span::styled(
-                        action.button_label(),
-                        if enabled {
-                            Style::default().fg(fg).add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(fg)
-                        },
-                    )))
-                    .alignment(ratatui::layout::Alignment::Center)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_set(border::ROUNDED)
-                            .border_style(Style::default().fg(border)),
-                    )
-                    .render(rect, frame.buffer_mut());
+                    Button::new(action.button_label())
+                        .kind(kind)
+                        .state(state)
+                        .render(frame, rect, &self.theme);
                     cursor_x += button_widths[index] + gap;
                 }
                 self.overlay_layout.active = OverlayMouseLayout::KillRunning {
@@ -3386,45 +3324,24 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) = if !confirm_prompt.confirm_selected {
-                    (
-                        self.theme.button_confirm_border,
-                        self.theme.button_active_fg,
-                    )
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
-                let (kill_border, kill_fg) = if confirm_prompt.confirm_selected {
-                    (self.theme.button_danger_border, self.theme.button_active_fg)
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(if !confirm_prompt.confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, cancel_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Cancel",
-                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(cancel_border)),
-                )
-                .render(cancel_area, frame.buffer_mut());
+                Button::new("Kill")
+                    .kind(ButtonKind::Danger)
+                    .state(if confirm_prompt.confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, kill_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Kill",
-                    Style::default().fg(kill_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(kill_border)),
-                )
-                .render(kill_area, frame.buffer_mut());
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmKillRunning {
                     cancel_button: cancel_area,
                     kill_button: kill_area,
@@ -3562,45 +3479,24 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) = if *focus == DeleteAgentFocus::Cancel {
-                    (
-                        self.theme.button_confirm_border,
-                        self.theme.button_active_fg,
-                    )
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
-                let (delete_border, delete_fg) = if *focus == DeleteAgentFocus::Delete {
-                    (self.theme.button_danger_border, self.theme.button_active_fg)
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(if *focus == DeleteAgentFocus::Cancel {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, cancel_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Cancel",
-                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(cancel_border)),
-                )
-                .render(cancel_area, frame.buffer_mut());
+                Button::new("Delete")
+                    .kind(ButtonKind::Danger)
+                    .state(if *focus == DeleteAgentFocus::Delete {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, delete_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Delete",
-                    Style::default().fg(delete_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(delete_border)),
-                )
-                .render(delete_area, frame.buffer_mut());
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
                     cancel_button: cancel_area,
                     delete_button: delete_area,
@@ -3666,45 +3562,24 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) = if !confirm_selected {
-                    (
-                        self.theme.button_confirm_border,
-                        self.theme.button_active_fg,
-                    )
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
-                let (delete_border, delete_fg) = if *confirm_selected {
-                    (self.theme.button_danger_border, self.theme.button_active_fg)
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(if !confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, cancel_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Cancel",
-                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(cancel_border)),
-                )
-                .render(cancel_area, frame.buffer_mut());
+                Button::new("Delete")
+                    .kind(ButtonKind::Danger)
+                    .state(if *confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, delete_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Delete",
-                    Style::default().fg(delete_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(delete_border)),
-                )
-                .render(delete_area, frame.buffer_mut());
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteTerminal {
                     cancel_button: cancel_area,
                     delete_button: delete_area,
@@ -3776,45 +3651,24 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) = if !confirm_selected {
-                    (
-                        self.theme.button_confirm_border,
-                        self.theme.button_active_fg,
-                    )
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
-                let (quit_border, quit_fg) = if *confirm_selected {
-                    (self.theme.button_danger_border, self.theme.button_active_fg)
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(if !confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, cancel_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Cancel",
-                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(cancel_border)),
-                )
-                .render(cancel_area, frame.buffer_mut());
+                Button::new("Quit")
+                    .kind(ButtonKind::Danger)
+                    .state(if *confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, quit_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Quit",
-                    Style::default().fg(quit_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(quit_border)),
-                )
-                .render(quit_area, frame.buffer_mut());
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmQuit {
                     cancel_button: cancel_area,
                     quit_button: quit_area,
@@ -3879,45 +3733,24 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) = if !confirm_selected {
-                    (
-                        self.theme.button_confirm_border,
-                        self.theme.button_active_fg,
-                    )
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
-                let (discard_border, discard_fg) = if *confirm_selected {
-                    (self.theme.button_danger_border, self.theme.button_active_fg)
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(if !confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, cancel_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Cancel",
-                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(cancel_border)),
-                )
-                .render(cancel_area, frame.buffer_mut());
+                Button::new("Discard")
+                    .kind(ButtonKind::Danger)
+                    .state(if *confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, discard_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Discard",
-                    Style::default().fg(discard_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(discard_border)),
-                )
-                .render(discard_area, frame.buffer_mut());
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmDiscardFile {
                     cancel_button: cancel_area,
                     discard_button: discard_area,
@@ -4184,48 +4017,26 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) = if !confirm_selected {
-                    (
-                        self.theme.button_confirm_border,
-                        self.theme.button_active_fg,
-                    )
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
-                let (use_border, use_fg) = if *confirm_selected {
-                    (
-                        self.theme.button_confirm_border,
-                        self.theme.button_active_fg,
-                    )
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(if !confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, cancel_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Cancel",
-                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(cancel_border)),
-                )
-                .render(cancel_area, frame.buffer_mut());
+                // "Use Existing" reuses a branch that already exists — not
+                // destructive, so it shares the Confirm kind with Cancel.
+                Button::new("Use Existing")
+                    .kind(ButtonKind::Confirm)
+                    .state(if *confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, use_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Use Existing",
-                    Style::default().fg(use_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(use_border)),
-                )
-                .render(use_area, frame.buffer_mut());
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmUseExistingBranch {
                     cancel_button: cancel_area,
                     use_button: use_area,
@@ -4825,45 +4636,23 @@ impl App {
             height: 3,
         };
 
-        let (cancel_border, cancel_fg) = if !confirm_selected {
-            (
-                self.theme.button_confirm_border,
-                self.theme.button_active_fg,
-            )
-        } else {
-            (self.theme.border_normal, self.theme.hint_desc_fg)
-        };
-        let (delete_border, delete_fg) = if confirm_selected {
-            (self.theme.button_danger_border, self.theme.button_active_fg)
-        } else {
-            (self.theme.border_normal, self.theme.hint_desc_fg)
-        };
+        Button::new("Cancel")
+            .kind(ButtonKind::Confirm)
+            .state(if !confirm_selected {
+                ButtonState::Focused
+            } else {
+                ButtonState::Normal
+            })
+            .render(frame, cancel_area, &self.theme);
 
-        Paragraph::new(Line::from(Span::styled(
-            "Cancel",
-            Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-        )))
-        .alignment(ratatui::layout::Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_set(border::ROUNDED)
-                .border_style(Style::default().fg(cancel_border)),
-        )
-        .render(cancel_area, frame.buffer_mut());
-
-        Paragraph::new(Line::from(Span::styled(
-            "Delete",
-            Style::default().fg(delete_fg).add_modifier(Modifier::BOLD),
-        )))
-        .alignment(ratatui::layout::Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_set(border::ROUNDED)
-                .border_style(Style::default().fg(delete_border)),
-        )
-        .render(delete_area, frame.buffer_mut());
+        Button::new("Delete")
+            .kind(ButtonKind::Danger)
+            .state(if confirm_selected {
+                ButtonState::Focused
+            } else {
+                ButtonState::Normal
+            })
+            .render(frame, delete_area, &self.theme);
 
         self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteMacro {
             cancel_button: cancel_area,

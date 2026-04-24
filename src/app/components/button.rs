@@ -48,12 +48,17 @@ pub(crate) fn shared_button_width(labels: &[&str]) -> u16 {
 }
 
 /// Visual focus state of a button. Maps to the border + label color pair
-/// used at render time: `Focused` highlights via the theme's button colors,
-/// `Normal` falls back to the dim border + hint text color.
+/// used at render time: `Focused` highlights via the theme's button
+/// colors, `Disabled` dims and drops the bold modifier so the button
+/// reads as unavailable, and `Normal` falls back to the standard hint
+/// text color. `Disabled` overrides any focus state — callers should set
+/// it when the underlying action can't be taken right now (e.g. an apply
+/// button when the current selection is already applied).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ButtonState {
     Normal,
     Focused,
+    Disabled,
 }
 
 /// Semantic intent of a button. Drives which theme color the focused
@@ -114,19 +119,23 @@ impl<'a> Button<'a> {
                 ButtonKind::Danger => (theme.button_danger_border, theme.button_active_fg),
             },
             ButtonState::Normal => (theme.border_normal, theme.hint_desc_fg),
+            ButtonState::Disabled => (theme.border_normal, theme.hint_dim_desc_fg),
         };
-        Paragraph::new(Line::from(Span::styled(
-            self.label,
-            Style::default().fg(fg).add_modifier(Modifier::BOLD),
-        )))
-        .alignment(Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_set(border::ROUNDED)
-                .border_style(Style::default().fg(border_color)),
-        )
-        .render(area, frame.buffer_mut());
+        // Disabled buttons drop the BOLD modifier so they visually fade —
+        // active and idle buttons stay bold to keep the row legible.
+        let mut label_style = Style::default().fg(fg);
+        if self.state != ButtonState::Disabled {
+            label_style = label_style.add_modifier(Modifier::BOLD);
+        }
+        Paragraph::new(Line::from(Span::styled(self.label, label_style)))
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_set(border::ROUNDED)
+                    .border_style(Style::default().fg(border_color)),
+            )
+            .render(area, frame.buffer_mut());
     }
 }
 
