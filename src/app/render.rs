@@ -4057,7 +4057,11 @@ impl App {
                     None
                 };
 
-                let btn_width = 16u16;
+                // Wider than the standard 16 used by other modals because the
+                // "Check Out & Add" label needs 15 columns inside the borders;
+                // both buttons share the width so the layout doesn't shift
+                // when the user toggles the checkbox.
+                let btn_width = 19u16;
                 let gap = 2u16;
                 let total = btn_width * 2 + gap;
                 let left_offset = buttons_area.width.saturating_sub(total) / 2;
