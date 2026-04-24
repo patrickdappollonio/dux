@@ -1205,6 +1205,11 @@ impl App {
                         );
                 }
             } else {
+                // Capture alt-screen state before mutable borrows — we need
+                // it below (after `refresh_snapshot_buf` takes &mut self) to
+                // decide whether the scrollback indicator applies.
+                let is_alt_screen = provider.is_alt_screen();
+
                 // Render the current terminal viewport into the ratatui
                 // buffer, reusing the pre-allocated snapshot buffer to
                 // avoid per-frame heap allocation.
@@ -1263,10 +1268,15 @@ impl App {
                     }
                 }
 
-                if let Some(label) = scrollback_indicator_label(
-                    self.snapshot_buf.scrollback_offset,
-                    self.snapshot_buf.scrollback_total,
-                ) {
+                // Suppress the scrollback indicator when the child is using
+                // the alternate screen buffer — the alt grid has no history,
+                // so the label would be misleading even if it somehow rendered.
+                if !is_alt_screen
+                    && let Some(label) = scrollback_indicator_label(
+                        self.snapshot_buf.scrollback_offset,
+                        self.snapshot_buf.scrollback_total,
+                    )
+                {
                     let badge_width = label.len() as u16;
                     if term_area.height > 0 && badge_width <= term_area.width {
                         Paragraph::new(label)
