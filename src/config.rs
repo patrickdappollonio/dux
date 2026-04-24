@@ -1136,12 +1136,14 @@ fn render_macros_config(
     out.push_str("[macros]\n");
     let _ = writeln!(
         out,
-        "# Text macros: press {macro_key} to open the macro bar and select one to paste.\n\
+        "# Text macros: press {macro_key} to open the macro bar and select one to send.\n\
          # Each entry is a name mapped to its text and a surface restriction.\n\
          # surface = \"agent\"    — only shown when the agent pane is focused.\n\
          # surface = \"terminal\" — only shown when the terminal pane is focused.\n\
          # surface = \"both\"     — shown on both surfaces.\n\
-         # Newlines in text values are safe — they are sent atomically and not interpreted as Enter.",
+         # Newlines in text values are translated to Alt+Enter (ESC + CR) so\n\
+         # multi-line macros are entered as a single prompt; press Enter yourself\n\
+         # to submit afterwards.",
     );
     if macros.entries.is_empty() {
         out.push_str(

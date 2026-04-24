@@ -4973,7 +4973,7 @@ impl App {
 
         // ── Input block (top, with title and hint badges) ──
         let mut bottom_spans = vec![Span::raw(" ")];
-        for (key, desc) in &[("Enter", "paste"), ("Tab", "complete"), ("Esc", "cancel")] {
+        for (key, desc) in &[("Enter", "send"), ("Tab", "complete"), ("Esc", "cancel")] {
             let badge = self.theme.key_badge_default(key);
             bottom_spans.extend(
                 badge
