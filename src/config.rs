@@ -118,7 +118,7 @@ pub struct Defaults {
     pub provider: String,
     pub start_directory: Option<String>,
     pub commit_prompt: Option<String>,
-    pub prompt_for_name: bool,
+    pub enable_randomized_pet_name_by_default: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -257,7 +257,7 @@ impl Default for Defaults {
             provider: "claude".to_string(),
             start_directory,
             commit_prompt: Some(DEFAULT_COMMIT_PROMPT.to_string()),
-            prompt_for_name: false,
+            enable_randomized_pet_name_by_default: false,
         }
     }
 }
@@ -441,10 +441,104 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
 
     let raw = fs::read_to_string(&paths.config_path)
         .with_context(|| format!("failed to read {}", paths.config_path.display()))?;
-    let mut config: Config = toml::from_str(&raw)
+    let mut doc: DocumentMut = raw
+        .parse()
+        .with_context(|| format!("failed to parse {}", paths.config_path.display()))?;
+    if apply_config_deprecations(&mut doc)? {
+        fs::write(&paths.config_path, doc.to_string())
+            .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
+    }
+
+    let mut config: Config = toml::from_str(&doc.to_string())
         .with_context(|| format!("failed to parse {}", paths.config_path.display()))?;
     config.providers.ensure_defaults();
     Ok(config)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DeprecatedConfigKey {
+    section: &'static str,
+    key: &'static str,
+}
+
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+enum DeprecatedConfigKeyAction {
+    Replace {
+        migrate: fn(&mut DocumentMut, DeprecatedConfigKey, Item) -> Result<()>,
+    },
+    Remove,
+    Fail {
+        message: &'static str,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct DeprecatedConfigKeyRule {
+    old: DeprecatedConfigKey,
+    action: DeprecatedConfigKeyAction,
+}
+
+const DEPRECATED_CONFIG_KEYS: &[DeprecatedConfigKeyRule] = &[DeprecatedConfigKeyRule {
+    old: DeprecatedConfigKey {
+        section: "defaults",
+        key: "prompt_for_name",
+    },
+    action: DeprecatedConfigKeyAction::Replace {
+        migrate: migrate_prompt_for_name,
+    },
+}];
+
+fn apply_config_deprecations(doc: &mut DocumentMut) -> Result<bool> {
+    apply_config_deprecations_with(doc, DEPRECATED_CONFIG_KEYS)
+}
+
+fn apply_config_deprecations_with(
+    doc: &mut DocumentMut,
+    rules: &[DeprecatedConfigKeyRule],
+) -> Result<bool> {
+    let mut changed = false;
+    for rule in rules {
+        let Some(old_item) = remove_table_key_item(doc, rule.old.section, rule.old.key) else {
+            continue;
+        };
+        match rule.action {
+            DeprecatedConfigKeyAction::Replace { migrate } => {
+                migrate(doc, rule.old, old_item)?;
+            }
+            DeprecatedConfigKeyAction::Remove => {}
+            DeprecatedConfigKeyAction::Fail { message } => {
+                bail!(
+                    "unsupported config key [{}.{}]: {}",
+                    rule.old.section,
+                    rule.old.key,
+                    message
+                );
+            }
+        }
+        changed = true;
+    }
+    Ok(changed)
+}
+
+fn migrate_prompt_for_name(
+    doc: &mut DocumentMut,
+    old: DeprecatedConfigKey,
+    old_item: Item,
+) -> Result<()> {
+    let Some(prompt_for_name) = old_item.as_value().and_then(Value::as_bool) else {
+        bail!(
+            "unsupported config key [{}.{}]: expected a boolean value",
+            old.section,
+            old.key
+        );
+    };
+
+    let table = ensure_table(doc, "defaults");
+    if !table.contains_key("enable_randomized_pet_name_by_default") {
+        table["enable_randomized_pet_name_by_default"] = toml_edit::value(!prompt_for_name);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -529,13 +623,13 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
         },
         ConfigEntry::Blank,
         ConfigEntry::Field {
-            key: "prompt_for_name",
+            key: "enable_randomized_pet_name_by_default",
             comment: Some(CommentSource::Static(
-                "# When true, dux prompts for a custom agent name before creating or forking a session.\n\
-                 # The name becomes the git branch name for the new worktree.\n\
-                 # When false, a random two-word name is generated automatically.",
+                "# When true, the new-agent name prompt starts with a random two-word pet name.\n\
+                 # You can still clear it and type a custom name before creating the agent.\n\
+                 # When false, the prompt starts empty and the pet-name checkbox is off.",
             )),
-            value_fn: |c| FieldValue::Bool(c.defaults.prompt_for_name),
+            value_fn: |c| FieldValue::Bool(c.defaults.enable_randomized_pet_name_by_default),
         },
         ConfigEntry::Blank,
         ConfigEntry::Providers,
@@ -775,9 +869,10 @@ pub fn save_config(
     patch_table_bool(
         &mut doc,
         "defaults",
-        "prompt_for_name",
-        config.defaults.prompt_for_name,
+        "enable_randomized_pet_name_by_default",
+        config.defaults.enable_randomized_pet_name_by_default,
     );
+    remove_table_key(&mut doc, "defaults", "prompt_for_name");
 
     // --- [logging] ---
     patch_table_str(&mut doc, "logging", "level", &config.logging.level);
@@ -936,6 +1031,16 @@ fn patch_table_usize(doc: &mut DocumentMut, section: &str, key: &str, value: usi
 fn patch_table_bool(doc: &mut DocumentMut, section: &str, key: &str, value: bool) {
     let table = ensure_table(doc, section);
     table[key] = toml_edit::value(value);
+}
+
+fn remove_table_key(doc: &mut DocumentMut, section: &str, key: &str) {
+    let _ = remove_table_key_item(doc, section, key);
+}
+
+fn remove_table_key_item(doc: &mut DocumentMut, section: &str, key: &str) -> Option<Item> {
+    doc.get_mut(section)
+        .and_then(Item::as_table_mut)
+        .and_then(|table| table.remove(key))
 }
 
 fn patch_table_string_array(doc: &mut DocumentMut, section: &str, key: &str, values: &[String]) {
@@ -1644,6 +1749,8 @@ mod tests {
         assert!(rendered.contains("# dux configuration"));
         assert!(rendered.contains("[defaults]"));
         assert!(rendered.contains("provider = \"claude\""));
+        assert!(rendered.contains("enable_randomized_pet_name_by_default = false"));
+        assert!(!rendered.contains("prompt_for_name"));
         assert!(rendered.contains("[providers.claude]"));
         assert!(rendered.contains("[providers.codex]"));
         assert!(rendered.contains("[providers.copilot]"));
@@ -1786,6 +1893,97 @@ agent_scrollback_lines = 10000
         let parsed: Config = toml::from_str(toml_str).expect("should parse");
         assert_eq!(parsed.ui.staged_pane_height_pct, 50);
         assert_eq!(parsed.ui.commit_pane_height_pct, 40);
+    }
+
+    #[test]
+    fn config_deprecation_replace_migrates_prompt_for_name() {
+        let mut doc: DocumentMut = r#"
+[defaults]
+provider = "claude"
+prompt_for_name = false
+"#
+        .parse()
+        .expect("parse doc");
+
+        let changed = apply_config_deprecations(&mut doc).expect("migrate");
+
+        assert!(changed);
+        let defaults = doc["defaults"].as_table().expect("defaults table");
+        assert!(!defaults.contains_key("prompt_for_name"));
+        assert_eq!(
+            defaults["enable_randomized_pet_name_by_default"]
+                .as_value()
+                .and_then(Value::as_bool),
+            Some(true),
+        );
+    }
+
+    #[test]
+    fn config_deprecation_replace_preserves_explicit_new_key() {
+        let mut doc: DocumentMut = r#"
+[defaults]
+prompt_for_name = false
+enable_randomized_pet_name_by_default = false
+"#
+        .parse()
+        .expect("parse doc");
+
+        apply_config_deprecations(&mut doc).expect("migrate");
+
+        let defaults = doc["defaults"].as_table().expect("defaults table");
+        assert!(!defaults.contains_key("prompt_for_name"));
+        assert_eq!(
+            defaults["enable_randomized_pet_name_by_default"]
+                .as_value()
+                .and_then(Value::as_bool),
+            Some(false),
+        );
+    }
+
+    #[test]
+    fn config_deprecation_remove_discards_old_key() {
+        let mut doc: DocumentMut = r#"
+[defaults]
+obsolete = true
+"#
+        .parse()
+        .expect("parse doc");
+        let rules = [DeprecatedConfigKeyRule {
+            old: DeprecatedConfigKey {
+                section: "defaults",
+                key: "obsolete",
+            },
+            action: DeprecatedConfigKeyAction::Remove,
+        }];
+
+        let changed = apply_config_deprecations_with(&mut doc, &rules).expect("remove");
+
+        assert!(changed);
+        assert!(!doc["defaults"].as_table().unwrap().contains_key("obsolete"));
+    }
+
+    #[test]
+    fn config_deprecation_fail_rejects_old_key() {
+        let mut doc: DocumentMut = r#"
+[defaults]
+dangerous = true
+"#
+        .parse()
+        .expect("parse doc");
+        let rules = [DeprecatedConfigKeyRule {
+            old: DeprecatedConfigKey {
+                section: "defaults",
+                key: "dangerous",
+            },
+            action: DeprecatedConfigKeyAction::Fail {
+                message: "remove it manually",
+            },
+        }];
+
+        let err = apply_config_deprecations_with(&mut doc, &rules).expect_err("should fail");
+
+        assert!(err.to_string().contains("unsupported config key"));
+        assert!(err.to_string().contains("remove it manually"));
     }
 
     #[test]
