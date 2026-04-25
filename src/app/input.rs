@@ -2251,22 +2251,70 @@ impl App {
         }
 
         if let PromptState::ConfirmNonDefaultBranch {
-            confirm_selected, ..
+            focus,
+            kind,
+            checkout_default,
+            ..
         } = &mut self.prompt
         {
+            // Checkbox is only reachable in the confident (Known) path.
+            // Heuristic warnings have no checkbox, so focus cycles Cancel ↔ Add.
+            let has_checkbox = matches!(kind, BranchWarningKind::Known { .. });
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => self.prompt = PromptState::None,
                 Some(Action::ToggleSelection) => {
-                    *confirm_selected = !*confirm_selected;
+                    let reverse = matches!(key.code, KeyCode::BackTab);
+                    *focus = match (*focus, has_checkbox, reverse) {
+                        (ConfirmNonDefaultBranchFocus::Cancel, true, false) => {
+                            ConfirmNonDefaultBranchFocus::Add
+                        }
+                        (ConfirmNonDefaultBranchFocus::Add, true, false) => {
+                            ConfirmNonDefaultBranchFocus::Checkbox
+                        }
+                        (ConfirmNonDefaultBranchFocus::Checkbox, _, false) => {
+                            ConfirmNonDefaultBranchFocus::Cancel
+                        }
+                        (ConfirmNonDefaultBranchFocus::Cancel, true, true) => {
+                            ConfirmNonDefaultBranchFocus::Checkbox
+                        }
+                        (ConfirmNonDefaultBranchFocus::Add, true, true) => {
+                            ConfirmNonDefaultBranchFocus::Cancel
+                        }
+                        (ConfirmNonDefaultBranchFocus::Checkbox, _, true) => {
+                            ConfirmNonDefaultBranchFocus::Add
+                        }
+                        (ConfirmNonDefaultBranchFocus::Cancel, false, _) => {
+                            ConfirmNonDefaultBranchFocus::Add
+                        }
+                        (ConfirmNonDefaultBranchFocus::Add, false, _) => {
+                            ConfirmNonDefaultBranchFocus::Cancel
+                        }
+                    };
                 }
-                Some(Action::Confirm) => {
-                    let confirm = *confirm_selected;
-                    return Ok(self.resolve_confirm_non_default_branch(confirm));
-                }
-                _ if key.code == KeyCode::Char(' ') => {
-                    let confirm = *confirm_selected;
-                    return Ok(self.resolve_confirm_non_default_branch(confirm));
-                }
+                Some(Action::Confirm) => match *focus {
+                    ConfirmNonDefaultBranchFocus::Checkbox => {
+                        *checkout_default = !*checkout_default;
+                    }
+                    ConfirmNonDefaultBranchFocus::Cancel => {
+                        self.prompt = PromptState::None;
+                    }
+                    ConfirmNonDefaultBranchFocus::Add => {
+                        return Ok(self.resolve_confirm_non_default_branch());
+                    }
+                },
+                // Space activates the focused element — toggles the checkbox
+                // when focused there, otherwise activates the current button.
+                _ if key.code == KeyCode::Char(' ') => match *focus {
+                    ConfirmNonDefaultBranchFocus::Checkbox => {
+                        *checkout_default = !*checkout_default;
+                    }
+                    ConfirmNonDefaultBranchFocus::Cancel => {
+                        self.prompt = PromptState::None;
+                    }
+                    ConfirmNonDefaultBranchFocus::Add => {
+                        return Ok(self.resolve_confirm_non_default_branch());
+                    }
+                },
                 _ => {}
             }
             return Ok(false);
@@ -2902,11 +2950,16 @@ impl App {
             OverlayMouseLayout::ConfirmNonDefaultBranch {
                 cancel_button,
                 add_button,
+                checkbox,
             } => {
                 if contains_point(cancel_button, column, row) {
                     Some(PromptMouseTarget::ConfirmNonDefaultBranchCancel)
                 } else if contains_point(add_button, column, row) {
                     Some(PromptMouseTarget::ConfirmNonDefaultBranchAdd)
+                } else if checkbox
+                    .is_some_and(|checkbox| contains_point(checkbox.rect, column, row))
+                {
+                    checkbox.map(|checkbox| PromptMouseTarget::Checkbox(checkbox.id))
                 } else {
                     None
                 }
@@ -3610,18 +3663,36 @@ impl App {
         false
     }
 
-    fn resolve_confirm_non_default_branch(&mut self, confirm: bool) -> bool {
-        let (path, name, branch) = match &self.prompt {
+    fn resolve_confirm_non_default_branch(&mut self) -> bool {
+        let (path, name, branch, checkout_default, default_branch) = match &self.prompt {
             PromptState::ConfirmNonDefaultBranch {
                 path,
                 name,
                 current_branch,
+                kind,
+                checkout_default,
                 ..
-            } => (path.clone(), name.clone(), current_branch.clone()),
+            } => {
+                let default_branch = match kind {
+                    BranchWarningKind::Known { default_branch } => Some(default_branch.clone()),
+                    BranchWarningKind::Heuristic => None,
+                };
+                (
+                    path.clone(),
+                    name.clone(),
+                    current_branch.clone(),
+                    *checkout_default && default_branch.is_some(),
+                    default_branch,
+                )
+            }
             _ => return false,
         };
         self.prompt = PromptState::None;
-        if confirm && let Err(e) = self.finish_add_project(path, name, branch) {
+        if checkout_default {
+            // Safe: `checkout_default` is only true when `default_branch` is `Some`.
+            let target = default_branch.expect("checkout_default implies known default branch");
+            self.dispatch_add_project_checkout(path, name, target);
+        } else if let Err(e) = self.finish_add_project(path, name, branch) {
             self.set_error(format!("{e:#}"));
         }
         false
@@ -3699,6 +3770,19 @@ impl App {
             OverlayCheckboxId::RenameSessionBranch => {
                 if let PromptState::RenameSession { rename_branch, .. } = &mut self.prompt {
                     *rename_branch = !*rename_branch;
+                }
+            }
+            OverlayCheckboxId::NonDefaultBranchCheckoutDefault => {
+                if let PromptState::ConfirmNonDefaultBranch {
+                    kind,
+                    checkout_default,
+                    focus,
+                    ..
+                } = &mut self.prompt
+                    && matches!(kind, BranchWarningKind::Known { .. })
+                {
+                    *checkout_default = !*checkout_default;
+                    *focus = ConfirmNonDefaultBranchFocus::Checkbox;
                 }
             }
         }
@@ -3913,10 +3997,13 @@ impl App {
                 return self.resolve_confirm_discard_file(true);
             }
             PromptMouseTarget::ConfirmNonDefaultBranchCancel => {
-                return self.resolve_confirm_non_default_branch(false);
+                self.prompt = PromptState::None;
             }
             PromptMouseTarget::ConfirmNonDefaultBranchAdd => {
-                return self.resolve_confirm_non_default_branch(true);
+                if let PromptState::ConfirmNonDefaultBranch { focus, .. } = &mut self.prompt {
+                    *focus = ConfirmNonDefaultBranchFocus::Add;
+                }
+                return self.resolve_confirm_non_default_branch();
             }
             PromptMouseTarget::ConfirmUseExistingBranchCancel => {
                 return self.resolve_confirm_use_existing_branch(false);
