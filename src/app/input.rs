@@ -15,6 +15,34 @@ const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 /// the user pastes large amounts of text while the agent is starting.
 const LOADING_INPUT_BUF_MAX: usize = 64;
 
+/// Build the byte payload for a macro send. Newlines are translated to
+/// Alt+Enter (ESC followed by CR) so that multi-line macros are entered
+/// as a single multi-line prompt rather than submitting at each newline.
+/// Handles `\r\n`, `\n`, and bare `\r` uniformly.
+pub(crate) fn macro_payload_bytes(text: &str) -> Vec<u8> {
+    const ALT_ENTER: &[u8] = b"\x1b\r";
+    let bytes = text.as_bytes();
+    let mut payload = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' if bytes.get(i + 1) == Some(&b'\n') => {
+                payload.extend_from_slice(ALT_ENTER);
+                i += 2;
+            }
+            b'\n' | b'\r' => {
+                payload.extend_from_slice(ALT_ENTER);
+                i += 1;
+            }
+            b => {
+                payload.push(b);
+                i += 1;
+            }
+        }
+    }
+    payload
+}
+
 /// Append `bytes` to `buf`, keeping at most `max` trailing bytes. Used to
 /// bound `loading_input_buf` so it cannot grow without bound when the user
 /// pastes large content during the agent loading phase.
@@ -705,14 +733,11 @@ impl App {
                 let filtered = self.filtered_macros(&query);
                 if let Some(&(name, text)) = filtered.get(selected) {
                     if let Some(provider) = self.selected_terminal_surface_client() {
-                        let mut payload = Vec::with_capacity(text.len() + 12);
-                        payload.extend_from_slice(b"\x1b[200~");
-                        payload.extend_from_slice(text.as_bytes());
-                        payload.extend_from_slice(b"\x1b[201~");
+                        let payload = macro_payload_bytes(text);
                         let _ = provider.write_bytes(&payload);
                     }
                     let name = name.to_string();
-                    self.set_info(format!("Pasted macro \"{name}\"."));
+                    self.set_info(format!("Sent macro \"{name}\"."));
                 }
                 self.close_macro_bar();
             }
@@ -4652,9 +4677,9 @@ mod tests {
         App, CenterMode, ConfirmKillRunningPrompt, DeleteAgentFocus, FocusPane, FullscreenOverlay,
         InputTarget, KillRunningAction, KillRunningFocus, KillRunningFooterAction,
         KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftItem, LeftSection,
-        MouseClickTarget, MouseLayoutState, OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout,
-        OverlayMouseLayoutState, PromptState, PullTarget, RightSection, RuntimeTargetId, TextInput,
-        WorkerEvent,
+        MacroBarState, MouseClickTarget, MouseLayoutState, OverlayCheckbox, OverlayCheckboxId,
+        OverlayMouseLayout, OverlayMouseLayoutState, PromptState, PullTarget, RightSection,
+        RuntimeTargetId, TextInput, WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
@@ -9110,6 +9135,166 @@ mod tests {
 
         assert!(pending_delete_state(&app).is_none());
         assert!(!app.config.macros.entries.contains_key("greet"));
+    }
+
+    #[test]
+    fn macro_bar_enter_sends_text_without_bracket_paste_wrapping() {
+        // Spawn a PTY running `cat -v` in raw mode. `-v` renders control
+        // bytes as printable caret notation (`^[` for ESC), and raw mode
+        // disables line discipline so bytes are visible immediately.
+        // If the macro handler wraps the text in bracket-paste markers
+        // (ESC[200~ ... ESC[201~), the terminal snapshot will contain
+        // literal `^[[200` and `^[[201` strings. If the text is sent as-is,
+        // only the macro text will appear.
+        let mut app = test_app(default_bindings());
+        let session_id = app.sessions[0].id.clone();
+        let client = PtyClient::spawn(
+            "sh",
+            &["-c".to_string(), "stty raw -echo; exec cat -v".to_string()],
+            std::path::Path::new("."),
+            5,
+            80,
+            100,
+        )
+        .expect("spawn pty");
+        app.providers.insert(session_id, client);
+        app.input_target = InputTarget::Agent;
+        app.session_surface = crate::model::SessionSurface::Agent;
+
+        // Give the shell a moment to enter raw mode and exec cat.
+        std::thread::sleep(std::time::Duration::from_millis(250));
+
+        app.config.macros.entries.insert(
+            "greet".to_string(),
+            crate::config::MacroEntry {
+                text: "hello-macro".to_string(),
+                surface: crate::config::MacroSurface::Agent,
+            },
+        );
+
+        app.macro_bar = Some(MacroBarState {
+            input: TextInput::new(),
+            selected: 0,
+            previous_input_target: InputTarget::Agent,
+        });
+
+        app.handle_macro_bar_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("handle enter");
+
+        assert!(app.macro_bar.is_none(), "macro bar closes after send");
+        assert_eq!(app.status.message(), "Sent macro \"greet\".");
+
+        // Wait for cat to echo the bytes back into the embedded terminal.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let provider = app.providers.values().next().expect("provider");
+        let snapshot = provider.snapshot();
+        let rendered: String = snapshot
+            .cells
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect();
+        assert!(
+            rendered.contains("hello-macro"),
+            "terminal snapshot should contain raw macro text; got: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("[200") && !rendered.contains("[201"),
+            "macro text must not be wrapped in bracket-paste markers; got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn macro_payload_translates_newlines_to_alt_enter() {
+        use crate::app::input::macro_payload_bytes;
+
+        // Plain text with no newlines passes through byte-for-byte.
+        assert_eq!(macro_payload_bytes("hello").as_slice(), b"hello");
+
+        // Bare LF (\n) becomes ESC + CR.
+        assert_eq!(macro_payload_bytes("a\nb").as_slice(), b"a\x1b\rb");
+
+        // Bare CR (\r) becomes ESC + CR.
+        assert_eq!(macro_payload_bytes("a\rb").as_slice(), b"a\x1b\rb");
+
+        // CRLF collapses to a single ESC + CR (not two).
+        assert_eq!(macro_payload_bytes("a\r\nb").as_slice(), b"a\x1b\rb");
+
+        // Multiple newlines each become their own ESC + CR.
+        assert_eq!(
+            macro_payload_bytes("a\nb\nc").as_slice(),
+            b"a\x1b\rb\x1b\rc"
+        );
+
+        // Trailing and leading newlines are also translated.
+        assert_eq!(macro_payload_bytes("\na\n").as_slice(), b"\x1b\ra\x1b\r");
+
+        // Empty input yields empty payload.
+        assert!(macro_payload_bytes("").is_empty());
+    }
+
+    #[test]
+    fn macro_bar_enter_translates_newlines_to_alt_enter() {
+        // Spawn a PTY running `cat -v` in raw mode. Control bytes render
+        // as caret notation: ESC → `^[`, CR → `^M`. If newlines are sent
+        // raw, `cat` would receive a literal LF which (even in raw mode)
+        // would not become `^[^M` in the snapshot. If the translation
+        // works, the `^[` and `^M` markers will appear between the two
+        // halves of the macro text.
+        let mut app = test_app(default_bindings());
+        let session_id = app.sessions[0].id.clone();
+        let client = PtyClient::spawn(
+            "sh",
+            &["-c".to_string(), "stty raw -echo; exec cat -v".to_string()],
+            std::path::Path::new("."),
+            5,
+            80,
+            100,
+        )
+        .expect("spawn pty");
+        app.providers.insert(session_id, client);
+        app.input_target = InputTarget::Agent;
+        app.session_surface = crate::model::SessionSurface::Agent;
+
+        std::thread::sleep(std::time::Duration::from_millis(250));
+
+        app.config.macros.entries.insert(
+            "multi".to_string(),
+            crate::config::MacroEntry {
+                text: "first\nsecond".to_string(),
+                surface: crate::config::MacroSurface::Agent,
+            },
+        );
+
+        app.macro_bar = Some(MacroBarState {
+            input: TextInput::new(),
+            selected: 0,
+            previous_input_target: InputTarget::Agent,
+        });
+
+        app.handle_macro_bar_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("handle enter");
+
+        assert_eq!(app.status.message(), "Sent macro \"multi\".");
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let provider = app.providers.values().next().expect("provider");
+        let snapshot = provider.snapshot();
+        let rendered: String = snapshot
+            .cells
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect();
+
+        assert!(
+            rendered.contains("first") && rendered.contains("second"),
+            "both halves of the macro text should be visible; got: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("^[") && rendered.contains("^M"),
+            "newline should have been translated to ESC+CR (`^[^M`); got: {rendered:?}"
+        );
     }
 
     #[test]
