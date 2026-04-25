@@ -191,7 +191,7 @@ const WELCOME_TIPS: &[fn(&RuntimeBindings) -> String] = &[
         )
     },
     |_b| {
-        "Not a fan of random animal names? Turn them off in config.toml and dux will ask you for a name every time."
+        "New agent prompt looking too empty? Tick the pet-name checkbox and let dux name your next chaos gremlin."
             .into()
     },
     |_b| {
@@ -4254,20 +4254,49 @@ impl App {
                     );
                 hint_para.render(hint_area, frame.buffer_mut());
             }
-            PromptState::NameNewAgent { input, .. } => {
+            PromptState::NameNewAgent {
+                input,
+                randomize_name,
+                focus,
+                ..
+            } => {
                 self.render_dim_overlay(frame);
-                let area = centered_rect_exact(60, 8, frame.area());
+                let checkbox = Checkbox::new("Use randomized pet name")
+                    .checked(*randomize_name)
+                    .state(if *focus == NameNewAgentFocus::Checkbox {
+                        CheckboxState::Focused
+                    } else {
+                        CheckboxState::Normal
+                    });
+                let dialog_width = 60.min(frame.area().width.max(1));
+                let inner_width = dialog_width.saturating_sub(2);
+                let checkbox_height = checkbox
+                    .layout(
+                        inner_width,
+                        checkbox.marker_style(Style::default()),
+                        checkbox.label_style(Style::default()),
+                    )
+                    .height
+                    .saturating_add(1);
+                let checkbox_spacing = 1;
+                let area = centered_rect_exact(
+                    dialog_width,
+                    8 + checkbox_spacing + checkbox_height,
+                    frame.area(),
+                );
                 Clear.render(area, frame.buffer_mut());
 
                 let outer = self.themed_overlay_block("Name New Agent");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
 
-                let [label_area, input_area, hint_area] = Layout::default()
+                let [label_area, input_area, _, checkbox_area, hint_area] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(1),
                         Constraint::Length(3),
+                        Constraint::Length(checkbox_spacing),
+                        Constraint::Length(checkbox_height),
                         Constraint::Min(1),
                     ])
                     .areas(inner);
@@ -4312,12 +4341,37 @@ impl App {
                     .block(input_block)
                     .render(input_area, frame.buffer_mut());
 
+                let (checkbox_rect, _) = self.render_overlay_checkbox(
+                    frame,
+                    checkbox_area,
+                    "Use randomized pet name",
+                    *randomize_name,
+                    if *focus == NameNewAgentFocus::Checkbox {
+                        CheckboxState::Focused
+                    } else {
+                        CheckboxState::Normal
+                    },
+                    Some(Line::from(Span::styled(
+                        format!(
+                            "{}Fills this prompt with a fresh pet-tool name",
+                            Checkbox::indent()
+                        ),
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ))),
+                );
+
                 let confirm_key = self.bindings.label_for(Action::Confirm);
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let toggle_key = self.bindings.label_for(Action::ToggleSelection);
                 let mut hints = vec![Span::raw(" ")];
                 hints.extend(self.theme.key_badge_default(&confirm_key));
                 hints.push(Span::styled(
                     " confirm  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                hints.extend(self.theme.key_badge_default(&toggle_key));
+                hints.push(Span::styled(
+                    " randomize  ",
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
                 hints.extend(self.theme.key_badge_default(&close_key));
@@ -4326,8 +4380,13 @@ impl App {
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
                 Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
-                self.overlay_layout.active =
-                    OverlayMouseLayout::NameNewAgent { input: input_inner };
+                self.overlay_layout.active = OverlayMouseLayout::NameNewAgent {
+                    input: input_inner,
+                    checkbox: Some(OverlayCheckbox {
+                        id: OverlayCheckboxId::NameNewAgentRandomizedPetName,
+                        rect: checkbox_rect,
+                    }),
+                };
             }
             PromptState::None => {}
         }
