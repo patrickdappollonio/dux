@@ -4478,6 +4478,12 @@ impl App {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(80, 70, frame.area());
                 Clear.render(popup, frame.buffer_mut());
+                // The hint row sits outside the inner block, so paint the
+                // whole popup with overlay_bg up front — otherwise that
+                // 1-line strip falls through to terminal default.
+                frame
+                    .buffer_mut()
+                    .set_style(popup, Style::default().bg(self.theme.overlay_bg));
 
                 // Split: content area + 1-line footer hint.
                 let chunks =
@@ -5302,6 +5308,14 @@ impl App {
         self.render_dim_overlay(frame);
         let popup = centered_rect(85, 78, frame.area());
         Clear.render(popup, frame.buffer_mut());
+        // Clear leaves cells at Color::Reset. The themed_overlay_block fills
+        // its own area below, but the 1-line hint row underneath sits
+        // outside the block and would otherwise read as terminal default —
+        // paint the whole popup with overlay_bg up front so every part of
+        // the modal tracks the active theme.
+        frame
+            .buffer_mut()
+            .set_style(popup, Style::default().bg(self.theme.overlay_bg));
 
         let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(popup);
         let content_area = chunks[0];
