@@ -128,18 +128,101 @@ pub fn load(name: &str, paths: &DuxPaths) -> Result<Theme> {
             .context("bundled dux-dark theme failed to load (this is a dux bug)");
     }
 
-    if let Some(theme) = opaline::load_by_name(name) {
-        let mut theme = theme;
-        register_dux_defaults(&mut theme);
-        return Ok(Theme::from_opaline(&theme));
+    // Opaline ids are kebab-case (`catppuccin-mocha`, `tokyo-night`). Accept
+    // underscored forms transparently so users who type `catppuccin_mocha`
+    // (matching the file stems in the opaline crate) still get a hit.
+    let candidates: [String; 2] = [name.to_string(), name.replace('_', "-")];
+    for candidate in candidates.iter() {
+        if let Some(mut theme) = opaline::load_by_name(candidate) {
+            register_dux_defaults(&mut theme);
+            return Ok(Theme::from_opaline(&theme));
+        }
     }
 
     Err(anyhow::anyhow!(
         "unknown theme '{name}' — try '{DEFAULT_THEME_NAME}', a built-in name like \
-         'catppuccin_mocha' / 'nord' / 'tokyo_night', or place a TOML file at \
+         'catppuccin-mocha' / 'nord' / 'tokyo-night', or place a TOML file at \
          {}/themes/<name>.toml",
         paths.root.display()
     ))
+}
+
+/// Where a theme came from — used by the theme picker to label entries and
+/// disambiguate same-named user themes from built-ins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThemeSource {
+    /// The bundled `dux-dark` theme — always present, always first in the list.
+    Bundled,
+    /// A theme compiled into the opaline crate (e.g. `nord`, `catppuccin-mocha`).
+    Opaline,
+    /// A user-authored theme found at `<config_dir>/themes/<name>.toml`.
+    User,
+}
+
+/// Metadata about an available theme, used to populate the theme picker.
+#[derive(Clone, Debug)]
+pub struct ThemeListing {
+    /// Identifier passed to [`load`] — file stem for user themes, kebab-case
+    /// id for built-ins, `dux-dark` for the bundled default.
+    pub id: String,
+    /// Human-readable label shown in the picker.
+    pub display_name: String,
+    pub source: ThemeSource,
+}
+
+/// Enumerate every theme reachable from the dux runtime: the bundled
+/// `dux-dark`, the opaline built-ins, and any TOML files the user has
+/// dropped in `<config_dir>/themes/`. Sorted with `dux-dark` first, then
+/// user themes, then built-ins alphabetically — predictable scrolling.
+pub fn discover_available(paths: &DuxPaths) -> Vec<ThemeListing> {
+    let mut themes = Vec::new();
+
+    themes.push(ThemeListing {
+        id: DEFAULT_THEME_NAME.to_string(),
+        display_name: "dux-dark (bundled default)".to_string(),
+        source: ThemeSource::Bundled,
+    });
+
+    let user_dir = paths.root.join("themes");
+    if let Ok(entries) = std::fs::read_dir(&user_dir) {
+        let mut user_themes: Vec<ThemeListing> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                if path.extension().is_none_or(|ext| ext != "toml") {
+                    return None;
+                }
+                let stem = path.file_stem()?.to_str()?.to_string();
+                if stem == DEFAULT_THEME_NAME {
+                    // dux-dark stays the bundled entry; a user file with the
+                    // same name still loads first via `theme::load`, but we
+                    // don't show two "dux-dark" rows in the picker.
+                    return None;
+                }
+                Some(ThemeListing {
+                    display_name: format!("{stem} (user)"),
+                    id: stem,
+                    source: ThemeSource::User,
+                })
+            })
+            .collect();
+        user_themes.sort_by(|a, b| a.id.cmp(&b.id));
+        themes.extend(user_themes);
+    }
+
+    let mut builtin: Vec<ThemeListing> = opaline::list_available_themes()
+        .into_iter()
+        .filter(|info| info.builtin)
+        .map(|info| ThemeListing {
+            id: info.name.clone(),
+            display_name: info.display_name.clone(),
+            source: ThemeSource::Opaline,
+        })
+        .collect();
+    builtin.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+    themes.extend(builtin);
+
+    themes
 }
 
 /// Load a theme by name and fall back to the bundled `dux-dark` if the lookup

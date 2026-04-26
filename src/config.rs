@@ -640,7 +640,7 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "theme",
             comment: Some(CommentSource::Static(
-                "# Visual theme for the dux interface.\n# Built-in options include \"dux-dark\" (the default), plus any theme\n# bundled with the opaline engine, for example: \"catppuccin_mocha\",\n# \"catppuccin_frappe\", \"nord\", \"dracula\", \"gruvbox_dark\",\n# \"tokyo_night\", \"solarized_dark\", \"one_dark\", \"rose_pine\", and others.\n# To use a custom theme, drop a TOML file into <config_dir>/themes/<name>.toml\n# (with the same token format as opaline themes) and reference it here\n# by file stem. Unknown names fall back to dux-dark with a warning.",
+                "# Visual theme for the dux interface.\n# Built-in options include \"dux-dark\" (the default), plus any theme\n# bundled with the opaline engine, for example: \"catppuccin-mocha\",\n# \"catppuccin-frappe\", \"nord\", \"dracula\", \"gruvbox-dark\",\n# \"tokyo-night\", \"solarized-dark\", \"one-dark\", \"rose-pine\", and others.\n# To use a custom theme, drop a TOML file into <config_dir>/themes/<name>.toml\n# (with the same token format as opaline themes) and reference it here\n# by file stem. Unknown names fall back to dux-dark with a warning.\n# Use the `change-theme` command in the palette (Ctrl-p) for an interactive picker.",
             )),
             value_fn: |c| FieldValue::Str(c.ui.theme.clone()),
         },

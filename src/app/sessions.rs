@@ -1015,6 +1015,77 @@ impl App {
         Ok(())
     }
 
+    pub(crate) fn open_change_theme_prompt(&mut self) -> Result<()> {
+        let options = crate::theme::discover_available(&self.paths);
+        if options.is_empty() {
+            self.set_error("No themes available.");
+            return Ok(());
+        }
+        let current = self.config.ui.theme.clone();
+        let selected = options
+            .iter()
+            .position(|opt| opt.id == current)
+            .unwrap_or(0);
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.prompt = PromptState::ChangeTheme(ChangeThemePrompt {
+            options,
+            selected,
+            current,
+        });
+        self.set_info("Use ↑/↓ or j/k to browse themes. Enter applies and saves; Esc cancels.");
+        Ok(())
+    }
+
+    pub(crate) fn apply_change_theme(&mut self) -> Result<()> {
+        let prompt = match &self.prompt {
+            PromptState::ChangeTheme(prompt) => prompt.clone(),
+            _ => return Ok(()),
+        };
+        let Some(selected) = prompt.options.get(prompt.selected).cloned() else {
+            self.prompt = PromptState::None;
+            self.set_error("Select a theme first.");
+            return Ok(());
+        };
+        self.prompt = PromptState::None;
+        if selected.id == prompt.current {
+            self.set_info(format!(
+                "Theme \"{}\" is already active. Pick a different one to change it.",
+                selected.display_name,
+            ));
+            return Ok(());
+        }
+        let theme = match crate::theme::load(&selected.id, &self.paths) {
+            Ok(theme) => theme,
+            Err(err) => {
+                self.set_error(format!(
+                    "Couldn't load theme \"{}\": {err:#}",
+                    selected.display_name
+                ));
+                return Ok(());
+            }
+        };
+        let previous = self.config.ui.theme.clone();
+        self.config.ui.theme = selected.id.clone();
+        if let Err(err) = save_config(&self.paths.config_path, &self.config, &self.bindings) {
+            self.config.ui.theme = previous;
+            self.set_error(format!(
+                "Couldn't persist the theme change: {err:#}. The new theme is loaded for this session only."
+            ));
+            // Still apply to the running session — the user explicitly asked
+            // for it and we'd rather flash a wrong-color UI than silently
+            // ignore the request.
+            self.theme = theme;
+            return Ok(());
+        }
+        self.theme = theme;
+        self.set_info(format!(
+            "Theme changed to \"{}\". Future sessions will use it too.",
+            selected.display_name,
+        ));
+        Ok(())
+    }
+
     pub(crate) fn remove_selected_project(&mut self) -> Result<()> {
         let Some(project) = self.selected_project().cloned() else {
             self.set_error("Select a project first.");

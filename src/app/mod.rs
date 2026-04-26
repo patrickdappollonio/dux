@@ -454,6 +454,13 @@ pub(crate) struct ChangeDefaultProviderPrompt {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct ChangeThemePrompt {
+    pub(crate) options: Vec<crate::theme::ThemeListing>,
+    pub(crate) selected: usize,
+    pub(crate) current: String,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct ConfirmKillRunningPrompt {
     pub(crate) previous: KillRunningPrompt,
     pub(crate) action: KillRunningAction,
@@ -491,6 +498,7 @@ pub(crate) enum PromptState {
     },
     ChangeAgentProvider(ChangeAgentProviderPrompt),
     ChangeDefaultProvider(ChangeDefaultProviderPrompt),
+    ChangeTheme(ChangeThemePrompt),
     KillRunning(KillRunningPrompt),
     ConfirmKillRunning(ConfirmKillRunningPrompt),
     ConfirmDeleteAgent {
@@ -800,6 +808,11 @@ pub(crate) enum OverlayMouseLayout {
         apply_button: Rect,
     },
     PickEditor {
+        list: Rect,
+        items: usize,
+        offset: usize,
+    },
+    ChangeTheme {
         list: Rect,
         items: usize,
         offset: usize,
@@ -1515,6 +1528,7 @@ impl App {
             "fork-agent" => self.fork_selected_session(),
             "change-agent-provider" => self.open_change_agent_provider_prompt(),
             "change-default-provider" => self.open_change_default_provider_prompt(),
+            "change-theme" => self.open_change_theme_prompt(),
             "pull-project" => self.refresh_selected_project(),
             "delete-project" => self.delete_selected_project(),
             "remove-project" => self.remove_selected_project(),
