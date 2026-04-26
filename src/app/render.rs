@@ -2261,7 +2261,8 @@ impl App {
                 let list_block = Block::default()
                     .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
                     .border_type(ratatui::widgets::BorderType::Rounded)
-                    .border_style(Style::default().fg(self.theme.overlay_border));
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
                 let list_inner = list_block.inner(list_area);
                 StatefulWidget::render(
                     List::new(items)
@@ -2433,6 +2434,7 @@ impl App {
                     let list_block = Block::default()
                         .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
                         .border_style(Style::default().fg(self.theme.overlay_border))
+                        .style(Style::default().bg(self.theme.overlay_bg))
                         .title_bottom(Line::from(bottom_spans));
                     let list_inner = list_block.inner(list_render_area);
                     StatefulWidget::render(
@@ -2615,7 +2617,8 @@ impl App {
                 ));
                 let list_block = Block::default()
                     .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(self.theme.overlay_border));
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
                 let list_inner = list_block.inner(list_area);
                 let highlight_style = if matches!(prompt.focus, ChangeAgentProviderFocus::List) {
                     self.theme.selection_style()
@@ -2823,7 +2826,8 @@ impl App {
                 ));
                 let list_block = Block::default()
                     .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(self.theme.overlay_border));
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
                 let list_inner = list_block.inner(list_area);
                 let highlight_style = if matches!(prompt.focus, ChangeDefaultProviderFocus::List) {
                     self.theme.selection_style()
@@ -3027,7 +3031,8 @@ impl App {
                 ));
                 let list_block = Block::default()
                     .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(self.theme.overlay_border));
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
                 let list_inner = list_block.inner(list_area);
                 StatefulWidget::render(
                     List::new(items)
@@ -3137,7 +3142,8 @@ impl App {
                     .with_selected(Some((*selected).min(editors.len().saturating_sub(1))));
                 let list_block = Block::default()
                     .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(self.theme.overlay_border));
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
                 let list_inner = list_block.inner(list_area);
                 StatefulWidget::render(
                     List::new(items)
@@ -3300,6 +3306,7 @@ impl App {
                         .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
                         .border_type(ratatui::widgets::BorderType::Rounded)
                         .border_style(Style::default().fg(self.theme.overlay_border))
+                        .style(Style::default().bg(self.theme.overlay_bg))
                         .title_bottom(Line::from(hint_spans));
                     let list_inner = list_block.inner(list_area);
                     StatefulWidget::render(
@@ -5220,7 +5227,8 @@ impl App {
         let list_block = Block::default()
             .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(Style::default().fg(self.theme.overlay_border));
+            .border_style(Style::default().fg(self.theme.overlay_border))
+            .style(Style::default().bg(self.theme.overlay_bg));
         let mut list_state = ListState::default();
         if !filtered.is_empty() {
             list_state.select(Some(selected));
@@ -5503,23 +5511,21 @@ fn xterm256_to_rgb(idx: u8) -> (u8, u8, u8) {
 /// theme's dim color and the background is converted to grayscale, giving
 /// the pane a muted appearance that signals it is read-only.
 ///
-/// Pass-through for the embedded agent/terminal PTY. Cells keep whatever
-/// colors the CLI emitted — including `Color::Reset` for cells with no
-/// explicit background — so the user's configured CLI theme renders
-/// untouched and dux doesn't have to fight every CLI tool's own palette.
-/// In non-interactive mode the foreground is replaced with a single dim
-/// shade and the background is grayscaled, giving the read-only pane a
-/// muted look while still preserving any "default background" cells.
+/// In interactive mode the agent and companion terminal pass through
+/// untouched — `Color::Reset` cells stay reset so the user's configured
+/// CLI palette renders end-to-end (fullscreen or otherwise) without dux
+/// fighting it. In non-interactive (minimized / read-only) mode the
+/// foreground collapses to a single dim shade and the background is
+/// grayscaled; cells the CLI emitted with `Color::Reset` are first
+/// resolved to `theme.app_bg` so the grayscale fill follows the active
+/// theme rather than reading the user's terminal default — that's what
+/// gives the dimmed pane a uniform muted surface tied to the palette.
 fn pty_cell_colors(fg: Color, bg: Color, is_input: bool, theme: &Theme) -> (Color, Color) {
     if is_input {
         (fg, bg)
     } else {
-        let dimmed_bg = if bg == Color::Reset {
-            bg
-        } else {
-            to_grayscale(bg)
-        };
-        (theme.overlay_dim_fg, dimmed_bg)
+        let resolved_bg = if bg == Color::Reset { theme.app_bg } else { bg };
+        (theme.overlay_dim_fg, to_grayscale(resolved_bg))
     }
 }
 
@@ -6069,15 +6075,18 @@ mod tests {
     }
 
     #[test]
-    fn pty_cell_colors_preserves_default_bg_in_non_interactive_mode() {
+    fn pty_cell_colors_resolves_default_bg_to_app_bg_in_non_interactive_mode() {
         let theme = Theme::default_dark();
         let fg = Color::Rgb(200, 100, 50);
-        // Color::Reset cells stay transparent even when grayscaling so the
-        // read-only PTY view continues to defer to the user's CLI palette
-        // rather than asserting a dux color.
+        // The minimized (non-interactive) PTY view reads as a uniform muted
+        // surface that follows the active theme. Color::Reset cells must be
+        // resolved to app_bg before grayscaling so the fill matches the rest
+        // of the dux chrome instead of falling through to the terminal
+        // default — interactive mode (covered by the test above) keeps the
+        // pass-through so fullscreen agent renders the user's CLI palette.
         assert_eq!(
             pty_cell_colors(fg, Color::Reset, false, &theme),
-            (theme.overlay_dim_fg, Color::Reset)
+            (theme.overlay_dim_fg, to_grayscale(theme.app_bg))
         );
     }
 
