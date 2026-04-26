@@ -333,7 +333,20 @@ impl App {
     }
 
     pub(crate) fn render(&mut self, frame: &mut Frame) {
-        let term_w = frame.area().width as usize;
+        // Pre-fill the whole frame with the theme's app background. Cells
+        // that no widget paints over (gutters, modal interiors, the strip
+        // under the PR banner caps) inherit this color, so light themes
+        // actually look light end-to-end. Widgets that explicitly set
+        // `Color::Reset` override this and still pass through to the
+        // user's terminal default — that path is preserved for PTY cells
+        // that emit a "reset background" SGR, so the embedded agent
+        // terminal keeps rendering the CLI's own colors unchanged.
+        let frame_area = frame.area();
+        frame
+            .buffer_mut()
+            .set_style(frame_area, Style::default().bg(self.theme.app_bg));
+
+        let term_w = frame_area.width as usize;
         let status_text_len = self.status.text().len() + 3; // " ● " prefix
         let status_lines: u16 = if term_w > 0 && status_text_len > term_w {
             2
@@ -5686,14 +5699,25 @@ impl App {
             return;
         }
 
+        // Paint the row with the theme's app background first so the
+        // half-block caps blend into a surface that actually changes with
+        // the theme. Without this the caps render on top of whatever
+        // cell colors the agent PTY left behind, which made the pill look
+        // detached on light themes.
+        frame
+            .buffer_mut()
+            .set_style(area, Style::default().bg(self.theme.app_bg));
+
         let bg = match pr.state {
             PrState::Open => self.theme.pr_open_bg,
             PrState::Merged => self.theme.pr_merged_bg,
             PrState::Closed => self.theme.pr_closed_bg,
         };
         let fg = self.theme.pr_banner_fg;
-        // Half-block caps: fg is the pill color, bg is terminal default.
-        let cap_style = Style::default().fg(bg);
+        // Half-block caps: fg is the pill color, bg is the freshly-painted
+        // app surface so the pill arc sits on a theme-driven backdrop
+        // instead of the terminal default.
+        let cap_style = Style::default().fg(bg).bg(self.theme.app_bg);
         // Inner content: white text on colored background.
         let text_style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
         let title_style = Style::default()

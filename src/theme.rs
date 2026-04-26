@@ -22,6 +22,11 @@ pub const DEFAULT_THEME_NAME: &str = "dux_dark";
 const DUX_DARK_TOML: &str = include_str!("../assets/themes/dux_dark.toml");
 
 pub struct Theme {
+    /// Base surface color for the dux app — used as a frame-wide pre-fill so
+    /// every cell that no widget explicitly paints (gutters, modal interiors,
+    /// the row behind the PR pill caps, etc.) inherits the active theme's
+    /// background instead of the user's terminal default.
+    pub app_bg: Color,
     pub header_fg: Color,
     pub header_bg: Color,
     pub header_label_fg: Color,
@@ -276,6 +281,7 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
     let text_dim = theme.color("text.dim");
     let bg_base = theme.color("bg.base");
     let bg_panel = theme.color("bg.panel");
+    theme.register_default_token("dux.app_bg", bg_base);
     let bg_highlight = theme.color("bg.highlight");
     let bg_active = theme.color("bg.active");
     let accent_primary = theme.color("accent.primary");
@@ -425,6 +431,7 @@ impl Theme {
     pub fn from_opaline(theme: &OpalineTheme) -> Self {
         let pick = |token: &str| into_ratatui(theme.color(token));
         Self {
+            app_bg: pick("dux.app_bg"),
             header_fg: pick("dux.header_fg"),
             header_bg: pick("dux.header_bg"),
             header_label_fg: pick("dux.header_label_fg"),
@@ -629,6 +636,10 @@ mod tests {
     /// against the pre-Opaline behavior.
     fn default_dark_archived() -> Theme {
         Theme {
+            // app_bg matches the historical overlay_bg shade so dark-terminal
+            // dux-dark users see no perceptible change after the frame
+            // pre-fill landed.
+            app_bg: Color::Rgb(20, 20, 20),
             header_fg: Color::White,
             header_bg: Color::Rgb(30, 30, 30),
             header_label_fg: Color::Rgb(120, 120, 120),
@@ -729,6 +740,7 @@ mod tests {
             };
         }
 
+        assert_field!(app_bg);
         assert_field!(header_fg);
         assert_field!(header_bg);
         assert_field!(header_label_fg);
@@ -816,6 +828,7 @@ mod tests {
         assert_eq!(fallback.border_focused, archived.border_focused);
         assert_eq!(fallback.header_bg, archived.header_bg);
         assert_eq!(fallback.diff_add, archived.diff_add);
+        assert_eq!(fallback.app_bg, archived.app_bg);
     }
 
     /// An Opaline built-in (no `dux.*` tokens defined) should still produce a

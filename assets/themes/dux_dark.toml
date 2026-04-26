@@ -31,6 +31,12 @@ ansi_magenta = "#ff00ff"
 ansi_darkgray = "#808080"
 
 [tokens]
+# ── Frame-wide surface ───────────────────────────────────────────────
+# Painted across the whole dux frame before any widget renders. Anything
+# that does not set its own background — modal interiors, gutters,
+# the strip under the PR banner — will sit on top of this color.
+"dux.app_bg"               = "#141414"
+
 # ── Header / chrome ──────────────────────────────────────────────────
 "dux.header_fg"            = "ansi_white"
 "dux.header_bg"            = "#1e1e1e"
