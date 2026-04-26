@@ -1033,8 +1033,45 @@ impl App {
             selected,
             current,
         });
-        self.set_info("Use ↑/↓ or j/k to browse themes. Enter applies and saves; Esc cancels.");
+        self.set_info(
+            "Themes preview live as you move. Enter saves the choice; Esc reverts to the previous theme.",
+        );
         Ok(())
+    }
+
+    /// Live-preview the theme at the prompt's current selection. Called every
+    /// time the user moves the cursor in the picker (keyboard or mouse) so
+    /// the whole UI repaints with the highlighted theme without having to
+    /// commit anything yet. Failures are swallowed — a theme that won't load
+    /// just leaves the previously-previewed theme in place; the picker stays
+    /// open so the user can pick a different one.
+    pub(crate) fn preview_change_theme_selection(&mut self) {
+        let id = match &self.prompt {
+            PromptState::ChangeTheme(prompt) => prompt
+                .options
+                .get(prompt.selected)
+                .map(|option| option.id.clone()),
+            _ => None,
+        };
+        let Some(id) = id else { return };
+        if let Ok(theme) = crate::theme::load(&id, &self.paths) {
+            self.theme = theme;
+        }
+    }
+
+    /// Cancel the theme picker. Reloads the theme that was active when the
+    /// picker opened so any live previews are reverted.
+    pub(crate) fn cancel_change_theme(&mut self) {
+        let original = match &self.prompt {
+            PromptState::ChangeTheme(prompt) => Some(prompt.current.clone()),
+            _ => None,
+        };
+        self.prompt = PromptState::None;
+        if let Some(original) = original
+            && let Ok(theme) = crate::theme::load(&original, &self.paths)
+        {
+            self.theme = theme;
+        }
     }
 
     pub(crate) fn apply_change_theme(&mut self) -> Result<()> {
