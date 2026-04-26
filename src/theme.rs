@@ -15,11 +15,11 @@ pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', 
 
 /// Name of the bundled default theme — also the value that ships in the
 /// generated `config.toml` on first boot.
-pub const DEFAULT_THEME_NAME: &str = "dux-dark";
+pub const DEFAULT_THEME_NAME: &str = "dux_dark";
 
-/// The bundled `dux-dark` theme TOML, embedded at compile time so the default
+/// The bundled `dux_dark` theme TOML, embedded at compile time so the default
 /// path never depends on a file on disk.
-const DUX_DARK_TOML: &str = include_str!("../assets/themes/dux-dark.toml");
+const DUX_DARK_TOML: &str = include_str!("../assets/themes/dux_dark.toml");
 
 pub struct Theme {
     pub header_fg: Color,
@@ -128,10 +128,12 @@ pub fn load(name: &str, paths: &DuxPaths) -> Result<Theme> {
             .context("bundled dux-dark theme failed to load (this is a dux bug)");
     }
 
-    // Opaline ids are kebab-case (`catppuccin-mocha`, `tokyo-night`). Accept
-    // underscored forms transparently so users who type `catppuccin_mocha`
-    // (matching the file stems in the opaline crate) still get a hit.
-    let candidates: [String; 2] = [name.to_string(), name.replace('_', "-")];
+    // Theme ids in dux match opaline's TOML filenames (`catppuccin_mocha`,
+    // `tokyo_night`). Opaline's runtime registry uses kebab-case ids derived
+    // from those filenames, so translate underscores → hyphens before the
+    // lookup. The original form is also tried as a fallback to forgive any
+    // legacy hyphenated id that may already live in someone's config.
+    let candidates: [String; 2] = [name.replace('_', "-"), name.to_string()];
     for candidate in candidates.iter() {
         if let Some(mut theme) = opaline::load_by_name(candidate) {
             register_dux_defaults(&mut theme);
@@ -141,7 +143,7 @@ pub fn load(name: &str, paths: &DuxPaths) -> Result<Theme> {
 
     Err(anyhow::anyhow!(
         "unknown theme '{name}' — try '{DEFAULT_THEME_NAME}', a built-in name like \
-         'catppuccin-mocha' / 'nord' / 'tokyo-night', or place a TOML file at \
+         'catppuccin_mocha' / 'nord' / 'tokyo_night', or place a TOML file at \
          {}/themes/<name>.toml",
         paths.root.display()
     ))
@@ -179,7 +181,7 @@ pub fn discover_available(paths: &DuxPaths) -> Vec<ThemeListing> {
 
     themes.push(ThemeListing {
         id: DEFAULT_THEME_NAME.to_string(),
-        display_name: "dux-dark (bundled default)".to_string(),
+        display_name: format!("{DEFAULT_THEME_NAME} (bundled default)"),
         source: ThemeSource::Bundled,
     });
 
@@ -214,7 +216,10 @@ pub fn discover_available(paths: &DuxPaths) -> Vec<ThemeListing> {
         .into_iter()
         .filter(|info| info.builtin)
         .map(|info| ThemeListing {
-            id: info.name.clone(),
+            // Match the opaline TOML filenames (underscored) for the
+            // user-facing id; `theme::load` reverses the conversion before
+            // calling opaline.
+            id: info.name.replace('-', "_"),
             display_name: info.display_name.clone(),
             source: ThemeSource::Opaline,
         })

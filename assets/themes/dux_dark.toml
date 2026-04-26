@@ -14,7 +14,7 @@
 # theme engines do.
 
 [meta]
-name = "dux-dark"
+name = "dux_dark"
 author = "dux"
 variant = "dark"
 description = "The default dux dark theme."
