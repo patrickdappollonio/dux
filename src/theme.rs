@@ -633,11 +633,17 @@ impl Theme {
     }
 
     pub fn key_badge_default<'a>(&self, key: &'a str) -> Vec<Span<'a>> {
-        self.key_badge(key, Color::Reset)
+        // Pass `app_bg` rather than `Color::Reset` so the badge background
+        // tracks the active theme. With `Color::Reset` the bracket and key
+        // cells emit an SGR that overrides the surrounding pre-fill and
+        // falls through to the user's terminal default — which on a dark
+        // terminal kept those badges dark even after switching to a light
+        // dux theme.
+        self.key_badge(key, self.app_bg)
     }
 
     pub fn dim_key_badge_default<'a>(&self, key: &'a str) -> Vec<Span<'a>> {
-        self.dim_key_badge(key, Color::Reset)
+        self.dim_key_badge(key, self.app_bg)
     }
 }
 

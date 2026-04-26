@@ -5484,18 +5484,18 @@ fn xterm256_to_rgb(idx: u8) -> (u8, u8, u8) {
 /// theme's dim color and the background is converted to grayscale, giving
 /// the pane a muted appearance that signals it is read-only.
 ///
-/// `Color::Reset` (no explicit background) is always preserved so cells
-/// without a background never turn black.
+/// Cells the CLI emitted with no background attribute (`Color::Reset`) are
+/// remapped to `theme.app_bg` so the PTY area follows the active dux theme
+/// rather than the user's terminal default. Cells that the CLI explicitly
+/// colored keep their colors. In non-interactive mode the resolved bg is
+/// then grayscaled, giving the read-only pane a uniform muted appearance
+/// regardless of which theme is active.
 fn pty_cell_colors(fg: Color, bg: Color, is_input: bool, theme: &Theme) -> (Color, Color) {
+    let resolved_bg = if bg == Color::Reset { theme.app_bg } else { bg };
     if is_input {
-        (fg, bg)
+        (fg, resolved_bg)
     } else {
-        let dimmed_bg = if bg == Color::Reset {
-            bg
-        } else {
-            to_grayscale(bg)
-        };
-        (theme.overlay_dim_fg, dimmed_bg)
+        (theme.overlay_dim_fg, to_grayscale(resolved_bg))
     }
 }
 
@@ -6010,11 +6010,21 @@ mod tests {
     // ── Unit tests for pty_cell_colors ────────────────────────────
 
     #[test]
-    fn pty_cell_colors_passes_through_in_interactive_mode() {
+    fn pty_cell_colors_passes_through_explicit_bg_in_interactive_mode() {
         let theme = Theme::default_dark();
         let fg = Color::Rgb(200, 100, 50);
         let bg = Color::Rgb(10, 20, 30);
         assert_eq!(pty_cell_colors(fg, bg, true, &theme), (fg, bg));
+    }
+
+    #[test]
+    fn pty_cell_colors_maps_default_bg_to_app_bg_in_interactive_mode() {
+        let theme = Theme::default_dark();
+        let fg = Color::Rgb(200, 100, 50);
+        assert_eq!(
+            pty_cell_colors(fg, Color::Reset, true, &theme),
+            (fg, theme.app_bg)
+        );
     }
 
     #[test]
@@ -6032,12 +6042,15 @@ mod tests {
     }
 
     #[test]
-    fn pty_cell_colors_preserves_default_bg_in_non_interactive_mode() {
+    fn pty_cell_colors_grayscales_app_bg_for_default_cells_in_non_interactive_mode() {
         let theme = Theme::default_dark();
         let fg = Color::Rgb(200, 100, 50);
+        // A "default bg" cell is now resolved to app_bg first, then grayscaled
+        // alongside every other cell, so the read-only pane reads as a uniform
+        // muted surface tied to the active theme.
         assert_eq!(
             pty_cell_colors(fg, Color::Reset, false, &theme),
-            (theme.overlay_dim_fg, Color::Reset)
+            (theme.overlay_dim_fg, to_grayscale(theme.app_bg))
         );
     }
 
