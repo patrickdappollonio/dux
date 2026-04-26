@@ -87,6 +87,7 @@ pub enum Action {
     TogglePromptForName,
     TogglePrBannerPosition,
     ForceReconnectAgent,
+    ChangeTheme,
 }
 
 /// Where a binding's key combo is matched.
@@ -254,6 +255,7 @@ impl Action {
             Action::TogglePromptForName => "toggle_prompt_for_name",
             Action::TogglePrBannerPosition => "toggle_pr_banner_position",
             Action::ForceReconnectAgent => "force_reconnect_agent",
+            Action::ChangeTheme => "change_theme",
         }
     }
 
@@ -290,7 +292,7 @@ impl Action {
             }
             Action::NewTerminal => "Spawn a new companion terminal for the selected agent.",
             Action::ExitInteractive => "Exit interactive mode (stop forwarding keys to agent).",
-            Action::OpenMacroBar => "Open the macro command bar to paste text macros.",
+            Action::OpenMacroBar => "Open the macro command bar to send text macros.",
             Action::ToggleFullscreen => "Toggle fullscreen overlay for the agent terminal.",
             Action::ScrollPageUp => "Scroll up one page in the agent output.",
             Action::ScrollPageDown => "Scroll down one page in the agent output.",
@@ -348,6 +350,7 @@ impl Action {
                 "Move PR banner between top and bottom of agent pane."
             }
             Action::ForceReconnectAgent => "Restart the agent without resuming the prior session.",
+            Action::ChangeTheme => "Open a picker to switch the dux color theme.",
         }
     }
 
@@ -426,7 +429,8 @@ impl Action {
             | Action::TogglePromptForName
             | Action::TogglePrBannerPosition
             | Action::ForceReconnectAgent
-            | Action::ChangeDefaultProvider => None,
+            | Action::ChangeDefaultProvider
+            | Action::ChangeTheme => None,
         }
     }
 }
@@ -564,6 +568,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "change-default-provider",
             description: "Change the default provider used when creating new sessions",
+        }),
+    },
+    BindingDef {
+        action: Action::ChangeTheme,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "change-theme",
+            description: "Switch the dux color theme",
         }),
     },
     BindingDef {
@@ -753,7 +768,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Interactive],
         help: Some(HelpEntry {
             section: "Agent pane",
-            description: "Open the macro command bar to paste text macros",
+            description: "Open the macro command bar to send text macros",
         }),
         hint_contexts: &[],
         palette: None,

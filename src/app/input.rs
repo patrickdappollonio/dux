@@ -15,6 +15,34 @@ const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 /// the user pastes large amounts of text while the agent is starting.
 const LOADING_INPUT_BUF_MAX: usize = 64;
 
+/// Build the byte payload for a macro send. Newlines are translated to
+/// Alt+Enter (ESC followed by CR) so that multi-line macros are entered
+/// as a single multi-line prompt rather than submitting at each newline.
+/// Handles `\r\n`, `\n`, and bare `\r` uniformly.
+pub(crate) fn macro_payload_bytes(text: &str) -> Vec<u8> {
+    const ALT_ENTER: &[u8] = b"\x1b\r";
+    let bytes = text.as_bytes();
+    let mut payload = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' if bytes.get(i + 1) == Some(&b'\n') => {
+                payload.extend_from_slice(ALT_ENTER);
+                i += 2;
+            }
+            b'\n' | b'\r' => {
+                payload.extend_from_slice(ALT_ENTER);
+                i += 1;
+            }
+            b => {
+                payload.push(b);
+                i += 1;
+            }
+        }
+    }
+    payload
+}
+
 /// Append `bytes` to `buf`, keeping at most `max` trailing bytes. Used to
 /// bound `loading_input_buf` so it cannot grow without bound when the user
 /// pastes large content during the agent loading phase.
@@ -54,6 +82,7 @@ enum PromptMouseTarget {
     BrowseProjectInput,
     BrowseProjectItem(usize),
     PickEditorItem(usize),
+    ChangeThemeItem(usize),
     ChangeAgentProviderItem(usize),
     ChangeAgentProviderCancel,
     ChangeAgentProviderApply,
@@ -705,14 +734,11 @@ impl App {
                 let filtered = self.filtered_macros(&query);
                 if let Some(&(name, text)) = filtered.get(selected) {
                     if let Some(provider) = self.selected_terminal_surface_client() {
-                        let mut payload = Vec::with_capacity(text.len() + 12);
-                        payload.extend_from_slice(b"\x1b[200~");
-                        payload.extend_from_slice(text.as_bytes());
-                        payload.extend_from_slice(b"\x1b[201~");
+                        let payload = macro_payload_bytes(text);
                         let _ = provider.write_bytes(&payload);
                     }
                     let name = name.to_string();
-                    self.set_info(format!("Pasted macro \"{name}\"."));
+                    self.set_info(format!("Sent macro \"{name}\"."));
                 }
                 self.close_macro_bar();
             }
@@ -2081,6 +2107,36 @@ impl App {
             return Ok(false);
         }
 
+        if let PromptState::ChangeTheme(prompt) = &mut self.prompt {
+            let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
+            let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
+
+            if matches!(palette_action.or(dialog_action), Some(Action::CloseOverlay)) {
+                self.cancel_change_theme();
+                return Ok(false);
+            }
+
+            let mut moved = false;
+            match palette_action.or(dialog_action) {
+                Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
+                    prompt.selected += 1;
+                    moved = true;
+                }
+                Some(Action::MoveUp) if prompt.selected > 0 => {
+                    prompt.selected -= 1;
+                    moved = true;
+                }
+                Some(Action::Confirm) => {
+                    self.apply_change_theme()?;
+                }
+                _ => {}
+            }
+            if moved {
+                self.preview_change_theme_selection();
+            }
+            return Ok(false);
+        }
+
         if let PromptState::ConfirmKillRunning(confirm_prompt) = &mut self.prompt {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => {
@@ -2226,22 +2282,70 @@ impl App {
         }
 
         if let PromptState::ConfirmNonDefaultBranch {
-            confirm_selected, ..
+            focus,
+            kind,
+            checkout_default,
+            ..
         } = &mut self.prompt
         {
+            // Checkbox is only reachable in the confident (Known) path.
+            // Heuristic warnings have no checkbox, so focus cycles Cancel ↔ Add.
+            let has_checkbox = matches!(kind, BranchWarningKind::Known { .. });
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => self.prompt = PromptState::None,
                 Some(Action::ToggleSelection) => {
-                    *confirm_selected = !*confirm_selected;
+                    let reverse = matches!(key.code, KeyCode::BackTab);
+                    *focus = match (*focus, has_checkbox, reverse) {
+                        (ConfirmNonDefaultBranchFocus::Cancel, true, false) => {
+                            ConfirmNonDefaultBranchFocus::Add
+                        }
+                        (ConfirmNonDefaultBranchFocus::Add, true, false) => {
+                            ConfirmNonDefaultBranchFocus::Checkbox
+                        }
+                        (ConfirmNonDefaultBranchFocus::Checkbox, _, false) => {
+                            ConfirmNonDefaultBranchFocus::Cancel
+                        }
+                        (ConfirmNonDefaultBranchFocus::Cancel, true, true) => {
+                            ConfirmNonDefaultBranchFocus::Checkbox
+                        }
+                        (ConfirmNonDefaultBranchFocus::Add, true, true) => {
+                            ConfirmNonDefaultBranchFocus::Cancel
+                        }
+                        (ConfirmNonDefaultBranchFocus::Checkbox, _, true) => {
+                            ConfirmNonDefaultBranchFocus::Add
+                        }
+                        (ConfirmNonDefaultBranchFocus::Cancel, false, _) => {
+                            ConfirmNonDefaultBranchFocus::Add
+                        }
+                        (ConfirmNonDefaultBranchFocus::Add, false, _) => {
+                            ConfirmNonDefaultBranchFocus::Cancel
+                        }
+                    };
                 }
-                Some(Action::Confirm) => {
-                    let confirm = *confirm_selected;
-                    return Ok(self.resolve_confirm_non_default_branch(confirm));
-                }
-                _ if key.code == KeyCode::Char(' ') => {
-                    let confirm = *confirm_selected;
-                    return Ok(self.resolve_confirm_non_default_branch(confirm));
-                }
+                Some(Action::Confirm) => match *focus {
+                    ConfirmNonDefaultBranchFocus::Checkbox => {
+                        *checkout_default = !*checkout_default;
+                    }
+                    ConfirmNonDefaultBranchFocus::Cancel => {
+                        self.prompt = PromptState::None;
+                    }
+                    ConfirmNonDefaultBranchFocus::Add => {
+                        return Ok(self.resolve_confirm_non_default_branch());
+                    }
+                },
+                // Space activates the focused element — toggles the checkbox
+                // when focused there, otherwise activates the current button.
+                _ if key.code == KeyCode::Char(' ') => match *focus {
+                    ConfirmNonDefaultBranchFocus::Checkbox => {
+                        *checkout_default = !*checkout_default;
+                    }
+                    ConfirmNonDefaultBranchFocus::Cancel => {
+                        self.prompt = PromptState::None;
+                    }
+                    ConfirmNonDefaultBranchFocus::Add => {
+                        return Ok(self.resolve_confirm_non_default_branch());
+                    }
+                },
                 _ => {}
             }
             return Ok(false);
@@ -2739,6 +2843,13 @@ impl App {
                 ..
             } => Self::overlay_row_at(list, offset, items, column, row)
                 .map(PromptMouseTarget::PickEditorItem),
+            OverlayMouseLayout::ChangeTheme {
+                list,
+                items,
+                offset,
+                ..
+            } => Self::overlay_row_at(list, offset, items, column, row)
+                .map(PromptMouseTarget::ChangeThemeItem),
             OverlayMouseLayout::ChangeAgentProvider {
                 list,
                 items,
@@ -2877,11 +2988,16 @@ impl App {
             OverlayMouseLayout::ConfirmNonDefaultBranch {
                 cancel_button,
                 add_button,
+                checkbox,
             } => {
                 if contains_point(cancel_button, column, row) {
                     Some(PromptMouseTarget::ConfirmNonDefaultBranchCancel)
                 } else if contains_point(add_button, column, row) {
                     Some(PromptMouseTarget::ConfirmNonDefaultBranchAdd)
+                } else if checkbox
+                    .is_some_and(|checkbox| contains_point(checkbox.rect, column, row))
+                {
+                    checkbox.map(|checkbox| PromptMouseTarget::Checkbox(checkbox.id))
                 } else {
                     None
                 }
@@ -3585,18 +3701,36 @@ impl App {
         false
     }
 
-    fn resolve_confirm_non_default_branch(&mut self, confirm: bool) -> bool {
-        let (path, name, branch) = match &self.prompt {
+    fn resolve_confirm_non_default_branch(&mut self) -> bool {
+        let (path, name, branch, checkout_default, default_branch) = match &self.prompt {
             PromptState::ConfirmNonDefaultBranch {
                 path,
                 name,
                 current_branch,
+                kind,
+                checkout_default,
                 ..
-            } => (path.clone(), name.clone(), current_branch.clone()),
+            } => {
+                let default_branch = match kind {
+                    BranchWarningKind::Known { default_branch } => Some(default_branch.clone()),
+                    BranchWarningKind::Heuristic => None,
+                };
+                (
+                    path.clone(),
+                    name.clone(),
+                    current_branch.clone(),
+                    *checkout_default && default_branch.is_some(),
+                    default_branch,
+                )
+            }
             _ => return false,
         };
         self.prompt = PromptState::None;
-        if confirm && let Err(e) = self.finish_add_project(path, name, branch) {
+        if checkout_default {
+            // Safe: `checkout_default` is only true when `default_branch` is `Some`.
+            let target = default_branch.expect("checkout_default implies known default branch");
+            self.dispatch_add_project_checkout(path, name, target);
+        } else if let Err(e) = self.finish_add_project(path, name, branch) {
             self.set_error(format!("{e:#}"));
         }
         false
@@ -3674,6 +3808,19 @@ impl App {
             OverlayCheckboxId::RenameSessionBranch => {
                 if let PromptState::RenameSession { rename_branch, .. } = &mut self.prompt {
                     *rename_branch = !*rename_branch;
+                }
+            }
+            OverlayCheckboxId::NonDefaultBranchCheckoutDefault => {
+                if let PromptState::ConfirmNonDefaultBranch {
+                    kind,
+                    checkout_default,
+                    focus,
+                    ..
+                } = &mut self.prompt
+                    && matches!(kind, BranchWarningKind::Known { .. })
+                {
+                    *checkout_default = !*checkout_default;
+                    *focus = ConfirmNonDefaultBranchFocus::Checkbox;
                 }
             }
         }
@@ -3788,6 +3935,24 @@ impl App {
                     self.open_selected_pick_editor();
                 }
             }
+            PromptMouseTarget::ChangeThemeItem(index) => {
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                let mut moved = false;
+                if let PromptState::ChangeTheme(prompt) = &mut self.prompt
+                    && index < prompt.options.len()
+                    && prompt.selected != index
+                {
+                    prompt.selected = index;
+                    moved = true;
+                }
+                if moved {
+                    self.preview_change_theme_selection();
+                }
+                if double_click && let Err(err) = self.apply_change_theme() {
+                    self.set_error(format!("{err:#}"));
+                }
+            }
             PromptMouseTarget::ChangeAgentProviderItem(index) => {
                 let double_click =
                     self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
@@ -3888,10 +4053,13 @@ impl App {
                 return self.resolve_confirm_discard_file(true);
             }
             PromptMouseTarget::ConfirmNonDefaultBranchCancel => {
-                return self.resolve_confirm_non_default_branch(false);
+                self.prompt = PromptState::None;
             }
             PromptMouseTarget::ConfirmNonDefaultBranchAdd => {
-                return self.resolve_confirm_non_default_branch(true);
+                if let PromptState::ConfirmNonDefaultBranch { focus, .. } = &mut self.prompt {
+                    *focus = ConfirmNonDefaultBranchFocus::Add;
+                }
+                return self.resolve_confirm_non_default_branch();
             }
             PromptMouseTarget::ConfirmUseExistingBranchCancel => {
                 return self.resolve_confirm_use_existing_branch(false);
@@ -4565,9 +4733,9 @@ mod tests {
         App, CenterMode, ConfirmKillRunningPrompt, DeleteAgentFocus, FocusPane, FullscreenOverlay,
         InputTarget, KillRunningAction, KillRunningFocus, KillRunningFooterAction,
         KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftItem, LeftSection,
-        MouseClickTarget, MouseLayoutState, OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout,
-        OverlayMouseLayoutState, PromptState, PullTarget, RightSection, RuntimeTargetId, TextInput,
-        WorkerEvent,
+        MacroBarState, MouseClickTarget, MouseLayoutState, OverlayCheckbox, OverlayCheckboxId,
+        OverlayMouseLayout, OverlayMouseLayoutState, PromptState, PullTarget, RightSection,
+        RuntimeTargetId, TextInput, WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
@@ -9023,6 +9191,166 @@ mod tests {
 
         assert!(pending_delete_state(&app).is_none());
         assert!(!app.config.macros.entries.contains_key("greet"));
+    }
+
+    #[test]
+    fn macro_bar_enter_sends_text_without_bracket_paste_wrapping() {
+        // Spawn a PTY running `cat -v` in raw mode. `-v` renders control
+        // bytes as printable caret notation (`^[` for ESC), and raw mode
+        // disables line discipline so bytes are visible immediately.
+        // If the macro handler wraps the text in bracket-paste markers
+        // (ESC[200~ ... ESC[201~), the terminal snapshot will contain
+        // literal `^[[200` and `^[[201` strings. If the text is sent as-is,
+        // only the macro text will appear.
+        let mut app = test_app(default_bindings());
+        let session_id = app.sessions[0].id.clone();
+        let client = PtyClient::spawn(
+            "sh",
+            &["-c".to_string(), "stty raw -echo; exec cat -v".to_string()],
+            std::path::Path::new("."),
+            5,
+            80,
+            100,
+        )
+        .expect("spawn pty");
+        app.providers.insert(session_id, client);
+        app.input_target = InputTarget::Agent;
+        app.session_surface = crate::model::SessionSurface::Agent;
+
+        // Give the shell a moment to enter raw mode and exec cat.
+        std::thread::sleep(std::time::Duration::from_millis(250));
+
+        app.config.macros.entries.insert(
+            "greet".to_string(),
+            crate::config::MacroEntry {
+                text: "hello-macro".to_string(),
+                surface: crate::config::MacroSurface::Agent,
+            },
+        );
+
+        app.macro_bar = Some(MacroBarState {
+            input: TextInput::new(),
+            selected: 0,
+            previous_input_target: InputTarget::Agent,
+        });
+
+        app.handle_macro_bar_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("handle enter");
+
+        assert!(app.macro_bar.is_none(), "macro bar closes after send");
+        assert_eq!(app.status.message(), "Sent macro \"greet\".");
+
+        // Wait for cat to echo the bytes back into the embedded terminal.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let provider = app.providers.values().next().expect("provider");
+        let snapshot = provider.snapshot();
+        let rendered: String = snapshot
+            .cells
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect();
+        assert!(
+            rendered.contains("hello-macro"),
+            "terminal snapshot should contain raw macro text; got: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("[200") && !rendered.contains("[201"),
+            "macro text must not be wrapped in bracket-paste markers; got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn macro_payload_translates_newlines_to_alt_enter() {
+        use crate::app::input::macro_payload_bytes;
+
+        // Plain text with no newlines passes through byte-for-byte.
+        assert_eq!(macro_payload_bytes("hello").as_slice(), b"hello");
+
+        // Bare LF (\n) becomes ESC + CR.
+        assert_eq!(macro_payload_bytes("a\nb").as_slice(), b"a\x1b\rb");
+
+        // Bare CR (\r) becomes ESC + CR.
+        assert_eq!(macro_payload_bytes("a\rb").as_slice(), b"a\x1b\rb");
+
+        // CRLF collapses to a single ESC + CR (not two).
+        assert_eq!(macro_payload_bytes("a\r\nb").as_slice(), b"a\x1b\rb");
+
+        // Multiple newlines each become their own ESC + CR.
+        assert_eq!(
+            macro_payload_bytes("a\nb\nc").as_slice(),
+            b"a\x1b\rb\x1b\rc"
+        );
+
+        // Trailing and leading newlines are also translated.
+        assert_eq!(macro_payload_bytes("\na\n").as_slice(), b"\x1b\ra\x1b\r");
+
+        // Empty input yields empty payload.
+        assert!(macro_payload_bytes("").is_empty());
+    }
+
+    #[test]
+    fn macro_bar_enter_translates_newlines_to_alt_enter() {
+        // Spawn a PTY running `cat -v` in raw mode. Control bytes render
+        // as caret notation: ESC → `^[`, CR → `^M`. If newlines are sent
+        // raw, `cat` would receive a literal LF which (even in raw mode)
+        // would not become `^[^M` in the snapshot. If the translation
+        // works, the `^[` and `^M` markers will appear between the two
+        // halves of the macro text.
+        let mut app = test_app(default_bindings());
+        let session_id = app.sessions[0].id.clone();
+        let client = PtyClient::spawn(
+            "sh",
+            &["-c".to_string(), "stty raw -echo; exec cat -v".to_string()],
+            std::path::Path::new("."),
+            5,
+            80,
+            100,
+        )
+        .expect("spawn pty");
+        app.providers.insert(session_id, client);
+        app.input_target = InputTarget::Agent;
+        app.session_surface = crate::model::SessionSurface::Agent;
+
+        std::thread::sleep(std::time::Duration::from_millis(250));
+
+        app.config.macros.entries.insert(
+            "multi".to_string(),
+            crate::config::MacroEntry {
+                text: "first\nsecond".to_string(),
+                surface: crate::config::MacroSurface::Agent,
+            },
+        );
+
+        app.macro_bar = Some(MacroBarState {
+            input: TextInput::new(),
+            selected: 0,
+            previous_input_target: InputTarget::Agent,
+        });
+
+        app.handle_macro_bar_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("handle enter");
+
+        assert_eq!(app.status.message(), "Sent macro \"multi\".");
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let provider = app.providers.values().next().expect("provider");
+        let snapshot = provider.snapshot();
+        let rendered: String = snapshot
+            .cells
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect();
+
+        assert!(
+            rendered.contains("first") && rendered.contains("second"),
+            "both halves of the macro text should be visible; got: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("^[") && rendered.contains("^M"),
+            "newline should have been translated to ESC+CR (`^[^M`); got: {rendered:?}"
+        );
     }
 
     #[test]
