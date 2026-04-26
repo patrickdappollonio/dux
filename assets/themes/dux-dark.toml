@@ -1,0 +1,136 @@
+# dux-dark — the default dux theme.
+#
+# Hand-ported from the original Theme::default_dark() palette so users see the
+# exact same colors after the Opaline integration. Every color used by the dux
+# UI is defined as a `dux.<field>` token below; user-authored themes can either
+# define the same tokens explicitly, or rely on the built-in fallback that
+# derives them from Opaline's standard semantic tokens (text.*, accent.*, etc.).
+#
+# Named ratatui colors (Cyan, Yellow, Red, Green, Magenta, White, Black,
+# DarkGray) have been expanded to their canonical 24-bit RGB. On most modern
+# true-color terminals the rendering is identical; terminals that remap the
+# 16-color ANSI palette via their profile will now see these literal RGB
+# values rather than the user-customized "Cyan", which matches what most TUI
+# theme engines do.
+
+[meta]
+name = "dux-dark"
+author = "dux"
+variant = "dark"
+description = "The default dux dark theme."
+
+[palette]
+# Named ANSI canonical RGB
+ansi_white   = "#ffffff"
+ansi_black   = "#000000"
+ansi_cyan    = "#00ffff"
+ansi_yellow  = "#ffff00"
+ansi_red     = "#ff0000"
+ansi_green   = "#00ff00"
+ansi_magenta = "#ff00ff"
+ansi_darkgray = "#808080"
+
+[tokens]
+# ── Header / chrome ──────────────────────────────────────────────────
+"dux.header_fg"            = "ansi_white"
+"dux.header_bg"            = "#1e1e1e"
+"dux.header_label_fg"      = "#787878"
+"dux.header_separator_fg"  = "#3c3c3c"
+
+# ── Borders & titles ─────────────────────────────────────────────────
+"dux.border_focused"       = "ansi_cyan"
+"dux.border_normal"        = "#505050"
+"dux.title_focused"        = "ansi_cyan"
+"dux.title_normal"         = "#8c8c8c"
+
+# ── Selection ────────────────────────────────────────────────────────
+"dux.selection_fg"         = "ansi_black"
+"dux.selection_bg"         = "ansi_cyan"
+
+# ── Project & session indicators ─────────────────────────────────────
+"dux.project_icon"         = "#6495ed"
+"dux.project_missing_fg"   = "#b4a050"
+"dux.session_active"       = "#d2d2d2"
+"dux.session_detached"     = "ansi_yellow"
+"dux.session_exited"       = "#646464"
+"dux.session_deleting"     = "#646464"
+
+# ── Status line ──────────────────────────────────────────────────────
+"dux.status_info_fg"       = "#646464"
+"dux.status_info_bg"       = "#191919"
+"dux.status_busy_fg"       = "ansi_yellow"
+"dux.status_busy_bg"       = "#28230f"
+"dux.status_error_fg"      = "ansi_red"
+"dux.status_error_bg"      = "#321414"
+
+# ── Diff visualization ───────────────────────────────────────────────
+"dux.diff_add"             = "ansi_green"
+"dux.diff_remove"          = "ansi_red"
+"dux.diff_hunk"            = "ansi_magenta"
+"dux.diff_file_header"     = "ansi_white"
+"dux.file_status_fg"       = "ansi_yellow"
+"dux.diff_add_bg"          = "#143214"
+"dux.diff_remove_bg"       = "#3c1414"
+"dux.diff_binary_fg"       = "ansi_yellow"
+"dux.diff_stat_add_fg"     = "ansi_green"
+"dux.diff_stat_remove_fg"  = "ansi_red"
+"dux.diff_line_number_fg"  = "#5a5a6e"
+"dux.diff_line_number_sep" = "#3c3c46"
+
+# ── Hint / footer bar ────────────────────────────────────────────────
+"dux.hint_key_fg"          = "ansi_cyan"
+"dux.hint_bracket_fg"      = "ansi_darkgray"
+"dux.hint_key_bg"          = "#232323"
+"dux.hint_desc_fg"         = "#a0a0a0"
+"dux.hint_dim_key_fg"      = "#508ca0"
+"dux.hint_dim_bracket_fg"  = "#3c3c3c"
+"dux.hint_dim_desc_fg"     = "#646464"
+"dux.hint_bar_bg"          = "#191919"
+
+# ── Overlays / modals ────────────────────────────────────────────────
+"dux.overlay_border"       = "ansi_cyan"
+"dux.overlay_bg"           = "#141414"
+"dux.overlay_dim_bg"       = "#0a0a0a"
+"dux.overlay_dim_fg"       = "ansi_darkgray"
+"dux.prompt_cursor"        = "ansi_cyan"
+
+# ── Provider / branch / scrollback ───────────────────────────────────
+"dux.provider_label_fg"    = "#646464"
+"dux.branch_fg"            = "ansi_cyan"
+"dux.terminal_hint_fg"     = "#505050"
+"dux.scroll_indicator_fg"  = "#d2d2d2"
+"dux.scroll_indicator_bg"  = "#373737"
+"dux.warning_fg"           = "ansi_yellow"
+
+# ── Buttons ──────────────────────────────────────────────────────────
+"dux.button_active_fg"     = "ansi_white"
+"dux.button_confirm_border" = "ansi_cyan"
+"dux.button_danger_border" = "ansi_red"
+
+# ── Help overlay ─────────────────────────────────────────────────────
+"dux.help_section_header_fg" = "ansi_cyan"
+"dux.help_banner_fg"       = "#141414"
+"dux.help_banner_bg"       = "ansi_cyan"
+"dux.help_body_fg"         = "#b4b4b4"
+
+# ── Input cursor ─────────────────────────────────────────────────────
+"dux.input_cursor_fg"      = "ansi_black"
+"dux.input_cursor_bg"      = "ansi_white"
+"dux.input_label_fg"       = "ansi_white"
+
+# ── Misc UI surfaces ─────────────────────────────────────────────────
+"dux.runtime_context_value_fg" = "#7d96a0"
+"dux.nudge_border"         = "#b49632"
+"dux.tip_pill_fg"          = "#b4b4b4"
+"dux.tip_pill_bg"          = "#463278"
+"dux.tip_text_fg"          = "#5a5a5a"
+"dux.tip_highlight_fg"     = "#007878"
+
+# ── Pull request banners ─────────────────────────────────────────────
+"dux.pr_open_bg"           = "#238636"
+"dux.pr_merged_bg"         = "#8250df"
+"dux.pr_closed_bg"         = "#6e3630"
+"dux.pr_banner_fg"         = "ansi_white"
+"dux.pr_open_label"        = "ansi_green"
+"dux.pr_merged_label"      = "#aa64dc"
+"dux.pr_closed_label"      = "#8c5050"

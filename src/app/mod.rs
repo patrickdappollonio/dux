@@ -1027,6 +1027,11 @@ impl App {
             bindings.label_for(Action::NewAgent),
             bindings.label_for(Action::ToggleHelp),
         );
+        let (theme, theme_warning) = crate::theme::load_or_fallback(&config.ui.theme, &paths);
+        let mut status = StatusLine::new(initial_status);
+        if let Some(message) = theme_warning {
+            status.warning(message);
+        }
         let gh_integration_val = config.ui.github_integration;
         let pr_banner_at_bottom = config.ui.pr_banner_position == "bottom";
         let mut app = Self {
@@ -1064,7 +1069,7 @@ impl App {
             last_help_height: 0,
             last_help_lines: 0,
             fullscreen_overlay: FullscreenOverlay::None,
-            status: StatusLine::new(initial_status),
+            status,
             prompt: PromptState::None,
             input_target: InputTarget::None,
             session_surface: SessionSurface::Agent,
@@ -1085,7 +1090,7 @@ impl App {
             prev_scrollback_offset: 0,
             last_diff_height: 0,
             last_diff_visual_lines: 0,
-            theme: Theme::default_dark(),
+            theme,
             tick_count: 0,
             start_time: Instant::now(),
             readonly_nudge_tick: None,
