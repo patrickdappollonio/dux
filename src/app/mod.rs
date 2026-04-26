@@ -477,6 +477,16 @@ pub(crate) enum DeleteAgentFocus {
     Checkbox,
 }
 
+/// Which selectable element has focus in the Non-Default Branch confirmation
+/// modal. `Checkbox` is only reachable when `BranchWarningKind::Known` — the
+/// heuristic path has no checkbox to focus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConfirmNonDefaultBranchFocus {
+    Cancel,
+    Add,
+    Checkbox,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PromptState {
     None,
@@ -552,7 +562,12 @@ pub(crate) enum PromptState {
         name: String,
         current_branch: String,
         kind: BranchWarningKind,
-        confirm_selected: bool, // false = Cancel (default), true = Add Anyway
+        focus: ConfirmNonDefaultBranchFocus,
+        /// When true and `kind == Known`, dux runs `git switch
+        /// <default_branch>` in the source repo before registering the project.
+        /// Ignored for `BranchWarningKind::Heuristic` because we can't
+        /// confidently identify the target.
+        checkout_default: bool,
     },
     ConfirmUseExistingBranch {
         request: CreateAgentRequest,
@@ -768,6 +783,7 @@ impl OverlayMouseLayoutState {
 pub(crate) enum OverlayCheckboxId {
     DeleteAgentWorktree,
     RenameSessionBranch,
+    NonDefaultBranchCheckoutDefault,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -855,6 +871,7 @@ pub(crate) enum OverlayMouseLayout {
     ConfirmNonDefaultBranch {
         cancel_button: Rect,
         add_button: Rect,
+        checkbox: Option<OverlayCheckbox>,
     },
     ConfirmUseExistingBranch {
         cancel_button: Rect,
@@ -981,6 +998,16 @@ pub(crate) enum WorkerEvent {
         session_id: String,
         result: Result<bool, String>,
     },
+    /// Background `git switch <target_branch>` run from the "Add Project"
+    /// warning modal has finished. On `Ok`, the main loop proceeds with
+    /// `finish_add_project` using `target_branch`. On `Err`, the formatted
+    /// git error is surfaced and the project is not added.
+    AddProjectCheckoutCompleted {
+        path: String,
+        name: String,
+        target_branch: String,
+        result: Result<(), String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -992,7 +1019,7 @@ pub(crate) enum PullTarget {
     Session,
 }
 
-mod checkbox;
+mod components;
 mod input;
 mod render;
 mod sessions;

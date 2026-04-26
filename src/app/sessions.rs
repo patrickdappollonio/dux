@@ -78,12 +78,18 @@ impl App {
         };
 
         if let Some(kind) = warning_kind {
+            // Default the checkbox to on for the confident path so hitting
+            // Enter resolves the warning in the way users typically want —
+            // "switch to main, then add". The heuristic path ignores this
+            // field (no checkbox is shown).
+            let checkout_default = matches!(kind, BranchWarningKind::Known { .. });
             self.prompt = PromptState::ConfirmNonDefaultBranch {
                 path: path.to_string_lossy().to_string(),
                 name,
                 current_branch: branch,
                 kind,
-                confirm_selected: false,
+                focus: ConfirmNonDefaultBranchFocus::Cancel,
+                checkout_default,
             };
             return Ok(());
         }
@@ -213,6 +219,25 @@ impl App {
                 "Forking agent \"{source_label}\" by cloning its current worktree contents into a fresh session...",
             ),
         )
+    }
+
+    /// Spawns a background worker that runs `git switch <target_branch>` in
+    /// the source repo before registering the project. On success, the
+    /// `WorkerEvent::AddProjectCheckoutCompleted` handler calls
+    /// `finish_add_project`; on failure it surfaces the git error.
+    pub(crate) fn dispatch_add_project_checkout(
+        &mut self,
+        path: String,
+        name: String,
+        target_branch: String,
+    ) {
+        self.set_busy(format!(
+            "Checking out \"{target_branch}\" in {path} before adding the project..."
+        ));
+        let worker_tx = self.worker_tx.clone();
+        thread::spawn(move || {
+            super::workers::run_add_project_checkout_job(path, name, target_branch, worker_tx);
+        });
     }
 
     pub(crate) fn dispatch_create_agent_request(

@@ -292,7 +292,7 @@ impl Action {
             }
             Action::NewTerminal => "Spawn a new companion terminal for the selected agent.",
             Action::ExitInteractive => "Exit interactive mode (stop forwarding keys to agent).",
-            Action::OpenMacroBar => "Open the macro command bar to paste text macros.",
+            Action::OpenMacroBar => "Open the macro command bar to send text macros.",
             Action::ToggleFullscreen => "Toggle fullscreen overlay for the agent terminal.",
             Action::ScrollPageUp => "Scroll up one page in the agent output.",
             Action::ScrollPageDown => "Scroll down one page in the agent output.",
@@ -768,7 +768,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Interactive],
         help: Some(HelpEntry {
             section: "Agent pane",
-            description: "Open the macro command bar to paste text macros",
+            description: "Open the macro command bar to send text macros",
         }),
         hint_contexts: &[],
         palette: None,
