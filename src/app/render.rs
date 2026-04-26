@@ -606,7 +606,9 @@ impl App {
                             Span::styled(icon, Style::default().fg(self.theme.project_icon)),
                             Span::styled(
                                 project.name.clone(),
-                                Style::default().add_modifier(Modifier::BOLD),
+                                Style::default()
+                                    .fg(self.theme.text_fg)
+                                    .add_modifier(Modifier::BOLD),
                             ),
                         ];
                         if count > 0 {
@@ -2307,7 +2309,7 @@ impl App {
                             format!("{spinner} "),
                             Style::default().fg(self.theme.hint_desc_fg),
                         ),
-                        Span::raw("Loading…"),
+                        Span::styled("Loading…", Style::default().fg(self.theme.text_fg)),
                     ]))]
                 } else if visible.is_empty() {
                     vec![ListItem::new(if filter.is_empty() {
@@ -2333,7 +2335,10 @@ impl App {
                                     prefix.to_string(),
                                     Style::default().fg(self.theme.hint_desc_fg),
                                 ),
-                                Span::raw(entry.label.clone()),
+                                Span::styled(
+                                    entry.label.clone(),
+                                    Style::default().fg(self.theme.text_fg),
+                                ),
                             ]))
                         })
                         .collect::<Vec<_>>()
@@ -2549,12 +2554,17 @@ impl App {
                         Span::styled(" Agent: ", Style::default().fg(self.theme.hint_desc_fg)),
                         Span::styled(
                             prompt.session_label.as_str(),
-                            Style::default().add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
                         ),
                     ]),
                     Line::from(vec![
                         Span::styled(" Path: ", Style::default().fg(self.theme.hint_desc_fg)),
-                        Span::raw(prompt.worktree_path.as_str()),
+                        Span::styled(
+                            prompt.worktree_path.as_str(),
+                            Style::default().fg(self.theme.text_fg),
+                        ),
                     ]),
                 ];
                 Paragraph::new(detail_lines)
@@ -2759,7 +2769,9 @@ impl App {
                         ),
                         Span::styled(
                             prompt.current.as_str().to_string(),
-                            Style::default().add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
                         ),
                     ]),
                     Line::from(vec![Span::styled(
@@ -2955,7 +2967,9 @@ impl App {
                         ),
                         Span::styled(
                             prompt.current.clone(),
-                            Style::default().add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
                         ),
                     ]),
                     Line::from(vec![Span::styled(
@@ -3076,12 +3090,17 @@ impl App {
                         Span::styled(" Agent: ", Style::default().fg(self.theme.hint_desc_fg)),
                         Span::styled(
                             session_label.as_str(),
-                            Style::default().add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
                         ),
                     ]),
                     Line::from(vec![
                         Span::styled(" Path: ", Style::default().fg(self.theme.hint_desc_fg)),
-                        Span::raw(worktree_path.as_str()),
+                        Span::styled(
+                            worktree_path.as_str(),
+                            Style::default().fg(self.theme.text_fg),
+                        ),
                     ]),
                 ];
                 Paragraph::new(detail_lines)

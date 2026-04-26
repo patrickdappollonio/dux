@@ -27,6 +27,13 @@ pub struct Theme {
     /// the row behind the PR pill caps, etc.) inherits the active theme's
     /// background instead of the user's terminal default.
     pub app_bg: Color,
+    /// Primary body-text color used by widgets that render plain bold or
+    /// emphasis text on top of `app_bg` (project names, "Current: …" lines
+    /// in modals, etc.). Without an explicit fg these spans fall through to
+    /// the terminal's default foreground, which becomes invisible on light
+    /// themes — this field gives them a theme-driven color that contrasts
+    /// with `app_bg`.
+    pub text_fg: Color,
     pub header_fg: Color,
     pub header_bg: Color,
     pub header_label_fg: Color,
@@ -282,6 +289,7 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
     let bg_base = theme.color("bg.base");
     let bg_panel = theme.color("bg.panel");
     theme.register_default_token("dux.app_bg", bg_base);
+    theme.register_default_token("dux.text_fg", text_primary);
     let bg_highlight = theme.color("bg.highlight");
     let bg_active = theme.color("bg.active");
     let accent_primary = theme.color("accent.primary");
@@ -388,11 +396,16 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
     theme.register_default_token("dux.tip_text_fg", text_dim);
     theme.register_default_token("dux.tip_highlight_fg", accent_secondary);
 
-    // Pull request banners
+    // Pull request banners. The pill foreground is intentionally pinned to
+    // pure white regardless of the theme: pill backgrounds are saturated
+    // semantic colors (success/accent/error), so white reads cleanly across
+    // both dark and light themes — and the pill is meant to feel like a
+    // status badge that stays consistent rather than chameleoning with the
+    // surrounding chrome.
     theme.register_default_token("dux.pr_open_bg", success);
     theme.register_default_token("dux.pr_merged_bg", accent_secondary);
     theme.register_default_token("dux.pr_closed_bg", error);
-    theme.register_default_token("dux.pr_banner_fg", text_primary);
+    theme.register_default_token("dux.pr_banner_fg", OpalineColor::WHITE);
     theme.register_default_token("dux.pr_open_label", success);
     theme.register_default_token("dux.pr_merged_label", accent_secondary);
     theme.register_default_token("dux.pr_closed_label", error);
@@ -432,6 +445,7 @@ impl Theme {
         let pick = |token: &str| into_ratatui(theme.color(token));
         Self {
             app_bg: pick("dux.app_bg"),
+            text_fg: pick("dux.text_fg"),
             header_fg: pick("dux.header_fg"),
             header_bg: pick("dux.header_bg"),
             header_label_fg: pick("dux.header_label_fg"),
@@ -640,6 +654,10 @@ mod tests {
             // dux-dark users see no perceptible change after the frame
             // pre-fill landed.
             app_bg: Color::Rgb(20, 20, 20),
+            // text_fg matches the historical "default fg" — pure white on
+            // dark — so unstyled body text (project names, modal "Current:"
+            // labels, etc.) renders identically to before for dux-dark.
+            text_fg: Color::White,
             header_fg: Color::White,
             header_bg: Color::Rgb(30, 30, 30),
             header_label_fg: Color::Rgb(120, 120, 120),
@@ -741,6 +759,7 @@ mod tests {
         }
 
         assert_field!(app_bg);
+        assert_field!(text_fg);
         assert_field!(header_fg);
         assert_field!(header_bg);
         assert_field!(header_label_fg);

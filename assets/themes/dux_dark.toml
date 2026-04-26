@@ -36,6 +36,11 @@ ansi_darkgray = "#808080"
 # that does not set its own background — modal interiors, gutters,
 # the strip under the PR banner — will sit on top of this color.
 "dux.app_bg"               = "#141414"
+# Primary body-text color used by spans that don't set an explicit
+# foreground (project names, modal "Current: …" labels, etc.). Without
+# this, those spans fall through to the user's terminal default fg and
+# become invisible on light themes.
+"dux.text_fg"              = "ansi_white"
 
 # ── Header / chrome ──────────────────────────────────────────────────
 "dux.header_fg"            = "ansi_white"
