@@ -1871,7 +1871,7 @@ impl App {
     fn render_help(&mut self, frame: &mut Frame) {
         self.render_dim_overlay(frame);
         let area = centered_rect(72, 70, frame.area());
-        Clear.render(area, frame.buffer_mut());
+        self.clear_overlay_area(frame, area);
 
         let outer_block = self.themed_overlay_block("Help");
         let inner = outer_block.inner(area);
@@ -2178,7 +2178,7 @@ impl App {
             PromptState::Command { input, selected } => {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(72, 40, frame.area());
-                Clear.render(popup, frame.buffer_mut());
+                self.clear_overlay_area(frame, popup);
                 let commands = self.bindings.filtered_palette(&input.text);
                 let items = if commands.is_empty() {
                     vec![ListItem::new("No matching commands.")]
@@ -2292,7 +2292,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(72, 70, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let visible: Vec<_> = if filter.is_empty() {
                     entries.iter().collect()
                 } else {
@@ -2507,7 +2507,7 @@ impl App {
             PromptState::ChangeAgentProvider(prompt) => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(72, 42, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
 
                 let move_down = self.bindings.label_for(Action::MoveDown);
                 let move_up = self.bindings.label_for(Action::MoveUp);
@@ -2720,7 +2720,7 @@ impl App {
             PromptState::ChangeDefaultProvider(prompt) => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(72, 42, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
 
                 let move_down = self.bindings.label_for(Action::MoveDown);
                 let move_up = self.bindings.label_for(Action::MoveUp);
@@ -2929,7 +2929,7 @@ impl App {
             PromptState::ChangeTheme(prompt) => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(60, 60, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
 
                 let move_down = self.bindings.label_for(Action::MoveDown);
                 let move_up = self.bindings.label_for(Action::MoveUp);
@@ -3057,7 +3057,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(64, 34, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
 
                 let confirm_key = self.bindings.label_for(Action::Confirm);
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
@@ -3162,7 +3162,7 @@ impl App {
             PromptState::KillRunning(prompt) => {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(78, 72, frame.area());
-                Clear.render(popup, frame.buffer_mut());
+                self.clear_overlay_area(frame, popup);
 
                 let visible_indices = Self::visible_kill_running_indices(prompt);
                 let items = if visible_indices.is_empty() {
@@ -3459,7 +3459,7 @@ impl App {
             PromptState::ConfirmKillRunning(confirm_prompt) => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(56, 32, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Confirm Kill");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -3659,7 +3659,7 @@ impl App {
                     2 + body_height + checkbox_spacing + checkbox_height + 3,
                     frame.area(),
                 );
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Delete Agent");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -3771,7 +3771,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(56, 30, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Delete Terminal");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -3874,7 +3874,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(56, 30, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Quit dux");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -3984,7 +3984,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(56, 30, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Discard Changes");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -4088,7 +4088,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(60, 30, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Non-Default Branch");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -4213,7 +4213,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(60, 30, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Branch Already Exists");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -4345,7 +4345,7 @@ impl App {
                     9 + checkbox_spacing + checkbox_height,
                     frame.area(),
                 );
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
 
                 let outer = self.themed_overlay_block("Rename Agent");
                 let inner = outer.inner(area);
@@ -4477,13 +4477,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(80, 70, frame.area());
-                Clear.render(popup, frame.buffer_mut());
-                // The hint row sits outside the inner block, so paint the
-                // whole popup with overlay_bg up front — otherwise that
-                // 1-line strip falls through to terminal default.
-                frame
-                    .buffer_mut()
-                    .set_style(popup, Style::default().bg(self.theme.overlay_bg));
+                self.clear_overlay_area(frame, popup);
 
                 // Split: content area + 1-line footer hint.
                 let chunks =
@@ -4541,7 +4535,7 @@ impl App {
             PromptState::NameNewAgent { input, .. } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect_exact(60, 8, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
 
                 let outer = self.themed_overlay_block("Name New Agent");
                 let inner = outer.inner(area);
@@ -4668,7 +4662,7 @@ impl App {
         };
 
         self.render_dim_overlay(frame);
-        Clear.render(popup, frame.buffer_mut());
+        self.clear_overlay_area(frame, popup);
 
         if let Some(edit_state) = editing {
             // ── Edit view ──
@@ -4875,7 +4869,7 @@ impl App {
     ) {
         self.render_dim_overlay(frame);
         let area = centered_rect(56, 30, frame.area());
-        Clear.render(area, frame.buffer_mut());
+        self.clear_overlay_area(frame, area);
         let outer = self.themed_overlay_block("Delete Macro");
         let inner = outer.inner(area);
         outer.render(area, frame.buffer_mut());
@@ -5141,7 +5135,7 @@ impl App {
             area.width,
             total_h,
         );
-        Clear.render(bar_area, frame.buffer_mut());
+        self.clear_overlay_area(frame, bar_area);
 
         // Split into input area (top) and list area (bottom).
         let [input_area, list_area] = Layout::default()
@@ -5260,6 +5254,22 @@ impl App {
             .border_style(self.theme.border_style(focused))
     }
 
+    /// Reset `area` to a blank surface and fill it with the modal overlay
+    /// background. Use this in place of a bare `Clear.render(area, ..)` for
+    /// every modal popup so the entire popup — including any strip outside
+    /// the inner `themed_overlay_block` (footer hints, gaps between stacked
+    /// blocks, etc.) — tracks the active theme rather than reading whatever
+    /// `Color::Reset` falls through to in the user's terminal.
+    ///
+    /// Fullscreen surfaces (the agent and terminal fullscreen overlays) want
+    /// `app_bg` instead of `overlay_bg` and stay open-coded.
+    fn clear_overlay_area(&self, frame: &mut Frame, area: Rect) {
+        Clear.render(area, frame.buffer_mut());
+        frame
+            .buffer_mut()
+            .set_style(area, Style::default().bg(self.theme.overlay_bg));
+    }
+
     fn themed_overlay_block<'a>(&self, title: &'a str) -> Block<'a> {
         Block::default()
             .title(Line::from(Span::styled(
@@ -5307,15 +5317,7 @@ impl App {
 
         self.render_dim_overlay(frame);
         let popup = centered_rect(85, 78, frame.area());
-        Clear.render(popup, frame.buffer_mut());
-        // Clear leaves cells at Color::Reset. The themed_overlay_block fills
-        // its own area below, but the 1-line hint row underneath sits
-        // outside the block and would otherwise read as terminal default —
-        // paint the whole popup with overlay_bg up front so every part of
-        // the modal tracks the active theme.
-        frame
-            .buffer_mut()
-            .set_style(popup, Style::default().bg(self.theme.overlay_bg));
+        self.clear_overlay_area(frame, popup);
 
         let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(popup);
         let content_area = chunks[0];
