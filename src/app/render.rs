@@ -1246,7 +1246,10 @@ impl App {
                     let x = term_area.x + cell.col;
                     let y = term_area.y + cell.row;
                     let (fg, bg) = pty_cell_colors(cell.fg, cell.bg, is_input, &self.theme);
-                    let style = Style::default().fg(fg).bg(bg).add_modifier(cell.modifier);
+                    let mut style = Style::default().fg(fg).add_modifier(cell.modifier);
+                    if let Some(bg) = bg {
+                        style = style.bg(bg);
+                    }
                     let ratatui_cell = &mut buf[(x, y)];
                     ratatui_cell.set_symbol(&cell.symbol);
                     ratatui_cell.set_style(style);
@@ -5527,21 +5530,32 @@ fn xterm256_to_rgb(idx: u8) -> (u8, u8, u8) {
 /// theme's dim color and the background is converted to grayscale, giving
 /// the pane a muted appearance that signals it is read-only.
 ///
-/// In interactive mode the agent and companion terminal pass through
-/// untouched — `Color::Reset` cells stay reset so the user's configured
-/// CLI palette renders end-to-end (fullscreen or otherwise) without dux
-/// fighting it. In non-interactive (minimized / read-only) mode the
-/// foreground collapses to a single dim shade and the background is
-/// grayscaled; cells the CLI emitted with `Color::Reset` are first
-/// resolved to `theme.app_bg` so the grayscale fill follows the active
-/// theme rather than reading the user's terminal default — that's what
-/// gives the dimmed pane a uniform muted surface tied to the palette.
-fn pty_cell_colors(fg: Color, bg: Color, is_input: bool, theme: &Theme) -> (Color, Color) {
+/// Resolve the foreground/background a single PTY cell should render with.
+///
+/// The bg is `Option<Color>` to give the caller a way to say "leave the
+/// underlying buffer background alone": the rendering loop only applies bg
+/// when this is `Some`, so `None` lets whatever was already in the buffer
+/// (the frame-wide `app_bg` pre-fill, the dim overlay, the parent block
+/// fill, …) show through.
+///
+/// Interactive mode (fullscreen agent or focused agent/terminal) always
+/// passes the CLI's colors through unchanged so the user's configured
+/// palette renders end-to-end without dux fighting it.
+///
+/// Non-interactive (minimized / read-only) mode dims the foreground to a
+/// single muted shade. Cells the CLI explicitly colored have their
+/// background grayscaled, which is what produces the recognizable "this
+/// pane is read-only" look. Cells the CLI emitted with `Color::Reset` are
+/// returned with `bg = None` so the dim overlay / app surface continues to
+/// show through them — only the solid CLI-painted backgrounds are
+/// grayscaled, not the ambient surface around them.
+fn pty_cell_colors(fg: Color, bg: Color, is_input: bool, theme: &Theme) -> (Color, Option<Color>) {
     if is_input {
-        (fg, bg)
+        (fg, Some(bg))
+    } else if bg == Color::Reset {
+        (theme.overlay_dim_fg, None)
     } else {
-        let resolved_bg = if bg == Color::Reset { theme.app_bg } else { bg };
-        (theme.overlay_dim_fg, to_grayscale(resolved_bg))
+        (theme.overlay_dim_fg, Some(to_grayscale(bg)))
     }
 }
 
@@ -6060,7 +6074,7 @@ mod tests {
         let theme = Theme::default_dark();
         let fg = Color::Rgb(200, 100, 50);
         let bg = Color::Rgb(10, 20, 30);
-        assert_eq!(pty_cell_colors(fg, bg, true, &theme), (fg, bg));
+        assert_eq!(pty_cell_colors(fg, bg, true, &theme), (fg, Some(bg)));
     }
 
     #[test]
@@ -6072,37 +6086,40 @@ mod tests {
         let fg = Color::Rgb(200, 100, 50);
         assert_eq!(
             pty_cell_colors(fg, Color::Reset, true, &theme),
-            (fg, Color::Reset)
+            (fg, Some(Color::Reset))
         );
     }
 
     #[test]
-    fn pty_cell_colors_dims_in_non_interactive_mode() {
+    fn pty_cell_colors_grayscales_solid_bg_in_non_interactive_mode() {
         let theme = Theme::default_dark();
         let fg = Color::Rgb(200, 100, 50);
         let bg = Color::Rgb(10, 20, 30);
         let (result_fg, result_bg) = pty_cell_colors(fg, bg, false, &theme);
         assert_eq!(result_fg, theme.overlay_dim_fg);
-        // Background should be the grayscale equivalent, not the fixed dim color.
-        assert_eq!(result_bg, to_grayscale(bg));
+        // Solid CLI-painted backgrounds get grayscaled, marking them as
+        // read-only.
+        assert_eq!(result_bg, Some(to_grayscale(bg)));
         // Sanity: the grayscale value is a uniform grey, not near-black.
         let expected_l = (0.299 * 10.0_f64 + 0.587 * 20.0 + 0.114 * 30.0).round() as u8;
-        assert_eq!(result_bg, Color::Rgb(expected_l, expected_l, expected_l));
+        assert_eq!(
+            result_bg,
+            Some(Color::Rgb(expected_l, expected_l, expected_l))
+        );
     }
 
     #[test]
-    fn pty_cell_colors_resolves_default_bg_to_app_bg_in_non_interactive_mode() {
+    fn pty_cell_colors_lets_default_bg_show_through_in_non_interactive_mode() {
         let theme = Theme::default_dark();
         let fg = Color::Rgb(200, 100, 50);
-        // The minimized (non-interactive) PTY view reads as a uniform muted
-        // surface that follows the active theme. Color::Reset cells must be
-        // resolved to app_bg before grayscaling so the fill matches the rest
-        // of the dux chrome instead of falling through to the terminal
-        // default — interactive mode (covered by the test above) keeps the
-        // pass-through so fullscreen agent renders the user's CLI palette.
+        // Cells the CLI emitted with no explicit background return `None`
+        // for the bg so the rendering loop leaves the underlying buffer
+        // bg untouched — that lets the dim overlay / app surface show
+        // through the minimized PTY view, only grayscaling the cells the
+        // CLI actually painted.
         assert_eq!(
             pty_cell_colors(fg, Color::Reset, false, &theme),
-            (theme.overlay_dim_fg, to_grayscale(theme.app_bg))
+            (theme.overlay_dim_fg, None)
         );
     }
 
