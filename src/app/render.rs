@@ -335,7 +335,20 @@ impl App {
     }
 
     pub(crate) fn render(&mut self, frame: &mut Frame) {
-        let term_w = frame.area().width as usize;
+        // Pre-fill the whole frame with the theme's app background. Cells
+        // that no widget paints over (gutters, modal interiors, the strip
+        // under the PR banner caps) inherit this color, so light themes
+        // actually look light end-to-end. Widgets that explicitly set
+        // `Color::Reset` override this and still pass through to the
+        // user's terminal default — that path is preserved for PTY cells
+        // that emit a "reset background" SGR, so the embedded agent
+        // terminal keeps rendering the CLI's own colors unchanged.
+        let frame_area = frame.area();
+        frame
+            .buffer_mut()
+            .set_style(frame_area, Style::default().bg(self.theme.app_bg));
+
+        let term_w = frame_area.width as usize;
         let status_text_len = self.status.text().len() + 3; // " ● " prefix
         let status_lines: u16 = if term_w > 0 && status_text_len > term_w {
             2
@@ -595,7 +608,9 @@ impl App {
                             Span::styled(icon, Style::default().fg(self.theme.project_icon)),
                             Span::styled(
                                 project.name.clone(),
-                                Style::default().add_modifier(Modifier::BOLD),
+                                Style::default()
+                                    .fg(self.theme.text_fg)
+                                    .add_modifier(Modifier::BOLD),
                             ),
                         ];
                         if count > 0 {
@@ -1233,7 +1248,10 @@ impl App {
                     let x = term_area.x + cell.col;
                     let y = term_area.y + cell.row;
                     let (fg, bg) = pty_cell_colors(cell.fg, cell.bg, is_input, &self.theme);
-                    let style = Style::default().fg(fg).bg(bg).add_modifier(cell.modifier);
+                    let mut style = Style::default().fg(fg).add_modifier(cell.modifier);
+                    if let Some(bg) = bg {
+                        style = style.bg(bg);
+                    }
                     let ratatui_cell = &mut buf[(x, y)];
                     ratatui_cell.set_symbol(&cell.symbol);
                     ratatui_cell.set_style(style);
@@ -1858,7 +1876,7 @@ impl App {
     fn render_help(&mut self, frame: &mut Frame) {
         self.render_dim_overlay(frame);
         let area = centered_rect(72, 70, frame.area());
-        Clear.render(area, frame.buffer_mut());
+        self.clear_overlay_area(frame, area);
 
         let outer_block = self.themed_overlay_block("Help");
         let inner = outer_block.inner(area);
@@ -2165,7 +2183,7 @@ impl App {
             PromptState::Command { input, selected } => {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(72, 40, frame.area());
-                Clear.render(popup, frame.buffer_mut());
+                self.clear_overlay_area(frame, popup);
                 let commands = self.bindings.filtered_palette(&input.text);
                 let items = if commands.is_empty() {
                     vec![ListItem::new("No matching commands.")]
@@ -2248,7 +2266,8 @@ impl App {
                 let list_block = Block::default()
                     .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
                     .border_type(ratatui::widgets::BorderType::Rounded)
-                    .border_style(Style::default().fg(self.theme.overlay_border));
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
                 let list_inner = list_block.inner(list_area);
                 StatefulWidget::render(
                     List::new(items)
@@ -2278,7 +2297,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(72, 70, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let visible: Vec<_> = if filter.is_empty() {
                     entries.iter().collect()
                 } else {
@@ -2296,7 +2315,7 @@ impl App {
                             format!("{spinner} "),
                             Style::default().fg(self.theme.hint_desc_fg),
                         ),
-                        Span::raw("Loading…"),
+                        Span::styled("Loading…", Style::default().fg(self.theme.text_fg)),
                     ]))]
                 } else if visible.is_empty() {
                     vec![ListItem::new(if filter.is_empty() {
@@ -2322,7 +2341,10 @@ impl App {
                                     prefix.to_string(),
                                     Style::default().fg(self.theme.hint_desc_fg),
                                 ),
-                                Span::raw(entry.label.clone()),
+                                Span::styled(
+                                    entry.label.clone(),
+                                    Style::default().fg(self.theme.text_fg),
+                                ),
                             ]))
                         })
                         .collect::<Vec<_>>()
@@ -2417,6 +2439,7 @@ impl App {
                     let list_block = Block::default()
                         .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
                         .border_style(Style::default().fg(self.theme.overlay_border))
+                        .style(Style::default().bg(self.theme.overlay_bg))
                         .title_bottom(Line::from(bottom_spans));
                     let list_inner = list_block.inner(list_render_area);
                     StatefulWidget::render(
@@ -2489,7 +2512,7 @@ impl App {
             PromptState::ChangeAgentProvider(prompt) => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(72, 42, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
 
                 let move_down = self.bindings.label_for(Action::MoveDown);
                 let move_up = self.bindings.label_for(Action::MoveUp);
@@ -2538,12 +2561,17 @@ impl App {
                         Span::styled(" Agent: ", Style::default().fg(self.theme.hint_desc_fg)),
                         Span::styled(
                             prompt.session_label.as_str(),
-                            Style::default().add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
                         ),
                     ]),
                     Line::from(vec![
                         Span::styled(" Path: ", Style::default().fg(self.theme.hint_desc_fg)),
-                        Span::raw(prompt.worktree_path.as_str()),
+                        Span::styled(
+                            prompt.worktree_path.as_str(),
+                            Style::default().fg(self.theme.text_fg),
+                        ),
                     ]),
                 ];
                 Paragraph::new(detail_lines)
@@ -2594,7 +2622,8 @@ impl App {
                 ));
                 let list_block = Block::default()
                     .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(self.theme.overlay_border));
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
                 let list_inner = list_block.inner(list_area);
                 let highlight_style = if matches!(prompt.focus, ChangeAgentProviderFocus::List) {
                     self.theme.selection_style()
@@ -2668,7 +2697,7 @@ impl App {
             PromptState::ChangeDefaultProvider(prompt) => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(72, 42, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
 
                 let move_down = self.bindings.label_for(Action::MoveDown);
                 let move_up = self.bindings.label_for(Action::MoveUp);
@@ -2720,7 +2749,9 @@ impl App {
                         ),
                         Span::styled(
                             prompt.current.as_str().to_string(),
-                            Style::default().add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
                         ),
                     ]),
                     Line::from(vec![Span::styled(
@@ -2772,7 +2803,8 @@ impl App {
                 ));
                 let list_block = Block::default()
                     .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(self.theme.overlay_border));
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
                 let list_inner = list_block.inner(list_area);
                 let highlight_style = if matches!(prompt.focus, ChangeDefaultProviderFocus::List) {
                     self.theme.selection_style()
@@ -2843,6 +2875,129 @@ impl App {
                     apply_button: apply_area,
                 };
             }
+            PromptState::ChangeTheme(prompt) => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(60, 60, frame.area());
+                self.clear_overlay_area(frame, area);
+
+                let move_down = self.bindings.label_for(Action::MoveDown);
+                let move_up = self.bindings.label_for(Action::MoveUp);
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+
+                let mut bottom_spans = vec![Span::raw(" ")];
+                bottom_spans.extend(self.theme.key_badge_default(&move_down));
+                bottom_spans.push(Span::styled(
+                    " down  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&move_up));
+                bottom_spans.push(Span::styled(
+                    " up  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
+                bottom_spans.push(Span::styled(
+                    " apply  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&close_key));
+                bottom_spans.push(Span::styled(
+                    " cancel",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+
+                let [details_area, list_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(4), Constraint::Min(6)])
+                    .areas(area);
+
+                let detail_lines = vec![
+                    Line::from(vec![
+                        Span::styled(
+                            " Current theme: ",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ),
+                        Span::styled(
+                            prompt.current.clone(),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(vec![Span::styled(
+                        " Selecting a theme applies it instantly and saves it to config.toml.",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )]),
+                ];
+                Paragraph::new(detail_lines)
+                    .block(
+                        self.themed_overlay_block("Change Theme")
+                            .title_bottom(Line::from(bottom_spans)),
+                    )
+                    .render(details_area, frame.buffer_mut());
+
+                let id_col = prompt
+                    .options
+                    .iter()
+                    .map(|option| option.id.chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    .max(8);
+                let items = prompt
+                    .options
+                    .iter()
+                    .map(|option| {
+                        let source_label = match option.source {
+                            crate::theme::ThemeSource::Bundled => "bundled",
+                            crate::theme::ThemeSource::Opaline => "opaline",
+                            crate::theme::ThemeSource::User => "user",
+                        };
+                        let is_current = option.id == prompt.current;
+                        let suffix = if is_current {
+                            format!("  {source_label} · current")
+                        } else {
+                            format!("  {source_label}")
+                        };
+                        let id_padded = format!("{:width$}", option.id, width = id_col);
+                        ListItem::new(Line::from(vec![
+                            Span::styled(
+                                id_padded,
+                                Style::default()
+                                    .fg(self.theme.help_section_header_fg)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("  {}", option.display_name),
+                                Style::default().fg(self.theme.hint_desc_fg),
+                            ),
+                            Span::styled(suffix, Style::default().fg(self.theme.hint_dim_desc_fg)),
+                        ]))
+                    })
+                    .collect::<Vec<_>>();
+                let mut state = ListState::default().with_selected(Some(
+                    prompt.selected.min(prompt.options.len().saturating_sub(1)),
+                ));
+                let list_block = Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
+                let list_inner = list_block.inner(list_area);
+                StatefulWidget::render(
+                    List::new(items)
+                        .block(list_block)
+                        .highlight_style(self.theme.selection_style()),
+                    list_area,
+                    frame.buffer_mut(),
+                    &mut state,
+                );
+
+                self.overlay_layout.active = OverlayMouseLayout::ChangeTheme {
+                    list: list_inner,
+                    items: prompt.options.len(),
+                    offset: state.offset(),
+                };
+            }
             PromptState::PickEditor {
                 session_label,
                 worktree_path,
@@ -2851,7 +3006,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(64, 34, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
 
                 let confirm_key = self.bindings.label_for(Action::Confirm);
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
@@ -2889,12 +3044,17 @@ impl App {
                         Span::styled(" Agent: ", Style::default().fg(self.theme.hint_desc_fg)),
                         Span::styled(
                             session_label.as_str(),
-                            Style::default().add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
                         ),
                     ]),
                     Line::from(vec![
                         Span::styled(" Path: ", Style::default().fg(self.theme.hint_desc_fg)),
-                        Span::raw(worktree_path.as_str()),
+                        Span::styled(
+                            worktree_path.as_str(),
+                            Style::default().fg(self.theme.text_fg),
+                        ),
                     ]),
                 ];
                 Paragraph::new(detail_lines)
@@ -2931,7 +3091,8 @@ impl App {
                     .with_selected(Some((*selected).min(editors.len().saturating_sub(1))));
                 let list_block = Block::default()
                     .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(self.theme.overlay_border));
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
                 let list_inner = list_block.inner(list_area);
                 StatefulWidget::render(
                     List::new(items)
@@ -2950,7 +3111,7 @@ impl App {
             PromptState::KillRunning(prompt) => {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(78, 72, frame.area());
-                Clear.render(popup, frame.buffer_mut());
+                self.clear_overlay_area(frame, popup);
 
                 let visible_indices = Self::visible_kill_running_indices(prompt);
                 let items = if visible_indices.is_empty() {
@@ -3094,6 +3255,7 @@ impl App {
                         .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
                         .border_type(ratatui::widgets::BorderType::Rounded)
                         .border_style(Style::default().fg(self.theme.overlay_border))
+                        .style(Style::default().bg(self.theme.overlay_bg))
                         .title_bottom(Line::from(hint_spans));
                     let list_inner = list_block.inner(list_area);
                     StatefulWidget::render(
@@ -3240,7 +3402,7 @@ impl App {
             PromptState::ConfirmKillRunning(confirm_prompt) => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(56, 32, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Confirm Kill");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -3419,7 +3581,7 @@ impl App {
                     2 + body_height + checkbox_spacing + checkbox_height + 3,
                     frame.area(),
                 );
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Delete Agent");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -3510,7 +3672,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(56, 30, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Delete Terminal");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -3592,7 +3754,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(56, 30, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Quit dux");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -3681,7 +3843,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(56, 30, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Discard Changes");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -3850,7 +4012,7 @@ impl App {
                     2 + body_height + checkbox_spacing + checkbox_height + 3,
                     frame.area(),
                 );
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Non-Default Branch");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -3957,7 +4119,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(60, 30, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Branch Already Exists");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -4067,7 +4229,7 @@ impl App {
                     9 + checkbox_spacing + checkbox_height,
                     frame.area(),
                 );
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
 
                 let outer = self.themed_overlay_block("Rename Agent");
                 let inner = outer.inner(area);
@@ -4199,7 +4361,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(80, 70, frame.area());
-                Clear.render(popup, frame.buffer_mut());
+                self.clear_overlay_area(frame, popup);
 
                 // Split: content area + 1-line footer hint.
                 let chunks =
@@ -4257,7 +4419,7 @@ impl App {
             PromptState::NameNewAgent { input, .. } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect_exact(60, 8, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
 
                 let outer = self.themed_overlay_block("Name New Agent");
                 let inner = outer.inner(area);
@@ -4384,7 +4546,7 @@ impl App {
         };
 
         self.render_dim_overlay(frame);
-        Clear.render(popup, frame.buffer_mut());
+        self.clear_overlay_area(frame, popup);
 
         if let Some(edit_state) = editing {
             // ── Edit view ──
@@ -4591,7 +4753,7 @@ impl App {
     ) {
         self.render_dim_overlay(frame);
         let area = centered_rect(56, 30, frame.area());
-        Clear.render(area, frame.buffer_mut());
+        self.clear_overlay_area(frame, area);
         let outer = self.themed_overlay_block("Delete Macro");
         let inner = outer.inner(area);
         outer.render(area, frame.buffer_mut());
@@ -4758,6 +4920,14 @@ impl App {
         self.render_dim_overlay(frame);
         let area = centered_rect(96, 94, frame.area());
         Clear.render(area, frame.buffer_mut());
+        // Clear leaves cells at Color::Reset (terminal default). Repaint
+        // with app_bg so the fullscreen agent surface — borders, the
+        // loading card area, the gap above the hint bar — tracks the
+        // active theme instead of falling through to the user's terminal
+        // default.
+        frame
+            .buffer_mut()
+            .set_style(area, Style::default().bg(self.theme.app_bg));
         let title = match self.selected_session() {
             Some(session) => {
                 let provider = capitalize(self.running_provider_for(session).as_str());
@@ -4781,6 +4951,11 @@ impl App {
         self.render_dim_overlay(frame);
         let area = centered_rect(96, 94, frame.area());
         Clear.render(area, frame.buffer_mut());
+        // Same reasoning as render_fullscreen_agent — fill with app_bg so
+        // the fullscreen terminal surface follows the active theme.
+        frame
+            .buffer_mut()
+            .set_style(area, Style::default().bg(self.theme.app_bg));
         let saved = self.session_surface;
         self.session_surface = SessionSurface::Terminal;
         self.render_agent_terminal(frame, area, " Terminal ", true);
@@ -4822,7 +4997,7 @@ impl App {
             area.width,
             total_h,
         );
-        Clear.render(bar_area, frame.buffer_mut());
+        self.clear_overlay_area(frame, bar_area);
 
         // Split into input area (top) and list area (bottom).
         let [input_area, list_area] = Layout::default()
@@ -4914,7 +5089,8 @@ impl App {
         let list_block = Block::default()
             .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(Style::default().fg(self.theme.overlay_border));
+            .border_style(Style::default().fg(self.theme.overlay_border))
+            .style(Style::default().bg(self.theme.overlay_bg));
         let mut list_state = ListState::default();
         if !filtered.is_empty() {
             list_state.select(Some(selected));
@@ -4940,6 +5116,22 @@ impl App {
             .border_style(self.theme.border_style(focused))
     }
 
+    /// Reset `area` to a blank surface and fill it with the modal overlay
+    /// background. Use this in place of a bare `Clear.render(area, ..)` for
+    /// every modal popup so the entire popup — including any strip outside
+    /// the inner `themed_overlay_block` (footer hints, gaps between stacked
+    /// blocks, etc.) — tracks the active theme rather than reading whatever
+    /// `Color::Reset` falls through to in the user's terminal.
+    ///
+    /// Fullscreen surfaces (the agent and terminal fullscreen overlays) want
+    /// `app_bg` instead of `overlay_bg` and stay open-coded.
+    fn clear_overlay_area(&self, frame: &mut Frame, area: Rect) {
+        Clear.render(area, frame.buffer_mut());
+        frame
+            .buffer_mut()
+            .set_style(area, Style::default().bg(self.theme.overlay_bg));
+    }
+
     fn themed_overlay_block<'a>(&self, title: &'a str) -> Block<'a> {
         Block::default()
             .title(Line::from(Span::styled(
@@ -4951,6 +5143,12 @@ impl App {
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
             .border_style(Style::default().fg(self.theme.overlay_border))
+            // Modals are presented after a `Clear.render(..)` which resets the
+            // popup cells to `Color::Reset`. Filling the block with overlay_bg
+            // means the modal interior — borders, surrounding chrome, the gap
+            // around the inner widgets — tracks the active theme instead of
+            // reading terminal-default behind the border ring.
+            .style(Style::default().bg(self.theme.overlay_bg))
     }
 
     fn center_pane_agent_title(&self) -> String {
@@ -4981,7 +5179,7 @@ impl App {
 
         self.render_dim_overlay(frame);
         let popup = centered_rect(85, 78, frame.area());
-        Clear.render(popup, frame.buffer_mut());
+        self.clear_overlay_area(frame, popup);
 
         let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(popup);
         let content_area = chunks[0];
@@ -5191,18 +5389,32 @@ fn xterm256_to_rgb(idx: u8) -> (u8, u8, u8) {
 /// theme's dim color and the background is converted to grayscale, giving
 /// the pane a muted appearance that signals it is read-only.
 ///
-/// `Color::Reset` (no explicit background) is always preserved so cells
-/// without a background never turn black.
-fn pty_cell_colors(fg: Color, bg: Color, is_input: bool, theme: &Theme) -> (Color, Color) {
+/// Resolve the foreground/background a single PTY cell should render with.
+///
+/// The bg is `Option<Color>` to give the caller a way to say "leave the
+/// underlying buffer background alone": the rendering loop only applies bg
+/// when this is `Some`, so `None` lets whatever was already in the buffer
+/// (the frame-wide `app_bg` pre-fill, the dim overlay, the parent block
+/// fill, …) show through.
+///
+/// Interactive mode (fullscreen agent or focused agent/terminal) always
+/// passes the CLI's colors through unchanged so the user's configured
+/// palette renders end-to-end without dux fighting it.
+///
+/// Non-interactive (minimized / read-only) mode dims the foreground to a
+/// single muted shade. Cells the CLI explicitly colored have their
+/// background grayscaled, which is what produces the recognizable "this
+/// pane is read-only" look. Cells the CLI emitted with `Color::Reset` are
+/// returned with `bg = None` so the dim overlay / app surface continues to
+/// show through them — only the solid CLI-painted backgrounds are
+/// grayscaled, not the ambient surface around them.
+fn pty_cell_colors(fg: Color, bg: Color, is_input: bool, theme: &Theme) -> (Color, Option<Color>) {
     if is_input {
-        (fg, bg)
+        (fg, Some(bg))
+    } else if bg == Color::Reset {
+        (theme.overlay_dim_fg, None)
     } else {
-        let dimmed_bg = if bg == Color::Reset {
-            bg
-        } else {
-            to_grayscale(bg)
-        };
-        (theme.overlay_dim_fg, dimmed_bg)
+        (theme.overlay_dim_fg, Some(to_grayscale(bg)))
     }
 }
 
@@ -5425,14 +5637,25 @@ impl App {
             return;
         }
 
+        // Paint the row with the theme's app background first so the
+        // half-block caps blend into a surface that actually changes with
+        // the theme. Without this the caps render on top of whatever
+        // cell colors the agent PTY left behind, which made the pill look
+        // detached on light themes.
+        frame
+            .buffer_mut()
+            .set_style(area, Style::default().bg(self.theme.app_bg));
+
         let bg = match pr.state {
             PrState::Open => self.theme.pr_open_bg,
             PrState::Merged => self.theme.pr_merged_bg,
             PrState::Closed => self.theme.pr_closed_bg,
         };
         let fg = self.theme.pr_banner_fg;
-        // Half-block caps: fg is the pill color, bg is terminal default.
-        let cap_style = Style::default().fg(bg);
+        // Half-block caps: fg is the pill color, bg is the freshly-painted
+        // app surface so the pill arc sits on a theme-driven backdrop
+        // instead of the terminal default.
+        let cap_style = Style::default().fg(bg).bg(self.theme.app_bg);
         // Inner content: white text on colored background.
         let text_style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
         let title_style = Style::default()
@@ -5710,30 +5933,52 @@ mod tests {
         let theme = Theme::default_dark();
         let fg = Color::Rgb(200, 100, 50);
         let bg = Color::Rgb(10, 20, 30);
-        assert_eq!(pty_cell_colors(fg, bg, true, &theme), (fg, bg));
+        assert_eq!(pty_cell_colors(fg, bg, true, &theme), (fg, Some(bg)));
     }
 
     #[test]
-    fn pty_cell_colors_dims_in_non_interactive_mode() {
+    fn pty_cell_colors_preserves_default_bg_in_interactive_mode() {
+        // Color::Reset must pass through so the agent/terminal pane shows
+        // whatever the user's CLI configured rather than fighting it with
+        // a dux-themed surface.
+        let theme = Theme::default_dark();
+        let fg = Color::Rgb(200, 100, 50);
+        assert_eq!(
+            pty_cell_colors(fg, Color::Reset, true, &theme),
+            (fg, Some(Color::Reset))
+        );
+    }
+
+    #[test]
+    fn pty_cell_colors_grayscales_solid_bg_in_non_interactive_mode() {
         let theme = Theme::default_dark();
         let fg = Color::Rgb(200, 100, 50);
         let bg = Color::Rgb(10, 20, 30);
         let (result_fg, result_bg) = pty_cell_colors(fg, bg, false, &theme);
         assert_eq!(result_fg, theme.overlay_dim_fg);
-        // Background should be the grayscale equivalent, not the fixed dim color.
-        assert_eq!(result_bg, to_grayscale(bg));
+        // Solid CLI-painted backgrounds get grayscaled, marking them as
+        // read-only.
+        assert_eq!(result_bg, Some(to_grayscale(bg)));
         // Sanity: the grayscale value is a uniform grey, not near-black.
         let expected_l = (0.299 * 10.0_f64 + 0.587 * 20.0 + 0.114 * 30.0).round() as u8;
-        assert_eq!(result_bg, Color::Rgb(expected_l, expected_l, expected_l));
+        assert_eq!(
+            result_bg,
+            Some(Color::Rgb(expected_l, expected_l, expected_l))
+        );
     }
 
     #[test]
-    fn pty_cell_colors_preserves_default_bg_in_non_interactive_mode() {
+    fn pty_cell_colors_lets_default_bg_show_through_in_non_interactive_mode() {
         let theme = Theme::default_dark();
         let fg = Color::Rgb(200, 100, 50);
+        // Cells the CLI emitted with no explicit background return `None`
+        // for the bg so the rendering loop leaves the underlying buffer
+        // bg untouched — that lets the dim overlay / app surface show
+        // through the minimized PTY view, only grayscaling the cells the
+        // CLI actually painted.
         assert_eq!(
             pty_cell_colors(fg, Color::Reset, false, &theme),
-            (theme.overlay_dim_fg, Color::Reset)
+            (theme.overlay_dim_fg, None)
         );
     }
 

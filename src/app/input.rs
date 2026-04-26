@@ -82,6 +82,7 @@ enum PromptMouseTarget {
     BrowseProjectInput,
     BrowseProjectItem(usize),
     PickEditorItem(usize),
+    ChangeThemeItem(usize),
     ChangeAgentProviderItem(usize),
     ChangeAgentProviderCancel,
     ChangeAgentProviderApply,
@@ -2106,6 +2107,36 @@ impl App {
             return Ok(false);
         }
 
+        if let PromptState::ChangeTheme(prompt) = &mut self.prompt {
+            let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
+            let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
+
+            if matches!(palette_action.or(dialog_action), Some(Action::CloseOverlay)) {
+                self.cancel_change_theme();
+                return Ok(false);
+            }
+
+            let mut moved = false;
+            match palette_action.or(dialog_action) {
+                Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
+                    prompt.selected += 1;
+                    moved = true;
+                }
+                Some(Action::MoveUp) if prompt.selected > 0 => {
+                    prompt.selected -= 1;
+                    moved = true;
+                }
+                Some(Action::Confirm) => {
+                    self.apply_change_theme()?;
+                }
+                _ => {}
+            }
+            if moved {
+                self.preview_change_theme_selection();
+            }
+            return Ok(false);
+        }
+
         if let PromptState::ConfirmKillRunning(confirm_prompt) = &mut self.prompt {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => {
@@ -2812,6 +2843,13 @@ impl App {
                 ..
             } => Self::overlay_row_at(list, offset, items, column, row)
                 .map(PromptMouseTarget::PickEditorItem),
+            OverlayMouseLayout::ChangeTheme {
+                list,
+                items,
+                offset,
+                ..
+            } => Self::overlay_row_at(list, offset, items, column, row)
+                .map(PromptMouseTarget::ChangeThemeItem),
             OverlayMouseLayout::ChangeAgentProvider {
                 list,
                 items,
@@ -3895,6 +3933,24 @@ impl App {
                 self.set_pick_editor_selection(index);
                 if double_click {
                     self.open_selected_pick_editor();
+                }
+            }
+            PromptMouseTarget::ChangeThemeItem(index) => {
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                let mut moved = false;
+                if let PromptState::ChangeTheme(prompt) = &mut self.prompt
+                    && index < prompt.options.len()
+                    && prompt.selected != index
+                {
+                    prompt.selected = index;
+                    moved = true;
+                }
+                if moved {
+                    self.preview_change_theme_selection();
+                }
+                if double_click && let Err(err) = self.apply_change_theme() {
+                    self.set_error(format!("{err:#}"));
                 }
             }
             PromptMouseTarget::ChangeAgentProviderItem(index) => {

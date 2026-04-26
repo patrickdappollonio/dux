@@ -196,6 +196,7 @@ pub struct UiConfig {
     pub diff_tab_width: u16,
     pub github_integration: bool,
     pub pr_banner_position: String,
+    pub theme: String,
 }
 
 impl Default for Config {
@@ -221,6 +222,7 @@ impl Default for Config {
                 diff_tab_width: 4,
                 github_integration: true,
                 pr_banner_position: "bottom".to_string(),
+                theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
             },
             editor: EditorConfig::default(),
             keys: KeysConfig::default(),
@@ -345,6 +347,7 @@ impl Default for UiConfig {
             diff_tab_width: 4,
             github_integration: true,
             pr_banner_position: "bottom".to_string(),
+            theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
         }
     }
 }
@@ -634,6 +637,13 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             )),
             value_fn: |c| FieldValue::Str(c.ui.pr_banner_position.clone()),
         },
+        ConfigEntry::Field {
+            key: "theme",
+            comment: Some(CommentSource::Static(
+                "# Visual theme for the dux interface.\n# Built-in options include \"dux_dark\" (the default), plus any theme\n# bundled with the opaline engine, for example: \"catppuccin_mocha\",\n# \"catppuccin_frappe\", \"nord\", \"dracula\", \"gruvbox_dark\",\n# \"tokyo_night\", \"solarized_dark\", \"one_dark\", \"rose_pine\", and others.\n# To use a custom theme, drop a TOML file into <config_dir>/themes/<name>.toml\n# (with the same token format as opaline themes) and reference it here\n# by file stem. Unknown names fall back to dux_dark with a warning.\n# Use the `change-theme` command in the palette (Ctrl-p) for an interactive picker.",
+            )),
+            value_fn: |c| FieldValue::Str(c.ui.theme.clone()),
+        },
         ConfigEntry::Blank,
         ConfigEntry::Section("editor"),
         ConfigEntry::Field {
@@ -835,6 +845,7 @@ pub fn save_config(
         "pr_banner_position",
         &config.ui.pr_banner_position,
     );
+    patch_table_str(&mut doc, "ui", "theme", &config.ui.theme);
 
     // --- [editor] ---
     patch_table_str(&mut doc, "editor", "default", &config.editor.default);
