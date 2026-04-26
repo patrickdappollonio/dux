@@ -5051,6 +5051,14 @@ impl App {
         self.render_dim_overlay(frame);
         let area = centered_rect(96, 94, frame.area());
         Clear.render(area, frame.buffer_mut());
+        // Clear leaves cells at Color::Reset (terminal default). Repaint
+        // with app_bg so the fullscreen agent surface — borders, the
+        // loading card area, the gap above the hint bar — tracks the
+        // active theme instead of falling through to the user's terminal
+        // default.
+        frame
+            .buffer_mut()
+            .set_style(area, Style::default().bg(self.theme.app_bg));
         let title = match self.selected_session() {
             Some(session) => {
                 let provider = capitalize(self.running_provider_for(session).as_str());
@@ -5074,6 +5082,11 @@ impl App {
         self.render_dim_overlay(frame);
         let area = centered_rect(96, 94, frame.area());
         Clear.render(area, frame.buffer_mut());
+        // Same reasoning as render_fullscreen_agent — fill with app_bg so
+        // the fullscreen terminal surface follows the active theme.
+        frame
+            .buffer_mut()
+            .set_style(area, Style::default().bg(self.theme.app_bg));
         let saved = self.session_surface;
         self.session_surface = SessionSurface::Terminal;
         self.render_agent_terminal(frame, area, " Terminal ", true);
@@ -5244,6 +5257,12 @@ impl App {
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
             .border_style(Style::default().fg(self.theme.overlay_border))
+            // Modals are presented after a `Clear.render(..)` which resets the
+            // popup cells to `Color::Reset`. Filling the block with overlay_bg
+            // means the modal interior — borders, surrounding chrome, the gap
+            // around the inner widgets — tracks the active theme instead of
+            // reading terminal-default behind the border ring.
+            .style(Style::default().bg(self.theme.overlay_bg))
     }
 
     fn center_pane_agent_title(&self) -> String {
@@ -5484,18 +5503,23 @@ fn xterm256_to_rgb(idx: u8) -> (u8, u8, u8) {
 /// theme's dim color and the background is converted to grayscale, giving
 /// the pane a muted appearance that signals it is read-only.
 ///
-/// Cells the CLI emitted with no background attribute (`Color::Reset`) are
-/// remapped to `theme.app_bg` so the PTY area follows the active dux theme
-/// rather than the user's terminal default. Cells that the CLI explicitly
-/// colored keep their colors. In non-interactive mode the resolved bg is
-/// then grayscaled, giving the read-only pane a uniform muted appearance
-/// regardless of which theme is active.
+/// Pass-through for the embedded agent/terminal PTY. Cells keep whatever
+/// colors the CLI emitted — including `Color::Reset` for cells with no
+/// explicit background — so the user's configured CLI theme renders
+/// untouched and dux doesn't have to fight every CLI tool's own palette.
+/// In non-interactive mode the foreground is replaced with a single dim
+/// shade and the background is grayscaled, giving the read-only pane a
+/// muted look while still preserving any "default background" cells.
 fn pty_cell_colors(fg: Color, bg: Color, is_input: bool, theme: &Theme) -> (Color, Color) {
-    let resolved_bg = if bg == Color::Reset { theme.app_bg } else { bg };
     if is_input {
-        (fg, resolved_bg)
+        (fg, bg)
     } else {
-        (theme.overlay_dim_fg, to_grayscale(resolved_bg))
+        let dimmed_bg = if bg == Color::Reset {
+            bg
+        } else {
+            to_grayscale(bg)
+        };
+        (theme.overlay_dim_fg, dimmed_bg)
     }
 }
 
@@ -6010,7 +6034,7 @@ mod tests {
     // ── Unit tests for pty_cell_colors ────────────────────────────
 
     #[test]
-    fn pty_cell_colors_passes_through_explicit_bg_in_interactive_mode() {
+    fn pty_cell_colors_passes_through_in_interactive_mode() {
         let theme = Theme::default_dark();
         let fg = Color::Rgb(200, 100, 50);
         let bg = Color::Rgb(10, 20, 30);
@@ -6018,12 +6042,15 @@ mod tests {
     }
 
     #[test]
-    fn pty_cell_colors_maps_default_bg_to_app_bg_in_interactive_mode() {
+    fn pty_cell_colors_preserves_default_bg_in_interactive_mode() {
+        // Color::Reset must pass through so the agent/terminal pane shows
+        // whatever the user's CLI configured rather than fighting it with
+        // a dux-themed surface.
         let theme = Theme::default_dark();
         let fg = Color::Rgb(200, 100, 50);
         assert_eq!(
             pty_cell_colors(fg, Color::Reset, true, &theme),
-            (fg, theme.app_bg)
+            (fg, Color::Reset)
         );
     }
 
@@ -6042,15 +6069,15 @@ mod tests {
     }
 
     #[test]
-    fn pty_cell_colors_grayscales_app_bg_for_default_cells_in_non_interactive_mode() {
+    fn pty_cell_colors_preserves_default_bg_in_non_interactive_mode() {
         let theme = Theme::default_dark();
         let fg = Color::Rgb(200, 100, 50);
-        // A "default bg" cell is now resolved to app_bg first, then grayscaled
-        // alongside every other cell, so the read-only pane reads as a uniform
-        // muted surface tied to the active theme.
+        // Color::Reset cells stay transparent even when grayscaling so the
+        // read-only PTY view continues to defer to the user's CLI palette
+        // rather than asserting a dux color.
         assert_eq!(
             pty_cell_colors(fg, Color::Reset, false, &theme),
-            (theme.overlay_dim_fg, to_grayscale(theme.app_bg))
+            (theme.overlay_dim_fg, Color::Reset)
         );
     }
 
