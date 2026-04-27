@@ -1,6 +1,6 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::prelude::{Modifier, Style};
+use ratatui::prelude::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
@@ -17,6 +17,7 @@ pub(crate) enum CheckboxState {
 pub(crate) struct CheckboxLayout {
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) height: u16,
+    background: Option<Color>,
 }
 
 impl CheckboxLayout {
@@ -24,7 +25,13 @@ impl CheckboxLayout {
         Self {
             lines: Vec::new(),
             height: 0,
+            background: None,
         }
+    }
+
+    pub(crate) fn background(mut self, background: Color) -> Self {
+        self.background = Some(background);
+        self
     }
 }
 
@@ -98,6 +105,7 @@ impl<'a> Checkbox<'a> {
         CheckboxLayout {
             height: lines.len() as u16,
             lines,
+            background: None,
         }
     }
 
@@ -133,10 +141,16 @@ impl<'a> Checkbox<'a> {
 
 impl Widget for CheckboxLayout {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        let clear_style = self
+            .background
+            .map(|background| Style::default().bg(background))
+            .unwrap_or_default();
         for clear_offset in 0..area.height {
             let y = area.y.saturating_add(clear_offset);
             for x_offset in 0..area.width {
-                buf[(area.x.saturating_add(x_offset), y)].reset();
+                let cell = &mut buf[(area.x.saturating_add(x_offset), y)];
+                cell.reset();
+                cell.set_style(clear_style);
             }
         }
 
@@ -283,5 +297,23 @@ mod tests {
     #[test]
     fn checkbox_indent_width_matches_indent_text() {
         assert_eq!(Checkbox::indent().chars().count(), 5);
+    }
+
+    #[test]
+    fn checkbox_render_preserves_configured_background() {
+        let layout = Checkbox::new("Label")
+            .layout(
+                12,
+                Style::default().fg(Color::Yellow),
+                Style::default().fg(Color::White),
+            )
+            .background(Color::Rgb(12, 34, 56));
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 12, 1));
+
+        layout.render(buffer.area, &mut buffer);
+
+        for x in 0..buffer.area.width {
+            assert_eq!(buffer[(x, 0)].bg, Color::Rgb(12, 34, 56));
+        }
     }
 }

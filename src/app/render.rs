@@ -296,7 +296,9 @@ impl App {
             CheckboxState::Disabled => Style::default().fg(self.theme.hint_desc_fg),
             CheckboxState::Normal => Style::default().fg(self.theme.input_label_fg),
         });
-        let layout = checkbox.layout(area.width, marker_style, label_style);
+        let layout = checkbox
+            .layout(area.width, marker_style, label_style)
+            .background(self.theme.overlay_bg);
         let checkbox_height = layout.height;
         let hint_height = u16::from(hint.is_some());
         let total_height = checkbox_height.saturating_add(hint_height);
