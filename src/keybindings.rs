@@ -87,6 +87,7 @@ pub enum Action {
     ToggleRandomizedPetNameDefault,
     TogglePrBannerPosition,
     ForceReconnectAgent,
+    ChangeTheme,
 }
 
 /// Where a binding's key combo is matched.
@@ -254,6 +255,7 @@ impl Action {
             Action::ToggleRandomizedPetNameDefault => "toggle_randomized_pet_name_default",
             Action::TogglePrBannerPosition => "toggle_pr_banner_position",
             Action::ForceReconnectAgent => "force_reconnect_agent",
+            Action::ChangeTheme => "change_theme",
         }
     }
 
@@ -350,6 +352,7 @@ impl Action {
                 "Move PR banner between top and bottom of agent pane."
             }
             Action::ForceReconnectAgent => "Restart the agent without resuming the prior session.",
+            Action::ChangeTheme => "Open a picker to switch the dux color theme.",
         }
     }
 
@@ -428,7 +431,8 @@ impl Action {
             | Action::ToggleRandomizedPetNameDefault
             | Action::TogglePrBannerPosition
             | Action::ForceReconnectAgent
-            | Action::ChangeDefaultProvider => None,
+            | Action::ChangeDefaultProvider
+            | Action::ChangeTheme => None,
         }
     }
 }
@@ -566,6 +570,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "change-default-provider",
             description: "Change the default provider used when creating new sessions",
+        }),
+    },
+    BindingDef {
+        action: Action::ChangeTheme,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "change-theme",
+            description: "Switch the dux color theme",
         }),
     },
     BindingDef {
