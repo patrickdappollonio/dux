@@ -1,4 +1,6 @@
-use super::checkbox::{Checkbox, CheckboxState};
+use super::components::{
+    Button, ButtonKind, ButtonState, Checkbox, CheckboxState, shared_button_width,
+};
 use super::*;
 
 /// ASCII art logo displayed in the agent pane when no content is active.
@@ -294,7 +296,9 @@ impl App {
             CheckboxState::Disabled => Style::default().fg(self.theme.hint_desc_fg),
             CheckboxState::Normal => Style::default().fg(self.theme.input_label_fg),
         });
-        let layout = checkbox.layout(area.width, marker_style, label_style);
+        let layout = checkbox
+            .layout(area.width, marker_style, label_style)
+            .background(self.theme.overlay_bg);
         let checkbox_height = layout.height;
         let hint_height = u16::from(hint.is_some());
         let total_height = checkbox_height.saturating_add(hint_height);
@@ -333,7 +337,20 @@ impl App {
     }
 
     pub(crate) fn render(&mut self, frame: &mut Frame) {
-        let term_w = frame.area().width as usize;
+        // Pre-fill the whole frame with the theme's app background. Cells
+        // that no widget paints over (gutters, modal interiors, the strip
+        // under the PR banner caps) inherit this color, so light themes
+        // actually look light end-to-end. Widgets that explicitly set
+        // `Color::Reset` override this and still pass through to the
+        // user's terminal default — that path is preserved for PTY cells
+        // that emit a "reset background" SGR, so the embedded agent
+        // terminal keeps rendering the CLI's own colors unchanged.
+        let frame_area = frame.area();
+        frame
+            .buffer_mut()
+            .set_style(frame_area, Style::default().bg(self.theme.app_bg));
+
+        let term_w = frame_area.width as usize;
         let status_text_len = self.status.text().len() + 3; // " ● " prefix
         let status_lines: u16 = if term_w > 0 && status_text_len > term_w {
             2
@@ -593,7 +610,9 @@ impl App {
                             Span::styled(icon, Style::default().fg(self.theme.project_icon)),
                             Span::styled(
                                 project.name.clone(),
-                                Style::default().add_modifier(Modifier::BOLD),
+                                Style::default()
+                                    .fg(self.theme.text_fg)
+                                    .add_modifier(Modifier::BOLD),
                             ),
                         ];
                         if count > 0 {
@@ -1205,6 +1224,11 @@ impl App {
                         );
                 }
             } else {
+                // Capture alt-screen state before mutable borrows — we need
+                // it below (after `refresh_snapshot_buf` takes &mut self) to
+                // decide whether the scrollback indicator applies.
+                let is_alt_screen = provider.is_alt_screen();
+
                 // Render the current terminal viewport into the ratatui
                 // buffer, reusing the pre-allocated snapshot buffer to
                 // avoid per-frame heap allocation.
@@ -1231,7 +1255,10 @@ impl App {
                     let x = term_area.x + cell.col;
                     let y = term_area.y + cell.row;
                     let (fg, bg) = pty_cell_colors(cell.fg, cell.bg, is_input, &self.theme);
-                    let style = Style::default().fg(fg).bg(bg).add_modifier(cell.modifier);
+                    let mut style = Style::default().fg(fg).add_modifier(cell.modifier);
+                    if let Some(bg) = bg {
+                        style = style.bg(bg);
+                    }
                     let ratatui_cell = &mut buf[(x, y)];
                     ratatui_cell.set_symbol(&cell.symbol);
                     ratatui_cell.set_style(style);
@@ -1263,10 +1290,15 @@ impl App {
                     }
                 }
 
-                if let Some(label) = scrollback_indicator_label(
-                    self.snapshot_buf.scrollback_offset,
-                    self.snapshot_buf.scrollback_total,
-                ) {
+                // Suppress the scrollback indicator when the child is using
+                // the alternate screen buffer — the alt grid has no history,
+                // so the label would be misleading even if it somehow rendered.
+                if !is_alt_screen
+                    && let Some(label) = scrollback_indicator_label(
+                        self.snapshot_buf.scrollback_offset,
+                        self.snapshot_buf.scrollback_total,
+                    )
+                {
                     let badge_width = label.len() as u16;
                     if term_area.height > 0 && badge_width <= term_area.width {
                         Paragraph::new(label)
@@ -1856,7 +1888,7 @@ impl App {
     fn render_help(&mut self, frame: &mut Frame) {
         self.render_dim_overlay(frame);
         let area = centered_rect(72, 70, frame.area());
-        Clear.render(area, frame.buffer_mut());
+        self.clear_overlay_area(frame, area);
 
         let outer_block = self.themed_overlay_block("Help");
         let inner = outer_block.inner(area);
@@ -2163,7 +2195,7 @@ impl App {
             PromptState::Command { input, selected } => {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(72, 40, frame.area());
-                Clear.render(popup, frame.buffer_mut());
+                self.clear_overlay_area(frame, popup);
                 let commands = self.bindings.filtered_palette(&input.text);
                 let items = if commands.is_empty() {
                     vec![ListItem::new("No matching commands.")]
@@ -2246,7 +2278,8 @@ impl App {
                 let list_block = Block::default()
                     .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
                     .border_type(ratatui::widgets::BorderType::Rounded)
-                    .border_style(Style::default().fg(self.theme.overlay_border));
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
                 let list_inner = list_block.inner(list_area);
                 StatefulWidget::render(
                     List::new(items)
@@ -2276,7 +2309,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(72, 70, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let visible: Vec<_> = if filter.is_empty() {
                     entries.iter().collect()
                 } else {
@@ -2294,7 +2327,7 @@ impl App {
                             format!("{spinner} "),
                             Style::default().fg(self.theme.hint_desc_fg),
                         ),
-                        Span::raw("Loading…"),
+                        Span::styled("Loading…", Style::default().fg(self.theme.text_fg)),
                     ]))]
                 } else if visible.is_empty() {
                     vec![ListItem::new(if filter.is_empty() {
@@ -2320,7 +2353,10 @@ impl App {
                                     prefix.to_string(),
                                     Style::default().fg(self.theme.hint_desc_fg),
                                 ),
-                                Span::raw(entry.label.clone()),
+                                Span::styled(
+                                    entry.label.clone(),
+                                    Style::default().fg(self.theme.text_fg),
+                                ),
                             ]))
                         })
                         .collect::<Vec<_>>()
@@ -2415,6 +2451,7 @@ impl App {
                     let list_block = Block::default()
                         .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
                         .border_style(Style::default().fg(self.theme.overlay_border))
+                        .style(Style::default().bg(self.theme.overlay_bg))
                         .title_bottom(Line::from(bottom_spans));
                     let list_inner = list_block.inner(list_render_area);
                     StatefulWidget::render(
@@ -2487,7 +2524,7 @@ impl App {
             PromptState::ChangeAgentProvider(prompt) => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(72, 42, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
 
                 let move_down = self.bindings.label_for(Action::MoveDown);
                 let move_up = self.bindings.label_for(Action::MoveUp);
@@ -2536,12 +2573,17 @@ impl App {
                         Span::styled(" Agent: ", Style::default().fg(self.theme.hint_desc_fg)),
                         Span::styled(
                             prompt.session_label.as_str(),
-                            Style::default().add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
                         ),
                     ]),
                     Line::from(vec![
                         Span::styled(" Path: ", Style::default().fg(self.theme.hint_desc_fg)),
-                        Span::raw(prompt.worktree_path.as_str()),
+                        Span::styled(
+                            prompt.worktree_path.as_str(),
+                            Style::default().fg(self.theme.text_fg),
+                        ),
                     ]),
                 ];
                 Paragraph::new(detail_lines)
@@ -2592,7 +2634,8 @@ impl App {
                 ));
                 let list_block = Block::default()
                     .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(self.theme.overlay_border));
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
                 let list_inner = list_block.inner(list_area);
                 let highlight_style = if matches!(prompt.focus, ChangeAgentProviderFocus::List) {
                     self.theme.selection_style()
@@ -2627,61 +2670,33 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) =
-                    if matches!(prompt.focus, ChangeAgentProviderFocus::Cancel) {
-                        (
-                            self.theme.button_confirm_border,
-                            self.theme.button_active_fg,
-                        )
-                    } else {
-                        (self.theme.border_normal, self.theme.hint_desc_fg)
-                    };
                 let apply_enabled = prompt
                     .options
                     .get(prompt.selected)
                     .map(|option| !option.is_current)
                     .unwrap_or(false);
-                let (apply_border, apply_fg) =
-                    if matches!(prompt.focus, ChangeAgentProviderFocus::Apply) && apply_enabled {
-                        (
-                            self.theme.button_confirm_border,
-                            self.theme.button_active_fg,
-                        )
-                    } else if !apply_enabled {
-                        (self.theme.border_normal, self.theme.hint_dim_desc_fg)
-                    } else {
-                        (self.theme.border_normal, self.theme.hint_desc_fg)
-                    };
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Cancel",
-                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(cancel_border)),
-                )
-                .render(cancel_area, frame.buffer_mut());
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(
+                        if matches!(prompt.focus, ChangeAgentProviderFocus::Cancel) {
+                            ButtonState::Focused
+                        } else {
+                            ButtonState::Normal
+                        },
+                    )
+                    .render(frame, cancel_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Use Provider",
-                    if apply_enabled {
-                        Style::default().fg(apply_fg).add_modifier(Modifier::BOLD)
+                Button::new("Use Provider")
+                    .kind(ButtonKind::Confirm)
+                    .state(if !apply_enabled {
+                        ButtonState::Disabled
+                    } else if matches!(prompt.focus, ChangeAgentProviderFocus::Apply) {
+                        ButtonState::Focused
                     } else {
-                        Style::default().fg(apply_fg)
-                    },
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(apply_border)),
-                )
-                .render(apply_area, frame.buffer_mut());
+                        ButtonState::Normal
+                    })
+                    .render(frame, apply_area, &self.theme);
 
                 self.overlay_layout.active = OverlayMouseLayout::ChangeAgentProvider {
                     list: list_inner,
@@ -2694,7 +2709,7 @@ impl App {
             PromptState::ChangeDefaultProvider(prompt) => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(72, 42, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
 
                 let move_down = self.bindings.label_for(Action::MoveDown);
                 let move_up = self.bindings.label_for(Action::MoveUp);
@@ -2746,7 +2761,9 @@ impl App {
                         ),
                         Span::styled(
                             prompt.current.as_str().to_string(),
-                            Style::default().add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
                         ),
                     ]),
                     Line::from(vec![Span::styled(
@@ -2798,7 +2815,8 @@ impl App {
                 ));
                 let list_block = Block::default()
                     .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(self.theme.overlay_border));
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
                 let list_inner = list_block.inner(list_area);
                 let highlight_style = if matches!(prompt.focus, ChangeDefaultProviderFocus::List) {
                     self.theme.selection_style()
@@ -2833,61 +2851,33 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) =
-                    if matches!(prompt.focus, ChangeDefaultProviderFocus::Cancel) {
-                        (
-                            self.theme.button_confirm_border,
-                            self.theme.button_active_fg,
-                        )
-                    } else {
-                        (self.theme.border_normal, self.theme.hint_desc_fg)
-                    };
                 let apply_enabled = prompt
                     .options
                     .get(prompt.selected)
                     .map(|option| !option.is_current)
                     .unwrap_or(false);
-                let (apply_border, apply_fg) =
-                    if matches!(prompt.focus, ChangeDefaultProviderFocus::Apply) && apply_enabled {
-                        (
-                            self.theme.button_confirm_border,
-                            self.theme.button_active_fg,
-                        )
-                    } else if !apply_enabled {
-                        (self.theme.border_normal, self.theme.hint_dim_desc_fg)
-                    } else {
-                        (self.theme.border_normal, self.theme.hint_desc_fg)
-                    };
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Cancel",
-                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(cancel_border)),
-                )
-                .render(cancel_area, frame.buffer_mut());
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(
+                        if matches!(prompt.focus, ChangeDefaultProviderFocus::Cancel) {
+                            ButtonState::Focused
+                        } else {
+                            ButtonState::Normal
+                        },
+                    )
+                    .render(frame, cancel_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Set Default",
-                    if apply_enabled {
-                        Style::default().fg(apply_fg).add_modifier(Modifier::BOLD)
+                Button::new("Set Default")
+                    .kind(ButtonKind::Confirm)
+                    .state(if !apply_enabled {
+                        ButtonState::Disabled
+                    } else if matches!(prompt.focus, ChangeDefaultProviderFocus::Apply) {
+                        ButtonState::Focused
                     } else {
-                        Style::default().fg(apply_fg)
-                    },
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(apply_border)),
-                )
-                .render(apply_area, frame.buffer_mut());
+                        ButtonState::Normal
+                    })
+                    .render(frame, apply_area, &self.theme);
 
                 self.overlay_layout.active = OverlayMouseLayout::ChangeDefaultProvider {
                     list: list_inner,
@@ -2895,6 +2885,129 @@ impl App {
                     offset: state.offset(),
                     cancel_button: cancel_area,
                     apply_button: apply_area,
+                };
+            }
+            PromptState::ChangeTheme(prompt) => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(60, 60, frame.area());
+                self.clear_overlay_area(frame, area);
+
+                let move_down = self.bindings.label_for(Action::MoveDown);
+                let move_up = self.bindings.label_for(Action::MoveUp);
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+
+                let mut bottom_spans = vec![Span::raw(" ")];
+                bottom_spans.extend(self.theme.key_badge_default(&move_down));
+                bottom_spans.push(Span::styled(
+                    " down  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&move_up));
+                bottom_spans.push(Span::styled(
+                    " up  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
+                bottom_spans.push(Span::styled(
+                    " apply  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&close_key));
+                bottom_spans.push(Span::styled(
+                    " cancel",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+
+                let [details_area, list_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(4), Constraint::Min(6)])
+                    .areas(area);
+
+                let detail_lines = vec![
+                    Line::from(vec![
+                        Span::styled(
+                            " Current theme: ",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ),
+                        Span::styled(
+                            prompt.current.clone(),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(vec![Span::styled(
+                        " Selecting a theme applies it instantly and saves it to config.toml.",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )]),
+                ];
+                Paragraph::new(detail_lines)
+                    .block(
+                        self.themed_overlay_block("Change Theme")
+                            .title_bottom(Line::from(bottom_spans)),
+                    )
+                    .render(details_area, frame.buffer_mut());
+
+                let id_col = prompt
+                    .options
+                    .iter()
+                    .map(|option| option.id.chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    .max(8);
+                let items = prompt
+                    .options
+                    .iter()
+                    .map(|option| {
+                        let source_label = match option.source {
+                            crate::theme::ThemeSource::Bundled => "bundled",
+                            crate::theme::ThemeSource::Opaline => "opaline",
+                            crate::theme::ThemeSource::User => "user",
+                        };
+                        let is_current = option.id == prompt.current;
+                        let suffix = if is_current {
+                            format!("  {source_label} · current")
+                        } else {
+                            format!("  {source_label}")
+                        };
+                        let id_padded = format!("{:width$}", option.id, width = id_col);
+                        ListItem::new(Line::from(vec![
+                            Span::styled(
+                                id_padded,
+                                Style::default()
+                                    .fg(self.theme.help_section_header_fg)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("  {}", option.display_name),
+                                Style::default().fg(self.theme.hint_desc_fg),
+                            ),
+                            Span::styled(suffix, Style::default().fg(self.theme.hint_dim_desc_fg)),
+                        ]))
+                    })
+                    .collect::<Vec<_>>();
+                let mut state = ListState::default().with_selected(Some(
+                    prompt.selected.min(prompt.options.len().saturating_sub(1)),
+                ));
+                let list_block = Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
+                let list_inner = list_block.inner(list_area);
+                StatefulWidget::render(
+                    List::new(items)
+                        .block(list_block)
+                        .highlight_style(self.theme.selection_style()),
+                    list_area,
+                    frame.buffer_mut(),
+                    &mut state,
+                );
+
+                self.overlay_layout.active = OverlayMouseLayout::ChangeTheme {
+                    list: list_inner,
+                    items: prompt.options.len(),
+                    offset: state.offset(),
                 };
             }
             PromptState::PickEditor {
@@ -2905,7 +3018,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(64, 34, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
 
                 let confirm_key = self.bindings.label_for(Action::Confirm);
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
@@ -2943,12 +3056,17 @@ impl App {
                         Span::styled(" Agent: ", Style::default().fg(self.theme.hint_desc_fg)),
                         Span::styled(
                             session_label.as_str(),
-                            Style::default().add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
                         ),
                     ]),
                     Line::from(vec![
                         Span::styled(" Path: ", Style::default().fg(self.theme.hint_desc_fg)),
-                        Span::raw(worktree_path.as_str()),
+                        Span::styled(
+                            worktree_path.as_str(),
+                            Style::default().fg(self.theme.text_fg),
+                        ),
                     ]),
                 ];
                 Paragraph::new(detail_lines)
@@ -2985,7 +3103,8 @@ impl App {
                     .with_selected(Some((*selected).min(editors.len().saturating_sub(1))));
                 let list_block = Block::default()
                     .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                    .border_style(Style::default().fg(self.theme.overlay_border));
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
                 let list_inner = list_block.inner(list_area);
                 StatefulWidget::render(
                     List::new(items)
@@ -3004,7 +3123,7 @@ impl App {
             PromptState::KillRunning(prompt) => {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(78, 72, frame.area());
-                Clear.render(popup, frame.buffer_mut());
+                self.clear_overlay_area(frame, popup);
 
                 let visible_indices = Self::visible_kill_running_indices(prompt);
                 let items = if visible_indices.is_empty() {
@@ -3148,6 +3267,7 @@ impl App {
                         .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
                         .border_type(ratatui::widgets::BorderType::Rounded)
                         .border_style(Style::default().fg(self.theme.overlay_border))
+                        .style(Style::default().bg(self.theme.overlay_bg))
                         .title_bottom(Line::from(hint_spans));
                     let list_inner = list_block.inner(list_area);
                     StatefulWidget::render(
@@ -3229,7 +3349,16 @@ impl App {
                     KillRunningFooterAction::Visible,
                 ];
                 let gap = 2u16;
-                let button_widths = buttons.map(|action| action.button_label().len() as u16 + 6);
+                // This footer pre-dates the Button widget's standard sizing —
+                // its labels are long ("Kill Hovered" etc.) and it lays four
+                // buttons in a row. The wider per-label width (label_chars + 6)
+                // keeps the row visually balanced; Button still handles the
+                // colors and bold-when-enabled rules.
+                let button_widths = buttons.map(|action| {
+                    let label_chars =
+                        u16::try_from(action.button_label().chars().count()).unwrap_or(u16::MAX);
+                    label_chars.saturating_add(6)
+                });
                 let total_width = button_widths.iter().sum::<u16>() + gap * 3;
                 let start_x = buttons_area.x + buttons_area.width.saturating_sub(total_width) / 2;
                 let mut cursor_x = start_x;
@@ -3243,41 +3372,26 @@ impl App {
                     };
                     button_rects[index] = rect;
                     let enabled = Self::kill_running_footer_enabled(prompt, *action);
-                    let selected = enabled
-                        && matches!(prompt.focus, KillRunningFocus::Footer(current) if current == *action);
-                    let is_danger = enabled && !matches!(action, KillRunningFooterAction::Cancel);
-                    let border = if selected {
-                        if is_danger {
-                            self.theme.button_danger_border
-                        } else {
-                            self.theme.button_confirm_border
-                        }
+                    let focused = matches!(
+                        prompt.focus,
+                        KillRunningFocus::Footer(current) if current == *action
+                    );
+                    let kind = if matches!(action, KillRunningFooterAction::Cancel) {
+                        ButtonKind::Confirm
                     } else {
-                        self.theme.border_normal
+                        ButtonKind::Danger
                     };
-                    let fg = if selected {
-                        self.theme.button_active_fg
-                    } else if !enabled {
-                        self.theme.hint_dim_desc_fg
+                    let state = if !enabled {
+                        ButtonState::Disabled
+                    } else if focused {
+                        ButtonState::Focused
                     } else {
-                        self.theme.hint_desc_fg
+                        ButtonState::Normal
                     };
-                    Paragraph::new(Line::from(Span::styled(
-                        action.button_label(),
-                        if enabled {
-                            Style::default().fg(fg).add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(fg)
-                        },
-                    )))
-                    .alignment(ratatui::layout::Alignment::Center)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_set(border::ROUNDED)
-                            .border_style(Style::default().fg(border)),
-                    )
-                    .render(rect, frame.buffer_mut());
+                    Button::new(action.button_label())
+                        .kind(kind)
+                        .state(state)
+                        .render(frame, rect, &self.theme);
                     cursor_x += button_widths[index] + gap;
                 }
                 self.overlay_layout.active = OverlayMouseLayout::KillRunning {
@@ -3300,7 +3414,7 @@ impl App {
             PromptState::ConfirmKillRunning(confirm_prompt) => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(56, 32, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Confirm Kill");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -3384,45 +3498,24 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) = if !confirm_prompt.confirm_selected {
-                    (
-                        self.theme.button_confirm_border,
-                        self.theme.button_active_fg,
-                    )
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
-                let (kill_border, kill_fg) = if confirm_prompt.confirm_selected {
-                    (self.theme.button_danger_border, self.theme.button_active_fg)
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(if !confirm_prompt.confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, cancel_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Cancel",
-                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(cancel_border)),
-                )
-                .render(cancel_area, frame.buffer_mut());
+                Button::new("Kill")
+                    .kind(ButtonKind::Danger)
+                    .state(if confirm_prompt.confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, kill_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Kill",
-                    Style::default().fg(kill_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(kill_border)),
-                )
-                .render(kill_area, frame.buffer_mut());
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmKillRunning {
                     cancel_button: cancel_area,
                     kill_button: kill_area,
@@ -3500,7 +3593,7 @@ impl App {
                     2 + body_height + checkbox_spacing + checkbox_height + 3,
                     frame.area(),
                 );
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Delete Agent");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -3560,45 +3653,24 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) = if *focus == DeleteAgentFocus::Cancel {
-                    (
-                        self.theme.button_confirm_border,
-                        self.theme.button_active_fg,
-                    )
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
-                let (delete_border, delete_fg) = if *focus == DeleteAgentFocus::Delete {
-                    (self.theme.button_danger_border, self.theme.button_active_fg)
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(if *focus == DeleteAgentFocus::Cancel {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, cancel_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Cancel",
-                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(cancel_border)),
-                )
-                .render(cancel_area, frame.buffer_mut());
+                Button::new("Delete")
+                    .kind(ButtonKind::Danger)
+                    .state(if *focus == DeleteAgentFocus::Delete {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, delete_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Delete",
-                    Style::default().fg(delete_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(delete_border)),
-                )
-                .render(delete_area, frame.buffer_mut());
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
                     cancel_button: cancel_area,
                     delete_button: delete_area,
@@ -3612,7 +3684,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(56, 30, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Delete Terminal");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -3664,45 +3736,24 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) = if !confirm_selected {
-                    (
-                        self.theme.button_confirm_border,
-                        self.theme.button_active_fg,
-                    )
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
-                let (delete_border, delete_fg) = if *confirm_selected {
-                    (self.theme.button_danger_border, self.theme.button_active_fg)
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(if !confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, cancel_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Cancel",
-                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(cancel_border)),
-                )
-                .render(cancel_area, frame.buffer_mut());
+                Button::new("Delete")
+                    .kind(ButtonKind::Danger)
+                    .state(if *confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, delete_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Delete",
-                    Style::default().fg(delete_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(delete_border)),
-                )
-                .render(delete_area, frame.buffer_mut());
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteTerminal {
                     cancel_button: cancel_area,
                     delete_button: delete_area,
@@ -3715,7 +3766,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(56, 30, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Quit dux");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -3774,45 +3825,24 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) = if !confirm_selected {
-                    (
-                        self.theme.button_confirm_border,
-                        self.theme.button_active_fg,
-                    )
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
-                let (quit_border, quit_fg) = if *confirm_selected {
-                    (self.theme.button_danger_border, self.theme.button_active_fg)
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(if !confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, cancel_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Cancel",
-                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(cancel_border)),
-                )
-                .render(cancel_area, frame.buffer_mut());
+                Button::new("Quit")
+                    .kind(ButtonKind::Danger)
+                    .state(if *confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, quit_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Quit",
-                    Style::default().fg(quit_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(quit_border)),
-                )
-                .render(quit_area, frame.buffer_mut());
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmQuit {
                     cancel_button: cancel_area,
                     quit_button: quit_area,
@@ -3825,7 +3855,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(56, 30, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Discard Changes");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -3877,45 +3907,24 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) = if !confirm_selected {
-                    (
-                        self.theme.button_confirm_border,
-                        self.theme.button_active_fg,
-                    )
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
-                let (discard_border, discard_fg) = if *confirm_selected {
-                    (self.theme.button_danger_border, self.theme.button_active_fg)
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(if !confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, cancel_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Cancel",
-                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(cancel_border)),
-                )
-                .render(cancel_area, frame.buffer_mut());
+                Button::new("Discard")
+                    .kind(ButtonKind::Danger)
+                    .state(if *confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, discard_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Discard",
-                    Style::default().fg(discard_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(discard_border)),
-                )
-                .render(discard_area, frame.buffer_mut());
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmDiscardFile {
                     cancel_button: cancel_area,
                     discard_button: discard_area,
@@ -3924,29 +3933,22 @@ impl App {
             PromptState::ConfirmNonDefaultBranch {
                 current_branch,
                 kind,
-                confirm_selected,
+                focus,
+                checkout_default,
                 ..
             } => {
                 self.render_dim_overlay(frame);
-                let area = centered_rect(60, 30, frame.area());
-                Clear.render(area, frame.buffer_mut());
-                let outer = self.themed_overlay_block("Non-Default Branch");
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
+                let dialog_width = 60u16.min(frame.area().width.max(1));
+                let inner_width = dialog_width.saturating_sub(2);
+                let has_checkbox = matches!(kind, BranchWarningKind::Known { .. });
 
-                let [body_area, _, buttons_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Min(1),
-                        Constraint::Length(1),
-                        Constraint::Length(3),
-                    ])
-                    .areas(inner);
-
-                let mut lines = vec![Line::from("")];
+                // Body: warning text + the "new worktrees branch from …" note,
+                // plus a dim info line on the heuristic path explaining why dux
+                // won't offer to switch branches automatically.
+                let mut body_lines = vec![Line::from("")];
                 match kind {
                     BranchWarningKind::Known { default_branch } => {
-                        lines.push(Line::from(vec![
+                        body_lines.push(Line::from(vec![
                             Span::raw(" This repository is on branch "),
                             Span::styled(
                                 current_branch.as_str(),
@@ -3954,7 +3956,7 @@ impl App {
                             ),
                             Span::raw(", but the"),
                         ]));
-                        lines.push(Line::from(vec![
+                        body_lines.push(Line::from(vec![
                             Span::raw(" remote default branch is "),
                             Span::styled(
                                 default_branch.as_str(),
@@ -3964,7 +3966,7 @@ impl App {
                         ]));
                     }
                     BranchWarningKind::Heuristic => {
-                        lines.push(Line::from(vec![
+                        body_lines.push(Line::from(vec![
                             Span::raw(" This repository is on branch "),
                             Span::styled(
                                 current_branch.as_str(),
@@ -3972,19 +3974,104 @@ impl App {
                             ),
                             Span::raw(","),
                         ]));
-                        lines.push(Line::from(" which doesn't appear to be the main branch."));
+                        body_lines.push(Line::from(" which doesn't appear to be the main branch."));
                     }
                 }
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
+                body_lines.push(Line::from(""));
+                body_lines.push(Line::from(Span::styled(
                     format!(" New worktrees will branch from \"{current_branch}\"."),
                     Style::default().fg(self.theme.warning_fg),
                 )));
-                Paragraph::new(lines)
+                if matches!(kind, BranchWarningKind::Heuristic) {
+                    body_lines.push(Line::from(""));
+                    body_lines.push(Line::from(Span::styled(
+                        " Dux can't confidently identify this repo's default",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )));
+                    body_lines.push(Line::from(Span::styled(
+                        " branch, so it won't change branches for you.",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )));
+                }
+                let body_height = wrapped_line_count(&body_lines, inner_width, false);
+
+                // Checkbox height is measured up-front so the outer rect can
+                // be sized exactly — mirrors the Delete Agent modal.
+                let checkbox_height = if let BranchWarningKind::Known { default_branch } = kind {
+                    let state = if *focus == ConfirmNonDefaultBranchFocus::Checkbox {
+                        CheckboxState::Focused
+                    } else {
+                        CheckboxState::Normal
+                    };
+                    let label = format!("Check out \"{default_branch}\" before adding");
+                    let checkbox = Checkbox::new(&label)
+                        .checked(*checkout_default)
+                        .state(state);
+                    checkbox
+                        .layout(
+                            inner_width,
+                            checkbox.marker_style(Style::default()),
+                            checkbox.label_style(Style::default()),
+                        )
+                        .height
+                } else {
+                    0
+                };
+                let checkbox_spacing = u16::from(has_checkbox);
+
+                let area = centered_rect_exact(
+                    dialog_width,
+                    2 + body_height + checkbox_spacing + checkbox_height + 3,
+                    frame.area(),
+                );
+                self.clear_overlay_area(frame, area);
+                let outer = self.themed_overlay_block("Non-Default Branch");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, checkbox_area, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(body_height),
+                        Constraint::Length(checkbox_spacing),
+                        Constraint::Length(checkbox_height),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                Paragraph::new(body_lines)
                     .wrap(Wrap { trim: false })
                     .render(body_area, frame.buffer_mut());
 
-                let btn_width = 16u16;
+                let checkbox_rect = if let BranchWarningKind::Known { default_branch } = kind {
+                    let checkbox_state = if *focus == ConfirmNonDefaultBranchFocus::Checkbox {
+                        CheckboxState::Focused
+                    } else {
+                        CheckboxState::Normal
+                    };
+                    let label = format!("Check out \"{default_branch}\" before adding");
+                    let (rect, _) = self.render_overlay_checkbox(
+                        frame,
+                        checkbox_area,
+                        &label,
+                        *checkout_default,
+                        checkbox_state,
+                        None,
+                    );
+                    Some(OverlayCheckbox {
+                        id: OverlayCheckboxId::NonDefaultBranchCheckoutDefault,
+                        rect,
+                    })
+                } else {
+                    None
+                };
+
+                // Both buttons share a single width derived from the longest
+                // label that could appear in either slot. Including
+                // "Check Out & Add" and "Add Anyway" in the calculation keeps
+                // the layout stable when the user toggles the checkbox —
+                // otherwise the buttons would resize mid-modal.
+                let btn_width = shared_button_width(&["Cancel", "Add Anyway", "Check Out & Add"]);
                 let gap = 2u16;
                 let total = btn_width * 2 + gap;
                 let left_offset = buttons_area.width.saturating_sub(total) / 2;
@@ -4002,48 +4089,38 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) = if !confirm_selected {
-                    (
-                        self.theme.button_confirm_border,
-                        self.theme.button_active_fg,
-                    )
+                // Swap the confirm button label so the user sees exactly what
+                // pressing it will do. When the checkbox is on and we know the
+                // default branch, the action is a two-step (switch + add),
+                // otherwise it's the original "Add Anyway" add-as-is.
+                let add_label = if has_checkbox && *checkout_default {
+                    "Check Out & Add"
                 } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
-                let (add_border, add_fg) = if *confirm_selected {
-                    (self.theme.button_danger_border, self.theme.button_active_fg)
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
+                    "Add Anyway"
                 };
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Cancel",
-                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(cancel_border)),
-                )
-                .render(cancel_area, frame.buffer_mut());
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(if *focus == ConfirmNonDefaultBranchFocus::Cancel {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, cancel_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Add Anyway",
-                    Style::default().fg(add_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(add_border)),
-                )
-                .render(add_area, frame.buffer_mut());
+                Button::new(add_label)
+                    .kind(ButtonKind::Danger)
+                    .state(if *focus == ConfirmNonDefaultBranchFocus::Add {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, add_area, &self.theme);
+
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmNonDefaultBranch {
                     cancel_button: cancel_area,
                     add_button: add_area,
+                    checkbox: checkbox_rect,
                 };
             }
             PromptState::ConfirmUseExistingBranch {
@@ -4054,7 +4131,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(60, 30, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block("Branch Already Exists");
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
@@ -4114,48 +4191,26 @@ impl App {
                     height: 3,
                 };
 
-                let (cancel_border, cancel_fg) = if !confirm_selected {
-                    (
-                        self.theme.button_confirm_border,
-                        self.theme.button_active_fg,
-                    )
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
-                let (use_border, use_fg) = if *confirm_selected {
-                    (
-                        self.theme.button_confirm_border,
-                        self.theme.button_active_fg,
-                    )
-                } else {
-                    (self.theme.border_normal, self.theme.hint_desc_fg)
-                };
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(if !confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, cancel_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Cancel",
-                    Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(cancel_border)),
-                )
-                .render(cancel_area, frame.buffer_mut());
+                // "Use Existing" reuses a branch that already exists — not
+                // destructive, so it shares the Confirm kind with Cancel.
+                Button::new("Use Existing")
+                    .kind(ButtonKind::Confirm)
+                    .state(if *confirm_selected {
+                        ButtonState::Focused
+                    } else {
+                        ButtonState::Normal
+                    })
+                    .render(frame, use_area, &self.theme);
 
-                Paragraph::new(Line::from(Span::styled(
-                    "Use Existing",
-                    Style::default().fg(use_fg).add_modifier(Modifier::BOLD),
-                )))
-                .alignment(ratatui::layout::Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(use_border)),
-                )
-                .render(use_area, frame.buffer_mut());
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmUseExistingBranch {
                     cancel_button: cancel_area,
                     use_button: use_area,
@@ -4186,7 +4241,7 @@ impl App {
                     9 + checkbox_spacing + checkbox_height,
                     frame.area(),
                 );
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
 
                 let outer = self.themed_overlay_block("Rename Agent");
                 let inner = outer.inner(area);
@@ -4318,7 +4373,7 @@ impl App {
             } => {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(80, 70, frame.area());
-                Clear.render(popup, frame.buffer_mut());
+                self.clear_overlay_area(frame, popup);
 
                 // Split: content area + 1-line footer hint.
                 let chunks =
@@ -4376,7 +4431,7 @@ impl App {
             PromptState::NameNewAgent { input, .. } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect_exact(60, 8, frame.area());
-                Clear.render(area, frame.buffer_mut());
+                self.clear_overlay_area(frame, area);
 
                 let outer = self.themed_overlay_block("Name New Agent");
                 let inner = outer.inner(area);
@@ -4503,7 +4558,7 @@ impl App {
         };
 
         self.render_dim_overlay(frame);
-        Clear.render(popup, frame.buffer_mut());
+        self.clear_overlay_area(frame, popup);
 
         if let Some(edit_state) = editing {
             // ── Edit view ──
@@ -4710,7 +4765,7 @@ impl App {
     ) {
         self.render_dim_overlay(frame);
         let area = centered_rect(56, 30, frame.area());
-        Clear.render(area, frame.buffer_mut());
+        self.clear_overlay_area(frame, area);
         let outer = self.themed_overlay_block("Delete Macro");
         let inner = outer.inner(area);
         outer.render(area, frame.buffer_mut());
@@ -4755,45 +4810,23 @@ impl App {
             height: 3,
         };
 
-        let (cancel_border, cancel_fg) = if !confirm_selected {
-            (
-                self.theme.button_confirm_border,
-                self.theme.button_active_fg,
-            )
-        } else {
-            (self.theme.border_normal, self.theme.hint_desc_fg)
-        };
-        let (delete_border, delete_fg) = if confirm_selected {
-            (self.theme.button_danger_border, self.theme.button_active_fg)
-        } else {
-            (self.theme.border_normal, self.theme.hint_desc_fg)
-        };
+        Button::new("Cancel")
+            .kind(ButtonKind::Confirm)
+            .state(if !confirm_selected {
+                ButtonState::Focused
+            } else {
+                ButtonState::Normal
+            })
+            .render(frame, cancel_area, &self.theme);
 
-        Paragraph::new(Line::from(Span::styled(
-            "Cancel",
-            Style::default().fg(cancel_fg).add_modifier(Modifier::BOLD),
-        )))
-        .alignment(ratatui::layout::Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_set(border::ROUNDED)
-                .border_style(Style::default().fg(cancel_border)),
-        )
-        .render(cancel_area, frame.buffer_mut());
-
-        Paragraph::new(Line::from(Span::styled(
-            "Delete",
-            Style::default().fg(delete_fg).add_modifier(Modifier::BOLD),
-        )))
-        .alignment(ratatui::layout::Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_set(border::ROUNDED)
-                .border_style(Style::default().fg(delete_border)),
-        )
-        .render(delete_area, frame.buffer_mut());
+        Button::new("Delete")
+            .kind(ButtonKind::Danger)
+            .state(if confirm_selected {
+                ButtonState::Focused
+            } else {
+                ButtonState::Normal
+            })
+            .render(frame, delete_area, &self.theme);
 
         self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteMacro {
             cancel_button: cancel_area,
@@ -4899,6 +4932,14 @@ impl App {
         self.render_dim_overlay(frame);
         let area = centered_rect(96, 94, frame.area());
         Clear.render(area, frame.buffer_mut());
+        // Clear leaves cells at Color::Reset (terminal default). Repaint
+        // with app_bg so the fullscreen agent surface — borders, the
+        // loading card area, the gap above the hint bar — tracks the
+        // active theme instead of falling through to the user's terminal
+        // default.
+        frame
+            .buffer_mut()
+            .set_style(area, Style::default().bg(self.theme.app_bg));
         let title = match self.selected_session() {
             Some(session) => {
                 let provider = capitalize(self.running_provider_for(session).as_str());
@@ -4922,6 +4963,11 @@ impl App {
         self.render_dim_overlay(frame);
         let area = centered_rect(96, 94, frame.area());
         Clear.render(area, frame.buffer_mut());
+        // Same reasoning as render_fullscreen_agent — fill with app_bg so
+        // the fullscreen terminal surface follows the active theme.
+        frame
+            .buffer_mut()
+            .set_style(area, Style::default().bg(self.theme.app_bg));
         let saved = self.session_surface;
         self.session_surface = SessionSurface::Terminal;
         self.render_agent_terminal(frame, area, " Terminal ", true);
@@ -4963,7 +5009,7 @@ impl App {
             area.width,
             total_h,
         );
-        Clear.render(bar_area, frame.buffer_mut());
+        self.clear_overlay_area(frame, bar_area);
 
         // Split into input area (top) and list area (bottom).
         let [input_area, list_area] = Layout::default()
@@ -4973,7 +5019,7 @@ impl App {
 
         // ── Input block (top, with title and hint badges) ──
         let mut bottom_spans = vec![Span::raw(" ")];
-        for (key, desc) in &[("Enter", "paste"), ("Tab", "complete"), ("Esc", "cancel")] {
+        for (key, desc) in &[("Enter", "send"), ("Tab", "complete"), ("Esc", "cancel")] {
             let badge = self.theme.key_badge_default(key);
             bottom_spans.extend(
                 badge
@@ -5055,7 +5101,8 @@ impl App {
         let list_block = Block::default()
             .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(Style::default().fg(self.theme.overlay_border));
+            .border_style(Style::default().fg(self.theme.overlay_border))
+            .style(Style::default().bg(self.theme.overlay_bg));
         let mut list_state = ListState::default();
         if !filtered.is_empty() {
             list_state.select(Some(selected));
@@ -5081,6 +5128,22 @@ impl App {
             .border_style(self.theme.border_style(focused))
     }
 
+    /// Reset `area` to a blank surface and fill it with the modal overlay
+    /// background. Use this in place of a bare `Clear.render(area, ..)` for
+    /// every modal popup so the entire popup — including any strip outside
+    /// the inner `themed_overlay_block` (footer hints, gaps between stacked
+    /// blocks, etc.) — tracks the active theme rather than reading whatever
+    /// `Color::Reset` falls through to in the user's terminal.
+    ///
+    /// Fullscreen surfaces (the agent and terminal fullscreen overlays) want
+    /// `app_bg` instead of `overlay_bg` and stay open-coded.
+    fn clear_overlay_area(&self, frame: &mut Frame, area: Rect) {
+        Clear.render(area, frame.buffer_mut());
+        frame
+            .buffer_mut()
+            .set_style(area, Style::default().bg(self.theme.overlay_bg));
+    }
+
     fn themed_overlay_block<'a>(&self, title: &'a str) -> Block<'a> {
         Block::default()
             .title(Line::from(Span::styled(
@@ -5092,6 +5155,12 @@ impl App {
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
             .border_style(Style::default().fg(self.theme.overlay_border))
+            // Modals are presented after a `Clear.render(..)` which resets the
+            // popup cells to `Color::Reset`. Filling the block with overlay_bg
+            // means the modal interior — borders, surrounding chrome, the gap
+            // around the inner widgets — tracks the active theme instead of
+            // reading terminal-default behind the border ring.
+            .style(Style::default().bg(self.theme.overlay_bg))
     }
 
     fn center_pane_agent_title(&self) -> String {
@@ -5122,7 +5191,7 @@ impl App {
 
         self.render_dim_overlay(frame);
         let popup = centered_rect(85, 78, frame.area());
-        Clear.render(popup, frame.buffer_mut());
+        self.clear_overlay_area(frame, popup);
 
         let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(popup);
         let content_area = chunks[0];
@@ -5332,18 +5401,32 @@ fn xterm256_to_rgb(idx: u8) -> (u8, u8, u8) {
 /// theme's dim color and the background is converted to grayscale, giving
 /// the pane a muted appearance that signals it is read-only.
 ///
-/// `Color::Reset` (no explicit background) is always preserved so cells
-/// without a background never turn black.
-fn pty_cell_colors(fg: Color, bg: Color, is_input: bool, theme: &Theme) -> (Color, Color) {
+/// Resolve the foreground/background a single PTY cell should render with.
+///
+/// The bg is `Option<Color>` to give the caller a way to say "leave the
+/// underlying buffer background alone": the rendering loop only applies bg
+/// when this is `Some`, so `None` lets whatever was already in the buffer
+/// (the frame-wide `app_bg` pre-fill, the dim overlay, the parent block
+/// fill, …) show through.
+///
+/// Interactive mode (fullscreen agent or focused agent/terminal) always
+/// passes the CLI's colors through unchanged so the user's configured
+/// palette renders end-to-end without dux fighting it.
+///
+/// Non-interactive (minimized / read-only) mode dims the foreground to a
+/// single muted shade. Cells the CLI explicitly colored have their
+/// background grayscaled, which is what produces the recognizable "this
+/// pane is read-only" look. Cells the CLI emitted with `Color::Reset` are
+/// returned with `bg = None` so the dim overlay / app surface continues to
+/// show through them — only the solid CLI-painted backgrounds are
+/// grayscaled, not the ambient surface around them.
+fn pty_cell_colors(fg: Color, bg: Color, is_input: bool, theme: &Theme) -> (Color, Option<Color>) {
     if is_input {
-        (fg, bg)
+        (fg, Some(bg))
+    } else if bg == Color::Reset {
+        (theme.overlay_dim_fg, None)
     } else {
-        let dimmed_bg = if bg == Color::Reset {
-            bg
-        } else {
-            to_grayscale(bg)
-        };
-        (theme.overlay_dim_fg, dimmed_bg)
+        (theme.overlay_dim_fg, Some(to_grayscale(bg)))
     }
 }
 
@@ -5566,14 +5649,25 @@ impl App {
             return;
         }
 
+        // Paint the row with the theme's app background first so the
+        // half-block caps blend into a surface that actually changes with
+        // the theme. Without this the caps render on top of whatever
+        // cell colors the agent PTY left behind, which made the pill look
+        // detached on light themes.
+        frame
+            .buffer_mut()
+            .set_style(area, Style::default().bg(self.theme.app_bg));
+
         let bg = match pr.state {
             PrState::Open => self.theme.pr_open_bg,
             PrState::Merged => self.theme.pr_merged_bg,
             PrState::Closed => self.theme.pr_closed_bg,
         };
         let fg = self.theme.pr_banner_fg;
-        // Half-block caps: fg is the pill color, bg is terminal default.
-        let cap_style = Style::default().fg(bg);
+        // Half-block caps: fg is the pill color, bg is the freshly-painted
+        // app surface so the pill arc sits on a theme-driven backdrop
+        // instead of the terminal default.
+        let cap_style = Style::default().fg(bg).bg(self.theme.app_bg);
         // Inner content: white text on colored background.
         let text_style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
         let title_style = Style::default()
@@ -5851,30 +5945,52 @@ mod tests {
         let theme = Theme::default_dark();
         let fg = Color::Rgb(200, 100, 50);
         let bg = Color::Rgb(10, 20, 30);
-        assert_eq!(pty_cell_colors(fg, bg, true, &theme), (fg, bg));
+        assert_eq!(pty_cell_colors(fg, bg, true, &theme), (fg, Some(bg)));
     }
 
     #[test]
-    fn pty_cell_colors_dims_in_non_interactive_mode() {
+    fn pty_cell_colors_preserves_default_bg_in_interactive_mode() {
+        // Color::Reset must pass through so the agent/terminal pane shows
+        // whatever the user's CLI configured rather than fighting it with
+        // a dux-themed surface.
+        let theme = Theme::default_dark();
+        let fg = Color::Rgb(200, 100, 50);
+        assert_eq!(
+            pty_cell_colors(fg, Color::Reset, true, &theme),
+            (fg, Some(Color::Reset))
+        );
+    }
+
+    #[test]
+    fn pty_cell_colors_grayscales_solid_bg_in_non_interactive_mode() {
         let theme = Theme::default_dark();
         let fg = Color::Rgb(200, 100, 50);
         let bg = Color::Rgb(10, 20, 30);
         let (result_fg, result_bg) = pty_cell_colors(fg, bg, false, &theme);
         assert_eq!(result_fg, theme.overlay_dim_fg);
-        // Background should be the grayscale equivalent, not the fixed dim color.
-        assert_eq!(result_bg, to_grayscale(bg));
+        // Solid CLI-painted backgrounds get grayscaled, marking them as
+        // read-only.
+        assert_eq!(result_bg, Some(to_grayscale(bg)));
         // Sanity: the grayscale value is a uniform grey, not near-black.
         let expected_l = (0.299 * 10.0_f64 + 0.587 * 20.0 + 0.114 * 30.0).round() as u8;
-        assert_eq!(result_bg, Color::Rgb(expected_l, expected_l, expected_l));
+        assert_eq!(
+            result_bg,
+            Some(Color::Rgb(expected_l, expected_l, expected_l))
+        );
     }
 
     #[test]
-    fn pty_cell_colors_preserves_default_bg_in_non_interactive_mode() {
+    fn pty_cell_colors_lets_default_bg_show_through_in_non_interactive_mode() {
         let theme = Theme::default_dark();
         let fg = Color::Rgb(200, 100, 50);
+        // Cells the CLI emitted with no explicit background return `None`
+        // for the bg so the rendering loop leaves the underlying buffer
+        // bg untouched — that lets the dim overlay / app surface show
+        // through the minimized PTY view, only grayscaling the cells the
+        // CLI actually painted.
         assert_eq!(
             pty_cell_colors(fg, Color::Reset, false, &theme),
-            (theme.overlay_dim_fg, Color::Reset)
+            (theme.overlay_dim_fg, None)
         );
     }
 

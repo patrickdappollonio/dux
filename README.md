@@ -85,7 +85,7 @@ You can also set a default per-project in the config file, which wins over the g
 
 ### Macros
 
-Tired of typing the same prompt over and over? Turn it into a macro. Macros are reusable text snippets you trigger from a quick-select bar. Search by name, hit enter, and the text gets pasted into the active pane.
+Tired of typing the same prompt over and over? Turn it into a macro. Macros are reusable text snippets you trigger from a quick-select bar. Search by name, hit enter, and the text gets sent to the active pane.
 
 ```toml
 [macros]
