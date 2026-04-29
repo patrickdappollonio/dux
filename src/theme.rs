@@ -21,6 +21,13 @@ pub const DEFAULT_THEME_NAME: &str = "dux_dark";
 /// path never depends on a file on disk.
 const DUX_DARK_TOML: &str = include_str!("../assets/themes/dux_dark.toml");
 
+const GITHUB_PR_OPEN_BG: OpalineColor = OpalineColor::new(35, 134, 54);
+const GITHUB_PR_MERGED_BG: OpalineColor = OpalineColor::new(130, 80, 223);
+const GITHUB_PR_CLOSED_BG: OpalineColor = OpalineColor::new(110, 54, 48);
+const GITHUB_PR_OPEN_LABEL: OpalineColor = OpalineColor::new(0, 255, 0);
+const GITHUB_PR_MERGED_LABEL: OpalineColor = OpalineColor::new(170, 100, 220);
+const GITHUB_PR_CLOSED_LABEL: OpalineColor = OpalineColor::new(140, 80, 80);
+
 pub struct Theme {
     /// Base surface color for the dux app — used as a frame-wide pre-fill so
     /// every cell that no widget explicitly paints (gutters, modal interiors,
@@ -396,19 +403,17 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
     theme.register_default_token("dux.tip_text_fg", text_dim);
     theme.register_default_token("dux.tip_highlight_fg", accent_secondary);
 
-    // Pull request banners. The pill foreground is intentionally pinned to
-    // pure white regardless of the theme: pill backgrounds are saturated
-    // semantic colors (success/accent/error), so white reads cleanly across
-    // both dark and light themes — and the pill is meant to feel like a
-    // status badge that stays consistent rather than chameleoning with the
-    // surrounding chrome.
-    theme.register_default_token("dux.pr_open_bg", success);
-    theme.register_default_token("dux.pr_merged_bg", accent_secondary);
-    theme.register_default_token("dux.pr_closed_bg", error);
+    // Pull request colors default to GitHub's PR state palette instead of the
+    // active theme's semantic colors. User themes may still override these
+    // `dux.pr_*` tokens explicitly, but generic themes should not accidentally
+    // repaint GitHub-specific open/closed/merged statuses.
+    theme.register_default_token("dux.pr_open_bg", GITHUB_PR_OPEN_BG);
+    theme.register_default_token("dux.pr_merged_bg", GITHUB_PR_MERGED_BG);
+    theme.register_default_token("dux.pr_closed_bg", GITHUB_PR_CLOSED_BG);
     theme.register_default_token("dux.pr_banner_fg", OpalineColor::WHITE);
-    theme.register_default_token("dux.pr_open_label", success);
-    theme.register_default_token("dux.pr_merged_label", accent_secondary);
-    theme.register_default_token("dux.pr_closed_label", error);
+    theme.register_default_token("dux.pr_open_label", GITHUB_PR_OPEN_LABEL);
+    theme.register_default_token("dux.pr_merged_label", GITHUB_PR_MERGED_LABEL);
+    theme.register_default_token("dux.pr_closed_label", GITHUB_PR_CLOSED_LABEL);
 }
 
 /// Convert an [`OpalineColor`] (always RGB) into a [`ratatui::style::Color`],
@@ -869,5 +874,91 @@ mod tests {
         // FALLBACK gray, so this is a real assertion that derivation worked.
         assert_ne!(theme.border_focused, Color::Rgb(128, 128, 128));
         assert_ne!(theme.title_focused, Color::Rgb(128, 128, 128));
+    }
+
+    #[test]
+    fn pr_colors_default_to_github_palette_not_theme_semantics() {
+        let theme = load_from_str(
+            r##"
+[meta]
+name = "Loud Semantic Theme"
+variant = "dark"
+
+[palette]
+base = "#010203"
+text = "#111111"
+muted = "#222222"
+dim = "#333333"
+panel = "#444444"
+highlight = "#555555"
+active = "#666666"
+accent = "#123456"
+accent_secondary = "#abcdef"
+border = "#999999"
+success = "#010101"
+error = "#020202"
+warning = "#030303"
+info = "#040404"
+
+[tokens]
+"text.primary" = "text"
+"text.muted" = "muted"
+"text.dim" = "dim"
+"bg.base" = "base"
+"bg.panel" = "panel"
+"bg.highlight" = "highlight"
+"bg.active" = "active"
+"accent.primary" = "accent"
+"accent.secondary" = "accent_secondary"
+"border.focused" = "border"
+"border.unfocused" = "dim"
+success = "success"
+error = "error"
+warning = "warning"
+info = "info"
+"##,
+        )
+        .expect("theme must parse");
+
+        assert_eq!(theme.pr_open_bg, Color::Rgb(35, 134, 54));
+        assert_eq!(theme.pr_merged_bg, Color::Rgb(130, 80, 223));
+        assert_eq!(theme.pr_closed_bg, Color::Rgb(110, 54, 48));
+        assert_eq!(theme.pr_banner_fg, Color::White);
+        assert_eq!(theme.pr_open_label, Color::Green);
+        assert_eq!(theme.pr_merged_label, Color::Rgb(170, 100, 220));
+        assert_eq!(theme.pr_closed_label, Color::Rgb(140, 80, 80));
+
+        assert_ne!(theme.pr_open_bg, Color::Rgb(1, 1, 1));
+        assert_ne!(theme.pr_merged_bg, Color::Rgb(171, 205, 239));
+        assert_ne!(theme.pr_closed_bg, Color::Rgb(2, 2, 2));
+    }
+
+    #[test]
+    fn explicit_pr_theme_tokens_override_github_defaults() {
+        let theme = load_from_str(
+            r##"
+[meta]
+name = "Custom PR Theme"
+variant = "dark"
+
+[tokens]
+"dux.pr_open_bg" = "#010203"
+"dux.pr_merged_bg" = "#040506"
+"dux.pr_closed_bg" = "#070809"
+"dux.pr_banner_fg" = "#101112"
+"dux.pr_open_label" = "#131415"
+"dux.pr_merged_label" = "#161718"
+"dux.pr_closed_label" = "#192021"
+"##,
+        )
+        .expect("theme must parse");
+
+        assert_eq!(theme.pr_open_bg, Color::Rgb(1, 2, 3));
+        assert_eq!(theme.pr_merged_bg, Color::Rgb(4, 5, 6));
+        assert_eq!(theme.pr_closed_bg, Color::Rgb(7, 8, 9));
+        assert_eq!(theme.pr_banner_fg, Color::Rgb(16, 17, 18));
+        assert_eq!(theme.pr_open_label, Color::Rgb(19, 20, 21));
+        assert_eq!(theme.pr_merged_label, Color::Rgb(22, 23, 24));
+        assert_eq!(theme.pr_closed_label, Color::Rgb(25, 32, 33));
     }
 }
