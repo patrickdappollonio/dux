@@ -1,12 +1,14 @@
 use std::collections::HashMap;
-use std::fs;
-use std::os::unix::fs::symlink;
+use std::fs::{self, OpenOptions};
+use std::io;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
 use content_inspector::{ContentType, inspect};
 
+use crate::logger;
 use crate::model::ChangedFile;
 
 /// Where a branch was found when checking for its existence.
@@ -564,15 +566,27 @@ fn parse_status_porcelain_z(raw: &[u8]) -> Vec<StatusEntry> {
 
         let index_status = record[0] as char;
         let worktree_status = record[1] as char;
-        let path = String::from_utf8_lossy(&record[3..]).to_string();
-
-        if path.is_empty() {
-            continue;
+        // Renames consume an extra NUL-delimited "old path" record. Advance
+        // past it unconditionally so the next record is not misparsed as a
+        // top-level status, even when we end up dropping this entry below.
+        let is_rename = matches!(index_status, 'R' | 'C') || matches!(worktree_status, 'R' | 'C');
+        if is_rename {
+            records.next();
         }
 
-        if matches!(index_status, 'R' | 'C') || matches!(worktree_status, 'R' | 'C') {
-            let _ = records.next();
-        }
+        // Strict UTF-8: lossy conversion silently substitutes U+FFFD for any
+        // non-UTF-8 bytes in a path. The resulting "string" is then used as
+        // an identifier for staging/discarding, which would no longer match
+        // the real on-disk path. Skip the entry instead so the user sees one
+        // less file rather than a mislabeled one that fails to act on.
+        let path = match std::str::from_utf8(&record[3..]) {
+            Ok(s) if !s.is_empty() => s.to_string(),
+            Ok(_) => continue,
+            Err(_) => {
+                logger::debug("git status: skipping entry with non-UTF-8 path");
+                continue;
+            }
+        };
 
         entries.push(StatusEntry {
             index_status,
@@ -600,13 +614,20 @@ where
     let stat = parse_numstat_line(std::str::from_utf8(record).ok()?)?;
     let path_bytes = &record[second_tab + 1..];
 
+    // Strict UTF-8 for the same reason as parse_status_porcelain_z: the path
+    // string is the lookup key into the status map, so a U+FFFD-substituted
+    // string would silently fail to associate stats with the right entry.
     if !path_bytes.is_empty() {
-        return Some((String::from_utf8_lossy(path_bytes).to_string(), stat));
+        let path = std::str::from_utf8(path_bytes).ok()?.to_string();
+        return Some((path, stat));
     }
 
+    // Rename record: two trailing NUL-delimited paths follow. Consume both
+    // even on UTF-8 failure so the iterator stays aligned for the next record.
     let _old_path = records.next()?;
     let new_path = records.next()?;
-    Some((String::from_utf8_lossy(new_path).to_string(), stat))
+    let path = std::str::from_utf8(new_path).ok()?.to_string();
+    Some((path, stat))
 }
 
 pub fn stage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
@@ -912,29 +933,67 @@ fn sync_entry(source: &Path, destination: &Path) -> Result<()> {
         return Ok(());
     }
 
+    let source_mode = metadata.permissions().mode();
+
     if file_type.is_dir() {
-        if destination.exists() {
-            let destination_meta = fs::symlink_metadata(destination)?;
-            if !destination_meta.file_type().is_dir() || destination_meta.file_type().is_symlink() {
+        // If something already lives at the destination but isn't a directory
+        // (or is a symlink — which `Path::exists()` follows and would lie
+        // about), tear it down first so we don't sync into the wrong target.
+        if let Ok(destination_meta) = fs::symlink_metadata(destination) {
+            let dest_type = destination_meta.file_type();
+            if !dest_type.is_dir() || dest_type.is_symlink() {
                 remove_path(destination)?;
             }
         }
-        if !destination.exists() {
-            fs::create_dir(destination)?;
+
+        // Create with the source's mode in a single syscall instead of
+        // creating with the umask default and fixing it up afterwards. The
+        // post-creation `set_permissions` race is exactly the "delayed
+        // permission" pitfall: between `mkdir` and `chmod`, the directory
+        // briefly exists with whatever the user's umask permitted.
+        match fs::DirBuilder::new().mode(source_mode).create(destination) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                // Pre-existing directory — align mode with source explicitly.
+                fs::set_permissions(destination, metadata.permissions())?;
+            }
+            Err(err) => return Err(err.into()),
         }
         sync_directory_contents(source, destination)?;
-        fs::set_permissions(destination, metadata.permissions())?;
         return Ok(());
     }
 
-    if destination.exists() {
-        let destination_meta = fs::symlink_metadata(destination)?;
-        if destination_meta.file_type().is_dir() || destination_meta.file_type().is_symlink() {
+    // Regular file: copy contents through an explicitly-moded handle so the
+    // destination never exists with default umask permissions, and so a
+    // symlink swapped in between checks can't redirect the write.
+    if let Ok(destination_meta) = fs::symlink_metadata(destination) {
+        let dest_type = destination_meta.file_type();
+        if dest_type.is_dir() || dest_type.is_symlink() {
             remove_path(destination)?;
         }
     }
-    fs::copy(source, destination)?;
-    fs::set_permissions(destination, metadata.permissions())?;
+
+    let mut input = fs::File::open(source)?;
+    let mut output = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(source_mode)
+        .open(destination)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+            // Destination is a regular file that survived the cleanup pass
+            // above. Truncate it in place and realign permissions.
+            let file = OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(destination)?;
+            fs::set_permissions(destination, metadata.permissions())?;
+            file
+        }
+        Err(err) => return Err(err.into()),
+    };
+    io::copy(&mut input, &mut output)?;
     Ok(())
 }
 
@@ -1133,6 +1192,44 @@ mod tests {
         assert_eq!(
             fs::read_to_string(destination.join(".git")).unwrap(),
             destination_git_before
+        );
+    }
+
+    #[test]
+    fn mirror_worktree_contents_propagates_source_file_modes() {
+        // Assert that file/dir modes match the source after mirroring. The
+        // previous implementation created with umask defaults and fixed up
+        // permissions afterwards, leaving a brief window where the entry was
+        // visible with the wrong mode. The current implementation creates
+        // with the mode in a single syscall (DirBuilderExt / OpenOptionsExt).
+        let repo = init_test_repo();
+
+        let source = add_worktree(repo.path(), "mode-source");
+        let destination = add_worktree(repo.path(), "mode-destination");
+
+        let secret = source.join("secret.txt");
+        fs::write(&secret, "shh\n").unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let private_dir = source.join("private");
+        fs::create_dir(&private_dir).unwrap();
+        fs::set_permissions(&private_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(private_dir.join("inner.txt"), "inside\n").unwrap();
+
+        mirror_worktree_contents(&source, &destination).unwrap();
+
+        let dest_secret = fs::metadata(destination.join("secret.txt")).unwrap();
+        assert_eq!(
+            dest_secret.permissions().mode() & 0o777,
+            0o600,
+            "file mode should match source after sync_entry"
+        );
+
+        let dest_dir = fs::metadata(destination.join("private")).unwrap();
+        assert_eq!(
+            dest_dir.permissions().mode() & 0o777,
+            0o700,
+            "directory mode should match source after sync_entry"
         );
     }
 
@@ -1419,6 +1516,40 @@ mod tests {
     fn parse_numstat_handles_binary_records() {
         let stats = parse_numstat(b"-\t-\tbinary.bin\0");
         assert!(matches!(stats.get("binary.bin"), Some(DiffStat::Binary)));
+    }
+
+    #[test]
+    fn parse_status_porcelain_z_skips_non_utf8_paths() {
+        // 0xFF is invalid as a UTF-8 start byte. Lossy conversion would
+        // produce a U+FFFD-substituted string that no longer matches the
+        // real on-disk file when used as a stage/discard identifier.
+        let raw: &[u8] = b"M  good.txt\0?? \xFFbad.txt\0M  also-good.txt\0";
+        let entries = parse_status_porcelain_z(raw);
+
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, vec!["good.txt", "also-good.txt"]);
+    }
+
+    #[test]
+    fn parse_status_porcelain_z_keeps_iterator_aligned_after_invalid_rename() {
+        // A rename whose destination path is not UTF-8 must still consume
+        // its trailing source-path record so the next status entry parses
+        // at the correct position.
+        let raw: &[u8] = b"R  \xFFnew.txt\0old.txt\0M  next.txt\0";
+        let entries = parse_status_porcelain_z(raw);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "next.txt");
+        assert_eq!(entries[0].index_status, 'M');
+    }
+
+    #[test]
+    fn parse_numstat_skips_non_utf8_paths() {
+        // Path bytes after the second tab include 0xFF which is invalid UTF-8.
+        // Without strict parsing, the lookup key would be a corrupted string
+        // that would never match downstream `file.path` comparisons.
+        let stats = parse_numstat(b"1\t2\t\xFFbad.txt\0");
+        assert!(stats.is_empty());
     }
 
     #[test]
