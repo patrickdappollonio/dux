@@ -274,6 +274,28 @@ fn wrapped_line_count(lines: &[Line<'_>], width: u16, trim: bool) -> u16 {
     total
 }
 
+fn macro_edit_text_inner_area(popup: Rect) -> Rect {
+    let outer_inner = Block::bordered().inner(popup);
+    let [_, bordered_area, _] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .areas(outer_inner);
+
+    Block::bordered().inner(bordered_area)
+}
+
+fn sync_macro_text_input_layout(input: &mut TextInput, popup: Rect) {
+    let text_inner = macro_edit_text_inner_area(popup);
+    let wrap_w = text_inner.width.saturating_sub(1) as usize;
+    input.set_display_width(if wrap_w > 0 { Some(wrap_w) } else { None });
+    input.set_visible_lines(text_inner.height as usize);
+    input.ensure_cursor_visible();
+}
+
 impl App {
     fn render_overlay_checkbox(
         &self,
@@ -4590,35 +4612,15 @@ impl App {
         let popup = centered_rect_exact(64, 20, frame.area());
         {
             // Temporarily borrow prompt mutably to set the text input's
-            // display width to match the available inner area.
+            // viewport to match the available inner area after all borders,
+            // labels, and hint rows have been removed.
             if let PromptState::EditMacros {
                 editing: Some(edit_state),
                 ..
             } = &mut self.prompt
                 && edit_state.stage == MacroEditStage::EditText
             {
-                // Replicate the layout chain to compute actual text width:
-                // popup → outer border inner → layout (label + text + hints)
-                // → text border inner → minus leading space(1).
-                let outer_block = Block::bordered();
-                let outer_inner = outer_block.inner(popup);
-                let text_bordered = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(1),
-                        Constraint::Min(3),
-                        Constraint::Length(1),
-                    ])
-                    .split(outer_inner)[1];
-                let inner_block = Block::bordered();
-                let text_inner = inner_block.inner(text_bordered);
-                // Subtract 1 for the leading space prefix on each rendered line.
-                let wrap_w = text_inner.width.saturating_sub(1) as usize;
-                edit_state.text_input.set_display_width(if wrap_w > 0 {
-                    Some(wrap_w)
-                } else {
-                    None
-                });
+                sync_macro_text_input_layout(&mut edit_state.text_input, popup);
             }
         }
 
@@ -5977,6 +5979,38 @@ mod tests {
     fn centered_rect_exact_clamps_to_available_area() {
         let area = Rect::new(0, 0, 40, 6);
         assert_eq!(centered_rect_exact(56, 9, area), area);
+    }
+
+    #[test]
+    fn macro_edit_text_inner_area_accounts_for_borders_and_chrome() {
+        let popup = Rect::new(0, 0, 64, 20);
+
+        assert_eq!(macro_edit_text_inner_area(popup), Rect::new(2, 3, 60, 14));
+    }
+
+    #[test]
+    fn macro_text_input_layout_uses_drawable_inner_height() {
+        let popup = Rect::new(0, 0, 64, 20);
+        let text = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut input = TextInput::with_text(text).with_multiline(8);
+
+        assert_eq!(input.visible_lines().len(), 8);
+
+        sync_macro_text_input_layout(&mut input, popup);
+
+        assert_eq!(input.visible_lines().len(), 14);
+        assert_eq!(input.scroll_offset(), 6);
+        assert_eq!(
+            input.visible_lines().first().map(String::as_str),
+            Some("line 6")
+        );
+        assert_eq!(
+            input.visible_lines().last().map(String::as_str),
+            Some("line 19")
+        );
     }
 
     #[test]
