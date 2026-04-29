@@ -1,10 +1,13 @@
 # dux-dark — the default dux theme.
 #
 # Hand-ported from the original Theme::default_dark() palette so users see the
-# exact same colors after the Opaline integration. Every color used by the dux
-# UI is defined as a `dux.<field>` token below; user-authored themes can either
+# exact same colors after the Opaline integration. Most colors used by the dux
+# UI are defined as `dux.<field>` tokens below; user-authored themes can either
 # define the same tokens explicitly, or rely on the built-in fallback that
 # derives them from Opaline's standard semantic tokens (text.*, accent.*, etc.).
+# GitHub PR colors intentionally are not listed here: missing `dux.pr_*` tokens
+# fall back to fixed GitHub open/closed/merged colors instead of the active
+# theme palette. User-authored themes may still define those tokens explicitly.
 #
 # Named ratatui colors (Cyan, Yellow, Red, Green, Magenta, White, Black,
 # DarkGray) have been expanded to their canonical 24-bit RGB. On most modern
@@ -136,12 +139,3 @@ ansi_darkgray = "#808080"
 "dux.tip_pill_bg"          = "#463278"
 "dux.tip_text_fg"          = "#5a5a5a"
 "dux.tip_highlight_fg"     = "#007878"
-
-# ── Pull request banners ─────────────────────────────────────────────
-"dux.pr_open_bg"           = "#238636"
-"dux.pr_merged_bg"         = "#8250df"
-"dux.pr_closed_bg"         = "#6e3630"
-"dux.pr_banner_fg"         = "ansi_white"
-"dux.pr_open_label"        = "ansi_green"
-"dux.pr_merged_label"      = "#aa64dc"
-"dux.pr_closed_label"      = "#8c5050"
