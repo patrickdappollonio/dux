@@ -358,7 +358,7 @@ impl TextInput {
     }
 
     /// Adjust scroll offset so the cursor's visual row is within the visible window.
-    fn ensure_cursor_visible(&mut self) {
+    pub(crate) fn ensure_cursor_visible(&mut self) {
         let Some(m) = &mut self.multiline else {
             return;
         };
