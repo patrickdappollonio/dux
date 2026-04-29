@@ -4467,9 +4467,10 @@ impl App {
                     .height
                     .saturating_add(1);
                 let checkbox_spacing = 1;
+                let footer_spacing = 1;
                 let area = centered_rect_exact(
                     dialog_width,
-                    8 + checkbox_spacing + checkbox_height,
+                    8 + checkbox_spacing + checkbox_height + footer_spacing,
                     frame.area(),
                 );
                 self.clear_overlay_area(frame, area);
@@ -4478,13 +4479,14 @@ impl App {
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
 
-                let [label_area, input_area, _, checkbox_area, hint_area] = Layout::default()
+                let [label_area, input_area, _, checkbox_area, _, hint_area] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(1),
                         Constraint::Length(3),
                         Constraint::Length(checkbox_spacing),
                         Constraint::Length(checkbox_height),
+                        Constraint::Length(footer_spacing),
                         Constraint::Min(1),
                     ])
                     .areas(inner);
