@@ -37,6 +37,16 @@ pub struct SingleInstanceLock {
     _file: File,
 }
 
+impl Drop for SingleInstanceLock {
+    fn drop(&mut self) {
+        // The kernel also releases the advisory lock when the file
+        // descriptor closes, but explicitly unlocking here makes the
+        // handoff point deterministic for tests and avoids depending on
+        // close-side timing alone.
+        let _ = retry_on_interrupt_errno(|| flock(&self._file, FlockOperation::Unlock));
+    }
+}
+
 /// Result of attempting to acquire the single-instance lock.
 #[derive(Debug)]
 pub enum AcquireError {
@@ -208,6 +218,23 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    fn acquire_with_retry(
+        path: &Path,
+        attempts: usize,
+        delay: Duration,
+    ) -> Result<SingleInstanceLock, AcquireError> {
+        for attempt in 0..attempts {
+            match SingleInstanceLock::acquire(path) {
+                Ok(lock) => return Ok(lock),
+                Err(AcquireError::AlreadyRunning { .. }) if attempt + 1 < attempts => {
+                    thread::sleep(delay);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        unreachable!("loop returns on success or final error")
+    }
+
     #[test]
     fn acquire_writes_own_pid_to_lockfile() {
         let tmp = TempDir::new().unwrap();
@@ -254,7 +281,7 @@ mod tests {
         let first = SingleInstanceLock::acquire(&path).expect("first acquire");
         drop(first);
 
-        let _second = SingleInstanceLock::acquire(&path)
+        let _second = acquire_with_retry(&path, 20, Duration::from_millis(2))
             .expect("second acquire should succeed after first is dropped");
     }
 

@@ -126,6 +126,12 @@ pub struct App {
     pub(crate) overlay_layout: OverlayMouseLayoutState,
     pub(crate) mouse_drag: Option<ResizeDragState>,
     pub(crate) last_mouse_click: Option<RecentMouseClick>,
+    /// Tracks an in-flight modal-button press: which button received
+    /// mouse-down and whether the cursor is still inside it. Set on
+    /// `MouseEventKind::Down(Left)` over a button, updated on `Drag`,
+    /// cleared on `Up` (firing the button's action only when the cursor
+    /// is still inside) and on any keystroke or modal-close event.
+    pub(crate) pressed_button: Option<components::PressedButton>,
     pub(crate) interactive_patterns: InteractiveBytePatterns,
     pub(crate) raw_input_buf: Vec<u8>,
     /// Separate buffer for scanning ExitInteractive during the loading phase.
@@ -833,6 +839,11 @@ pub(crate) enum OverlayMouseLayout {
         items: usize,
         offset: usize,
     },
+    ResourceMonitor {
+        list: Rect,
+        items: usize,
+        offset: usize,
+    },
     KillRunning {
         input: Option<Rect>,
         list: Rect,
@@ -1142,6 +1153,7 @@ impl App {
             overlay_layout: OverlayMouseLayoutState::default(),
             mouse_drag: None,
             last_mouse_click: None,
+            pressed_button: None,
             interactive_patterns,
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),

@@ -1,5 +1,6 @@
 use super::components::{
-    Button, ButtonKind, ButtonState, Checkbox, CheckboxState, shared_button_width,
+    Button, ButtonKind, ButtonPressedTarget, Checkbox, CheckboxState, button_state_for,
+    shared_button_width,
 };
 use super::*;
 
@@ -2678,24 +2679,22 @@ impl App {
 
                 Button::new("Cancel")
                     .kind(ButtonKind::Confirm)
-                    .state(
-                        if matches!(prompt.focus, ChangeAgentProviderFocus::Cancel) {
-                            ButtonState::Focused
-                        } else {
-                            ButtonState::Normal
-                        },
-                    )
+                    .state(button_state_for(
+                        ButtonPressedTarget::ChangeAgentProviderCancel,
+                        self.pressed_button,
+                        matches!(prompt.focus, ChangeAgentProviderFocus::Cancel),
+                        true,
+                    ))
                     .render(frame, cancel_area, &self.theme);
 
                 Button::new("Use Provider")
                     .kind(ButtonKind::Confirm)
-                    .state(if !apply_enabled {
-                        ButtonState::Disabled
-                    } else if matches!(prompt.focus, ChangeAgentProviderFocus::Apply) {
-                        ButtonState::Focused
-                    } else {
-                        ButtonState::Normal
-                    })
+                    .state(button_state_for(
+                        ButtonPressedTarget::ChangeAgentProviderApply,
+                        self.pressed_button,
+                        matches!(prompt.focus, ChangeAgentProviderFocus::Apply),
+                        apply_enabled,
+                    ))
                     .render(frame, apply_area, &self.theme);
 
                 self.overlay_layout.active = OverlayMouseLayout::ChangeAgentProvider {
@@ -2859,24 +2858,22 @@ impl App {
 
                 Button::new("Cancel")
                     .kind(ButtonKind::Confirm)
-                    .state(
-                        if matches!(prompt.focus, ChangeDefaultProviderFocus::Cancel) {
-                            ButtonState::Focused
-                        } else {
-                            ButtonState::Normal
-                        },
-                    )
+                    .state(button_state_for(
+                        ButtonPressedTarget::ChangeDefaultProviderCancel,
+                        self.pressed_button,
+                        matches!(prompt.focus, ChangeDefaultProviderFocus::Cancel),
+                        true,
+                    ))
                     .render(frame, cancel_area, &self.theme);
 
                 Button::new("Set Default")
                     .kind(ButtonKind::Confirm)
-                    .state(if !apply_enabled {
-                        ButtonState::Disabled
-                    } else if matches!(prompt.focus, ChangeDefaultProviderFocus::Apply) {
-                        ButtonState::Focused
-                    } else {
-                        ButtonState::Normal
-                    })
+                    .state(button_state_for(
+                        ButtonPressedTarget::ChangeDefaultProviderApply,
+                        self.pressed_button,
+                        matches!(prompt.focus, ChangeDefaultProviderFocus::Apply),
+                        apply_enabled,
+                    ))
                     .render(frame, apply_area, &self.theme);
 
                 self.overlay_layout.active = OverlayMouseLayout::ChangeDefaultProvider {
@@ -3381,13 +3378,16 @@ impl App {
                     } else {
                         ButtonKind::Danger
                     };
-                    let state = if !enabled {
-                        ButtonState::Disabled
-                    } else if focused {
-                        ButtonState::Focused
-                    } else {
-                        ButtonState::Normal
+                    let press_target = match action {
+                        KillRunningFooterAction::Cancel => ButtonPressedTarget::RuntimeKillCancel,
+                        KillRunningFooterAction::Hovered => ButtonPressedTarget::RuntimeKillHovered,
+                        KillRunningFooterAction::Selected => {
+                            ButtonPressedTarget::RuntimeKillSelected
+                        }
+                        KillRunningFooterAction::Visible => ButtonPressedTarget::RuntimeKillVisible,
                     };
+                    let state =
+                        button_state_for(press_target, self.pressed_button, focused, enabled);
                     Button::new(action.button_label())
                         .kind(kind)
                         .state(state)
@@ -3500,20 +3500,22 @@ impl App {
 
                 Button::new("Cancel")
                     .kind(ButtonKind::Confirm)
-                    .state(if !confirm_prompt.confirm_selected {
-                        ButtonState::Focused
-                    } else {
-                        ButtonState::Normal
-                    })
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmKillCancel,
+                        self.pressed_button,
+                        !confirm_prompt.confirm_selected,
+                        true,
+                    ))
                     .render(frame, cancel_area, &self.theme);
 
                 Button::new("Kill")
                     .kind(ButtonKind::Danger)
-                    .state(if confirm_prompt.confirm_selected {
-                        ButtonState::Focused
-                    } else {
-                        ButtonState::Normal
-                    })
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmKillConfirm,
+                        self.pressed_button,
+                        confirm_prompt.confirm_selected,
+                        true,
+                    ))
                     .render(frame, kill_area, &self.theme);
 
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmKillRunning {
@@ -3655,20 +3657,22 @@ impl App {
 
                 Button::new("Cancel")
                     .kind(ButtonKind::Confirm)
-                    .state(if *focus == DeleteAgentFocus::Cancel {
-                        ButtonState::Focused
-                    } else {
-                        ButtonState::Normal
-                    })
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmDeleteCancel,
+                        self.pressed_button,
+                        *focus == DeleteAgentFocus::Cancel,
+                        true,
+                    ))
                     .render(frame, cancel_area, &self.theme);
 
                 Button::new("Delete")
                     .kind(ButtonKind::Danger)
-                    .state(if *focus == DeleteAgentFocus::Delete {
-                        ButtonState::Focused
-                    } else {
-                        ButtonState::Normal
-                    })
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmDeleteConfirm,
+                        self.pressed_button,
+                        *focus == DeleteAgentFocus::Delete,
+                        true,
+                    ))
                     .render(frame, delete_area, &self.theme);
 
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
@@ -3738,20 +3742,22 @@ impl App {
 
                 Button::new("Cancel")
                     .kind(ButtonKind::Confirm)
-                    .state(if !confirm_selected {
-                        ButtonState::Focused
-                    } else {
-                        ButtonState::Normal
-                    })
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmDeleteTerminalCancel,
+                        self.pressed_button,
+                        !confirm_selected,
+                        true,
+                    ))
                     .render(frame, cancel_area, &self.theme);
 
                 Button::new("Delete")
                     .kind(ButtonKind::Danger)
-                    .state(if *confirm_selected {
-                        ButtonState::Focused
-                    } else {
-                        ButtonState::Normal
-                    })
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmDeleteTerminalConfirm,
+                        self.pressed_button,
+                        *confirm_selected,
+                        true,
+                    ))
                     .render(frame, delete_area, &self.theme);
 
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteTerminal {
@@ -3827,20 +3833,22 @@ impl App {
 
                 Button::new("Cancel")
                     .kind(ButtonKind::Confirm)
-                    .state(if !confirm_selected {
-                        ButtonState::Focused
-                    } else {
-                        ButtonState::Normal
-                    })
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmQuitCancel,
+                        self.pressed_button,
+                        !confirm_selected,
+                        true,
+                    ))
                     .render(frame, cancel_area, &self.theme);
 
                 Button::new("Quit")
                     .kind(ButtonKind::Danger)
-                    .state(if *confirm_selected {
-                        ButtonState::Focused
-                    } else {
-                        ButtonState::Normal
-                    })
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmQuitConfirm,
+                        self.pressed_button,
+                        *confirm_selected,
+                        true,
+                    ))
                     .render(frame, quit_area, &self.theme);
 
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmQuit {
@@ -3909,20 +3917,22 @@ impl App {
 
                 Button::new("Cancel")
                     .kind(ButtonKind::Confirm)
-                    .state(if !confirm_selected {
-                        ButtonState::Focused
-                    } else {
-                        ButtonState::Normal
-                    })
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmDiscardCancel,
+                        self.pressed_button,
+                        !confirm_selected,
+                        true,
+                    ))
                     .render(frame, cancel_area, &self.theme);
 
                 Button::new("Discard")
                     .kind(ButtonKind::Danger)
-                    .state(if *confirm_selected {
-                        ButtonState::Focused
-                    } else {
-                        ButtonState::Normal
-                    })
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmDiscardConfirm,
+                        self.pressed_button,
+                        *confirm_selected,
+                        true,
+                    ))
                     .render(frame, discard_area, &self.theme);
 
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmDiscardFile {
@@ -4101,20 +4111,22 @@ impl App {
 
                 Button::new("Cancel")
                     .kind(ButtonKind::Confirm)
-                    .state(if *focus == ConfirmNonDefaultBranchFocus::Cancel {
-                        ButtonState::Focused
-                    } else {
-                        ButtonState::Normal
-                    })
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmNonDefaultBranchCancel,
+                        self.pressed_button,
+                        *focus == ConfirmNonDefaultBranchFocus::Cancel,
+                        true,
+                    ))
                     .render(frame, cancel_area, &self.theme);
 
                 Button::new(add_label)
                     .kind(ButtonKind::Danger)
-                    .state(if *focus == ConfirmNonDefaultBranchFocus::Add {
-                        ButtonState::Focused
-                    } else {
-                        ButtonState::Normal
-                    })
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmNonDefaultBranchAdd,
+                        self.pressed_button,
+                        *focus == ConfirmNonDefaultBranchFocus::Add,
+                        true,
+                    ))
                     .render(frame, add_area, &self.theme);
 
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmNonDefaultBranch {
@@ -4193,22 +4205,24 @@ impl App {
 
                 Button::new("Cancel")
                     .kind(ButtonKind::Confirm)
-                    .state(if !confirm_selected {
-                        ButtonState::Focused
-                    } else {
-                        ButtonState::Normal
-                    })
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmUseExistingBranchCancel,
+                        self.pressed_button,
+                        !confirm_selected,
+                        true,
+                    ))
                     .render(frame, cancel_area, &self.theme);
 
                 // "Use Existing" reuses a branch that already exists — not
                 // destructive, so it shares the Confirm kind with Cancel.
                 Button::new("Use Existing")
                     .kind(ButtonKind::Confirm)
-                    .state(if *confirm_selected {
-                        ButtonState::Focused
-                    } else {
-                        ButtonState::Normal
-                    })
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmUseExistingBranchUse,
+                        self.pressed_button,
+                        *confirm_selected,
+                        true,
+                    ))
                     .render(frame, use_area, &self.theme);
 
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmUseExistingBranch {
@@ -4812,20 +4826,22 @@ impl App {
 
         Button::new("Cancel")
             .kind(ButtonKind::Confirm)
-            .state(if !confirm_selected {
-                ButtonState::Focused
-            } else {
-                ButtonState::Normal
-            })
+            .state(button_state_for(
+                ButtonPressedTarget::ConfirmDeleteMacroCancel,
+                self.pressed_button,
+                !confirm_selected,
+                true,
+            ))
             .render(frame, cancel_area, &self.theme);
 
         Button::new("Delete")
             .kind(ButtonKind::Danger)
-            .state(if confirm_selected {
-                ButtonState::Focused
-            } else {
-                ButtonState::Normal
-            })
+            .state(button_state_for(
+                ButtonPressedTarget::ConfirmDeleteMacroConfirm,
+                self.pressed_button,
+                confirm_selected,
+                true,
+            ))
             .render(frame, delete_area, &self.theme);
 
         self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteMacro {
@@ -5303,6 +5319,18 @@ impl App {
             .with_offset(scroll_offset as usize)
             .with_selected(Some(selected_row));
         StatefulWidget::render(table, inner, frame.buffer_mut(), &mut table_state);
+
+        let row_area = Rect::new(
+            inner.x,
+            inner.y.saturating_add(1),
+            inner.width,
+            inner.height.saturating_sub(1),
+        );
+        self.overlay_layout.active = OverlayMouseLayout::ResourceMonitor {
+            list: row_area,
+            items: visual.len(),
+            offset: table_state.offset(),
+        };
 
         // Footer hint.
         let close_key = self.bindings.label_for(Action::CloseOverlay);

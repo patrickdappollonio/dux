@@ -1,3 +1,4 @@
+use super::components::{ButtonPressedTarget, PressedButton};
 use super::*;
 use chrono::Local;
 const MOUSE_WHEEL_LINES: usize = 3;
@@ -114,6 +115,88 @@ enum PromptMouseTarget {
     Checkbox(OverlayCheckboxId),
     RenameInput,
     NameNewAgentInput,
+}
+
+impl ButtonPressedTarget {
+    /// Map a hit-tested prompt target to its button-press identifier.
+    /// Returns `None` for non-button targets (text inputs, list rows,
+    /// checkboxes) so the press machinery cannot accidentally arm them —
+    /// those targets keep their existing on-Down behavior.
+    fn from_prompt_target(target: PromptMouseTarget) -> Option<Self> {
+        match target {
+            PromptMouseTarget::ChangeAgentProviderCancel => {
+                Some(ButtonPressedTarget::ChangeAgentProviderCancel)
+            }
+            PromptMouseTarget::ChangeAgentProviderApply => {
+                Some(ButtonPressedTarget::ChangeAgentProviderApply)
+            }
+            PromptMouseTarget::ChangeDefaultProviderCancel => {
+                Some(ButtonPressedTarget::ChangeDefaultProviderCancel)
+            }
+            PromptMouseTarget::ChangeDefaultProviderApply => {
+                Some(ButtonPressedTarget::ChangeDefaultProviderApply)
+            }
+            PromptMouseTarget::RuntimeKillCancel => Some(ButtonPressedTarget::RuntimeKillCancel),
+            PromptMouseTarget::RuntimeKillHovered => Some(ButtonPressedTarget::RuntimeKillHovered),
+            PromptMouseTarget::RuntimeKillSelected => {
+                Some(ButtonPressedTarget::RuntimeKillSelected)
+            }
+            PromptMouseTarget::RuntimeKillVisible => Some(ButtonPressedTarget::RuntimeKillVisible),
+            PromptMouseTarget::ConfirmKillCancel => Some(ButtonPressedTarget::ConfirmKillCancel),
+            PromptMouseTarget::ConfirmKillConfirm => Some(ButtonPressedTarget::ConfirmKillConfirm),
+            PromptMouseTarget::ConfirmDeleteCancel => {
+                Some(ButtonPressedTarget::ConfirmDeleteCancel)
+            }
+            PromptMouseTarget::ConfirmDeleteConfirm => {
+                Some(ButtonPressedTarget::ConfirmDeleteConfirm)
+            }
+            PromptMouseTarget::ConfirmDeleteTerminalCancel => {
+                Some(ButtonPressedTarget::ConfirmDeleteTerminalCancel)
+            }
+            PromptMouseTarget::ConfirmDeleteTerminalConfirm => {
+                Some(ButtonPressedTarget::ConfirmDeleteTerminalConfirm)
+            }
+            PromptMouseTarget::ConfirmDeleteMacroCancel => {
+                Some(ButtonPressedTarget::ConfirmDeleteMacroCancel)
+            }
+            PromptMouseTarget::ConfirmDeleteMacroConfirm => {
+                Some(ButtonPressedTarget::ConfirmDeleteMacroConfirm)
+            }
+            PromptMouseTarget::ConfirmQuitCancel => Some(ButtonPressedTarget::ConfirmQuitCancel),
+            PromptMouseTarget::ConfirmQuitConfirm => Some(ButtonPressedTarget::ConfirmQuitConfirm),
+            PromptMouseTarget::ConfirmDiscardCancel => {
+                Some(ButtonPressedTarget::ConfirmDiscardCancel)
+            }
+            PromptMouseTarget::ConfirmDiscardConfirm => {
+                Some(ButtonPressedTarget::ConfirmDiscardConfirm)
+            }
+            PromptMouseTarget::ConfirmNonDefaultBranchCancel => {
+                Some(ButtonPressedTarget::ConfirmNonDefaultBranchCancel)
+            }
+            PromptMouseTarget::ConfirmNonDefaultBranchAdd => {
+                Some(ButtonPressedTarget::ConfirmNonDefaultBranchAdd)
+            }
+            PromptMouseTarget::ConfirmUseExistingBranchCancel => {
+                Some(ButtonPressedTarget::ConfirmUseExistingBranchCancel)
+            }
+            PromptMouseTarget::ConfirmUseExistingBranchUse => {
+                Some(ButtonPressedTarget::ConfirmUseExistingBranchUse)
+            }
+            PromptMouseTarget::CommandInput
+            | PromptMouseTarget::CommandItem(_)
+            | PromptMouseTarget::BrowseProjectInput
+            | PromptMouseTarget::BrowseProjectItem(_)
+            | PromptMouseTarget::PickEditorItem(_)
+            | PromptMouseTarget::ChangeThemeItem(_)
+            | PromptMouseTarget::ChangeAgentProviderItem(_)
+            | PromptMouseTarget::ChangeDefaultProviderItem(_)
+            | PromptMouseTarget::RuntimeKillInput
+            | PromptMouseTarget::RuntimeKillItem(_)
+            | PromptMouseTarget::Checkbox(_)
+            | PromptMouseTarget::RenameInput
+            | PromptMouseTarget::NameNewAgentInput => None,
+        }
+    }
 }
 
 fn contains_point(rect: Rect, column: u16, row: u16) -> bool {
@@ -1458,6 +1541,11 @@ impl App {
     }
 
     fn handle_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
+        // Any keystroke during a held mouse-press cancels the press —
+        // mouse-up will see no pending press and will not fire an
+        // action. This keeps the press visual from outliving its trigger
+        // when the user reaches for the keyboard mid-click.
+        self.pressed_button = None;
         if let PromptState::ResourceMonitor {
             scroll_offset,
             selected_row,
@@ -2847,6 +2935,7 @@ impl App {
                 ..
             } => Self::overlay_row_at(list, offset, items, column, row)
                 .map(PromptMouseTarget::PickEditorItem),
+            OverlayMouseLayout::ResourceMonitor { .. } => None,
             OverlayMouseLayout::ChangeTheme {
                 list,
                 items,
@@ -3843,6 +3932,27 @@ impl App {
             let visual = build_visual_rows(rows, expanded);
             let max_row = visual.len().saturating_sub(1);
             match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let OverlayMouseLayout::ResourceMonitor {
+                        list,
+                        items,
+                        offset,
+                    } = self.overlay_layout.active
+                        && let Some(index) =
+                            Self::overlay_row_at(list, offset, items, mouse.column, mouse.row)
+                    {
+                        *selected_row = index;
+                        if let Some(VisualRow::Parent(row_idx)) = visual.get(index) {
+                            let stat = &rows[*row_idx];
+                            if let Some(pid) = stat.pid
+                                && !stat.children.is_empty()
+                                && !expanded.remove(&pid)
+                            {
+                                expanded.insert(pid);
+                            }
+                        }
+                    }
+                }
                 MouseEventKind::ScrollUp => {
                     *selected_row = selected_row.saturating_sub(3);
                 }
@@ -3901,14 +4011,78 @@ impl App {
             return false;
         }
 
-        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+        // Watchdog: a press cannot outlive the modal it was made in. If
+        // the prompt closed between Down and a follow-up event (e.g. via
+        // a key handler), drop any stale press before doing anything
+        // else.
+        if matches!(self.prompt, PromptState::None) {
+            self.pressed_button = None;
             return false;
         }
 
-        let Some(target) = self.prompt_mouse_target(mouse.column, mouse.row) else {
-            return false;
-        };
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(target) = self.prompt_mouse_target(mouse.column, mouse.row) else {
+                    return false;
+                };
+                if let Some(button) = ButtonPressedTarget::from_prompt_target(target) {
+                    // Buttons no longer fire on Down — record the press and
+                    // wait for Up. Drag updates the `inside` flag so the
+                    // press visual follows the cursor.
+                    self.pressed_button = Some(PressedButton {
+                        target: button,
+                        inside: true,
+                    });
+                    false
+                } else {
+                    // Non-button targets (text inputs, list rows,
+                    // checkboxes) keep their existing on-Down behavior.
+                    self.dispatch_prompt_target_action(target, mouse)
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(target) = self.pressed_button.map(|p| p.target) {
+                    let still_inside = match self.prompt_mouse_target(mouse.column, mouse.row) {
+                        Some(t) => ButtonPressedTarget::from_prompt_target(t) == Some(target),
+                        None => false,
+                    };
+                    if let Some(pressed) = self.pressed_button.as_mut() {
+                        pressed.inside = still_inside;
+                    }
+                }
+                false
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let Some(pressed) = self.pressed_button.take() else {
+                    return false;
+                };
+                // Defensive re-hit-test: a fast click may not produce an
+                // intervening Drag, so trust the cursor at Up time rather
+                // than the last known `inside` flag.
+                let still_inside = match self.prompt_mouse_target(mouse.column, mouse.row) {
+                    Some(t) => ButtonPressedTarget::from_prompt_target(t) == Some(pressed.target),
+                    None => false,
+                };
+                if still_inside {
+                    self.activate_button(pressed.target)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
 
+    /// Dispatch on-Down behavior for non-button prompt targets — text
+    /// inputs (cursor placement), list rows (selection + double-click
+    /// activation), and checkboxes (toggle). These keep their original
+    /// semantics since users expect immediate feedback for cursor moves
+    /// and instant toggles.
+    fn dispatch_prompt_target_action(
+        &mut self,
+        target: PromptMouseTarget,
+        mouse: MouseEvent,
+    ) -> bool {
         match target {
             PromptMouseTarget::CommandInput => {
                 self.set_command_palette_cursor_from_mouse(mouse.column);
@@ -3966,27 +4140,11 @@ impl App {
                     self.set_error(format!("{err:#}"));
                 }
             }
-            PromptMouseTarget::ChangeAgentProviderCancel => {
-                self.prompt = PromptState::None;
-            }
-            PromptMouseTarget::ChangeAgentProviderApply => {
-                if let Err(err) = self.apply_change_agent_provider() {
-                    self.set_error(format!("{err:#}"));
-                }
-            }
             PromptMouseTarget::ChangeDefaultProviderItem(index) => {
                 let double_click =
                     self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
                 self.set_change_default_provider_selection(index);
                 if double_click && let Err(err) = self.apply_change_default_provider() {
-                    self.set_error(format!("{err:#}"));
-                }
-            }
-            PromptMouseTarget::ChangeDefaultProviderCancel => {
-                self.prompt = PromptState::None;
-            }
-            PromptMouseTarget::ChangeDefaultProviderApply => {
-                if let Err(err) = self.apply_change_default_provider() {
                     self.set_error(format!("{err:#}"));
                 }
             }
@@ -3997,81 +4155,6 @@ impl App {
                 self.set_kill_running_hovered(index);
                 self.toggle_hovered_kill_running_selection();
             }
-            PromptMouseTarget::RuntimeKillCancel => {
-                if let Err(e) =
-                    self.execute_kill_running_footer_action(KillRunningFooterAction::Cancel)
-                {
-                    self.set_error(format!("{e:#}"));
-                }
-            }
-            PromptMouseTarget::RuntimeKillHovered => {
-                if let Err(e) =
-                    self.execute_kill_running_footer_action(KillRunningFooterAction::Hovered)
-                {
-                    self.set_error(format!("{e:#}"));
-                }
-            }
-            PromptMouseTarget::RuntimeKillSelected => {
-                if let Err(e) =
-                    self.execute_kill_running_footer_action(KillRunningFooterAction::Selected)
-                {
-                    self.set_error(format!("{e:#}"));
-                }
-            }
-            PromptMouseTarget::RuntimeKillVisible => {
-                if let Err(e) =
-                    self.execute_kill_running_footer_action(KillRunningFooterAction::Visible)
-                {
-                    self.set_error(format!("{e:#}"));
-                }
-            }
-            PromptMouseTarget::ConfirmKillCancel => {
-                return self.resolve_confirm_kill_running(false);
-            }
-            PromptMouseTarget::ConfirmKillConfirm => {
-                return self.resolve_confirm_kill_running(true);
-            }
-            PromptMouseTarget::ConfirmDeleteCancel => {
-                return self.resolve_confirm_delete_agent(false);
-            }
-            PromptMouseTarget::ConfirmDeleteConfirm => {
-                return self.resolve_confirm_delete_agent(true);
-            }
-            PromptMouseTarget::ConfirmDeleteTerminalCancel => {
-                return self.resolve_confirm_delete_terminal(false);
-            }
-            PromptMouseTarget::ConfirmDeleteTerminalConfirm => {
-                return self.resolve_confirm_delete_terminal(true);
-            }
-            PromptMouseTarget::ConfirmDeleteMacroCancel => {
-                return self.resolve_confirm_delete_macro(false);
-            }
-            PromptMouseTarget::ConfirmDeleteMacroConfirm => {
-                return self.resolve_confirm_delete_macro(true);
-            }
-            PromptMouseTarget::ConfirmQuitCancel => return self.resolve_confirm_quit(false),
-            PromptMouseTarget::ConfirmQuitConfirm => return self.resolve_confirm_quit(true),
-            PromptMouseTarget::ConfirmDiscardCancel => {
-                return self.resolve_confirm_discard_file(false);
-            }
-            PromptMouseTarget::ConfirmDiscardConfirm => {
-                return self.resolve_confirm_discard_file(true);
-            }
-            PromptMouseTarget::ConfirmNonDefaultBranchCancel => {
-                self.prompt = PromptState::None;
-            }
-            PromptMouseTarget::ConfirmNonDefaultBranchAdd => {
-                if let PromptState::ConfirmNonDefaultBranch { focus, .. } = &mut self.prompt {
-                    *focus = ConfirmNonDefaultBranchFocus::Add;
-                }
-                return self.resolve_confirm_non_default_branch();
-            }
-            PromptMouseTarget::ConfirmUseExistingBranchCancel => {
-                return self.resolve_confirm_use_existing_branch(false);
-            }
-            PromptMouseTarget::ConfirmUseExistingBranchUse => {
-                return self.resolve_confirm_use_existing_branch(true);
-            }
             PromptMouseTarget::Checkbox(checkbox_id) => {
                 self.toggle_overlay_checkbox(checkbox_id);
             }
@@ -4081,9 +4164,140 @@ impl App {
             PromptMouseTarget::NameNewAgentInput => {
                 self.set_name_new_agent_cursor_from_mouse(mouse.column);
             }
+            // Button targets are handled by `activate_button` and never
+            // reach this path — `from_prompt_target` returns `Some(_)`
+            // for all of them, sending mouse-down through the press
+            // flow instead.
+            PromptMouseTarget::ChangeAgentProviderCancel
+            | PromptMouseTarget::ChangeAgentProviderApply
+            | PromptMouseTarget::ChangeDefaultProviderCancel
+            | PromptMouseTarget::ChangeDefaultProviderApply
+            | PromptMouseTarget::RuntimeKillCancel
+            | PromptMouseTarget::RuntimeKillHovered
+            | PromptMouseTarget::RuntimeKillSelected
+            | PromptMouseTarget::RuntimeKillVisible
+            | PromptMouseTarget::ConfirmKillCancel
+            | PromptMouseTarget::ConfirmKillConfirm
+            | PromptMouseTarget::ConfirmDeleteCancel
+            | PromptMouseTarget::ConfirmDeleteConfirm
+            | PromptMouseTarget::ConfirmDeleteTerminalCancel
+            | PromptMouseTarget::ConfirmDeleteTerminalConfirm
+            | PromptMouseTarget::ConfirmDeleteMacroCancel
+            | PromptMouseTarget::ConfirmDeleteMacroConfirm
+            | PromptMouseTarget::ConfirmQuitCancel
+            | PromptMouseTarget::ConfirmQuitConfirm
+            | PromptMouseTarget::ConfirmDiscardCancel
+            | PromptMouseTarget::ConfirmDiscardConfirm
+            | PromptMouseTarget::ConfirmNonDefaultBranchCancel
+            | PromptMouseTarget::ConfirmNonDefaultBranchAdd
+            | PromptMouseTarget::ConfirmUseExistingBranchCancel
+            | PromptMouseTarget::ConfirmUseExistingBranchUse => {
+                debug_assert!(
+                    false,
+                    "button target {:?} should be dispatched via activate_button, not \
+                     dispatch_prompt_target_action",
+                    target
+                );
+            }
         }
 
         false
+    }
+
+    /// Fire the action for a button that was both pressed and released
+    /// over its own bounds. Mirrors the previous on-Down dispatch
+    /// arms one-for-one — only the trigger event differs.
+    fn activate_button(&mut self, button: ButtonPressedTarget) -> bool {
+        match button {
+            ButtonPressedTarget::ChangeAgentProviderCancel => {
+                self.prompt = PromptState::None;
+                false
+            }
+            ButtonPressedTarget::ChangeAgentProviderApply => {
+                if let Err(err) = self.apply_change_agent_provider() {
+                    self.set_error(format!("{err:#}"));
+                }
+                false
+            }
+            ButtonPressedTarget::ChangeDefaultProviderCancel => {
+                self.prompt = PromptState::None;
+                false
+            }
+            ButtonPressedTarget::ChangeDefaultProviderApply => {
+                if let Err(err) = self.apply_change_default_provider() {
+                    self.set_error(format!("{err:#}"));
+                }
+                false
+            }
+            ButtonPressedTarget::RuntimeKillCancel => {
+                if let Err(e) =
+                    self.execute_kill_running_footer_action(KillRunningFooterAction::Cancel)
+                {
+                    self.set_error(format!("{e:#}"));
+                }
+                false
+            }
+            ButtonPressedTarget::RuntimeKillHovered => {
+                if let Err(e) =
+                    self.execute_kill_running_footer_action(KillRunningFooterAction::Hovered)
+                {
+                    self.set_error(format!("{e:#}"));
+                }
+                false
+            }
+            ButtonPressedTarget::RuntimeKillSelected => {
+                if let Err(e) =
+                    self.execute_kill_running_footer_action(KillRunningFooterAction::Selected)
+                {
+                    self.set_error(format!("{e:#}"));
+                }
+                false
+            }
+            ButtonPressedTarget::RuntimeKillVisible => {
+                if let Err(e) =
+                    self.execute_kill_running_footer_action(KillRunningFooterAction::Visible)
+                {
+                    self.set_error(format!("{e:#}"));
+                }
+                false
+            }
+            ButtonPressedTarget::ConfirmKillCancel => self.resolve_confirm_kill_running(false),
+            ButtonPressedTarget::ConfirmKillConfirm => self.resolve_confirm_kill_running(true),
+            ButtonPressedTarget::ConfirmDeleteCancel => self.resolve_confirm_delete_agent(false),
+            ButtonPressedTarget::ConfirmDeleteConfirm => self.resolve_confirm_delete_agent(true),
+            ButtonPressedTarget::ConfirmDeleteTerminalCancel => {
+                self.resolve_confirm_delete_terminal(false)
+            }
+            ButtonPressedTarget::ConfirmDeleteTerminalConfirm => {
+                self.resolve_confirm_delete_terminal(true)
+            }
+            ButtonPressedTarget::ConfirmDeleteMacroCancel => {
+                self.resolve_confirm_delete_macro(false)
+            }
+            ButtonPressedTarget::ConfirmDeleteMacroConfirm => {
+                self.resolve_confirm_delete_macro(true)
+            }
+            ButtonPressedTarget::ConfirmQuitCancel => self.resolve_confirm_quit(false),
+            ButtonPressedTarget::ConfirmQuitConfirm => self.resolve_confirm_quit(true),
+            ButtonPressedTarget::ConfirmDiscardCancel => self.resolve_confirm_discard_file(false),
+            ButtonPressedTarget::ConfirmDiscardConfirm => self.resolve_confirm_discard_file(true),
+            ButtonPressedTarget::ConfirmNonDefaultBranchCancel => {
+                self.prompt = PromptState::None;
+                false
+            }
+            ButtonPressedTarget::ConfirmNonDefaultBranchAdd => {
+                if let PromptState::ConfirmNonDefaultBranch { focus, .. } = &mut self.prompt {
+                    *focus = ConfirmNonDefaultBranchFocus::Add;
+                }
+                self.resolve_confirm_non_default_branch()
+            }
+            ButtonPressedTarget::ConfirmUseExistingBranchCancel => {
+                self.resolve_confirm_use_existing_branch(false)
+            }
+            ButtonPressedTarget::ConfirmUseExistingBranchUse => {
+                self.resolve_confirm_use_existing_branch(true)
+            }
+        }
     }
 
     fn activate_selected_left_item(&mut self) -> Result<()> {
@@ -4382,6 +4596,12 @@ impl App {
         if !matches!(self.prompt, PromptState::None) {
             return self.handle_prompt_mouse(mouse);
         }
+        // Watchdog: a press can only be set inside `handle_prompt_mouse`,
+        // but the modal that armed it may have been closed by an
+        // unrelated path (key handler, action callback). Drop any stale
+        // press the moment we see a non-prompt mouse event so it cannot
+        // outlive its dialog.
+        self.pressed_button = None;
 
         if let Some(ref mut scroll) = self.help_scroll {
             let max_help = self
@@ -4734,13 +4954,14 @@ mod tests {
     use std::sync::{Arc, Mutex, mpsc};
 
     use super::DOUBLE_CLICK_THRESHOLD;
+    use super::components::{ButtonPressedTarget, PressedButton};
     use crate::app::{
         App, CenterMode, ConfirmKillRunningPrompt, DeleteAgentFocus, FocusPane, FullscreenOverlay,
         InputTarget, KillRunningAction, KillRunningFocus, KillRunningFooterAction,
         KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftItem, LeftSection,
         MacroBarState, MouseClickTarget, MouseLayoutState, OverlayCheckbox, OverlayCheckboxId,
-        OverlayMouseLayout, OverlayMouseLayoutState, PromptState, PullTarget, RightSection,
-        RuntimeTargetId, TextInput, WorkerEvent,
+        OverlayMouseLayout, OverlayMouseLayoutState, ProcessInfo, PromptState, PullTarget,
+        ResourceStats, RightSection, RuntimeTargetId, TextInput, WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
@@ -4904,6 +5125,7 @@ mod tests {
             overlay_layout: OverlayMouseLayoutState::default(),
             mouse_drag: None,
             last_mouse_click: None,
+            pressed_button: None,
             interactive_patterns: crate::keybindings::InteractiveBytePatterns {
                 bindings: Vec::new(),
             },
@@ -4993,6 +5215,14 @@ mod tests {
         };
     }
 
+    fn install_change_theme_overlay(app: &mut App, items: usize) {
+        app.overlay_layout.active = OverlayMouseLayout::ChangeTheme {
+            list: Rect::new(11, 9, 58, 10),
+            items,
+            offset: 0,
+        };
+    }
+
     fn install_kill_running_overlay(app: &mut App, items: usize) {
         app.overlay_layout.active = OverlayMouseLayout::KillRunning {
             input: Some(Rect::new(12, 4, 70, 1)),
@@ -5003,6 +5233,14 @@ mod tests {
             hovered_button: Rect::new(28, 16, 16, 3),
             selected_button: Rect::new(46, 16, 17, 3),
             visible_button: Rect::new(65, 16, 15, 3),
+        };
+    }
+
+    fn install_resource_monitor_overlay(app: &mut App, items: usize) {
+        app.overlay_layout.active = OverlayMouseLayout::ResourceMonitor {
+            list: Rect::new(11, 6, 58, 8),
+            items,
+            offset: 0,
         };
     }
 
@@ -5022,6 +5260,35 @@ mod tests {
             cancel_button: Rect::new(34, 10, 16, 3),
             quit_button: Rect::new(52, 10, 16, 3),
         };
+    }
+
+    fn install_confirm_kill_running_overlay(app: &mut App) {
+        app.overlay_layout.active = OverlayMouseLayout::ConfirmKillRunning {
+            cancel_button: Rect::new(34, 10, 16, 3),
+            kill_button: Rect::new(52, 10, 16, 3),
+        };
+    }
+
+    fn confirm_kill_running_prompt() -> ConfirmKillRunningPrompt {
+        let runtime_id = RuntimeTargetId::Agent("session-1".to_string());
+        ConfirmKillRunningPrompt {
+            previous: KillRunningPrompt {
+                runtimes: vec![sample_runtime(
+                    runtime_id.clone(),
+                    KillableRuntimeKind::Agent,
+                    "agent-branch",
+                    "demo / codex / agent-branch",
+                )],
+                filter: TextInput::new(),
+                searching: false,
+                hovered_visible_index: 0,
+                selected_ids: std::iter::once(runtime_id.clone()).collect(),
+                focus: KillRunningFocus::Footer(KillRunningFooterAction::Selected),
+            },
+            action: KillRunningAction::Selected,
+            target_ids: vec![runtime_id],
+            confirm_selected: true,
+        }
     }
 
     fn install_confirm_discard_overlay(app: &mut App) {
@@ -6823,6 +7090,141 @@ mod tests {
     }
 
     #[test]
+    fn mouse_down_on_change_theme_row_selects_and_previews_immediately() {
+        use ratatui::style::Color;
+
+        let mut app = test_app(default_bindings());
+        let themes_dir = app.paths.root.join("themes");
+        std::fs::create_dir_all(&themes_dir).expect("themes dir");
+        std::fs::write(
+            themes_dir.join("z_mouse_preview.toml"),
+            r##"[meta]
+name = "z_mouse_preview"
+author = "tests"
+variant = "dark"
+description = "mouse preview regression test"
+
+[palette]
+white = "#ffffff"
+cyan = "#00ffff"
+
+[tokens]
+"bg.base" = "#123456"
+"bg.panel" = "#1b2b3b"
+"text.primary" = "white"
+"text.muted" = "#c0c0c0"
+"text.dim" = "#707070"
+"bg.highlight" = "#234567"
+"bg.active" = "#345678"
+"accent.primary" = "cyan"
+"accent.secondary" = "#ff00ff"
+"border.focused" = "cyan"
+"border.unfocused" = "#555555"
+"success" = "#00ff00"
+"error" = "#ff0000"
+"warning" = "#ffff00"
+"info" = "#00ffff"
+"dux.app_bg" = "#123456"
+"##,
+        )
+        .expect("write theme");
+
+        app.open_change_theme_prompt().expect("open change theme");
+        let item_count = match &app.prompt {
+            PromptState::ChangeTheme(prompt) => prompt.options.len(),
+            other => panic!("expected change theme prompt, got {other:?}"),
+        };
+        install_change_theme_overlay(&mut app, item_count);
+
+        let target_index = match &app.prompt {
+            PromptState::ChangeTheme(prompt) => prompt
+                .options
+                .iter()
+                .position(|option| option.id == "z_mouse_preview")
+                .expect("custom theme listed"),
+            other => panic!("expected change theme prompt, got {other:?}"),
+        };
+
+        let row = 9 + target_index as u16;
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 15, row));
+
+        match &app.prompt {
+            PromptState::ChangeTheme(prompt) => {
+                assert_eq!(prompt.selected, target_index);
+            }
+            other => panic!("expected change theme prompt, got {other:?}"),
+        }
+        assert_eq!(app.pressed_button, None);
+        assert_eq!(app.theme.app_bg, Color::Rgb(0x12, 0x34, 0x56));
+    }
+
+    #[test]
+    fn mouse_click_resource_monitor_parent_row_toggles_expansion() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ResourceMonitor {
+            rows: vec![
+                ResourceStats {
+                    label: "dux".into(),
+                    pid: Some(1),
+                    cpu_percent: 0.0,
+                    rss_bytes: 0,
+                    process_count: 1,
+                    children: Vec::new(),
+                },
+                ResourceStats {
+                    label: "Agent".into(),
+                    pid: Some(100),
+                    cpu_percent: 5.0,
+                    rss_bytes: 1024,
+                    process_count: 3,
+                    children: vec![
+                        ProcessInfo {
+                            name: "node".into(),
+                            pid: 101,
+                            cpu_percent: 3.0,
+                            rss_bytes: 512,
+                        },
+                        ProcessInfo {
+                            name: "claude".into(),
+                            pid: 102,
+                            cpu_percent: 2.0,
+                            rss_bytes: 256,
+                        },
+                    ],
+                },
+                ResourceStats {
+                    label: "TOTAL".into(),
+                    pid: None,
+                    cpu_percent: 5.0,
+                    rss_bytes: 1024,
+                    process_count: 4,
+                    children: Vec::new(),
+                },
+            ],
+            scroll_offset: 0,
+            selected_row: 0,
+            expanded: std::collections::HashSet::new(),
+            last_refresh: std::time::Instant::now(),
+            first_sample: false,
+        };
+        install_resource_monitor_overlay(&mut app, 3);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 15, 7));
+
+        match &app.prompt {
+            PromptState::ResourceMonitor {
+                selected_row,
+                expanded,
+                ..
+            } => {
+                assert_eq!(*selected_row, 1);
+                assert!(expanded.contains(&100), "agent row should expand on click");
+            }
+            other => panic!("expected resource monitor prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn mouse_click_browser_search_input_moves_cursor_and_edits_filter() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::BrowseProjects {
@@ -6961,7 +7363,11 @@ mod tests {
         });
         install_kill_running_overlay(&mut app, 1);
 
+        // Buttons activate on mouse-up (with the cursor still inside the
+        // originally-pressed button), so a click is Down+Up at the same
+        // coordinates.
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 47, 16));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 47, 16));
 
         match &app.prompt {
             PromptState::ConfirmKillRunning(confirm_prompt) => {
@@ -6970,6 +7376,176 @@ mod tests {
             }
             other => panic!("expected confirm kill prompt, got {other:?}"),
         }
+    }
+
+    // Mouse-down on a modal button arms the press but does not fire the
+    // action — the activation lives on mouse-up so that dragging off the
+    // button cancels the click (universal GUI convention).
+    #[test]
+    fn prompt_mouse_down_on_button_arms_pressed_state_without_firing() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmKillRunning(confirm_kill_running_prompt());
+        install_confirm_kill_running_overlay(&mut app);
+
+        // Click inside the Kill button (cols 52..68, row 10..13).
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 55, 11));
+
+        assert!(matches!(app.prompt, PromptState::ConfirmKillRunning(_)));
+        assert_eq!(
+            app.pressed_button,
+            Some(PressedButton {
+                target: ButtonPressedTarget::ConfirmKillConfirm,
+                inside: true,
+            })
+        );
+    }
+
+    #[test]
+    fn prompt_mouse_up_inside_pressed_button_fires_action() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmKillRunning(confirm_kill_running_prompt());
+        install_confirm_kill_running_overlay(&mut app);
+
+        // Click Cancel — deterministically returns to the prior
+        // KillRunning prompt regardless of running-process state.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 35, 11));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 35, 11));
+
+        assert!(matches!(app.prompt, PromptState::KillRunning(_)));
+        assert_eq!(app.pressed_button, None);
+    }
+
+    #[test]
+    fn prompt_mouse_drag_outside_clears_inside_flag() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmKillRunning(confirm_kill_running_prompt());
+        install_confirm_kill_running_overlay(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 55, 11));
+        // Drag far outside the modal — coordinate (0, 0) is well outside
+        // either button rect.
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 0, 0));
+
+        assert_eq!(
+            app.pressed_button,
+            Some(PressedButton {
+                target: ButtonPressedTarget::ConfirmKillConfirm,
+                inside: false,
+            })
+        );
+    }
+
+    #[test]
+    fn prompt_mouse_up_outside_pressed_button_does_not_fire() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmKillRunning(confirm_kill_running_prompt());
+        install_confirm_kill_running_overlay(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 55, 11));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 0, 0));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 0, 0));
+
+        // Modal still open, action did not run, press cleared.
+        assert!(matches!(app.prompt, PromptState::ConfirmKillRunning(_)));
+        assert_eq!(app.pressed_button, None);
+    }
+
+    #[test]
+    fn prompt_mouse_drag_back_inside_re_arms_action() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmKillRunning(confirm_kill_running_prompt());
+        install_confirm_kill_running_overlay(&mut app);
+
+        // Press Cancel, drag out, drag back in, release — the press
+        // re-arms when the cursor returns to the original button so the
+        // action fires on Up.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 35, 11));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 0, 0));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 35, 11));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 35, 11));
+
+        assert!(matches!(app.prompt, PromptState::KillRunning(_)));
+        assert_eq!(app.pressed_button, None);
+    }
+
+    #[test]
+    fn prompt_mouse_up_on_sibling_button_does_not_fire() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmKillRunning(confirm_kill_running_prompt());
+        install_confirm_kill_running_overlay(&mut app);
+
+        // Press Kill, release on Cancel — neither fires.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 55, 11));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 35, 11));
+
+        assert!(matches!(app.prompt, PromptState::ConfirmKillRunning(_)));
+        assert_eq!(app.pressed_button, None);
+    }
+
+    #[test]
+    fn prompt_keystroke_clears_pressed_state() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmKillRunning(confirm_kill_running_prompt());
+        install_confirm_kill_running_overlay(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 55, 11));
+        assert!(app.pressed_button.is_some());
+
+        // Any key event during a held press cancels the press so the
+        // visual highlight does not outlive its trigger.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(app.pressed_button, None);
+    }
+
+    #[test]
+    fn prompt_modal_close_clears_pressed_state_via_watchdog() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmKillRunning(confirm_kill_running_prompt());
+        install_confirm_kill_running_overlay(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 55, 11));
+        assert!(app.pressed_button.is_some());
+
+        // Modal closes via some other path (e.g. a non-prompt action). The
+        // next mouse event should drop the stale press without firing
+        // anything.
+        app.prompt = PromptState::None;
+        app.overlay_layout.active = OverlayMouseLayout::None;
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 55, 11));
+
+        assert_eq!(app.pressed_button, None);
+    }
+
+    #[test]
+    fn prompt_mouse_down_on_checkbox_still_fires_on_down() {
+        // Regression guard: non-button targets (text inputs, list rows,
+        // checkboxes) keep their original on-Down behavior so users get
+        // immediate feedback for cursor moves and toggles.
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmDeleteAgent {
+            session_id: app.sessions[0].id.clone(),
+            branch_name: app.sessions[0].branch_name.clone(),
+            focus: DeleteAgentFocus::Cancel,
+            delete_worktree: false,
+            worktree_shared: false,
+        };
+        install_confirm_delete_overlay(&mut app);
+
+        // Click the checkbox at (30, 7) — install_confirm_delete_overlay
+        // places the checkbox at (24, 7, 44, 1).
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 7));
+
+        match &app.prompt {
+            PromptState::ConfirmDeleteAgent {
+                delete_worktree, ..
+            } => {
+                assert!(*delete_worktree, "checkbox toggles on mouse-down");
+            }
+            other => panic!("expected delete prompt, got {other:?}"),
+        }
+        assert_eq!(app.pressed_button, None);
     }
 
     #[test]
@@ -6981,7 +7557,8 @@ mod tests {
             confirm_selected: false,
         };
         install_confirm_quit_overlay(&mut app);
-        let should_quit = app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 35, 10));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 35, 10));
+        let should_quit = app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 35, 10));
         assert!(!should_quit);
         assert!(matches!(app.prompt, PromptState::None));
 
@@ -6992,7 +7569,8 @@ mod tests {
             confirm_selected: true,
         };
         install_confirm_quit_overlay(&mut app);
-        let should_quit = app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 53, 10));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 53, 10));
+        let should_quit = app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 53, 10));
         assert!(should_quit);
         assert!(matches!(app.prompt, PromptState::None));
     }
@@ -7633,7 +8211,9 @@ mod tests {
         };
         install_confirm_discard_overlay(&mut app);
 
+        // Down+Up at the same coordinates fires the button action.
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 53, 10));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 53, 10));
 
         assert!(matches!(app.prompt, PromptState::None));
         let contents = std::fs::read_to_string(
@@ -7655,7 +8235,9 @@ mod tests {
         };
         install_confirm_delete_overlay(&mut app);
 
+        // Down+Up at the same coordinates fires the Cancel button.
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 35, 10));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 35, 10));
 
         assert!(matches!(app.prompt, PromptState::None));
     }

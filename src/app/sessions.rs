@@ -1951,6 +1951,7 @@ mod tests {
             overlay_layout: OverlayMouseLayoutState::default(),
             mouse_drag: None,
             last_mouse_click: None,
+            pressed_button: None,
             interactive_patterns: crate::keybindings::InteractiveBytePatterns {
                 bindings: Vec::new(),
             },
