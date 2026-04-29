@@ -10,5 +10,7 @@
 pub(crate) mod button;
 pub(crate) mod checkbox;
 
-pub(crate) use button::{Button, ButtonKind, ButtonState, shared_button_width};
+pub(crate) use button::{
+    Button, ButtonKind, ButtonPressedTarget, PressedButton, button_state_for, shared_button_width,
+};
 pub(crate) use checkbox::{Checkbox, CheckboxState};

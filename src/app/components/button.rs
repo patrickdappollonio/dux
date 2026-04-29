@@ -61,6 +61,85 @@ pub(crate) enum ButtonState {
     Disabled,
 }
 
+/// Identifier for every modal button that can be activated by mouse. Lives
+/// next to [`Button`] so the press-tracking type is colocated with the
+/// widget it describes. The conversion from the broader hit-test target
+/// `PromptMouseTarget` is implemented in `app::input` (where that enum
+/// lives) and returns `None` for non-button targets — list rows, text
+/// inputs, and checkboxes — so the press machinery cannot accidentally
+/// arm those cases.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ButtonPressedTarget {
+    ChangeAgentProviderCancel,
+    ChangeAgentProviderApply,
+    ChangeDefaultProviderCancel,
+    ChangeDefaultProviderApply,
+    RuntimeKillCancel,
+    RuntimeKillHovered,
+    RuntimeKillSelected,
+    RuntimeKillVisible,
+    ConfirmKillCancel,
+    ConfirmKillConfirm,
+    ConfirmDeleteCancel,
+    ConfirmDeleteConfirm,
+    ConfirmDeleteTerminalCancel,
+    ConfirmDeleteTerminalConfirm,
+    ConfirmDeleteMacroCancel,
+    ConfirmDeleteMacroConfirm,
+    ConfirmQuitCancel,
+    ConfirmQuitConfirm,
+    ConfirmDiscardCancel,
+    ConfirmDiscardConfirm,
+    ConfirmNonDefaultBranchCancel,
+    ConfirmNonDefaultBranchAdd,
+    ConfirmUseExistingBranchCancel,
+    ConfirmUseExistingBranchUse,
+}
+
+/// In-flight state for a button the user is currently pressing. `target`
+/// records which button received the original mouse-down; `inside` tracks
+/// whether the cursor is still over that same button right now. The
+/// release handler fires the button's action only when `inside` is true,
+/// matching the universal GUI convention where dragging off a button
+/// before release cancels the click.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PressedButton {
+    pub(crate) target: ButtonPressedTarget,
+    pub(crate) inside: bool,
+}
+
+/// Resolve the [`ButtonState`] for a given button at render time.
+///
+/// `pressed` is the app-wide press state (set on mouse-down, cleared on
+/// release or any keystroke). When the press matches `target` *and* the
+/// cursor is still inside the original button, the button shows the
+/// focused look — providing immediate feedback that the press registered
+/// without changing the keyboard-focus model. Dragging off the button
+/// drops the override so the caller's regular `focused` signal takes
+/// over again.
+///
+/// `enabled` always wins: a disabled button stays disabled even while
+/// pressed, so a button that becomes unactivatable mid-drag does not
+/// pretend it is still armed.
+pub(crate) fn button_state_for(
+    target: ButtonPressedTarget,
+    pressed: Option<PressedButton>,
+    focused: bool,
+    enabled: bool,
+) -> ButtonState {
+    if !enabled {
+        return ButtonState::Disabled;
+    }
+    if matches!(pressed, Some(p) if p.target == target && p.inside) {
+        return ButtonState::Focused;
+    }
+    if focused {
+        ButtonState::Focused
+    } else {
+        ButtonState::Normal
+    }
+}
+
 /// Semantic intent of a button. Drives which theme color the focused
 /// border uses, so the user gets a consistent visual signal across modals
 /// (red for destructive, cyan for safe).
@@ -172,5 +251,91 @@ mod tests {
     #[test]
     fn shared_button_width_falls_back_when_empty() {
         assert_eq!(shared_button_width(&[]), MIN_BUTTON_WIDTH);
+    }
+
+    fn pressed(target: ButtonPressedTarget, inside: bool) -> Option<PressedButton> {
+        Some(PressedButton { target, inside })
+    }
+
+    #[test]
+    fn button_state_for_pressed_inside_returns_focused() {
+        // Holding the mouse on a button with the cursor still inside it
+        // should always render as Focused, regardless of whether keyboard
+        // focus was on it before the press.
+        assert_eq!(
+            button_state_for(
+                ButtonPressedTarget::ConfirmKillConfirm,
+                pressed(ButtonPressedTarget::ConfirmKillConfirm, true),
+                false,
+                true,
+            ),
+            ButtonState::Focused
+        );
+    }
+
+    #[test]
+    fn button_state_for_pressed_outside_falls_back_to_focused_signal() {
+        // Drag-out drops the press visual; the underlying focus signal
+        // takes over again so the keyboard-focused button stays
+        // highlighted.
+        assert_eq!(
+            button_state_for(
+                ButtonPressedTarget::ConfirmKillConfirm,
+                pressed(ButtonPressedTarget::ConfirmKillConfirm, false),
+                false,
+                true,
+            ),
+            ButtonState::Normal
+        );
+        assert_eq!(
+            button_state_for(
+                ButtonPressedTarget::ConfirmKillConfirm,
+                pressed(ButtonPressedTarget::ConfirmKillConfirm, false),
+                true,
+                true,
+            ),
+            ButtonState::Focused
+        );
+    }
+
+    #[test]
+    fn button_state_for_pressed_on_other_button_does_not_leak() {
+        // A press on the Kill button must not visually affect Cancel.
+        assert_eq!(
+            button_state_for(
+                ButtonPressedTarget::ConfirmKillCancel,
+                pressed(ButtonPressedTarget::ConfirmKillConfirm, true),
+                false,
+                true,
+            ),
+            ButtonState::Normal
+        );
+    }
+
+    #[test]
+    fn button_state_for_disabled_overrides_press_and_focus() {
+        // Disabled wins over both press and keyboard focus — a button that
+        // becomes unactivatable mid-drag must not pretend it is armed.
+        assert_eq!(
+            button_state_for(
+                ButtonPressedTarget::RuntimeKillSelected,
+                pressed(ButtonPressedTarget::RuntimeKillSelected, true),
+                true,
+                false,
+            ),
+            ButtonState::Disabled
+        );
+    }
+
+    #[test]
+    fn button_state_for_no_press_uses_focus_signal() {
+        assert_eq!(
+            button_state_for(ButtonPressedTarget::ConfirmQuitConfirm, None, true, true,),
+            ButtonState::Focused
+        );
+        assert_eq!(
+            button_state_for(ButtonPressedTarget::ConfirmQuitConfirm, None, false, true,),
+            ButtonState::Normal
+        );
     }
 }
