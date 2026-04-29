@@ -61,6 +61,12 @@ impl TerminalSnapshot {
     }
 }
 
+/// Maximum number of bytes buffered while PTY ingestion is paused (4 MiB).
+/// The oldest data is dropped on overflow — on resume the child will typically
+/// redraw anyway because pause is only active during scrollback sessions with
+/// TUI-style providers.
+const PAUSE_BUFFER_CAP: usize = 4 * 1024 * 1024;
+
 /// A PTY-based client that spawns a CLI tool in a pseudo-terminal and keeps a
 /// full terminal grid with scrollback using `alacritty_terminal`.
 pub struct PtyClient {
@@ -81,6 +87,21 @@ pub struct PtyClient {
     /// Records the last resize so `take_received_data` can suppress the
     /// redraw burst that follows a `SIGWINCH`.
     last_resize_at: Mutex<Option<Instant>>,
+    /// When true, the reader thread buffers incoming bytes into `pending_bytes`
+    /// instead of feeding them to the terminal parser. Toggled by the app
+    /// when the user enters/leaves scrollback so the grid stays stable while
+    /// the user reads history (tmux copy-mode style).
+    scroll_paused: Arc<AtomicBool>,
+    /// Bytes received from the PTY while ingestion is paused. Drained into
+    /// the terminal parser on resume. Bounded by `PAUSE_BUFFER_CAP`; oldest
+    /// bytes are dropped on overflow.
+    pending_bytes: Arc<Mutex<PendingIngest>>,
+}
+
+#[derive(Default)]
+struct PendingIngest {
+    buf: Vec<u8>,
+    dropped: bool,
 }
 
 impl PtyClient {
@@ -133,6 +154,8 @@ impl PtyClient {
         let has_output = Arc::new(AtomicBool::new(false));
         let dirty = Arc::new(AtomicBool::new(true));
         let received_data = Arc::new(AtomicBool::new(false));
+        let scroll_paused = Arc::new(AtomicBool::new(false));
+        let pending_bytes = Arc::new(Mutex::new(PendingIngest::default()));
 
         let terminal_ref = Arc::clone(&terminal);
         let writer_ref = Arc::clone(&writer);
@@ -140,6 +163,8 @@ impl PtyClient {
         let has_output_ref = Arc::clone(&has_output);
         let dirty_ref = Arc::clone(&dirty);
         let received_data_ref = Arc::clone(&received_data);
+        let scroll_paused_ref = Arc::clone(&scroll_paused);
+        let pending_bytes_ref = Arc::clone(&pending_bytes);
         thread::spawn(move || {
             Self::reader_loop(
                 reader,
@@ -149,6 +174,8 @@ impl PtyClient {
                 has_output_ref,
                 dirty_ref,
                 received_data_ref,
+                scroll_paused_ref,
+                pending_bytes_ref,
             );
         });
 
@@ -162,9 +189,12 @@ impl PtyClient {
             dirty,
             received_data,
             last_resize_at: Mutex::new(None),
+            scroll_paused,
+            pending_bytes,
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn reader_loop(
         mut reader: Box<dyn std::io::Read + Send>,
         terminal: Arc<Mutex<TerminalState>>,
@@ -173,6 +203,8 @@ impl PtyClient {
         has_output: Arc<AtomicBool>,
         dirty: Arc<AtomicBool>,
         received_data: Arc<AtomicBool>,
+        scroll_paused: Arc<AtomicBool>,
+        pending_bytes: Arc<Mutex<PendingIngest>>,
     ) {
         let mut buf = [0u8; 4096];
         loop {
@@ -183,6 +215,25 @@ impl PtyClient {
                 }
                 Ok(n) => {
                     let data = &buf[..n];
+
+                    // Fast-path check: if paused, buffer instead of parsing.
+                    // The definitive check happens inside the pending_bytes
+                    // lock below to synchronize with resume_ingestion.
+                    if scroll_paused.load(Ordering::Acquire)
+                        && let Ok(mut pending) = pending_bytes.lock()
+                    {
+                        // Re-check under the lock: resume_ingestion flips the
+                        // flag while holding this same lock, so if we observe
+                        // paused=true here it will stay true until we release.
+                        if scroll_paused.load(Ordering::Acquire) {
+                            append_with_cap(&mut pending, data, PAUSE_BUFFER_CAP);
+                            received_data.store(true, Ordering::Release);
+                            continue;
+                        }
+                        // Fell through — pause was just lifted; drop the lock
+                        // and feed this chunk through the normal path.
+                    }
+
                     if let Ok(mut terminal) = terminal.lock() {
                         let replies = terminal.process(data);
                         dirty.store(true, Ordering::Release);
@@ -246,20 +297,107 @@ impl PtyClient {
     }
 
     /// Atomically adjust the scrollback offset by the given amount in the
-    /// given direction.
+    /// given direction. If the scroll crosses the 0 boundary, PTY ingestion
+    /// is paused (entering scrollback) or resumed (returning to the live
+    /// bottom).
     pub fn scroll(&self, up: bool, amount: usize) {
-        if let Ok(mut terminal) = self.terminal.lock() {
-            terminal.scroll(up, amount);
-            self.dirty.store(true, Ordering::Release);
-        }
+        let Some((prev, next)) = self.mutate_scroll(|t| t.scroll(up, amount)) else {
+            return;
+        };
+        self.sync_pause_state(prev, next);
     }
 
     /// Set the scrollback offset (0 = normal view, positive = scrolled back).
     pub fn set_scrollback(&self, rows: usize) {
-        if let Ok(mut terminal) = self.terminal.lock() {
-            terminal.set_scrollback(rows);
-            self.dirty.store(true, Ordering::Release);
+        let Some((prev, next)) = self.mutate_scroll(|t| t.set_scrollback(rows)) else {
+            return;
+        };
+        self.sync_pause_state(prev, next);
+    }
+
+    /// Run a closure under the terminal lock, capturing the scrollback offset
+    /// before and after so the caller can detect transitions. Marks dirty on
+    /// success. Returns `None` if the terminal mutex was poisoned.
+    fn mutate_scroll<F>(&self, mutate: F) -> Option<(usize, usize)>
+    where
+        F: FnOnce(&mut TerminalState),
+    {
+        let mut terminal = self.terminal.lock().ok()?;
+        let prev = terminal.scrollback_offset();
+        mutate(&mut terminal);
+        let next = terminal.scrollback_offset();
+        self.dirty.store(true, Ordering::Release);
+        drop(terminal);
+        Some((prev, next))
+    }
+
+    /// Toggle PTY ingestion based on whether the scrollback offset just
+    /// crossed the live-bottom boundary (0 ↔ >0). Called from `scroll` and
+    /// `set_scrollback` after the grid has been updated and the terminal
+    /// lock released.
+    fn sync_pause_state(&self, prev: usize, next: usize) {
+        match (prev, next) {
+            (0, n) if n > 0 => self.pause_ingestion(),
+            (p, 0) if p > 0 => self.resume_ingestion(),
+            _ => {}
         }
+    }
+
+    /// Pause PTY ingestion: the reader thread will buffer incoming bytes
+    /// into `pending_bytes` instead of feeding them to the terminal parser.
+    /// Idempotent.
+    fn pause_ingestion(&self) {
+        self.scroll_paused.store(true, Ordering::Release);
+    }
+
+    /// Resume PTY ingestion and drain any bytes that arrived while paused
+    /// into the terminal parser. Idempotent — a no-op if not paused.
+    fn resume_ingestion(&self) {
+        // Lock terminal first, then pending_bytes. Flip the flag while
+        // holding pending_bytes so readers blocked on that lock re-check
+        // `scroll_paused` and fall through to the normal path.
+        let Ok(mut terminal) = self.terminal.lock() else {
+            return;
+        };
+        let Ok(mut pending) = self.pending_bytes.lock() else {
+            return;
+        };
+        self.scroll_paused.store(false, Ordering::Release);
+
+        if pending.dropped {
+            logger::debug(
+                "PTY pause buffer overflowed during scrollback session; oldest bytes dropped",
+            );
+            pending.dropped = false;
+        }
+
+        if pending.buf.is_empty() {
+            return;
+        }
+        let bytes = std::mem::take(&mut pending.buf);
+        drop(pending);
+
+        let replies = terminal.process(&bytes);
+        self.dirty.store(true, Ordering::Release);
+        if !self.has_output.load(Ordering::Acquire) && terminal.has_visible_output() {
+            self.has_output.store(true, Ordering::Release);
+        }
+        drop(terminal);
+
+        if !replies.is_empty()
+            && let Ok(mut w) = self.writer.lock()
+        {
+            let _ = w.write_all(&replies);
+            let _ = w.flush();
+        }
+    }
+
+    /// Whether the child process has switched to the alternate screen buffer
+    /// (e.g. via `CSI ?1049h`). Providers that use the alt screen manage their
+    /// own redraws and do not populate scrollback, so the app can suppress
+    /// scrollback UI affordances when this is true.
+    pub fn is_alt_screen(&self) -> bool {
+        self.terminal.lock().is_ok_and(|t| t.is_alt_screen())
     }
 
     /// Resize the PTY and the internal terminal parser.
@@ -476,6 +614,13 @@ impl TerminalState {
     /// (e.g. via DECSET 1000/1002/1003).
     fn has_mouse_mode(&self) -> bool {
         self.term.mode().intersects(TermMode::MOUSE_MODE)
+    }
+
+    /// Whether the child process has switched to the alternate screen buffer
+    /// (e.g. via DECSET 1049). Full-screen TUI apps like opencode use the
+    /// alt screen; Claude and shells use the main screen.
+    fn is_alt_screen(&self) -> bool {
+        self.term.mode().contains(TermMode::ALT_SCREEN)
     }
 
     fn snapshot(&self) -> TerminalSnapshot {
@@ -860,6 +1005,31 @@ fn xterm_grayscale(index: usize) -> Rgb {
 
 const fn rgb(r: u8, g: u8, b: u8) -> Rgb {
     Rgb { r, g, b }
+}
+
+/// Append `data` to `pending.buf`, respecting `cap`. On overflow, drop the
+/// oldest bytes from the front and mark `pending.dropped` so the next resume
+/// can log a warning. If `data` alone exceeds `cap`, keep only its trailing
+/// `cap` bytes.
+fn append_with_cap(pending: &mut PendingIngest, data: &[u8], cap: usize) {
+    if cap == 0 {
+        pending.buf.clear();
+        pending.dropped = !data.is_empty();
+        return;
+    }
+    if data.len() >= cap {
+        pending.buf.clear();
+        pending.buf.extend_from_slice(&data[data.len() - cap..]);
+        pending.dropped = true;
+        return;
+    }
+    let new_len = pending.buf.len().saturating_add(data.len());
+    if new_len > cap {
+        let overflow = new_len - cap;
+        pending.buf.drain(..overflow);
+        pending.dropped = true;
+    }
+    pending.buf.extend_from_slice(data);
 }
 
 #[cfg(test)]
@@ -1355,5 +1525,141 @@ mod tests {
             dirty.swap(false, Ordering::AcqRel),
             "dirty flag should be true after data arrives"
         );
+    }
+
+    #[test]
+    fn alt_screen_off_by_default() {
+        let terminal = TerminalState::with_scrollback(24, 80, 100);
+        assert!(
+            !terminal.is_alt_screen(),
+            "plain shell should not be on the alternate screen"
+        );
+    }
+
+    #[test]
+    fn alt_screen_on_after_enter_sequence() {
+        let mut terminal = TerminalState::with_scrollback(24, 80, 100);
+        // DECSET 1049: enter alternate screen buffer.
+        terminal.process(b"\x1b[?1049h");
+        assert!(
+            terminal.is_alt_screen(),
+            "alt-screen should be active after DECSET 1049"
+        );
+    }
+
+    #[test]
+    fn alt_screen_off_after_exit_sequence() {
+        let mut terminal = TerminalState::with_scrollback(24, 80, 100);
+        terminal.process(b"\x1b[?1049h");
+        assert!(terminal.is_alt_screen());
+
+        // DECRST 1049: exit alternate screen buffer.
+        terminal.process(b"\x1b[?1049l");
+        assert!(
+            !terminal.is_alt_screen(),
+            "alt-screen should be inactive after DECRST 1049"
+        );
+    }
+
+    #[test]
+    fn append_with_cap_grows_buffer_below_cap() {
+        let mut pending = PendingIngest::default();
+        append_with_cap(&mut pending, b"hello ", 64);
+        append_with_cap(&mut pending, b"world", 64);
+        assert_eq!(pending.buf, b"hello world");
+        assert!(!pending.dropped);
+    }
+
+    #[test]
+    fn append_with_cap_drops_oldest_on_overflow() {
+        let mut pending = PendingIngest::default();
+        pending.buf.extend_from_slice(b"AAAAAAAA"); // 8 bytes already buffered
+        append_with_cap(&mut pending, b"BBBB", 10);
+        // Cap=10, new_len would be 12 → drop 2 from the front.
+        assert_eq!(pending.buf, b"AAAAAABBBB");
+        assert!(pending.dropped);
+    }
+
+    #[test]
+    fn append_with_cap_truncates_oversized_single_chunk() {
+        let mut pending = PendingIngest::default();
+        pending.buf.extend_from_slice(b"prev");
+        let huge = vec![b'X'; 32];
+        append_with_cap(&mut pending, &huge, 10);
+        // Existing content is dropped; only the last 10 bytes of `huge` are kept.
+        assert_eq!(pending.buf.len(), 10);
+        assert!(pending.buf.iter().all(|b| *b == b'X'));
+        assert!(pending.dropped);
+    }
+
+    #[test]
+    fn append_with_cap_zero_cap_is_noop_with_flag() {
+        let mut pending = PendingIngest::default();
+        append_with_cap(&mut pending, b"ignored", 0);
+        assert!(pending.buf.is_empty());
+        assert!(pending.dropped);
+
+        // With empty data and cap=0, dropped stays false on a fresh buffer.
+        let mut fresh = PendingIngest::default();
+        append_with_cap(&mut fresh, b"", 0);
+        assert!(fresh.buf.is_empty());
+        assert!(!fresh.dropped);
+    }
+
+    /// The resume path drains `pending_bytes` into `terminal.process`. Verify
+    /// that a paused-then-drained stream produces an identical terminal state
+    /// to feeding the same bytes inline, so users returning from scrollback
+    /// see exactly the output they would have seen without pausing.
+    #[test]
+    fn paused_then_resumed_matches_unpaused_baseline() {
+        let mut baseline = TerminalState::with_scrollback(5, 20, 100);
+        baseline.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\n");
+
+        // Simulate: first chunk arrives live, remainder while paused.
+        let mut paused = TerminalState::with_scrollback(5, 20, 100);
+        paused.process(b"one\r\n");
+
+        let mut pending = PendingIngest::default();
+        append_with_cap(&mut pending, b"two\r\nthree\r\n", PAUSE_BUFFER_CAP);
+        append_with_cap(&mut pending, b"four\r\nfive\r\n", PAUSE_BUFFER_CAP);
+        assert!(!pending.dropped);
+
+        // Resume: drain accumulated bytes into the terminal parser.
+        let drained = std::mem::take(&mut pending.buf);
+        paused.process(&drained);
+
+        assert_eq!(
+            viewport_lines(&baseline.snapshot()),
+            viewport_lines(&paused.snapshot()),
+            "paused+drained stream should match the unpaused baseline"
+        );
+        assert_eq!(
+            baseline.term.grid().history_size(),
+            paused.term.grid().history_size(),
+            "scrollback history size should match"
+        );
+    }
+
+    /// Chunks that overflow the pause buffer must still drop oldest rather
+    /// than panic, and `dropped` must be sticky so resume can log once.
+    #[test]
+    fn overflow_during_pause_keeps_tail_and_flags_drop() {
+        let mut pending = PendingIngest::default();
+        // Small cap for deterministic overflow.
+        let cap = 8;
+        append_with_cap(&mut pending, b"1234", cap);
+        append_with_cap(&mut pending, b"5678", cap);
+        assert_eq!(pending.buf, b"12345678");
+        assert!(!pending.dropped);
+
+        // Next chunk forces an overflow — oldest bytes are dropped.
+        append_with_cap(&mut pending, b"abcd", cap);
+        assert_eq!(pending.buf, b"5678abcd");
+        assert!(pending.dropped);
+
+        // Flag stays set across subsequent non-overflowing appends so that a
+        // single log line on resume can summarize the session.
+        append_with_cap(&mut pending, b"", cap);
+        assert!(pending.dropped);
     }
 }

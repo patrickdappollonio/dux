@@ -82,6 +82,7 @@ enum PromptMouseTarget {
     BrowseProjectInput,
     BrowseProjectItem(usize),
     PickEditorItem(usize),
+    ChangeThemeItem(usize),
     ChangeAgentProviderItem(usize),
     ChangeAgentProviderCancel,
     ChangeAgentProviderApply,
@@ -422,16 +423,19 @@ impl App {
                 Action::MoveDown => {
                     if self.selected_left + 1 < item_count {
                         self.selected_left += 1;
+                        self.close_diff_view();
                         self.reload_changed_files();
                         self.update_missing_project_warning();
                     } else if self.has_terminal_items() {
                         // Jump to terminals section.
                         self.left_section = LeftSection::Terminals;
                         self.selected_terminal_index = 0;
+                        self.close_diff_view();
                     }
                 }
                 Action::MoveUp if self.selected_left > 0 => {
                     self.selected_left -= 1;
+                    self.close_diff_view();
                     self.reload_changed_files();
                     self.update_missing_project_warning();
                 }
@@ -497,6 +501,7 @@ impl App {
                         let item_count = self.left_items().len();
                         if item_count > 0 {
                             self.selected_left = item_count - 1;
+                            self.close_diff_view();
                         }
                     }
                 }
@@ -2106,6 +2111,36 @@ impl App {
             return Ok(false);
         }
 
+        if let PromptState::ChangeTheme(prompt) = &mut self.prompt {
+            let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
+            let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
+
+            if matches!(palette_action.or(dialog_action), Some(Action::CloseOverlay)) {
+                self.cancel_change_theme();
+                return Ok(false);
+            }
+
+            let mut moved = false;
+            match palette_action.or(dialog_action) {
+                Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
+                    prompt.selected += 1;
+                    moved = true;
+                }
+                Some(Action::MoveUp) if prompt.selected > 0 => {
+                    prompt.selected -= 1;
+                    moved = true;
+                }
+                Some(Action::Confirm) => {
+                    self.apply_change_theme()?;
+                }
+                _ => {}
+            }
+            if moved {
+                self.preview_change_theme_selection();
+            }
+            return Ok(false);
+        }
+
         if let PromptState::ConfirmKillRunning(confirm_prompt) = &mut self.prompt {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => {
@@ -2812,6 +2847,13 @@ impl App {
                 ..
             } => Self::overlay_row_at(list, offset, items, column, row)
                 .map(PromptMouseTarget::PickEditorItem),
+            OverlayMouseLayout::ChangeTheme {
+                list,
+                items,
+                offset,
+                ..
+            } => Self::overlay_row_at(list, offset, items, column, row)
+                .map(PromptMouseTarget::ChangeThemeItem),
             OverlayMouseLayout::ChangeAgentProvider {
                 list,
                 items,
@@ -3152,6 +3194,7 @@ impl App {
         self.fullscreen_overlay = FullscreenOverlay::None;
         if self.selected_left != index {
             self.selected_left = index;
+            self.close_diff_view();
             self.reload_changed_files();
         }
     }
@@ -3895,6 +3938,24 @@ impl App {
                 self.set_pick_editor_selection(index);
                 if double_click {
                     self.open_selected_pick_editor();
+                }
+            }
+            PromptMouseTarget::ChangeThemeItem(index) => {
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                let mut moved = false;
+                if let PromptState::ChangeTheme(prompt) = &mut self.prompt
+                    && index < prompt.options.len()
+                    && prompt.selected != index
+                {
+                    prompt.selected = index;
+                    moved = true;
+                }
+                if moved {
+                    self.preview_change_theme_selection();
+                }
+                if double_click && let Err(err) = self.apply_change_theme() {
+                    self.set_error(format!("{err:#}"));
                 }
             }
             PromptMouseTarget::ChangeAgentProviderItem(index) => {
@@ -6312,6 +6373,87 @@ mod tests {
             CenterMode::Diff { scroll, .. } => assert_eq!(scroll, 3),
             _ => panic!("expected diff mode"),
         }
+    }
+
+    fn open_fake_diff(app: &mut App) {
+        app.center_mode = CenterMode::Diff {
+            lines: Arc::new(vec![Line::from("diff")]),
+            scroll: 0,
+            gutter_width: 0,
+            worktree_path: String::new(),
+            rel_path: String::new(),
+        };
+    }
+
+    #[test]
+    fn left_move_down_closes_open_diff_when_moving_between_agents() {
+        let mut app = test_app(default_bindings());
+        let now = Utc::now();
+        app.sessions.push(AgentSession {
+            id: "session-2".to_string(),
+            project_id: app.projects[0].id.clone(),
+            project_path: Some(app.projects[0].path.clone()),
+            provider: ProviderKind::from_str("codex"),
+            source_branch: "main".to_string(),
+            branch_name: "agent-branch-2".to_string(),
+            worktree_path: app.paths.worktrees_root.to_string_lossy().to_string(),
+            title: None,
+            started_providers: Vec::new(),
+            status: SessionStatus::Detached,
+            created_at: now,
+            updated_at: now,
+        });
+        app.rebuild_left_items();
+        app.selected_left = 1;
+        app.focus = FocusPane::Left;
+        open_fake_diff(&mut app);
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(app.selected_left, 2);
+        assert!(matches!(app.center_mode, CenterMode::Agent));
+    }
+
+    #[test]
+    fn left_move_up_closes_open_diff() {
+        let mut app = test_app(default_bindings());
+        app.selected_left = 1;
+        app.focus = FocusPane::Left;
+        open_fake_diff(&mut app);
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(app.selected_left, 0);
+        assert!(matches!(app.center_mode, CenterMode::Agent));
+    }
+
+    #[test]
+    fn mouse_click_different_left_row_closes_open_diff() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.selected_left = 1;
+        open_fake_diff(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 1));
+
+        assert_eq!(app.selected_left, 0);
+        assert!(matches!(app.center_mode, CenterMode::Agent));
+    }
+
+    #[test]
+    fn mouse_click_same_left_row_preserves_open_diff() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.selected_left = 1;
+        app.focus = FocusPane::Left;
+        open_fake_diff(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
+
+        assert_eq!(app.selected_left, 1);
+        assert!(matches!(app.center_mode, CenterMode::Diff { .. }));
     }
 
     #[test]
