@@ -84,7 +84,7 @@ pub enum Action {
     ToggleDiffLineNumbers,
     ResourceMonitor,
     ToggleGithubIntegration,
-    TogglePromptForName,
+    ToggleRandomizedPetNameDefault,
     TogglePrBannerPosition,
     ForceReconnectAgent,
     ChangeTheme,
@@ -252,7 +252,7 @@ impl Action {
             Action::ToggleDiffLineNumbers => "toggle_diff_line_numbers",
             Action::ResourceMonitor => "resource_monitor",
             Action::ToggleGithubIntegration => "toggle_github_integration",
-            Action::TogglePromptForName => "toggle_prompt_for_name",
+            Action::ToggleRandomizedPetNameDefault => "toggle_randomized_pet_name_default",
             Action::TogglePrBannerPosition => "toggle_pr_banner_position",
             Action::ForceReconnectAgent => "force_reconnect_agent",
             Action::ChangeTheme => "change_theme",
@@ -345,7 +345,9 @@ impl Action {
             Action::ToggleDiffLineNumbers => "Toggle line numbers in diff view.",
             Action::ResourceMonitor => "Show CPU and memory usage for dux and all running agents.",
             Action::ToggleGithubIntegration => "Toggle GitHub PR integration.",
-            Action::TogglePromptForName => "Toggle prompting for agent name before creation.",
+            Action::ToggleRandomizedPetNameDefault => {
+                "Toggle whether the agent name prompt starts with a random pet name."
+            }
             Action::TogglePrBannerPosition => {
                 "Move PR banner between top and bottom of agent pane."
             }
@@ -426,7 +428,7 @@ impl Action {
             | Action::ToggleDiffLineNumbers
             | Action::ResourceMonitor
             | Action::ToggleGithubIntegration
-            | Action::TogglePromptForName
+            | Action::ToggleRandomizedPetNameDefault
             | Action::TogglePrBannerPosition
             | Action::ForceReconnectAgent
             | Action::ChangeDefaultProvider
@@ -1420,14 +1422,14 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         }),
     },
     BindingDef {
-        action: Action::TogglePromptForName,
+        action: Action::ToggleRandomizedPetNameDefault,
         default_keys: &[],
         scopes: &[],
         help: None,
         hint_contexts: &[],
         palette: Some(PaletteEntry {
-            name: "toggle-prompt-for-name",
-            description: "Toggle prompting for agent name before creation",
+            name: "toggle-randomized-pet-name-default",
+            description: "Toggle whether new agent prompts start with a random pet name",
         }),
     },
     BindingDef {

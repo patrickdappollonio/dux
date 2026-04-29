@@ -493,6 +493,12 @@ pub(crate) enum ConfirmNonDefaultBranchFocus {
     Checkbox,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NameNewAgentFocus {
+    Input,
+    Checkbox,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PromptState {
     None,
@@ -550,6 +556,9 @@ pub(crate) enum PromptState {
     NameNewAgent {
         request: CreateAgentRequest,
         input: TextInput,
+        randomize_name: bool,
+        randomized_name: Option<String>,
+        focus: NameNewAgentFocus,
     },
     PickEditor {
         session_label: String,
@@ -790,6 +799,7 @@ pub(crate) enum OverlayCheckboxId {
     DeleteAgentWorktree,
     RenameSessionBranch,
     NonDefaultBranchCheckoutDefault,
+    NameNewAgentRandomizedPetName,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -894,6 +904,7 @@ pub(crate) enum OverlayMouseLayout {
     },
     NameNewAgent {
         input: Rect,
+        checkbox: Option<OverlayCheckbox>,
     },
 }
 
@@ -1700,23 +1711,24 @@ impl App {
                 }
                 Ok(())
             }
-            "toggle-prompt-for-name" => {
-                self.config.defaults.prompt_for_name = !self.config.defaults.prompt_for_name;
+            "toggle-randomized-pet-name-default" => {
+                self.config.defaults.enable_randomized_pet_name_by_default =
+                    !self.config.defaults.enable_randomized_pet_name_by_default;
                 let save_result =
                     save_config(&self.paths.config_path, &self.config, &self.bindings);
-                let state = if self.config.defaults.prompt_for_name {
-                    "enabled — you'll be prompted for a name"
+                let state = if self.config.defaults.enable_randomized_pet_name_by_default {
+                    "enabled — new agent prompts start with a random pet name"
                 } else {
-                    "disabled — random names will be generated"
+                    "disabled — new agent prompts start empty"
                 };
                 if let Err(err) = save_result {
                     self.set_error(format!(
-                        "Prompt for agent name {state} for this session, but couldn't persist the change to config: {err:#}"
+                        "Random pet-name defaults {state} for this session, but couldn't persist the change to config: {err:#}"
                     ));
                 } else {
                     let palette_key = self.bindings.label_for(Action::OpenPalette);
                     self.set_info(format!(
-                        "Prompt for agent name {state}. Press {palette_key} to toggle back."
+                        "Random pet-name defaults {state}. Press {palette_key} to toggle back."
                     ));
                 }
                 Ok(())

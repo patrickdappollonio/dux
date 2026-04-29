@@ -2483,6 +2483,9 @@ impl App {
                 Some(Action::CloseOverlay) => {
                     self.prompt = PromptState::None;
                 }
+                Some(Action::ToggleSelection) => {
+                    self.toggle_name_new_agent_randomized_name();
+                }
                 Some(Action::Confirm) => {
                     // Extract the name from the input before taking ownership.
                     let name = if let PromptState::NameNewAgent { input, .. } = &self.prompt {
@@ -2553,7 +2556,20 @@ impl App {
                     self.dispatch_create_agent_request(request, msg)?;
                 }
                 _ => {
-                    if let PromptState::NameNewAgent { input, .. } = &mut self.prompt {
+                    if key.code == KeyCode::Char(' ') {
+                        let checkbox_focused = matches!(
+                            self.prompt,
+                            PromptState::NameNewAgent {
+                                focus: NameNewAgentFocus::Checkbox,
+                                ..
+                            }
+                        );
+                        if checkbox_focused {
+                            self.toggle_name_new_agent_randomized_name();
+                        } else if let PromptState::NameNewAgent { input, .. } = &mut self.prompt {
+                            input.handle_key(key);
+                        }
+                    } else if let PromptState::NameNewAgent { input, .. } = &mut self.prompt {
                         input.handle_key(key);
                     }
                 }
@@ -3114,8 +3130,13 @@ impl App {
                     contains_point(input, column, row).then_some(PromptMouseTarget::RenameInput)
                 }
             }
-            OverlayMouseLayout::NameNewAgent { input } => {
-                contains_point(input, column, row).then_some(PromptMouseTarget::NameNewAgentInput)
+            OverlayMouseLayout::NameNewAgent { input, checkbox } => {
+                if checkbox.is_some_and(|checkbox| contains_point(checkbox.rect, column, row)) {
+                    checkbox.map(|checkbox| PromptMouseTarget::Checkbox(checkbox.id))
+                } else {
+                    contains_point(input, column, row)
+                        .then_some(PromptMouseTarget::NameNewAgentInput)
+                }
             }
         }
     }
@@ -3876,11 +3897,36 @@ impl App {
 
     fn set_name_new_agent_cursor_from_mouse(&mut self, column: u16) {
         let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::NameNewAgent { input } => input,
+            OverlayMouseLayout::NameNewAgent { input, .. } => input,
             _ => return,
         };
-        if let PromptState::NameNewAgent { input, .. } = &mut self.prompt {
+        if let PromptState::NameNewAgent { input, focus, .. } = &mut self.prompt {
             input.cursor = cursor_from_single_line_position(&input.text, input_area, 0, column);
+            *focus = NameNewAgentFocus::Input;
+        }
+    }
+
+    fn toggle_name_new_agent_randomized_name(&mut self) {
+        if let PromptState::NameNewAgent {
+            input,
+            randomize_name,
+            randomized_name,
+            focus,
+            ..
+        } = &mut self.prompt
+        {
+            *focus = NameNewAgentFocus::Checkbox;
+            *randomize_name = !*randomize_name;
+            if *randomize_name {
+                let name = crate::git::docker_style_name();
+                input.set_text(name.clone());
+                *randomized_name = Some(name);
+            } else if randomized_name.as_deref() == Some(input.text.as_str()) {
+                input.clear();
+                *randomized_name = None;
+            } else {
+                *randomized_name = None;
+            }
         }
     }
 
@@ -3916,6 +3962,9 @@ impl App {
                     *checkout_default = !*checkout_default;
                     *focus = ConfirmNonDefaultBranchFocus::Checkbox;
                 }
+            }
+            OverlayCheckboxId::NameNewAgentRandomizedPetName => {
+                self.toggle_name_new_agent_randomized_name();
             }
         }
     }
@@ -4956,12 +5005,13 @@ mod tests {
     use super::DOUBLE_CLICK_THRESHOLD;
     use super::components::{ButtonPressedTarget, PressedButton};
     use crate::app::{
-        App, CenterMode, ConfirmKillRunningPrompt, DeleteAgentFocus, FocusPane, FullscreenOverlay,
-        InputTarget, KillRunningAction, KillRunningFocus, KillRunningFooterAction,
-        KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftItem, LeftSection,
-        MacroBarState, MouseClickTarget, MouseLayoutState, OverlayCheckbox, OverlayCheckboxId,
-        OverlayMouseLayout, OverlayMouseLayoutState, ProcessInfo, PromptState, PullTarget,
-        ResourceStats, RightSection, RuntimeTargetId, TextInput, WorkerEvent,
+        App, CenterMode, ConfirmKillRunningPrompt, CreateAgentRequest, DeleteAgentFocus, FocusPane,
+        FullscreenOverlay, InputTarget, KillRunningAction, KillRunningFocus,
+        KillRunningFooterAction, KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftItem,
+        LeftSection, MacroBarState, MouseClickTarget, MouseLayoutState, NameNewAgentFocus,
+        OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout, OverlayMouseLayoutState,
+        ProcessInfo, PromptState, PullTarget, ResourceStats, RightSection, RuntimeTargetId,
+        TextInput, WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
@@ -5303,6 +5353,16 @@ mod tests {
             input: Rect::new(24, 10, 30, 1),
             checkbox: Some(OverlayCheckbox {
                 id: OverlayCheckboxId::RenameSessionBranch,
+                rect: Rect::new(24, 12, 34, 2),
+            }),
+        };
+    }
+
+    fn install_name_new_agent_overlay(app: &mut App) {
+        app.overlay_layout.active = OverlayMouseLayout::NameNewAgent {
+            input: Rect::new(24, 10, 30, 1),
+            checkbox: Some(OverlayCheckbox {
+                id: OverlayCheckboxId::NameNewAgentRandomizedPetName,
                 rect: Rect::new(24, 12, 34, 2),
             }),
         };
@@ -5965,9 +6025,110 @@ mod tests {
 
         app.fork_selected_session().unwrap();
 
-        assert!(app.create_agent_in_flight);
-        assert!(app.status.text().contains("Forking agent"));
-        assert!(app.status.text().contains("fresh session"));
+        match &app.prompt {
+            PromptState::NameNewAgent {
+                request,
+                input,
+                randomize_name,
+                focus,
+                ..
+            } => {
+                assert!(matches!(request, CreateAgentRequest::ForkSession { .. }));
+                assert!(input.text.is_empty());
+                assert!(!*randomize_name);
+                assert_eq!(*focus, NameNewAgentFocus::Input);
+            }
+            other => panic!("expected name-new-agent prompt, got {other:?}"),
+        }
+        assert!(!app.create_agent_in_flight);
+    }
+
+    #[test]
+    fn create_agent_always_opens_name_prompt_empty_by_default() {
+        let mut app = test_app(default_bindings());
+
+        app.create_agent_for_selected_project().unwrap();
+
+        match &app.prompt {
+            PromptState::NameNewAgent {
+                request,
+                input,
+                randomize_name,
+                focus,
+                ..
+            } => {
+                assert!(matches!(request, CreateAgentRequest::NewProject { .. }));
+                assert!(input.text.is_empty());
+                assert!(!*randomize_name);
+                assert_eq!(*focus, NameNewAgentFocus::Input);
+            }
+            other => panic!("expected name-new-agent prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_agent_prefills_name_when_randomized_default_enabled() {
+        let mut app = test_app(default_bindings());
+        app.config.defaults.enable_randomized_pet_name_by_default = true;
+
+        app.create_agent_for_selected_project().unwrap();
+
+        match &app.prompt {
+            PromptState::NameNewAgent {
+                input,
+                randomize_name,
+                randomized_name,
+                ..
+            } => {
+                assert!(*randomize_name);
+                assert!(!input.text.is_empty());
+                assert_eq!(randomized_name.as_deref(), Some(input.text.as_str()));
+            }
+            other => panic!("expected name-new-agent prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn name_prompt_toggle_randomized_name_fills_and_clears_input() {
+        let mut app = test_app(default_bindings());
+        app.create_agent_for_selected_project().unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+
+        let generated = match &app.prompt {
+            PromptState::NameNewAgent {
+                input,
+                randomize_name,
+                randomized_name,
+                focus,
+                ..
+            } => {
+                assert!(*randomize_name);
+                assert_eq!(*focus, NameNewAgentFocus::Checkbox);
+                assert!(!input.text.is_empty());
+                assert_eq!(randomized_name.as_deref(), Some(input.text.as_str()));
+                input.text.clone()
+            }
+            other => panic!("expected name-new-agent prompt, got {other:?}"),
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::NameNewAgent {
+                input,
+                randomize_name,
+                randomized_name,
+                ..
+            } => {
+                assert!(!*randomize_name);
+                assert!(input.text.is_empty(), "generated name was {generated}");
+                assert!(randomized_name.is_none());
+            }
+            other => panic!("expected name-new-agent prompt, got {other:?}"),
+        }
     }
 
     #[test]
@@ -8344,6 +8505,31 @@ cyan = "#00ffff"
         match &app.prompt {
             PromptState::RenameSession { rename_branch, .. } => assert!(*rename_branch),
             other => panic!("expected rename prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mouse_click_name_prompt_checkbox_toggles_randomized_name() {
+        let mut app = test_app(default_bindings());
+        app.create_agent_for_selected_project().unwrap();
+        install_name_new_agent_overlay(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 12));
+
+        match &app.prompt {
+            PromptState::NameNewAgent {
+                input,
+                randomize_name,
+                randomized_name,
+                focus,
+                ..
+            } => {
+                assert!(*randomize_name);
+                assert_eq!(*focus, NameNewAgentFocus::Checkbox);
+                assert!(!input.text.is_empty());
+                assert_eq!(randomized_name.as_deref(), Some(input.text.as_str()));
+            }
+            other => panic!("expected name-new-agent prompt, got {other:?}"),
         }
     }
 

@@ -150,32 +150,11 @@ impl App {
             return Ok(());
         }
 
-        if self.config.defaults.prompt_for_name {
-            self.input_target = InputTarget::None;
-            self.fullscreen_overlay = FullscreenOverlay::None;
-            self.prompt = PromptState::NameNewAgent {
-                request: CreateAgentRequest::NewProject {
-                    project,
-                    custom_name: None,
-                    use_existing_branch: false,
-                },
-                input: TextInput::new().with_char_map(crate::git::agent_name_char_map),
-            };
-            return Ok(());
-        }
-
-        logger::info(&format!("creating agent for project {}", project.path));
-        self.dispatch_create_agent_request(
-            CreateAgentRequest::NewProject {
-                project: project.clone(),
-                custom_name: None,
-                use_existing_branch: false,
-            },
-            format!(
-                "Creating a new agent worktree for project \"{}\" and launching a fresh session...",
-                project.name
-            ),
-        )
+        self.open_name_new_agent_prompt(CreateAgentRequest::NewProject {
+            project,
+            custom_name: None,
+            use_existing_branch: false,
+        })
     }
 
     pub(crate) fn fork_selected_session(&mut self) -> Result<()> {
@@ -189,36 +168,34 @@ impl App {
         };
         let source_label = self.session_label(&source_session);
 
-        if self.config.defaults.prompt_for_name {
-            self.input_target = InputTarget::None;
-            self.fullscreen_overlay = FullscreenOverlay::None;
-            self.prompt = PromptState::NameNewAgent {
-                request: CreateAgentRequest::ForkSession {
-                    project: project.clone(),
-                    source_session: Box::new(source_session),
-                    source_label,
-                    custom_name: None,
-                },
-                input: TextInput::new().with_char_map(crate::git::agent_name_char_map),
-            };
-            return Ok(());
+        self.open_name_new_agent_prompt(CreateAgentRequest::ForkSession {
+            project,
+            source_session: Box::new(source_session),
+            source_label,
+            custom_name: None,
+        })
+    }
+
+    fn open_name_new_agent_prompt(&mut self, request: CreateAgentRequest) -> Result<()> {
+        let randomize_name = self.config.defaults.enable_randomized_pet_name_by_default;
+        let mut input = TextInput::new().with_char_map(crate::git::agent_name_char_map);
+        let mut randomized_name = None;
+        if randomize_name {
+            let name = crate::git::docker_style_name();
+            input.set_text(name.clone());
+            randomized_name = Some(name);
         }
 
-        logger::info(&format!(
-            "forking session {} from worktree {}",
-            source_session.id, source_session.worktree_path
-        ));
-        self.dispatch_create_agent_request(
-            CreateAgentRequest::ForkSession {
-                project: project.clone(),
-                source_session: Box::new(source_session),
-                source_label: source_label.clone(),
-                custom_name: None,
-            },
-            format!(
-                "Forking agent \"{source_label}\" by cloning its current worktree contents into a fresh session...",
-            ),
-        )
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.prompt = PromptState::NameNewAgent {
+            request,
+            input,
+            randomize_name,
+            randomized_name,
+            focus: NameNewAgentFocus::Input,
+        };
+        Ok(())
     }
 
     /// Spawns a background worker that runs `git switch <target_branch>` in
