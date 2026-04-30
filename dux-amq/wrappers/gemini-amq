@@ -19,4 +19,9 @@ ME=$(printf '%s' "$ME" | tr '[:upper:]' '[:lower:]' | sed 's|[^a-z0-9_-]|-|g; s|
 
 ROOT="${AMQ_GLOBAL_ROOT:-/data/state/amq}"
 
-exec amq coop exec --no-init --root "$ROOT" --me "$ME" gemini -- "$@"
+# Gemini is crossterm-based; paste mode is the right default. We still
+# start wake explicitly so coop exec doesn't spawn its own (which would
+# otherwise double up on injection).
+amq wake --me "$ME" --root "$ROOT" --inject-mode auto >/dev/null 2>&1 &
+
+exec amq coop exec --no-wake --no-init --root "$ROOT" --me "$ME" gemini -- "$@"

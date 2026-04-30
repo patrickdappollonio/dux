@@ -17,4 +17,7 @@ ME=$(printf '%s' "$ME" | tr '[:upper:]' '[:lower:]' | sed 's|[^a-z0-9_-]|-|g; s|
 
 ROOT="${AMQ_GLOBAL_ROOT:-/data/state/amq}"
 
-exec amq coop exec --no-init --root "$ROOT" --me "$ME" codex -- --dangerously-bypass-approvals-and-sandbox "$@"
+# Start wake explicitly in raw mode so injected messages auto-submit.
+amq wake --me "$ME" --root "$ROOT" --inject-mode raw >/dev/null 2>&1 &
+
+exec amq coop exec --no-wake --no-init --root "$ROOT" --me "$ME" codex -- --dangerously-bypass-approvals-and-sandbox "$@"
