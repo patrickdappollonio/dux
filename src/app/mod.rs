@@ -1199,6 +1199,7 @@ impl App {
             _single_instance_lock: single_instance_lock,
         };
         app.restore_sessions();
+        app.auto_resume_all_sessions();
         app.seed_pr_statuses_from_db();
         app.rebuild_left_items();
         app.reload_changed_files();
@@ -1368,6 +1369,47 @@ impl App {
                 self.mark_session_status(&id, SessionStatus::Detached);
             } else {
                 self.mark_session_status(&id, SessionStatus::Exited);
+            }
+        }
+    }
+
+    /// If `defaults.auto_resume_on_start` is enabled, eagerly reconnect every
+    /// detached session so all panes are live as soon as dux opens. Skips
+    /// sessions whose worktree no longer exists. Failures are logged but
+    /// don't abort startup — a single bad session shouldn't stop the others.
+    fn auto_resume_all_sessions(&mut self) {
+        if !self.config.defaults.auto_resume_on_start {
+            return;
+        }
+        let candidates: Vec<AgentSession> = self
+            .sessions
+            .iter()
+            .filter(|s| Path::new(&s.worktree_path).exists())
+            .filter(|s| !self.providers.contains_key(&s.id))
+            .cloned()
+            .collect();
+        logger::info(&format!(
+            "auto_resume_on_start: spawning {} agent session(s)",
+            candidates.len()
+        ));
+        for session in candidates {
+            let use_resume = self.should_resume_session(&session);
+            match self.spawn_pty_for_session(&session, use_resume) {
+                Ok(client) => {
+                    self.providers.insert(session.id.clone(), client);
+                    if use_resume {
+                        self.resume_fallback_candidates
+                            .insert(session.id.clone(), Instant::now());
+                    }
+                    self.mark_session_status(&session.id, SessionStatus::Active);
+                    self.mark_session_provider_started(&session.id);
+                }
+                Err(e) => {
+                    logger::info(&format!(
+                        "auto_resume_on_start: failed to spawn session {}: {e}",
+                        session.id
+                    ));
+                }
             }
         }
     }

@@ -119,6 +119,7 @@ pub struct Defaults {
     pub start_directory: Option<String>,
     pub commit_prompt: Option<String>,
     pub enable_randomized_pet_name_by_default: bool,
+    pub auto_resume_on_start: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -260,6 +261,7 @@ impl Default for Defaults {
             start_directory,
             commit_prompt: Some(DEFAULT_COMMIT_PROMPT.to_string()),
             enable_randomized_pet_name_by_default: false,
+            auto_resume_on_start: false,
         }
     }
 }
@@ -633,6 +635,17 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
                  # When false, the prompt starts empty and the pet-name checkbox is off.",
             )),
             value_fn: |c| FieldValue::Bool(c.defaults.enable_randomized_pet_name_by_default),
+        },
+        ConfigEntry::Blank,
+        ConfigEntry::Field {
+            key: "auto_resume_on_start",
+            comment: Some(CommentSource::Static(
+                "# When true, every persisted agent session is reconnected automatically\n\
+                 # at startup so all panes are live as soon as dux opens. Default false:\n\
+                 # sessions stay detached until you focus them.\n\
+                 # Caveat: spawning N agents at once means N provider processes (CPU/RAM).",
+            )),
+            value_fn: |c| FieldValue::Bool(c.defaults.auto_resume_on_start),
         },
         ConfigEntry::Blank,
         ConfigEntry::Providers,
