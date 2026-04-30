@@ -9,6 +9,9 @@ if [[ "${1:-}" == "exec" ]]; then
 fi
 
 ME="${AM_ME:-}"
+if [[ -z "$ME" && "$PWD" == "${DUX_HOME:-/data/state/dux}/worktrees/"* ]]; then
+  ME=$(basename "$PWD")
+fi
 if [[ -z "$ME" ]]; then
   ME=$(git -C "$PWD" branch --show-current 2>/dev/null || true)
 fi
@@ -18,6 +21,7 @@ ME=$(printf '%s' "$ME" | tr '[:upper:]' '[:lower:]' | sed 's|[^a-z0-9_-]|-|g; s|
 ROOT="${AMQ_GLOBAL_ROOT:-/data/state/amq}"
 
 # Start wake explicitly in raw mode so injected messages auto-submit.
-amq wake --me "$ME" --root "$ROOT" --inject-mode raw >/dev/null 2>&1 &
+# Stdin must be /dev/tty (see claude-amq for full explanation).
+amq wake --me "$ME" --root "$ROOT" --inject-mode raw </dev/tty >/dev/null 2>&1 &
 
 exec amq coop exec --no-wake --no-init --root "$ROOT" --me "$ME" codex -- --dangerously-bypass-approvals-and-sandbox "$@"

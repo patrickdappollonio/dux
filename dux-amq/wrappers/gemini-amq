@@ -11,6 +11,9 @@ for arg in "$@"; do
 done
 
 ME="${AM_ME:-}"
+if [[ -z "$ME" && "$PWD" == "${DUX_HOME:-/data/state/dux}/worktrees/"* ]]; then
+  ME=$(basename "$PWD")
+fi
 if [[ -z "$ME" ]]; then
   ME=$(git -C "$PWD" branch --show-current 2>/dev/null || true)
 fi
@@ -21,7 +24,8 @@ ROOT="${AMQ_GLOBAL_ROOT:-/data/state/amq}"
 
 # Gemini is crossterm-based; paste mode is the right default. We still
 # start wake explicitly so coop exec doesn't spawn its own (which would
-# otherwise double up on injection).
-amq wake --me "$ME" --root "$ROOT" --inject-mode auto >/dev/null 2>&1 &
+# otherwise double up on injection). Stdin must be /dev/tty (see
+# claude-amq for full explanation).
+amq wake --me "$ME" --root "$ROOT" --inject-mode auto </dev/tty >/dev/null 2>&1 &
 
 exec amq coop exec --no-wake --no-init --root "$ROOT" --me "$ME" gemini -- "$@"

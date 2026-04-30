@@ -58,6 +58,15 @@ seed_session_history() {
 seed_session_history || true
 
 ME="${AM_ME:-}"
+# Identity priority:
+#   1. AM_ME from env (explicit override)
+#   2. dux worktree dir basename — stable per-pane and unique, even if the
+#      git branch was renamed or checked out to something unexpected
+#   3. git branch (legacy fallback)
+#   4. claude-<pid> (no-context fallback)
+if [[ -z "$ME" && "$PWD" == "${DUX_HOME:-/data/state/dux}/worktrees/"* ]]; then
+  ME=$(basename "$PWD")
+fi
 if [[ -z "$ME" ]]; then
   ME=$(git -C "$PWD" branch --show-current 2>/dev/null || true)
 fi
@@ -79,6 +88,11 @@ fi
 # arrive as plain text + carriage return, which Claude Code (Ink-based)
 # auto-submits. The default `auto` mode sometimes picks `paste`, which
 # only types the message without sending it.
-amq wake --me "$ME" --root "$ROOT" --inject-mode raw >/dev/null 2>&1 &
+#
+# CRITICAL: stdin must be re-attached to /dev/tty here. Bash auto-redirects
+# background jobs' stdin to /dev/null in non-interactive scripts (job
+# control off), and `amq wake` then fails its `IsTerminal(stdin)` check
+# and exits as a zombie before it can inject anything.
+amq wake --me "$ME" --root "$ROOT" --inject-mode raw </dev/tty >/dev/null 2>&1 &
 
 exec amq coop exec --no-wake --no-init --root "$ROOT" --me "$ME" claude -- "${EXTRA[@]}" "$@"
