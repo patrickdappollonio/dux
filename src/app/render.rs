@@ -117,7 +117,7 @@ const WELCOME_TIPS: &[fn(&RuntimeBindings) -> String] = &[
         "dux remembers which providers you've run on each worktree. Swap away and back, and each one picks up right where you left it.".into()
     },
     |_b| {
-        "New agents spawning with the wrong CLI? Run `change-default-provider` in the palette to swap the default. Existing agents stay on their current brain.".into()
+        "Need to change which CLI new agents use? `change-default-provider` updates the global fallback. `change-project-default-provider` overrides just one project.".into()
     },
     |_b| {
         "Swapped providers while an agent was still running? The sidebar shows `(old → new)` until you exit and relaunch. dux queues the swap, you run the show.".into()
@@ -474,14 +474,31 @@ impl App {
                 ));
             }
             spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
+            let has_project_override = self.project_uses_explicit_default_provider(&project.id);
+            let provider_label = if has_project_override {
+                "project provider: "
+            } else {
+                "default provider: "
+            };
             spans.push(Span::styled(
-                "default provider: ",
+                provider_label,
                 Style::default().fg(label_fg).bg(bg),
             ));
             spans.push(Span::styled(
                 project.default_provider.as_str().to_string(),
                 Style::default().fg(self.theme.branch_fg).bg(bg),
             ));
+            if has_project_override {
+                spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
+                spans.push(Span::styled(
+                    "global default: ",
+                    Style::default().fg(label_fg).bg(bg),
+                ));
+                spans.push(Span::styled(
+                    self.config.default_provider().as_str().to_string(),
+                    Style::default().fg(self.theme.branch_fg).bg(bg),
+                ));
+            }
             if let Some(session) = self.selected_session()
                 && session.provider != project.default_provider
             {
@@ -2777,7 +2794,7 @@ impl App {
                 let detail_lines = vec![
                     Line::from(vec![
                         Span::styled(
-                            " Current default: ",
+                            " Current global default: ",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ),
                         Span::styled(
@@ -2788,7 +2805,7 @@ impl App {
                         ),
                     ]),
                     Line::from(vec![Span::styled(
-                        " New sessions will use the chosen provider. Existing agents keep their current provider.",
+                        " Projects with an explicit project provider keep their override. Existing agents keep their current provider.",
                         Style::default().fg(self.theme.hint_desc_fg),
                     )]),
                 ];
@@ -2811,7 +2828,7 @@ impl App {
                     .iter()
                     .map(|option| {
                         let status = if option.is_current {
-                            "current default"
+                            "current global default"
                         } else {
                             "available"
                         };
@@ -2888,7 +2905,7 @@ impl App {
                     ))
                     .render(frame, cancel_area, &self.theme);
 
-                Button::new("Set Default")
+                Button::new("Set Global")
                     .kind(ButtonKind::Confirm)
                     .state(button_state_for(
                         ButtonPressedTarget::ChangeDefaultProviderApply,
@@ -2899,6 +2916,223 @@ impl App {
                     .render(frame, apply_area, &self.theme);
 
                 self.overlay_layout.active = OverlayMouseLayout::ChangeDefaultProvider {
+                    list: list_inner,
+                    items: prompt.options.len(),
+                    offset: state.offset(),
+                    cancel_button: cancel_area,
+                    apply_button: apply_area,
+                };
+            }
+            PromptState::ChangeProjectDefaultProvider(prompt) => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(64, 60, frame.area());
+                self.clear_overlay_area(frame, area);
+
+                let move_down = self.bindings.label_for(Action::MoveDown);
+                let move_up = self.bindings.label_for(Action::MoveUp);
+                let toggle = self.bindings.label_for(Action::ToggleSelection);
+                let confirm = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+
+                let mut bottom_spans = vec![Span::raw(" ")];
+                bottom_spans.extend(self.theme.key_badge_default(&move_down));
+                bottom_spans.push(Span::styled(
+                    "/",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&move_up));
+                bottom_spans.push(Span::styled(
+                    " move  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&toggle));
+                bottom_spans.push(Span::styled(
+                    " buttons  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&confirm));
+                bottom_spans.push(Span::styled(
+                    " choose  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&close_key));
+                bottom_spans.push(Span::styled(
+                    " cancel",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+
+                let [details_area, list_area, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(5),
+                        Constraint::Min(6),
+                        Constraint::Length(3),
+                    ])
+                    .areas(area);
+
+                let project_mode = if prompt.inherits_global_default {
+                    "inherits global default"
+                } else {
+                    "project override"
+                };
+                let detail_lines = vec![
+                    Line::from(vec![
+                        Span::styled(" Project: ", Style::default().fg(self.theme.hint_desc_fg)),
+                        Span::styled(
+                            prompt.project_name.clone(),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(
+                            " Current provider: ",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ),
+                        Span::styled(
+                            format!("{} ({project_mode})", prompt.current.as_str()),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(
+                            " Global default: ",
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ),
+                        Span::styled(
+                            prompt.global_default.as_str().to_string(),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(vec![Span::styled(
+                        " Choose \"inherit global default\" to remove the project-specific override. Existing agents keep their current provider.",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )]),
+                ];
+                Paragraph::new(detail_lines)
+                    .block(
+                        self.themed_overlay_block("Change Project Provider")
+                            .title_bottom(Line::from(bottom_spans)),
+                    )
+                    .render(details_area, frame.buffer_mut());
+
+                let provider_col = prompt
+                    .options
+                    .iter()
+                    .map(|option| match &option.provider {
+                        Some(provider) => provider.as_str().chars().count(),
+                        None => "inherit global default".chars().count(),
+                    })
+                    .max()
+                    .unwrap_or(0)
+                    .max(8);
+                let items = prompt
+                    .options
+                    .iter()
+                    .map(|option| {
+                        let name = match &option.provider {
+                            Some(provider) => provider.as_str().to_string(),
+                            None => "inherit global default".to_string(),
+                        };
+                        let status = match (&option.provider, option.is_current) {
+                            (None, true) => "current setting",
+                            (None, false) => "remove project override",
+                            (Some(_), true) => "current project override",
+                            (Some(provider), false)
+                                if provider.as_str() == prompt.global_default.as_str() =>
+                            {
+                                "matches global default"
+                            }
+                            _ => "available",
+                        };
+                        let name = format!("{name:width$}", width = provider_col);
+                        ListItem::new(Line::from(vec![
+                            Span::styled(
+                                name,
+                                Style::default()
+                                    .fg(self.theme.help_section_header_fg)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("  {status}"),
+                                Style::default().fg(self.theme.hint_desc_fg),
+                            ),
+                        ]))
+                    })
+                    .collect::<Vec<_>>();
+                let mut state = ListState::default().with_selected(Some(
+                    prompt.selected.min(prompt.options.len().saturating_sub(1)),
+                ));
+                let list_block = Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
+                let list_inner = list_block.inner(list_area);
+                let highlight_style = if matches!(prompt.focus, ChangeDefaultProviderFocus::List) {
+                    self.theme.selection_style()
+                } else {
+                    Style::default()
+                        .fg(self.theme.help_section_header_fg)
+                        .add_modifier(Modifier::BOLD)
+                };
+                StatefulWidget::render(
+                    List::new(items)
+                        .block(list_block)
+                        .highlight_style(highlight_style),
+                    list_area,
+                    frame.buffer_mut(),
+                    &mut state,
+                );
+
+                let btn_width = 18u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let apply_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                let apply_enabled = prompt
+                    .options
+                    .get(prompt.selected)
+                    .map(|option| !option.is_current)
+                    .unwrap_or(false);
+
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ChangeProjectDefaultProviderCancel,
+                        self.pressed_button,
+                        matches!(prompt.focus, ChangeDefaultProviderFocus::Cancel),
+                        true,
+                    ))
+                    .render(frame, cancel_area, &self.theme);
+
+                Button::new("Set Project")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ChangeProjectDefaultProviderApply,
+                        self.pressed_button,
+                        matches!(prompt.focus, ChangeDefaultProviderFocus::Apply),
+                        apply_enabled,
+                    ))
+                    .render(frame, apply_area, &self.theme);
+
+                self.overlay_layout.active = OverlayMouseLayout::ChangeProjectDefaultProvider {
                     list: list_inner,
                     items: prompt.options.len(),
                     offset: state.offset(),

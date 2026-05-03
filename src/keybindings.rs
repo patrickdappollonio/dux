@@ -13,6 +13,7 @@ pub enum Action {
     ForkAgent,
     ChangeAgentProvider,
     ChangeDefaultProvider,
+    ChangeProjectDefaultProvider,
     FocusAgent,
     OpenProjectBrowser,
     CopyPath,
@@ -188,6 +189,7 @@ impl Action {
             Action::ForkAgent => "fork_agent",
             Action::ChangeAgentProvider => "change_agent_provider",
             Action::ChangeDefaultProvider => "change_default_provider",
+            Action::ChangeProjectDefaultProvider => "change_project_default_provider",
             Action::FocusAgent => "focus_agent",
             Action::OpenProjectBrowser => "open_project_browser",
             Action::CopyPath => "copy_path",
@@ -271,7 +273,10 @@ impl Action {
                 "Swap the selected agent worktree to a different provider."
             }
             Action::ChangeDefaultProvider => {
-                "Change the default provider used when creating new agent sessions."
+                "Change the global default provider used for new agent sessions in projects without an explicit project override."
+            }
+            Action::ChangeProjectDefaultProvider => {
+                "Change the selected project's default provider used for new agent sessions in that project only."
             }
             Action::FocusAgent => "Focus the selected agent's output pane.",
             Action::OpenProjectBrowser => "Open the project browser.",
@@ -432,6 +437,7 @@ impl Action {
             | Action::TogglePrBannerPosition
             | Action::ForceReconnectAgent
             | Action::ChangeDefaultProvider
+            | Action::ChangeProjectDefaultProvider
             | Action::ChangeTheme => None,
         }
     }
@@ -569,7 +575,18 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
         palette: Some(PaletteEntry {
             name: "change-default-provider",
-            description: "Change the default provider used when creating new sessions",
+            description: "Change the global default provider for new agents in projects without a project-specific override",
+        }),
+    },
+    BindingDef {
+        action: Action::ChangeProjectDefaultProvider,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "change-project-default-provider",
+            description: "Change the selected project's default provider for future agents in that project only",
         }),
     },
     BindingDef {
@@ -2169,6 +2186,36 @@ mod tests {
             .filter_map(|binding| binding.palette_name)
             .collect::<Vec<_>>();
         assert!(names.contains(&"change-agent-provider"));
+        assert!(names.contains(&"change-default-provider"));
+        assert!(names.contains(&"change-project-default-provider"));
+    }
+
+    #[test]
+    fn provider_palette_descriptions_clarify_scope() {
+        let bindings = default_bindings();
+        let global = bindings
+            .filtered_palette("change-default-provider")
+            .into_iter()
+            .find(|binding| binding.palette_name == Some("change-default-provider"))
+            .expect("global provider palette entry");
+        assert_eq!(
+            global.palette_description,
+            Some(
+                "Change the global default provider for new agents in projects without a project-specific override"
+            )
+        );
+
+        let project = bindings
+            .filtered_palette("change-project-default-provider")
+            .into_iter()
+            .find(|binding| binding.palette_name == Some("change-project-default-provider"))
+            .expect("project provider palette entry");
+        assert_eq!(
+            project.palette_description,
+            Some(
+                "Change the selected project's default provider for future agents in that project only"
+            )
+        );
     }
 
     #[test]
