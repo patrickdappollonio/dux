@@ -2917,9 +2917,12 @@ args = [\"-l\"]
     }
 
     #[test]
+    #[serial_test::serial(env_mutation)]
     fn expand_path_dollar_var() {
-        // SAFETY: test-only env manipulation; tests are run with --test-threads=1
-        // or use unique variable names to avoid races.
+        // SAFETY: test-only env manipulation. `#[serial(env_mutation)]`
+        // serializes every env-mutating test in this module so they can't
+        // race the process-global table even under `cargo test`'s default
+        // multi-threaded runner.
         unsafe { std::env::set_var("DUX_TEST_VAR_1", "/test/value") };
         let result = expand_path("$DUX_TEST_VAR_1/subdir").unwrap();
         assert_eq!(result, "/test/value/subdir");
@@ -2927,6 +2930,7 @@ args = [\"-l\"]
     }
 
     #[test]
+    #[serial_test::serial(env_mutation)]
     fn expand_path_braced_var() {
         unsafe { std::env::set_var("DUX_TEST_VAR_2", "/braced") };
         let result = expand_path("${DUX_TEST_VAR_2}/sub").unwrap();
@@ -2956,6 +2960,7 @@ args = [\"-l\"]
     }
 
     #[test]
+    #[serial_test::serial(env_mutation)]
     fn expand_path_rejects_traversal() {
         unsafe { std::env::set_var("DUX_TEST_VAR_3", "/safe") };
         assert!(expand_path("$DUX_TEST_VAR_3/../etc/passwd").is_none());
