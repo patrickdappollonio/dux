@@ -1,0 +1,30 @@
+    Fetching advisory database from `https://github.com/RustSec/advisory-db.git`
+      Loaded 1067 security advisories (from /home/siavash_kiani_jobzy_fi/.cargo/advisory-db)
+    Updating crates.io index
+    Scanning Cargo.lock for vulnerabilities (348 crate dependencies)
+Crate:     bincode
+Version:   1.3.3
+Warning:   unmaintained
+Title:     Bincode is unmaintained
+Date:      2025-12-16
+ID:        RUSTSEC-2025-0141
+URL:       https://rustsec.org/advisories/RUSTSEC-2025-0141
+Dependency tree:
+bincode 1.3.3
+└── syntect 5.3.0
+    └── dux 0.1.0
+
+Crate:     instant
+Version:   0.1.13
+Warning:   unmaintained
+Title:     `instant` is unmaintained
+Date:      2024-09-01
+ID:        RUSTSEC-2024-0384
+URL:       https://rustsec.org/advisories/RUSTSEC-2024-0384
+Dependency tree:
+instant 0.1.13
+└── notify-types 1.0.1
+    └── notify 7.0.0
+        └── dux 0.1.0
+
+warning: 2 allowed warnings found

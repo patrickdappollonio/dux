@@ -1,0 +1,46 @@
+2026-05-03 12:51:23 [WARN] unable to find a config path, falling back to default config
+error[rejected]: failed to satisfy license requirements
+   ┌─ /home/siavash_kiani_jobzy_fi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/adler2-2.0.1/Cargo.toml:38:12
+   │
+38 │ license = "0BSD OR MIT OR Apache-2.0"
+   │            ━━━━────━━━────━━━━━━━━━━
+   │            │       │      │
+   │            │       │      rejected: license is not explicitly allowed
+   │            │       rejected: license is not explicitly allowed
+   │            rejected: license is not explicitly allowed
+   │
+   ├ 0BSD - BSD Zero Clause License:
+   ├   - OSI approved
+   ├ MIT - MIT License:
+   ├   - OSI approved
+   ├   - FSF Free/Libre
+   ├ Apache-2.0 - Apache License 2.0:
+   ├   - OSI approved
+   ├   - FSF Free/Libre
+   ├ adler2 v2.0.1
+     └── miniz_oxide v0.8.9
+         ├── flate2 v1.1.9
+         │   ├── png v0.18.1
+         │   │   └── image v0.25.10
+         │   │       └── arboard v3.6.1
+         │   │           └── dux v0.1.0
+         │   ├── syntect v5.3.0
+         │   │   └── dux v0.1.0 (*)
+         │   └── tiff v0.11.3
+         │       └── image v0.25.10 (*)
+         └── png v0.18.1 (*)
+
+error[rejected]: failed to satisfy license requirements
+   ┌─ /home/siavash_kiani_jobzy_fi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aho-corasick-1.1.4/Cargo.toml:40:12
+   │
+40 │ license = "Unlicense OR MIT"
+   │            ━━━━━━━━━────━━━
+   │            │            │
+   │            │            rejected: license is not explicitly allowed
+   │            rejected: license is not explicitly allowed
+...
+(truncated; cargo deny check exit follows)
+EXIT=5
+
+=== Final summary line ===
+advisories FAILED, bans ok, licenses FAILED, sources ok
