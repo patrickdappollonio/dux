@@ -168,6 +168,15 @@ pub fn split_sequences(buf: &[u8]) -> (Vec<&[u8]>, &[u8]) {
 
             let next = buf[i + 1];
             match next {
+                0x1b => {
+                    // A bare ESC followed by another escape sequence. Keep
+                    // the first ESC as its own sequence so the second ESC can
+                    // still prefix CSI/OSC/SS3 input such as SGR mouse
+                    // reports. Otherwise ESC ESC [ < ... M would consume the
+                    // first two bytes and leak "[<...M" as printable input.
+                    i += 1;
+                    sequences.push(&buf[start..i]);
+                }
                 b'[' => {
                     // CSI sequence: ESC [ <params> <final byte 0x40-0x7e>
                     i += 2; // skip ESC [
@@ -496,6 +505,17 @@ mod tests {
         assert_eq!(seqs.len(), 2);
         assert!(rem.is_empty());
         assert!(is_sgr_mouse(seqs[0]));
+        assert!(is_sgr_mouse(seqs[1]));
+    }
+
+    #[test]
+    fn bare_esc_before_sgr_mouse_does_not_strip_mouse_prefix() {
+        let input = b"\x1b\x1b[<35;138;12M";
+        let (seqs, rem) = split_sequences(input);
+        assert_eq!(seqs.len(), 2);
+        assert_eq!(seqs[0], b"\x1b");
+        assert_eq!(seqs[1], b"\x1b[<35;138;12M");
+        assert!(rem.is_empty());
         assert!(is_sgr_mouse(seqs[1]));
     }
 

@@ -8,6 +8,7 @@ const MIN_RIGHT_WIDTH_PCT: u16 = 14;
 const MAX_RIGHT_WIDTH_PCT: u16 = 50;
 const MIN_CENTER_WIDTH_PCT: u16 = 20;
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
+const ESC_AMBIGUITY_TIMEOUT: Duration = Duration::from_millis(25);
 
 /// Maximum size of `loading_input_buf`. During the loading phase we
 /// accumulate bytes only to detect a (possibly multi-byte) ExitInteractive
@@ -1125,6 +1126,7 @@ impl App {
 
         // Poll stdin with 100ms timeout (matches the crossterm poll interval).
         let stdin_handle = std::io::stdin();
+        let mut buf = [0u8; 4096];
         let timeout = rustix::time::Timespec {
             tv_sec: 0,
             tv_nsec: 100_000_000, // 100ms
@@ -1135,11 +1137,13 @@ impl App {
             poll(&mut pollfd, Some(&timeout))
         })?;
         if ready == 0 {
+            if self.resolve_pending_bare_esc(&stdin_borrow, None, &mut buf)? {
+                return Ok(false);
+            }
             return Ok(false);
         }
 
         // Read available bytes from the same handle used for polling.
-        let mut buf = [0u8; 4096];
         let mut stdin_lock = stdin_handle.lock();
         let n = crate::io_retry::retry_on_interrupt(|| stdin_lock.read(&mut buf))?;
         if n == 0 {
@@ -1235,7 +1239,49 @@ impl App {
             }
         }
 
+        if self.resolve_pending_bare_esc(&stdin_borrow, Some(&mut stdin_lock), &mut buf)? {
+            return Ok(false);
+        }
+
         Ok(false)
+    }
+
+    fn resolve_pending_bare_esc(
+        &mut self,
+        stdin_borrow: &impl std::os::fd::AsFd,
+        stdin_lock: Option<&mut std::io::StdinLock<'_>>,
+        buf: &mut [u8; 4096],
+    ) -> Result<bool> {
+        use rustix::event::{PollFd, PollFlags, poll};
+        use std::io::Read;
+
+        if self.raw_input_buf != [0x1b] {
+            return Ok(false);
+        }
+
+        std::thread::sleep(ESC_AMBIGUITY_TIMEOUT);
+        let zero_timeout = rustix::time::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let more = crate::io_retry::retry_on_interrupt_errno(|| {
+            let mut pollfd = [PollFd::new(stdin_borrow, PollFlags::IN)];
+            poll(&mut pollfd, Some(&zero_timeout))
+        })?;
+        if more != 0 {
+            let n = if let Some(stdin_lock) = stdin_lock {
+                crate::io_retry::retry_on_interrupt(|| stdin_lock.read(buf))?
+            } else {
+                let stdin_handle = std::io::stdin();
+                let mut stdin_lock = stdin_handle.lock();
+                crate::io_retry::retry_on_interrupt(|| stdin_lock.read(buf))?
+            };
+            if n != 0 {
+                return self.process_raw_input_bytes(&buf[..n]);
+            }
+        }
+
+        self.process_raw_input_bytes(&[])
     }
 
     /// Process raw bytes that have already been read from stdin.
@@ -1247,7 +1293,11 @@ impl App {
 
         // Split into complete sequences and collect actions to avoid borrow
         // conflicts between raw_input_buf and &mut self methods.
-        let (sequences, remainder) = crate::raw_input::split_sequences(&self.raw_input_buf);
+        let (mut sequences, mut remainder) = crate::raw_input::split_sequences(&self.raw_input_buf);
+        if bytes.is_empty() && remainder == [0x1b] {
+            sequences.push(remainder);
+            remainder = &self.raw_input_buf[self.raw_input_buf.len()..];
+        }
         let remainder_len = remainder.len();
 
         // Collect what to do for each sequence: an intercepted action, a
@@ -9175,6 +9225,50 @@ cyan = "#00ffff"
             "ExitInteractive must work even when scrolled back"
         );
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    #[test]
+    fn timed_out_bare_esc_can_exit_interactive() {
+        let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["esc"])]);
+        let mut app = app_with_scrolled_back_pty();
+        app.bindings = bindings;
+        app.interactive_patterns = app.bindings.interactive_byte_patterns();
+
+        app.process_raw_input_bytes(b"\x1b").unwrap();
+        assert_eq!(
+            app.input_target,
+            InputTarget::Agent,
+            "bare ESC is held until the ambiguity timeout resolves it"
+        );
+        assert_eq!(app.raw_input_buf, b"\x1b");
+
+        app.process_raw_input_bytes(&[]).unwrap();
+        assert_eq!(
+            app.input_target,
+            InputTarget::None,
+            "timed-out bare ESC should resolve as ExitInteractive"
+        );
+        assert!(app.raw_input_buf.is_empty());
+    }
+
+    #[test]
+    fn pending_esc_before_sgr_mouse_does_not_leave_printable_tail() {
+        let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["esc"])]);
+        let mut app = app_with_scrolled_back_pty();
+        app.bindings = bindings;
+        app.interactive_patterns = app.bindings.interactive_byte_patterns();
+
+        app.process_raw_input_bytes(b"\x1b\x1b[<35;138;12M")
+            .unwrap();
+        assert_eq!(
+            app.input_target,
+            InputTarget::None,
+            "first ESC should exit interactive mode"
+        );
+        assert!(
+            app.raw_input_buf.is_empty(),
+            "SGR mouse report must not leave a [<...M printable remainder"
+        );
     }
 
     #[test]
