@@ -74,6 +74,8 @@ pub(crate) enum ButtonPressedTarget {
     ChangeAgentProviderApply,
     ChangeDefaultProviderCancel,
     ChangeDefaultProviderApply,
+    ChangeProjectDefaultProviderCancel,
+    ChangeProjectDefaultProviderApply,
     RuntimeKillCancel,
     RuntimeKillHovered,
     RuntimeKillSelected,

@@ -956,6 +956,36 @@ impl App {
             .collect()
     }
 
+    fn change_project_default_provider_options(
+        &self,
+        project_id: &str,
+    ) -> Vec<ChangeProjectDefaultProviderOption> {
+        let global_default = self.config.default_provider();
+        let explicit = self.project_explicit_default_provider(project_id);
+        let mut options = vec![ChangeProjectDefaultProviderOption {
+            provider: None,
+            is_current: explicit.is_none(),
+        }];
+        options.extend(self.config.providers.commands.keys().map(|name| {
+            let provider = ProviderKind::new(name.clone());
+            ChangeProjectDefaultProviderOption {
+                is_current: explicit.as_ref() == Some(&provider),
+                provider: Some(provider),
+            }
+        }));
+        if explicit.is_none()
+            && !options
+                .iter()
+                .any(|option| option.provider.as_ref() == Some(&global_default))
+        {
+            options.push(ChangeProjectDefaultProviderOption {
+                provider: Some(global_default),
+                is_current: false,
+            });
+        }
+        options
+    }
+
     pub(crate) fn open_change_default_provider_prompt(&mut self) -> Result<()> {
         if self.config.providers.commands.is_empty() {
             self.set_error("No providers are configured.");
@@ -976,7 +1006,42 @@ impl App {
             focus: ChangeDefaultProviderFocus::List,
         });
         self.set_info(
-            "Choose the default provider for newly created agent sessions. Existing agents keep their current provider.",
+            "Choose the global default provider for newly created agent sessions. Projects with an explicit project provider keep their override, and existing agents keep their current provider.",
+        );
+        Ok(())
+    }
+
+    pub(crate) fn open_change_project_default_provider_prompt(&mut self) -> Result<()> {
+        if self.config.providers.commands.is_empty() {
+            self.set_error("No providers are configured.");
+            return Ok(());
+        }
+        let Some(project) = self.selected_project().cloned() else {
+            self.set_error("Select a project first.");
+            return Ok(());
+        };
+        let options = self.change_project_default_provider_options(&project.id);
+        let selected = options
+            .iter()
+            .position(|option| option.is_current)
+            .unwrap_or(0);
+        let global_default = self.config.default_provider();
+        let inherits_global_default = !self.project_uses_explicit_default_provider(&project.id);
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.prompt =
+            PromptState::ChangeProjectDefaultProvider(ChangeProjectDefaultProviderPrompt {
+                project_id: project.id,
+                project_name: project.name,
+                current: project.default_provider,
+                global_default,
+                inherits_global_default,
+                options,
+                selected,
+                focus: ChangeDefaultProviderFocus::List,
+            });
+        self.set_info(
+            "Choose the selected project's default provider for future agents. Choose \"inherit global default\" to remove a project-specific override. Existing agents keep their current provider.",
         );
         Ok(())
     }
@@ -994,7 +1059,7 @@ impl App {
         self.prompt = PromptState::None;
         if selected.is_current {
             self.set_info(format!(
-                "{} is already the default provider. Pick a different one to change it.",
+                "{} is already the global default provider. Pick a different one to change it.",
                 selected.provider.as_str(),
             ));
             return Ok(());
@@ -1004,16 +1069,84 @@ impl App {
         if let Err(err) = save_config(&self.paths.config_path, &self.config, &self.bindings) {
             self.config.defaults.provider = previous;
             self.set_error(format!(
-                "Couldn't persist the default provider change: {err:#}"
+                "Couldn't persist the global default provider change: {err:#}"
             ));
             return Ok(());
         }
         refresh_project_defaults(&mut self.projects, &self.config);
         self.rebuild_left_items();
         self.set_info(format!(
-            "Default provider changed to {}. New agent sessions will use it; existing agents keep their current provider. Use \"change-agent-provider\" on a session to switch providers for an existing worktree.",
+            "Global default provider changed to {}. New agents in projects without a project-specific override will use it; existing agents keep their current provider. Use \"change-project-default-provider\" to override one project or \"change-agent-provider\" to switch an existing worktree.",
             selected.provider.as_str(),
         ));
+        Ok(())
+    }
+
+    pub(crate) fn apply_change_project_default_provider(&mut self) -> Result<()> {
+        let prompt = match &self.prompt {
+            PromptState::ChangeProjectDefaultProvider(prompt) => prompt.clone(),
+            _ => return Ok(()),
+        };
+        let Some(selected) = prompt.options.get(prompt.selected).cloned() else {
+            self.prompt = PromptState::None;
+            self.set_error("Select a provider first.");
+            return Ok(());
+        };
+        self.prompt = PromptState::None;
+        let previous = self
+            .project_config(&prompt.project_id)
+            .and_then(|project| project.default_provider.clone());
+        if selected.is_current {
+            let message = match selected.provider {
+                Some(provider) => format!(
+                    "{} is already the project provider for \"{}\". Pick a different option to change it.",
+                    provider.as_str(),
+                    prompt.project_name,
+                ),
+                None => format!(
+                    "\"{}\" is already inheriting the global default provider ({}).",
+                    prompt.project_name,
+                    prompt.global_default.as_str(),
+                ),
+            };
+            self.set_info(message);
+            return Ok(());
+        }
+
+        let Some(project_config) = self.project_config_mut(&prompt.project_id) else {
+            self.set_error(format!(
+                "Could not find config for project \"{}\".",
+                prompt.project_name
+            ));
+            return Ok(());
+        };
+        project_config.default_provider =
+            selected.provider.as_ref().map(|p| p.as_str().to_string());
+        if let Err(err) = save_config(&self.paths.config_path, &self.config, &self.bindings) {
+            if let Some(project_config) = self.project_config_mut(&prompt.project_id) {
+                project_config.default_provider = previous;
+            }
+            self.set_error(format!(
+                "Couldn't persist the project provider change: {err:#}"
+            ));
+            return Ok(());
+        }
+
+        refresh_project_defaults(&mut self.projects, &self.config);
+        self.rebuild_left_items();
+        let message = match selected.provider {
+            Some(provider) => format!(
+                "Project provider for \"{}\" changed to {}. Future agents in this project will use it; existing agents keep their current provider.",
+                prompt.project_name,
+                provider.as_str(),
+            ),
+            None => format!(
+                "\"{}\" now inherits the global default provider ({}). Future agents in this project will use it unless you add a project override again.",
+                prompt.project_name,
+                prompt.global_default.as_str(),
+            ),
+        };
+        self.set_info(message);
         Ok(())
     }
 
@@ -1261,8 +1394,14 @@ impl App {
                 if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
                     && project.default_provider != session.provider
                 {
+                    let provider_label = if self.project_uses_explicit_default_provider(&project.id)
+                    {
+                        "current project provider"
+                    } else {
+                        "current global default provider"
+                    };
                     msg.push_str(&format!(
-                        " Note: this agent uses {}. Your current default provider is {}.",
+                        " Note: this agent uses {}. Your {provider_label} is {}.",
                         session.provider.as_str(),
                         project.default_provider.as_str(),
                     ));
@@ -1340,8 +1479,14 @@ impl App {
                 if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
                     && project.default_provider != session.provider
                 {
+                    let provider_label = if self.project_uses_explicit_default_provider(&project.id)
+                    {
+                        "current project provider"
+                    } else {
+                        "current global default provider"
+                    };
                     msg.push_str(&format!(
-                        " Note: this agent uses {}. Your current default provider is {}.",
+                        " Note: this agent uses {}. Your {provider_label} is {}.",
                         session.provider.as_str(),
                         project.default_provider.as_str(),
                     ));

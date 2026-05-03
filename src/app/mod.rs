@@ -460,6 +460,24 @@ pub(crate) struct ChangeDefaultProviderPrompt {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct ChangeProjectDefaultProviderOption {
+    pub(crate) provider: Option<ProviderKind>,
+    pub(crate) is_current: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ChangeProjectDefaultProviderPrompt {
+    pub(crate) project_id: String,
+    pub(crate) project_name: String,
+    pub(crate) current: ProviderKind,
+    pub(crate) global_default: ProviderKind,
+    pub(crate) inherits_global_default: bool,
+    pub(crate) options: Vec<ChangeProjectDefaultProviderOption>,
+    pub(crate) selected: usize,
+    pub(crate) focus: ChangeDefaultProviderFocus,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct ChangeThemePrompt {
     pub(crate) options: Vec<crate::theme::ThemeListing>,
     pub(crate) selected: usize,
@@ -520,6 +538,7 @@ pub(crate) enum PromptState {
     },
     ChangeAgentProvider(ChangeAgentProviderPrompt),
     ChangeDefaultProvider(ChangeDefaultProviderPrompt),
+    ChangeProjectDefaultProvider(ChangeProjectDefaultProviderPrompt),
     ChangeTheme(ChangeThemePrompt),
     KillRunning(KillRunningPrompt),
     ConfirmKillRunning(ConfirmKillRunningPrompt),
@@ -833,6 +852,13 @@ pub(crate) enum OverlayMouseLayout {
         apply_button: Rect,
     },
     ChangeDefaultProvider {
+        list: Rect,
+        items: usize,
+        offset: usize,
+        cancel_button: Rect,
+        apply_button: Rect,
+    },
+    ChangeProjectDefaultProvider {
         list: Rect,
         items: usize,
         offset: usize,
@@ -1589,6 +1615,7 @@ impl App {
             "fork-agent" => self.fork_selected_session(),
             "change-agent-provider" => self.open_change_agent_provider_prompt(),
             "change-default-provider" => self.open_change_default_provider_prompt(),
+            "change-project-default-provider" => self.open_change_project_default_provider_prompt(),
             "change-theme" => self.open_change_theme_prompt(),
             "pull-project" => self.refresh_selected_project(),
             "delete-project" => self.delete_selected_project(),
@@ -1891,6 +1918,33 @@ impl App {
             }),
             None => None,
         }
+    }
+
+    pub(crate) fn project_config(&self, project_id: &str) -> Option<&ProjectConfig> {
+        self.config
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+    }
+
+    pub(crate) fn project_config_mut(&mut self, project_id: &str) -> Option<&mut ProjectConfig> {
+        self.config
+            .projects
+            .iter_mut()
+            .find(|project| project.id == project_id)
+    }
+
+    pub(crate) fn project_explicit_default_provider(
+        &self,
+        project_id: &str,
+    ) -> Option<ProviderKind> {
+        self.project_config(project_id)
+            .and_then(|project| project.default_provider.as_deref())
+            .map(ProviderKind::from_str)
+    }
+
+    pub(crate) fn project_uses_explicit_default_provider(&self, project_id: &str) -> bool {
+        self.project_explicit_default_provider(project_id).is_some()
     }
 
     pub(crate) fn selected_session(&self) -> Option<&AgentSession> {

@@ -90,6 +90,9 @@ enum PromptMouseTarget {
     ChangeDefaultProviderItem(usize),
     ChangeDefaultProviderCancel,
     ChangeDefaultProviderApply,
+    ChangeProjectDefaultProviderItem(usize),
+    ChangeProjectDefaultProviderCancel,
+    ChangeProjectDefaultProviderApply,
     RuntimeKillInput,
     RuntimeKillItem(usize),
     RuntimeKillCancel,
@@ -135,6 +138,12 @@ impl ButtonPressedTarget {
             }
             PromptMouseTarget::ChangeDefaultProviderApply => {
                 Some(ButtonPressedTarget::ChangeDefaultProviderApply)
+            }
+            PromptMouseTarget::ChangeProjectDefaultProviderCancel => {
+                Some(ButtonPressedTarget::ChangeProjectDefaultProviderCancel)
+            }
+            PromptMouseTarget::ChangeProjectDefaultProviderApply => {
+                Some(ButtonPressedTarget::ChangeProjectDefaultProviderApply)
             }
             PromptMouseTarget::RuntimeKillCancel => Some(ButtonPressedTarget::RuntimeKillCancel),
             PromptMouseTarget::RuntimeKillHovered => Some(ButtonPressedTarget::RuntimeKillHovered),
@@ -190,6 +199,7 @@ impl ButtonPressedTarget {
             | PromptMouseTarget::ChangeThemeItem(_)
             | PromptMouseTarget::ChangeAgentProviderItem(_)
             | PromptMouseTarget::ChangeDefaultProviderItem(_)
+            | PromptMouseTarget::ChangeProjectDefaultProviderItem(_)
             | PromptMouseTarget::RuntimeKillInput
             | PromptMouseTarget::RuntimeKillItem(_)
             | PromptMouseTarget::Checkbox(_)
@@ -2199,6 +2209,59 @@ impl App {
             return Ok(false);
         }
 
+        if let PromptState::ChangeProjectDefaultProvider(prompt) = &mut self.prompt {
+            let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
+            let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
+            let is_space = key.code == KeyCode::Char(' ');
+            let reverse_tab = key.code == KeyCode::BackTab;
+
+            if matches!(palette_action.or(dialog_action), Some(Action::CloseOverlay)) {
+                self.prompt = PromptState::None;
+                return Ok(false);
+            }
+
+            if reverse_tab {
+                prompt.focus = Self::next_change_default_provider_focus(prompt.focus, false);
+                return Ok(false);
+            }
+
+            match prompt.focus {
+                ChangeDefaultProviderFocus::List => match palette_action.or(dialog_action) {
+                    Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
+                        prompt.selected += 1;
+                    }
+                    Some(Action::MoveUp) if prompt.selected > 0 => {
+                        prompt.selected -= 1;
+                    }
+                    Some(Action::Confirm) => {
+                        self.apply_change_project_default_provider()?;
+                    }
+                    Some(Action::ToggleSelection) => {
+                        prompt.focus = Self::next_change_default_provider_focus(prompt.focus, true);
+                    }
+                    _ => {}
+                },
+                ChangeDefaultProviderFocus::Cancel | ChangeDefaultProviderFocus::Apply => {
+                    if matches!(dialog_action, Some(Action::ToggleSelection)) {
+                        prompt.focus = Self::next_change_default_provider_focus(prompt.focus, true);
+                        return Ok(false);
+                    }
+                    if matches!(dialog_action, Some(Action::Confirm)) || is_space {
+                        match prompt.focus {
+                            ChangeDefaultProviderFocus::Cancel => {
+                                self.prompt = PromptState::None;
+                            }
+                            ChangeDefaultProviderFocus::Apply => {
+                                self.apply_change_project_default_provider()?;
+                            }
+                            ChangeDefaultProviderFocus::List => {}
+                        }
+                    }
+                }
+            }
+            return Ok(false);
+        }
+
         if let PromptState::ChangeTheme(prompt) = &mut self.prompt {
             let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
             let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
@@ -2993,6 +3056,23 @@ impl App {
                     None
                 }
             }
+            OverlayMouseLayout::ChangeProjectDefaultProvider {
+                list,
+                items,
+                offset,
+                cancel_button,
+                apply_button,
+            } => {
+                if let Some(index) = Self::overlay_row_at(list, offset, items, column, row) {
+                    Some(PromptMouseTarget::ChangeProjectDefaultProviderItem(index))
+                } else if contains_point(cancel_button, column, row) {
+                    Some(PromptMouseTarget::ChangeProjectDefaultProviderCancel)
+                } else if contains_point(apply_button, column, row) {
+                    Some(PromptMouseTarget::ChangeProjectDefaultProviderApply)
+                } else {
+                    None
+                }
+            }
             OverlayMouseLayout::KillRunning {
                 input,
                 list,
@@ -3699,6 +3779,20 @@ impl App {
         }
     }
 
+    fn set_change_project_default_provider_selection(&mut self, index: usize) {
+        let count = match &self.prompt {
+            PromptState::ChangeProjectDefaultProvider(prompt) => prompt.options.len(),
+            _ => 0,
+        };
+        if count == 0 {
+            return;
+        }
+        if let PromptState::ChangeProjectDefaultProvider(prompt) = &mut self.prompt {
+            prompt.selected = index.min(count.saturating_sub(1));
+            prompt.focus = ChangeDefaultProviderFocus::List;
+        }
+    }
+
     fn resolve_confirm_delete_agent(&mut self, confirm: bool) -> bool {
         let (session_id, delete_worktree) = match &self.prompt {
             PromptState::ConfirmDeleteAgent {
@@ -4197,6 +4291,14 @@ impl App {
                     self.set_error(format!("{err:#}"));
                 }
             }
+            PromptMouseTarget::ChangeProjectDefaultProviderItem(index) => {
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                self.set_change_project_default_provider_selection(index);
+                if double_click && let Err(err) = self.apply_change_project_default_provider() {
+                    self.set_error(format!("{err:#}"));
+                }
+            }
             PromptMouseTarget::RuntimeKillInput => {
                 self.set_kill_running_search_cursor_from_mouse(mouse.column);
             }
@@ -4221,6 +4323,8 @@ impl App {
             | PromptMouseTarget::ChangeAgentProviderApply
             | PromptMouseTarget::ChangeDefaultProviderCancel
             | PromptMouseTarget::ChangeDefaultProviderApply
+            | PromptMouseTarget::ChangeProjectDefaultProviderCancel
+            | PromptMouseTarget::ChangeProjectDefaultProviderApply
             | PromptMouseTarget::RuntimeKillCancel
             | PromptMouseTarget::RuntimeKillHovered
             | PromptMouseTarget::RuntimeKillSelected
@@ -4274,6 +4378,16 @@ impl App {
             }
             ButtonPressedTarget::ChangeDefaultProviderApply => {
                 if let Err(err) = self.apply_change_default_provider() {
+                    self.set_error(format!("{err:#}"));
+                }
+                false
+            }
+            ButtonPressedTarget::ChangeProjectDefaultProviderCancel => {
+                self.prompt = PromptState::None;
+                false
+            }
+            ButtonPressedTarget::ChangeProjectDefaultProviderApply => {
+                if let Err(err) = self.apply_change_project_default_provider() {
                     self.set_error(format!("{err:#}"));
                 }
                 false
@@ -10285,7 +10399,7 @@ cyan = "#00ffff"
         assert!(
             app.status
                 .text()
-                .contains("Default provider changed to claude")
+                .contains("Global default provider changed to claude")
         );
     }
 
@@ -10293,6 +10407,13 @@ cyan = "#00ffff"
     fn change_default_provider_rejects_current_selection_without_mutating_config() {
         let mut app = test_app(default_bindings());
         app.config.defaults.provider = "codex".to_string();
+        app.config.projects.push(ProjectConfig {
+            id: app.projects[0].id.clone(),
+            path: app.projects[0].path.clone(),
+            name: Some(app.projects[0].name.clone()),
+            default_provider: None,
+            commit_prompt: None,
+        });
 
         app.open_change_default_provider_prompt()
             .expect("open default provider picker");
@@ -10315,16 +10436,149 @@ cyan = "#00ffff"
         assert!(
             app.status
                 .text()
-                .contains("is already the default provider")
+                .contains("is already the global default provider")
         );
     }
 
     #[test]
-    fn header_shows_current_provider_when_it_differs_from_project_default() {
+    fn change_project_default_provider_updates_selected_project_only() {
+        let mut app = test_app(default_bindings());
+        app.config.defaults.provider = "codex".to_string();
+        app.config.projects.push(ProjectConfig {
+            id: app.projects[0].id.clone(),
+            path: app.projects[0].path.clone(),
+            name: Some(app.projects[0].name.clone()),
+            default_provider: None,
+            commit_prompt: None,
+        });
+
+        let pinned = Project {
+            id: "project-2".to_string(),
+            name: "pinned".to_string(),
+            path: app.paths.root.join("pinned").display().to_string(),
+            default_provider: ProviderKind::from_str("gemini"),
+            current_branch: "main".to_string(),
+            path_missing: false,
+        };
+        app.config.projects.push(ProjectConfig {
+            id: pinned.id.clone(),
+            path: pinned.path.clone(),
+            name: Some(pinned.name.clone()),
+            default_provider: Some("gemini".to_string()),
+            commit_prompt: None,
+        });
+        app.projects.push(pinned);
+
+        app.open_change_project_default_provider_prompt()
+            .expect("open project provider picker");
+        match &mut app.prompt {
+            PromptState::ChangeProjectDefaultProvider(prompt) => {
+                prompt.selected = prompt
+                    .options
+                    .iter()
+                    .position(|option| {
+                        option
+                            .provider
+                            .as_ref()
+                            .map(|provider| provider.as_str() == "claude")
+                            .unwrap_or(false)
+                    })
+                    .expect("claude option present");
+            }
+            other => panic!("expected change-project-default-provider prompt, got {other:?}"),
+        }
+
+        app.apply_change_project_default_provider()
+            .expect("apply project provider");
+
+        assert_eq!(app.config.defaults.provider, "codex");
+        let persisted = crate::config::ensure_config(&app.paths).expect("reload config");
+        let inherited_cfg = persisted
+            .projects
+            .iter()
+            .find(|project| project.id == "project-1")
+            .expect("project-1 config");
+        assert_eq!(inherited_cfg.default_provider.as_deref(), Some("claude"));
+
+        let pinned_cfg = persisted
+            .projects
+            .iter()
+            .find(|project| project.id == "project-2")
+            .expect("project-2 config");
+        assert_eq!(pinned_cfg.default_provider.as_deref(), Some("gemini"));
+
+        let project = app
+            .projects
+            .iter()
+            .find(|project| project.id == "project-1")
+            .expect("updated project");
+        assert_eq!(project.default_provider.as_str(), "claude");
+
+        assert!(
+            app.status
+                .text()
+                .contains("Project provider for \"demo\" changed to claude")
+        );
+    }
+
+    #[test]
+    fn change_project_default_provider_can_revert_to_global_default() {
+        let mut app = test_app(default_bindings());
+        app.config.defaults.provider = "codex".to_string();
+        app.config.projects.push(ProjectConfig {
+            id: app.projects[0].id.clone(),
+            path: app.projects[0].path.clone(),
+            name: Some(app.projects[0].name.clone()),
+            default_provider: Some("gemini".to_string()),
+            commit_prompt: None,
+        });
+        app.projects[0].default_provider = ProviderKind::from_str("gemini");
+
+        app.open_change_project_default_provider_prompt()
+            .expect("open project provider picker");
+        match &mut app.prompt {
+            PromptState::ChangeProjectDefaultProvider(prompt) => {
+                prompt.selected = prompt
+                    .options
+                    .iter()
+                    .position(|option| option.provider.is_none())
+                    .expect("inherit option present");
+            }
+            other => panic!("expected change-project-default-provider prompt, got {other:?}"),
+        }
+
+        app.apply_change_project_default_provider()
+            .expect("apply inherit global");
+
+        let persisted = crate::config::ensure_config(&app.paths).expect("reload config");
+        let config = persisted
+            .projects
+            .iter()
+            .find(|project| project.id == "project-1")
+            .expect("project-1 config");
+        assert_eq!(config.default_provider, None);
+        assert_eq!(app.projects[0].default_provider.as_str(), "codex");
+        assert!(
+            app.status
+                .text()
+                .contains("\"demo\" now inherits the global default provider (codex)")
+        );
+    }
+
+    #[test]
+    fn header_shows_project_and_global_provider_when_project_is_overridden() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
+        app.config.defaults.provider = "claude".to_string();
+        app.config.projects.push(ProjectConfig {
+            id: app.projects[0].id.clone(),
+            path: app.projects[0].path.clone(),
+            name: Some(app.projects[0].name.clone()),
+            default_provider: Some("codex".to_string()),
+            commit_prompt: None,
+        });
         app.projects[0].default_provider = ProviderKind::from_str("codex");
         app.sessions[0].provider = ProviderKind::from_str("gemini");
         app.rebuild_left_items();
@@ -10348,8 +10602,12 @@ cyan = "#00ffff"
             .collect();
 
         assert!(
-            rendered.contains("default provider: codex"),
-            "expected default provider label, got: {rendered}"
+            rendered.contains("project provider: codex"),
+            "expected project provider label, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("global default: claude"),
+            "expected global default label, got: {rendered}"
         );
         assert!(
             rendered.contains("current provider: gemini"),
@@ -10358,11 +10616,19 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn header_omits_current_provider_when_session_matches_project_default() {
+    fn header_uses_default_provider_label_when_project_inherits_global_default() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
+        app.config.defaults.provider = "codex".to_string();
+        app.config.projects.push(ProjectConfig {
+            id: app.projects[0].id.clone(),
+            path: app.projects[0].path.clone(),
+            name: Some(app.projects[0].name.clone()),
+            default_provider: None,
+            commit_prompt: None,
+        });
         app.projects[0].default_provider = ProviderKind::from_str("codex");
         app.sessions[0].provider = ProviderKind::from_str("codex");
         app.rebuild_left_items();
@@ -10388,6 +10654,14 @@ cyan = "#00ffff"
         assert!(
             rendered.contains("default provider: codex"),
             "expected default provider label, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("project provider:"),
+            "project provider label should be hidden when inheriting global default, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("global default:"),
+            "global default label should be hidden when the project inherits it, got: {rendered}"
         );
         assert!(
             !rendered.contains("current provider:"),
