@@ -146,6 +146,7 @@ pub fn switch_branch(repo_path: &Path, branch_name: &str) -> Result<()> {
             "-C",
             repo_path.to_string_lossy().as_ref(),
             "switch",
+            "--",
             branch_name,
         ])
         .output()?;
@@ -220,6 +221,7 @@ pub fn create_worktree_existing_branch(
             repo.as_ref(),
             "worktree",
             "add",
+            "--",
             worktree.as_ref(),
             branch_name,
         ])
@@ -266,6 +268,7 @@ pub fn create_worktree_from_start_point(
         "add",
         "-b",
         &branch_name,
+        "--",
         worktree.as_ref(),
     ]);
     if let Some(start_point) = start_point {
@@ -769,6 +772,7 @@ pub fn rename_branch(worktree_path: &Path, old_name: &str, new_name: &str) -> Re
             worktree_path.to_string_lossy().as_ref(),
             "branch",
             "-m",
+            "--",
             old_name,
             new_name,
         ])
@@ -783,7 +787,7 @@ pub fn rename_branch(worktree_path: &Path, old_name: &str, new_name: &str) -> Re
 }
 
 pub fn docker_style_name() -> String {
-    petname::petname(2, "-").expect("petname generation should not fail")
+    petname::petname(2, "-").unwrap_or_else(|| format!("agent-{}", uuid::Uuid::new_v4().simple()))
 }
 
 /// Returns `true` if `name` contains only characters safe for git branch names:

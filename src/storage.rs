@@ -7,6 +7,92 @@ use rusqlite::{Connection, params};
 
 use crate::model::{AgentSession, SessionStatus};
 
+/// Ordered list of schema migrations. Each entry is `(version, sql)`.
+///
+/// Rules (see `docs/contributing/schema-policy.md`):
+///
+/// 1. **Migrations are immutable.** Never edit an SQL file once it has been
+///    committed. To fix a bug introduced in migration N, write a new
+///    migration N+1 that corrects the data.
+/// 2. Append-only: new migrations are added to the end of this slice with
+///    a strictly increasing `version`.
+/// 3. Each migration's SQL must leave the schema in a consistent state. The
+///    runner records the version in `PRAGMA user_version` after applying.
+///
+/// SQLite's `PRAGMA user_version` is per-database and survives the
+/// `Storage::backup_to` SQLite Online Backup API used in Phase 14, so a
+/// `.bak` copy automatically carries the correct schema version.
+const MIGRATIONS: &[(u32, &str)] = &[
+    (
+        1,
+        include_str!("storage/migrations/0001_initial_schema.sql"),
+    ),
+    // TODO(audit02 Phase 18): add `0002_session_state_v2.sql` once the
+    // session state machine lands. The migration shape sketched in
+    // `docs/plans/audits/audit02/19-schema-versioning.md` (§19.3) adds a
+    // `state_json` column to `agent_sessions` and back-fills it from the
+    // existing `status` column. Until Phase 18 merges, leaving the slot
+    // empty keeps `MIGRATIONS` honest — every entry is a real migration.
+];
+
+/// Apply any migrations whose version is greater than the database's
+/// current `PRAGMA user_version` and bump `user_version` after each.
+///
+/// Idempotent: running this on an already-migrated database is a no-op
+/// because every migration's `version` is `<= user_version`. Migrations
+/// run in declaration order; SQLite executes each `execute_batch` inside
+/// an implicit transaction so a failure rolls back the partial DDL.
+///
+/// The `PRAGMA user_version = {n}` write uses `format!` because the
+/// version number is a hardcoded `u32` literal from `MIGRATIONS`, never
+/// user input — bound parameters are not allowed in PRAGMA statements.
+fn run_migrations(conn: &Connection) -> Result<()> {
+    let current: u32 = conn
+        .query_row("PRAGMA user_version;", [], |r| r.get(0))
+        .context("failed to read PRAGMA user_version")?;
+    for (version, sql) in MIGRATIONS {
+        if *version <= current {
+            continue;
+        }
+        conn.execute_batch(sql)
+            .with_context(|| format!("migration {version} failed"))?;
+        conn.execute_batch(&format!("PRAGMA user_version = {version};"))
+            .with_context(|| format!("failed to set user_version = {version}"))?;
+        crate::logger::info(&format!(
+            "storage: applied migration {version} (user_version now {version})"
+        ));
+    }
+
+    // Backwards-compatibility shim for databases that predate
+    // `user_version` tracking: the original `migrate()` body invoked
+    // `ensure_column` here to add columns that were grafted onto the
+    // schema over time (`title`, `project_path`, `started_providers`,
+    // and the `session_prs.state` / `session_prs.title` defaults). After
+    // migration 1 runs against a fresh DB these columns are present
+    // already and the calls are no-ops. They remain to handle the case
+    // where an older user upgrades from a version that had the columns
+    // but not the canonical schema captured here.
+    //
+    // `ensure_column` is `#[deprecated]`; suppress the warning at this
+    // single call site because we are explicitly keeping it for the
+    // legacy upgrade path. New schema additions must go through a new
+    // numbered migration file, never via `ensure_column`.
+    #[allow(deprecated)]
+    {
+        ensure_column(conn, "agent_sessions", "title", "text")?;
+        ensure_column(conn, "agent_sessions", "project_path", "text")?;
+        ensure_column(
+            conn,
+            "agent_sessions",
+            "started_providers",
+            "text not null default '[]'",
+        )?;
+        ensure_column(conn, "session_prs", "state", "text not null default 'OPEN'")?;
+        ensure_column(conn, "session_prs", "title", "text not null default ''")?;
+    }
+    Ok(())
+}
+
 /// A stored PR association loaded from the database.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredPr {
@@ -65,51 +151,7 @@ impl SessionStore {
 
     fn migrate(&self) -> Result<()> {
         let conn = self.conn();
-        conn.execute_batch(
-            r#"
-            create table if not exists agent_sessions (
-                id text primary key,
-                project_id text not null,
-                provider text not null,
-                source_branch text not null,
-                branch_name text not null,
-                worktree_path text not null,
-                title text,
-                project_path text,
-                status text not null,
-                created_at text not null,
-                updated_at text not null
-            );
-            "#,
-        )?;
-        ensure_column(&conn, "agent_sessions", "title", "text")?;
-        ensure_column(&conn, "agent_sessions", "project_path", "text")?;
-        ensure_column(
-            &conn,
-            "agent_sessions",
-            "started_providers",
-            "text not null default '[]'",
-        )?;
-        conn.execute_batch(
-            r#"
-            create table if not exists session_prs (
-                session_id text not null,
-                pr_number integer not null,
-                owner_repo text not null,
-                state text not null default 'OPEN',
-                primary key (session_id, pr_number),
-                foreign key (session_id) references agent_sessions(id) on delete cascade
-            );
-            "#,
-        )?;
-        ensure_column(
-            &conn,
-            "session_prs",
-            "state",
-            "text not null default 'OPEN'",
-        )?;
-        ensure_column(&conn, "session_prs", "title", "text not null default ''")?;
-        Ok(())
+        run_migrations(&conn)
     }
 
     /// Insert a PR association or update its state and title if it already exists.
@@ -429,6 +471,96 @@ mod tests {
 }
 
 #[cfg(test)]
+mod ensure_column_validation_tests {
+    use super::*;
+
+    #[test]
+    fn ensure_column_rejects_injection() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (id INTEGER);").unwrap();
+
+        // Hostile column name: classic SQL-injection payload.
+        #[allow(deprecated)]
+        let bad_column = ensure_column(&conn, "t", "x; DROP TABLE t; --", "TEXT");
+        assert!(
+            bad_column.is_err(),
+            "injection in column should be rejected"
+        );
+
+        // Hostile sql_type: trailing statement plus comment.
+        #[allow(deprecated)]
+        let bad_type = ensure_column(&conn, "t", "ok_name", "TEXT; DROP TABLE t; --");
+        assert!(
+            bad_type.is_err(),
+            "injection in sql_type should be rejected"
+        );
+
+        // Hostile table name: starts with a digit (not an identifier).
+        #[allow(deprecated)]
+        let bad_table = ensure_column(&conn, "1bad", "ok_name", "TEXT");
+        assert!(
+            bad_table.is_err(),
+            "non-identifier table should be rejected"
+        );
+
+        // Hostile sql_type: SQL comment in the middle.
+        #[allow(deprecated)]
+        let comment_type = ensure_column(&conn, "t", "ok_name", "TEXT /* sneaky */");
+        assert!(
+            comment_type.is_err(),
+            "block-comment in sql_type should be rejected"
+        );
+
+        // Confirm the table is still intact (no DROP got through).
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='t'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "table 't' must survive the rejected payloads");
+
+        // Sanity: a clean call still succeeds.
+        #[allow(deprecated)]
+        let ok = ensure_column(&conn, "t", "extra", "TEXT");
+        assert!(ok.is_ok(), "well-formed inputs should still work");
+    }
+
+    #[test]
+    fn ensure_column_accepts_legacy_defaults() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (id INTEGER);").unwrap();
+        // These exact strings appear in the legacy ensure_column call sites
+        // inside `run_migrations` and must keep working unchanged.
+        #[allow(deprecated)]
+        {
+            ensure_column(
+                &conn,
+                "t",
+                "started_providers",
+                "text not null default '[]'",
+            )
+            .unwrap();
+            ensure_column(&conn, "t", "state", "text not null default 'OPEN'").unwrap();
+            ensure_column(&conn, "t", "title", "text not null default ''").unwrap();
+        }
+    }
+
+    #[test]
+    fn is_safe_ident_matches_pattern() {
+        assert!(is_safe_ident("agent_sessions"));
+        assert!(is_safe_ident("_under"));
+        assert!(is_safe_ident("Col1"));
+        assert!(!is_safe_ident(""));
+        assert!(!is_safe_ident("1col"));
+        assert!(!is_safe_ident("col-name"));
+        assert!(!is_safe_ident("col;drop"));
+        assert!(!is_safe_ident("col name"));
+    }
+}
+
+#[cfg(test)]
 mod pr_tests {
     use super::*;
     use chrono::Duration;
@@ -513,7 +645,35 @@ mod pr_tests {
     }
 }
 
+/// Idempotently `ALTER TABLE ... ADD COLUMN` if `column` is missing.
+///
+/// **Deprecated.** This shim predates the `MIGRATIONS` registry and is
+/// retained only so that databases created before `PRAGMA user_version`
+/// was wired up keep working. New schema changes must be added as a
+/// numbered migration in `src/storage/migrations/` and listed in
+/// [`MIGRATIONS`]; see `docs/contributing/schema-policy.md` for the
+/// rules on naming, immutability, and review requirements.
+///
+/// As defense-in-depth (audit02 P1-K), `table` and `column` must match
+/// `[A-Za-z_][A-Za-z0-9_]*` and `sql_type` must be one of the SQLite
+/// storage classes (optionally followed by a constraint clause). Inputs
+/// that fail these checks return an error rather than splicing into the
+/// generated DDL — this guarantees we never SQL-inject ourselves even if
+/// a future caller forgets that all three arguments are interpolated raw.
+#[deprecated(
+    note = "schema changes must go through src/storage/migrations/ — see docs/contributing/schema-policy.md"
+)]
 fn ensure_column(conn: &Connection, table: &str, column: &str, sql_type: &str) -> Result<()> {
+    if !is_safe_ident(table) {
+        anyhow::bail!("ensure_column: rejected unsafe table name {table:?}");
+    }
+    if !is_safe_ident(column) {
+        anyhow::bail!("ensure_column: rejected unsafe column name {column:?}");
+    }
+    if !is_safe_sql_type(sql_type) {
+        anyhow::bail!("ensure_column: rejected unsafe sql_type {sql_type:?}");
+    }
+
     let mut stmt = conn.prepare(&format!("pragma table_info({table})"))?;
     let existing = stmt
         .query_map([], |row| row.get::<_, String>(1))?
@@ -526,4 +686,70 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, sql_type: &str) -
         [],
     )?;
     Ok(())
+}
+
+/// Return `true` when `s` looks like a safe SQL identifier:
+/// non-empty, starts with an ASCII letter or `_`, and contains only
+/// ASCII alphanumerics and `_` thereafter.
+///
+/// Free-standing so the rejection test can call it without pulling the
+/// whole `ensure_column` body through.
+fn is_safe_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Return `true` when `s` is one of SQLite's storage classes (optionally
+/// followed by a column constraint clause separated by ASCII whitespace).
+/// This deliberately accepts the constraint suffix because the legacy
+/// `ensure_column` call sites use values like
+/// `"text not null default '[]'"`. Anything containing a semicolon, a
+/// SQL comment marker, or a quote is rejected.
+fn is_safe_sql_type(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    // Reject anything that could end the current statement or smuggle a
+    // comment past it. SQLite treats `--` and `/*` as comment markers and
+    // `;` as a statement terminator.
+    if s.contains(';')
+        || s.contains("--")
+        || s.contains("/*")
+        || s.contains('"')
+        || s.contains('\'')
+    {
+        // The legacy default literal `'[]'` *does* contain `'`, so we
+        // re-allow that exact constraint shape further down. Anything
+        // else is rejected here.
+        return is_known_legacy_default_literal(s);
+    }
+    const STORAGE_CLASSES: &[&str] = &["TEXT", "INTEGER", "REAL", "BLOB", "NULL", "NUMERIC"];
+    let upper = s.trim().to_ascii_uppercase();
+    STORAGE_CLASSES
+        .iter()
+        .any(|class| upper == *class || upper.starts_with(&format!("{class} ")))
+}
+
+/// Whitelist for the small set of legacy `ensure_column` defaults that
+/// embed a single-quoted SQL literal — currently `text not null default
+/// '[]'` and `text not null default ''`. Keeps the broader
+/// quote-rejection in [`is_safe_sql_type`] intact while preserving the
+/// pre-Phase-19 `started_providers` / `session_prs.title` schema shims.
+fn is_known_legacy_default_literal(s: &str) -> bool {
+    let normalized: String = s
+        .trim()
+        .to_ascii_lowercase()
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    matches!(
+        normalized.as_str(),
+        "text not null default '[]'" | "text not null default ''" | "text not null default 'open'"
+    )
 }

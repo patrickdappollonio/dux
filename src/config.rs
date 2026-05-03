@@ -28,6 +28,12 @@ Rules:
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Internal schema version of this `config.toml`. Used by
+    /// [`migrate_config`] to apply backwards-compatible upgrades on
+    /// load. Do not edit by hand — `dux config regenerate` will write
+    /// the correct value.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     pub defaults: Defaults,
     pub providers: ProvidersConfig,
     pub terminal: TerminalConfig,
@@ -40,6 +46,49 @@ pub struct Config {
     pub storage: StorageConfig,
     pub auto_resume: AutoResumeConfig,
     pub limits: LimitsConfig,
+}
+
+/// Current canonical config schema version. Increment whenever a new
+/// migration arm is added to [`migrate_config`]; see
+/// `docs/contributing/schema-policy.md`.
+pub const CONFIG_SCHEMA_CURRENT: u32 = 1;
+
+/// Default value for [`Config::schema_version`] when the field is
+/// missing from `config.toml` (i.e. the file predates this field). A
+/// missing field is treated as schema version 1, and [`migrate_config`]
+/// brings it forward to [`CONFIG_SCHEMA_CURRENT`].
+fn default_schema_version() -> u32 {
+    1
+}
+
+/// Walk a [`Config`] forward to [`CONFIG_SCHEMA_CURRENT`] by applying
+/// each version-specific upgrade arm in order. Designed as a ladder so
+/// future migrations only need to add a new arm — never edit existing
+/// ones (see `docs/contributing/schema-policy.md`).
+///
+/// The function is total: a config already at or beyond the current
+/// version is returned unchanged. Versions newer than this build of
+/// dux are also returned as-is — `Config::load` chooses how to handle
+/// that case.
+pub fn migrate_config(mut c: Config) -> Config {
+    while c.schema_version < CONFIG_SCHEMA_CURRENT {
+        match c.schema_version {
+            0 => {
+                // 0 -> 1: pre-versioning configs simply adopt the
+                // current canonical layout. No field renames or value
+                // rewrites are required because the new fields added
+                // since v0 (the `[storage]` section, etc.) all carry
+                // serde defaults via `#[serde(default)]`.
+                c.schema_version = 1;
+            }
+            // TODO(audit02 Phases 15/16): when `[limits]` and the
+            // `[auto_resume]` section land, bump
+            // `CONFIG_SCHEMA_CURRENT` to 2 and add an arm that rewrites
+            // `c.schema_version = 1` to fill those defaults explicitly.
+            _ => break,
+        }
+    }
+    c
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -360,6 +409,7 @@ pub struct UiConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            schema_version: CONFIG_SCHEMA_CURRENT,
             defaults: Defaults::default(),
             providers: ProvidersConfig::default(),
             terminal: TerminalConfig::default(),
@@ -614,9 +664,26 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
             .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
     }
 
-    let mut config: Config = toml::from_str(&doc.to_string())
+    let parsed: Config = toml::from_str(&doc.to_string())
         .with_context(|| format!("failed to parse {}", paths.config_path.display()))?;
+    let original_version = parsed.schema_version;
+    let mut config = migrate_config(parsed);
     config.providers.ensure_defaults();
+
+    // If `migrate_config` advanced `schema_version`, persist the
+    // upgraded form so the next launch is a no-op. We rewrite via the
+    // same `save_config` path used elsewhere so user comments and
+    // unknown keys are preserved.
+    if config.schema_version != original_version {
+        let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
+        save_config(&paths.config_path, &config, &bindings).with_context(|| {
+            format!(
+                "failed to persist migrated config to {}",
+                paths.config_path.display()
+            )
+        })?;
+    }
+
     Ok(config)
 }
 
@@ -762,6 +829,16 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
         ConfigEntry::Comment(
             "# Every value is materialized here so the file doubles as documentation.",
         ),
+        ConfigEntry::Blank,
+        ConfigEntry::Field {
+            key: "schema_version",
+            comment: Some(CommentSource::Static(
+                "# Internal config schema version. Managed by dux — do not edit by hand.\n\
+                 # `dux config regenerate` writes the current value; older configs are\n\
+                 # migrated forward automatically on load.",
+            )),
+            value_fn: |c| FieldValue::U32(c.schema_version),
+        },
         ConfigEntry::Blank,
         ConfigEntry::Section("defaults"),
         ConfigEntry::Field {
@@ -1146,6 +1223,9 @@ pub fn save_config(
         .parse()
         .with_context(|| format!("failed to parse {}", config_path.display()))?;
 
+    // --- top-level (no section header) ---
+    patch_root_u32(&mut doc, "schema_version", config.schema_version);
+
     // --- [defaults] ---
     patch_table_str(&mut doc, "defaults", "provider", &config.defaults.provider);
     patch_table_opt_str(
@@ -1316,6 +1396,34 @@ fn patch_table_opt_multiline(doc: &mut DocumentMut, section: &str, key: &str, va
 fn patch_table_u16(doc: &mut DocumentMut, section: &str, key: &str, value: u16) {
     let table = ensure_table(doc, section);
     table[key] = toml_edit::value(i64::from(value));
+}
+
+/// Patch a top-level (no section header) integer key. Used for keys
+/// that live at the document root, like `schema_version`. The new key
+/// is inserted at the top of the document so it appears before any
+/// section header — required by TOML grammar.
+fn patch_root_u32(doc: &mut DocumentMut, key: &str, value: u32) {
+    let new_item = toml_edit::value(i64::from(value));
+    let table = doc.as_table_mut();
+    if table.contains_key(key) {
+        table[key] = new_item;
+    } else {
+        // `Table::insert` appends; we need it before any section header
+        // to remain syntactically valid TOML (bare keys cannot follow a
+        // table header). `toml_edit` lets us push to the front by
+        // re-inserting all existing entries after the new one.
+        let existing: Vec<(String, Item)> = table
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        for (k, _) in &existing {
+            table.remove(k);
+        }
+        table.insert(key, new_item);
+        for (k, v) in existing {
+            table.insert(&k, v);
+        }
+    }
 }
 
 fn patch_table_usize(doc: &mut DocumentMut, section: &str, key: &str, value: usize) {
@@ -3040,9 +3148,12 @@ args = [\"-l\"]
     }
 
     #[test]
+    #[serial_test::serial(env_mutation)]
     fn expand_path_dollar_var() {
-        // SAFETY: test-only env manipulation; tests are run with --test-threads=1
-        // or use unique variable names to avoid races.
+        // SAFETY: test-only env manipulation. `#[serial(env_mutation)]`
+        // serializes every env-mutating test in this module so they can't
+        // race the process-global table even under `cargo test`'s default
+        // multi-threaded runner.
         unsafe { std::env::set_var("DUX_TEST_VAR_1", "/test/value") };
         let result = expand_path("$DUX_TEST_VAR_1/subdir").unwrap();
         assert_eq!(result, "/test/value/subdir");
@@ -3050,6 +3161,7 @@ args = [\"-l\"]
     }
 
     #[test]
+    #[serial_test::serial(env_mutation)]
     fn expand_path_braced_var() {
         unsafe { std::env::set_var("DUX_TEST_VAR_2", "/braced") };
         let result = expand_path("${DUX_TEST_VAR_2}/sub").unwrap();
@@ -3079,6 +3191,7 @@ args = [\"-l\"]
     }
 
     #[test]
+    #[serial_test::serial(env_mutation)]
     fn expand_path_rejects_traversal() {
         unsafe { std::env::set_var("DUX_TEST_VAR_3", "/safe") };
         assert!(expand_path("$DUX_TEST_VAR_3/../etc/passwd").is_none());

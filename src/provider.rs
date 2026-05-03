@@ -1,7 +1,9 @@
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::process::Command;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use tempfile::{Builder, NamedTempFile};
 
 use crate::config::{OneshotOutput, ProviderCommandConfig};
 
@@ -19,35 +21,60 @@ impl GenericProvider {
     /// Build a [`Command`] for a non-interactive one-shot prompt.
     ///
     /// Substitutes `{prompt}` and `{tempfile}` placeholders in `oneshot_args`.
-    pub fn build_oneshot_command(&self, prompt: &str, cwd: &Path) -> (Command, Option<PathBuf>) {
-        let unique: u64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        let tmpfile = std::env::temp_dir().join(format!(
-            "dux-{}-{}-{}.txt",
-            self.name,
-            std::process::id(),
-            unique
-        ));
+    /// When the provider's `oneshot_output` is `Tempfile`, a `NamedTempFile`
+    /// with mode `0600` is created so the prompt and the eventual response
+    /// land in a file that only the current user can read. The returned
+    /// `NamedTempFile` (when `Some`) must be kept alive for the duration of
+    /// the spawned command — its `Drop` impl unlinks the file, so callers
+    /// don't need to (and shouldn't) call `remove_file` manually.
+    pub fn build_oneshot_command(
+        &self,
+        prompt: &str,
+        cwd: &Path,
+    ) -> Result<(Command, Option<NamedTempFile>)> {
+        let tempfile_handle = match self.config.oneshot_output {
+            OneshotOutput::Tempfile => {
+                let prefix = format!("dux-{}-{}-", self.name, uuid::Uuid::new_v4().simple());
+                let tf = Builder::new()
+                    .prefix(&prefix)
+                    .suffix(".txt")
+                    .permissions(std::fs::Permissions::from_mode(0o600))
+                    .tempfile()
+                    .with_context(|| {
+                        format!(
+                            "failed to create oneshot tempfile for provider {}",
+                            self.name
+                        )
+                    })?;
+                Some(tf)
+            }
+            OneshotOutput::Stdout => None,
+        };
+
         let mut cmd = Command::new(&self.config.command);
         cmd.current_dir(cwd);
         for arg_template in &self.config.oneshot_args {
-            let arg = arg_template
-                .replace("{prompt}", prompt)
-                .replace("{tempfile}", &tmpfile.to_string_lossy());
+            let mut arg = arg_template.replace("{prompt}", prompt);
+            if let Some(ref tf) = tempfile_handle {
+                arg = arg.replace("{tempfile}", &tf.path().to_string_lossy());
+            }
             cmd.arg(arg);
         }
-        let tmpfile_option = match self.config.oneshot_output {
-            OneshotOutput::Tempfile => Some(tmpfile),
-            OneshotOutput::Stdout => None,
-        };
-        (cmd, tmpfile_option)
+
+        Ok((cmd, tempfile_handle))
     }
 
     /// Run a non-interactive prompt and return the response text.
+    ///
+    /// When `oneshot_output` is `Tempfile`, the response is read from the
+    /// 0600-mode tempfile created in [`build_oneshot_command`]. The
+    /// `NamedTempFile` is held until the read finishes; its `Drop` then
+    /// unlinks the file regardless of which return path is taken (success,
+    /// command failure, or read error). This closes the leak that the
+    /// previous `let _ = remove_file(...)` left open whenever
+    /// `read_to_string` failed.
     pub fn run_oneshot(&self, prompt: &str, cwd: &Path) -> Result<String> {
-        let (mut cmd, tmpfile) = self.build_oneshot_command(prompt, cwd);
+        let (mut cmd, tmpfile) = self.build_oneshot_command(prompt, cwd)?;
         let output = cmd.output()?;
         if !output.status.success() {
             anyhow::bail!(
@@ -56,9 +83,9 @@ impl GenericProvider {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        if let Some(path) = tmpfile {
-            let text = std::fs::read_to_string(&path)?;
-            let _ = std::fs::remove_file(&path);
+        if let Some(tf) = tmpfile {
+            let text = std::fs::read_to_string(tf.path())?;
+            // `tf` drops here, unlinking the tempfile.
             Ok(text.trim().to_string())
         } else {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -108,7 +135,7 @@ mod tests {
     fn claude_style_stdout_build_command() {
         let prov = create_provider("claude", claude_like_config());
         let cwd = std::env::temp_dir();
-        let (cmd, tmpfile) = prov.build_oneshot_command("hello world", &cwd);
+        let (cmd, tmpfile) = prov.build_oneshot_command("hello world", &cwd).unwrap();
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -124,7 +151,7 @@ mod tests {
     fn codex_style_tempfile_build_command() {
         let prov = create_provider("codex", codex_like_config());
         let cwd = std::env::temp_dir();
-        let (cmd, tmpfile) = prov.build_oneshot_command("hello world", &cwd);
+        let (cmd, tmpfile) = prov.build_oneshot_command("hello world", &cwd).unwrap();
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -134,15 +161,19 @@ mod tests {
             "tempfile mode should produce a tempfile path"
         );
         let tf = tmpfile.unwrap();
+        let tf_path = tf.path().to_string_lossy().to_string();
         assert_eq!(args[0], "-c");
         assert!(
             args[1].contains("hello world"),
             "prompt should be substituted"
         );
         assert!(
-            args[1].contains(&tf.to_string_lossy().to_string()),
+            args[1].contains(&tf_path),
             "tempfile path should be substituted"
         );
+        // 0600 perms: owner read+write only.
+        let mode = std::fs::metadata(tf.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "tempfile should be created with mode 0600");
     }
 
     #[test]
