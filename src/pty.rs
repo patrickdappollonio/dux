@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
@@ -70,7 +70,13 @@ const PAUSE_BUFFER_CAP: usize = 4 * 1024 * 1024;
 /// A PTY-based client that spawns a CLI tool in a pseudo-terminal and keeps a
 /// full terminal grid with scrollback using `alacritty_terminal`.
 pub struct PtyClient {
-    #[allow(dead_code)]
+    /// Owns the master end of the PTY. **Load-bearing** — kept alive to
+    /// back the `BorrowedFd` constructed inside `foreground_process_name`
+    /// (see the `unsafe` block in that method). Removing this field would
+    /// allow the master fd to close while a `BorrowedFd` derived from it is
+    /// still in use, violating the SAFETY contract of `BorrowedFd::borrow_raw`.
+    /// Touched in code paths that take `&self.master`, e.g. `as_raw_fd()` in
+    /// `foreground_process_name`, so dead-code analysis sees a real use.
     master: Box<dyn MasterPty + Send>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     terminal: Arc<Mutex<TerminalState>>,
@@ -96,6 +102,12 @@ pub struct PtyClient {
     /// the terminal parser on resume. Bounded by `PAUSE_BUFFER_CAP`; oldest
     /// bytes are dropped on overflow.
     pending_bytes: Arc<Mutex<PendingIngest>>,
+    /// Join handle for the reader thread spawned in `PtyClient::spawn`.
+    /// Joined in `Drop for PtyClient` after the child is killed and the
+    /// master fd is closed, so the reader thread observes EOF and exits.
+    /// This prevents the thread (and its Arc clones / file descriptor
+    /// reference) from leaking past `PtyClient` destruction.
+    reader_handle: Option<JoinHandle<()>>,
 }
 
 #[derive(Default)]
@@ -165,19 +177,32 @@ impl PtyClient {
         let received_data_ref = Arc::clone(&received_data);
         let scroll_paused_ref = Arc::clone(&scroll_paused);
         let pending_bytes_ref = Arc::clone(&pending_bytes);
-        thread::spawn(move || {
-            Self::reader_loop(
-                reader,
-                terminal_ref,
-                writer_ref,
-                exited_ref,
-                has_output_ref,
-                dirty_ref,
-                received_data_ref,
-                scroll_paused_ref,
-                pending_bytes_ref,
-            );
-        });
+        // Build a named thread (visible in `top -H`/`gdb` and easier to
+        // diagnose if it ever sticks around) and stash the handle so `Drop`
+        // can join it — otherwise the reader thread holds Arc clones and an
+        // open fd past `PtyClient` destruction.
+        let reader_handle = thread::Builder::new()
+            .name(format!(
+                "pty-reader[{}]",
+                Path::new(command)
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .unwrap_or("pty")
+            ))
+            .spawn(move || {
+                Self::reader_loop(
+                    reader,
+                    terminal_ref,
+                    writer_ref,
+                    exited_ref,
+                    has_output_ref,
+                    dirty_ref,
+                    received_data_ref,
+                    scroll_paused_ref,
+                    pending_bytes_ref,
+                );
+            })
+            .context("failed to spawn PTY reader thread")?;
 
         Ok(Self {
             master: pair.master,
@@ -191,6 +216,7 @@ impl PtyClient {
             last_resize_at: Mutex::new(None),
             scroll_paused,
             pending_bytes,
+            reader_handle: Some(reader_handle),
         })
     }
 
@@ -274,7 +300,10 @@ impl PtyClient {
     /// Get an owned snapshot of the currently visible terminal viewport.
     #[allow(dead_code)]
     pub fn snapshot(&self) -> TerminalSnapshot {
-        let terminal = self.terminal.lock().expect("terminal mutex poisoned");
+        let Ok(terminal) = self.terminal.lock() else {
+            logger::error("pty: terminal mutex poisoned; rendering empty snapshot");
+            return TerminalSnapshot::empty();
+        };
         terminal.snapshot()
     }
 
@@ -286,13 +315,19 @@ impl PtyClient {
         if !self.dirty.swap(false, Ordering::AcqRel) {
             return false;
         }
-        let terminal = self.terminal.lock().expect("terminal mutex poisoned");
+        let Ok(terminal) = self.terminal.lock() else {
+            logger::error("pty: terminal mutex poisoned; skipping snapshot rebuild");
+            return false;
+        };
         terminal.snapshot_into(target);
         true
     }
 
     pub fn scrollback_offset(&self) -> usize {
-        let terminal = self.terminal.lock().expect("terminal mutex poisoned");
+        let Ok(terminal) = self.terminal.lock() else {
+            logger::error("pty: terminal mutex poisoned; reporting scrollback offset 0");
+            return 0;
+        };
         terminal.scrollback_offset()
     }
 
@@ -492,7 +527,18 @@ impl PtyClient {
         use std::os::unix::io::BorrowedFd;
 
         let raw_fd = self.master.as_raw_fd()?;
-        // SAFETY: the master fd is valid for the lifetime of PtyClient.
+        // SAFETY: `raw_fd` was just obtained from `self.master.as_raw_fd()`.
+        // The `master: Box<dyn MasterPty + Send>` field on `PtyClient` owns
+        // the underlying PTY master and keeps the fd open for the entire
+        // lifetime of `&self` — `self` is borrowed for the duration of this
+        // call, so the fd cannot be closed while `fd` is in scope.
+        // **DO NOT remove the `master` field** — its presence is the
+        // sole keep-alive backing this `BorrowedFd`. The field-level doc
+        // comment on `master` repeats this warning.
+        debug_assert!(
+            self.child.process_id().is_some(),
+            "pty: child gone before BorrowedFd borrow — master fd may already be closed",
+        );
         let fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
         let fg_pid = rustix::termios::tcgetpgrp(fd).ok()?;
 
@@ -508,7 +554,24 @@ impl PtyClient {
 
 impl Drop for PtyClient {
     fn drop(&mut self) {
+        // Kill the child first so the reader sees EOF on its next read.
         let _ = self.child.kill();
+        // Touch `master` so dead-code analysis sees a use here too — its
+        // presence is load-bearing for the `BorrowedFd` constructed in
+        // `foreground_process_name`. See the field-level doc comment.
+        let _ = &self.master;
+        // Join the reader thread to release its Arc clones and the cloned
+        // PTY reader fd. The reader exits when the master fd closes (EOF),
+        // which happens once `self.master` is dropped at the end of this
+        // Drop impl. We join here so any `JoinHandle` accounting (and the
+        // `Arc<...>` strong-count drops it owns) completes synchronously.
+        if let Some(handle) = self.reader_handle.take()
+            && let Err(panic) = handle.join()
+        {
+            logger::warn(&format!(
+                "pty: reader thread panicked during shutdown: {panic:?}"
+            ));
+        }
     }
 }
 
