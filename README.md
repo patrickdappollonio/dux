@@ -18,7 +18,9 @@ Every agent runs through a PTY, the same pseudo-terminal your shell uses. That m
 
 ## Install
 
-**Homebrew:**
+**Homebrew (macOS and Linux):**
+
+On macOS, Homebrew is the preferred distribution method. This command installs my tap and then installs dux in one step:
 
 ```bash
 brew install patrickdappollonio/tap/dux
@@ -37,7 +39,9 @@ npm install -g @patrickdappollonio/dux
 dux
 ```
 
-**Shell:**
+**Shell (all platforms):**
+
+The install script autodetects your operating system and architecture, then downloads the matching release archive:
 
 ```bash
 curl -sSfL https://github.com/patrickdappollonio/dux/releases/latest/download/install.sh | bash
