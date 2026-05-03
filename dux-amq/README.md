@@ -132,6 +132,28 @@ that `--continue` refuses.
 - **Identity collisions are possible** if two worktrees normalize to the same handle. Pick distinct branch names.
 - **Compaction risk** (when seeding is enabled): on repos with a heavy session history, `--fork-session` inherits all of it, which can push fresh sessions toward 1M-context billing tier earlier. If that bites, leave `CLAUDE_AMQ_SEED_FROM_PARENT` unset (the default) or revert `resume_args` to `["--continue"]`.
 
+## Production setup
+
+The default deployment relies on the cloud provider's at-rest
+encryption (GCE PD, EBS, Azure Disk). That covers physical-disk
+theft but **not** a compromised cloud IAM principal who can attach
+the persistent disk to another VM and read agent transcripts /
+queues in plaintext.
+
+For stronger isolation, see the operator playbook at
+[`docs/operations/encryption-at-rest.md`](../docs/operations/encryption-at-rest.md).
+It covers two paths:
+
+- **gocryptfs** — file-level FUSE encryption, no reformat, ~5% IO
+  overhead. Recommended for single-user spot VMs. An opt-in helper
+  is shipped at [`scripts/install-gocryptfs.sh`](scripts/install-gocryptfs.sh)
+  and is **not** invoked by `install.sh`.
+- **LUKS** — block-level, requires reformatting the persistent
+  disk. Recommended for long-lived shared hosts.
+
+Either path is layered on top of, not in place of, the cloud
+default. See also `SECURITY.md` for the broader threat model.
+
 ## License
 
 The wrappers and scripts in this directory are MIT-licensed (matching the dux license in the parent repo).

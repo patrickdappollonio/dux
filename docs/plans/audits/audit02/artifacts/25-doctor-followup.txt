@@ -1,0 +1,35 @@
+Phase 25 -> Phase 20 follow-up
+==============================
+
+Phase 25 (encryption-at-rest playbook) does NOT modify the
+dux-amq-doctor script. It documents an expected output block; the
+implementation belongs to Phase 20.
+
+TODO (Phase 20 owner):
+
+  Add an "Encryption at rest" section to `dux-amq-doctor` output that
+  reports whether /data/state is:
+
+  (a) a gocryptfs FUSE mount
+        - detect via:   mount | grep -E '^gocryptfs '
+                  or:   findmnt -no FSTYPE /data/state  -> "fuse.gocryptfs"
+        - report cipher (read from $CIPHER_DIR/gocryptfs.conf metadata)
+        - report master-key fingerprint (gocryptfs -info $CIPHER_DIR)
+
+  (b) an ext4/xfs/etc on /dev/mapper/* backed by LUKS
+        - detect via:   findmnt -no SOURCE /data/state  -> /dev/mapper/X
+                        cryptsetup status X             -> type=LUKSn
+        - report cipher and key file (NOT the key itself)
+
+  (c) plaintext on the cloud-default at-rest layer
+        - print a one-line warning pointing at:
+          docs/operations/encryption-at-rest.md
+        - non-fatal; some operators legitimately rely on cloud default
+
+The expected output blocks (sample formatting) are spelled out in
+section 5 ("Operational quirks -> Doctor (Phase 20) reporting") of
+docs/operations/encryption-at-rest.md.
+
+Scope guard: Phase 25 is docs-only plus one opt-in shell helper. We
+deliberately did NOT edit Phase 20's doctor implementation here to
+keep the phase boundary clean. This file is the hand-off note.
