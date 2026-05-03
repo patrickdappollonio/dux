@@ -16,8 +16,15 @@ jobs:
   build:
     name: Build ${{ matrix.archive }}
     runs-on: ${{ matrix.runner }}
+    # audit02 P0-I — `actions/attest-build-provenance` requires:
+    #   id-token: write     mint the OIDC token used to sign the attestation
+    #   attestations: write store the attestation against the repository
+    #   contents: write     upload tarball + SBOM + SHA256SUMS to the release
+    # All three must live on the SAME job (per GitHub's documentation).
     permissions:
-      contents: write    # upload release assets
+      id-token: write
+      attestations: write
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -45,6 +52,13 @@ jobs:
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
+      # macOS runners ship with BSD tar; reproducible-tar flags need GNU
+      # tar (audit02 P0-I §7.7 footnote). Install gnu-tar and prefer
+      # `gtar` for the package step.
+      - name: Install GNU tar (macOS)
+        if: contains(matrix.runner, 'macos')
+        run: brew install gnu-tar
+
       # Toolchain channel comes from rust-toolchain.toml at repo root
       # (audit02 6.2 — deterministic version, no `stable` drift).
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -62,25 +76,74 @@ jobs:
       - name: Install cargo-edit
         run: cargo install cargo-edit --locked
 
+      # audit02 P0-I — cargo-auditable embeds the dependency tree in the
+      # binary so post-publication scans (`cargo audit bin`, trivy, grype)
+      # can re-check release artefacts. ~4 KB overhead.
+      - name: Install cargo-auditable
+        run: cargo install --locked cargo-auditable
+
+      # audit02 P0-I — cargo-cyclonedx generates a CycloneDX SBOM per
+      # build target. Limitation: bundled C/C++ deps (rusqlite's vendored
+      # SQLite) are not enumerated; downstream consumers should treat the
+      # SBOM as Rust-deps-only.
+      - name: Install cargo-cyclonedx
+        run: cargo install --locked cargo-cyclonedx
+
       - name: Set version from tag
         run: |
           VERSION="${{ github.event.release.tag_name }}"
           VERSION="${VERSION#v}"
           cargo set-version "$VERSION"
 
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+      # audit02 P0-I §7.3 — replaces plain `cargo build --release`. The
+      # produced binary is byte-compatible (same compiler flags) but
+      # carries an embedded `.dep-v0` section.
+      - name: Build (auditable)
+        run: cargo auditable build --release --target ${{ matrix.target }}
 
       - name: Strip binary
         run: strip target/${{ matrix.target }}/release/dux
 
-      - name: Package
-        run: tar czf ${{ matrix.archive }} -C target/${{ matrix.target }}/release dux
+      # audit02 P0-I §7.4 — SBOM filename includes the matrix target so
+      # all four end up in the release alongside the tarballs. The
+      # `--override-filename` flag tells cargo-cyclonedx to write
+      # `sbom-<target>.cdx.json` next to Cargo.toml.
+      - name: Generate SBOM
+        run: |
+          cargo cyclonedx --format json --override-filename "sbom-${{ matrix.target }}.cdx"
+          ls -la sbom-*.cdx.json
 
-      - name: Upload to release
+      # audit02 P0-I §7.7 — reproducible tar so two reruns of the same
+      # tag produce byte-identical archives. `--mtime=@<release.created_at>`
+      # pins the timestamp to the release event time (stable across reruns
+      # of the same release). GNU tar required (`gtar` on macOS).
+      - name: Package (reproducible)
+        run: |
+          if command -v gtar >/dev/null 2>&1; then TAR=gtar; else TAR=tar; fi
+          "$TAR" --sort=name --owner=0 --group=0 --numeric-owner \
+            --mtime='@${{ github.event.release.created_at }}' \
+            -czf "${{ matrix.archive }}" \
+            -C "target/${{ matrix.target }}/release" dux
+
+      # audit02 P0-I §7.5 — OIDC-keyless build provenance attestation.
+      # Verifiable downstream via:
+      #   gh attestation verify dux-linux-amd64.tar.gz --owner <owner>
+      # Subject covers both the tarball and the per-target SBOM.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: |
+            ${{ matrix.archive }}
+            sbom-${{ matrix.target }}.cdx.json
+
+      - name: Upload tarball + SBOM to release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload ${{ github.event.release.tag_name }} ${{ matrix.archive }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            "${{ matrix.archive }}" \
+            "sbom-${{ matrix.target }}.cdx.json" \
+            --clobber
 
   upload-install-script:
     name: Upload install script
@@ -94,12 +157,52 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload ${{ github.event.release.tag_name }} install.sh
 
+  # audit02 P0-I §7.6 — generate SHA256SUMS over the now-uploaded tarballs
+  # so users (and `dux-amq/install.sh`'s pinned hash) can verify integrity
+  # with `curl -fsSL .../SHA256SUMS | sha256sum -c -`.
+  # Runs after `build` has uploaded every per-target tarball.
+  sha256sums:
+    name: SHA256SUMS
+    runs-on: ubuntu-24.04
+    needs: [build]
+    permissions:
+      contents: write    # upload SHA256SUMS asset
+    steps:
+      - name: Download tarballs from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist
+          # The `--pattern '*.tar.gz'` filter restricts download to the
+          # binary archives — SBOMs are JSON and excluded.
+          gh release download "${{ github.event.release.tag_name }}" \
+            --repo "${{ github.repository }}" \
+            --pattern '*.tar.gz' \
+            --dir dist
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          # `sha256sum` already produces `<hash>  <filename>` (two spaces),
+          # the format expected by `sha256sum -c -`. Sort for determinism.
+          sha256sum *.tar.gz | LC_ALL=C sort > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            dist/SHA256SUMS --clobber
+
   update-release-notes:
     name: Append install instructions
     runs-on: ubuntu-latest
     permissions:
       contents: write    # edit release body
-    needs: [build, upload-install-script]
+    # Wait for SHA256SUMS so the rendered release body never references
+    # an asset that hasn't landed yet.
+    needs: [build, upload-install-script, sha256sums]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 

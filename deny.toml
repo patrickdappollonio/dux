@@ -1,0 +1,100 @@
+# cargo-deny configuration for dux.
+#
+# audit02 Phase 07 (P0-I) — supply-chain advisory + license + source gating
+# in CI. The PR/test workflows run `cargo audit --deny warnings` AND
+# `cargo deny check`; both must stay green for a PR to merge.
+#
+# Adapted from https://github.com/EmbarkStudios/cargo-deny/blob/main/deny.toml
+# and trimmed to the minimum dux actually needs. Each allowlist entry has
+# an inline comment explaining *why* — additions to these lists must be
+# reviewed and justified in the PR description.
+
+# ---------------------------------------------------------------------------
+# Advisories
+# ---------------------------------------------------------------------------
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+# Fail PRs on any unaddressed RUSTSEC advisory. Add a temporary entry here
+# (with a brief justification + review date) only when no fix is yet
+# available upstream. Each ignore is reviewed quarterly — if a fix has
+# landed, drop the ignore.
+ignore = [
+  # RUSTSEC-2025-0141 — `bincode` 1.3.3 is unmaintained (the maintainer
+  # ceased development after a doxxing/harassment incident; v1 is
+  # considered "complete", no security issue). Pulled transitively by
+  # `syntect` for syntax-set serialization. Tracking syntect's migration
+  # to postcard/wincode upstream; no safe in-tree replacement today.
+  # Review: 2026-08-01.
+  { id = "RUSTSEC-2025-0141", reason = "transitive via syntect; no upstream replacement yet" },
+  # RUSTSEC-2024-0384 — `instant` 0.1.13 is unmaintained; author points
+  # users at `web-time`. Pulled transitively by `notify-types` →
+  # `notify`. Not exploitable (it's a wall-clock helper); waiting on
+  # `notify` to migrate. Review: 2026-08-01.
+  { id = "RUSTSEC-2024-0384", reason = "transitive via notify; waiting upstream migration to web-time" },
+]
+
+# ---------------------------------------------------------------------------
+# Bans / version policy
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"   # warn first; tighten to "deny" once tree is clean
+wildcards = "deny"
+highlight = "all"
+# Specific crates we never want pulled in. Empty for now.
+deny = []
+# Crates allowed to appear in multiple versions. Each entry needs a
+# pointer to the audit issue or upstream PR that explains why.
+skip = [
+  # audit02 P2-20 — `signal-hook` 0.3 + 0.4 both transitively pulled.
+  # Tracking upstream consolidation; not a CVE, just code-bloat.
+  { crate = "signal-hook" },
+]
+skip-tree = []
+
+# ---------------------------------------------------------------------------
+# Licenses
+# ---------------------------------------------------------------------------
+[licenses]
+# SPDX expressions accepted across the dependency tree. Strict allowlist —
+# additions must be justified in the PR.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-DFS-2016",
+  "Unicode-3.0",
+  # Weak copyleft. We do not statically link any MPL crate into a binary
+  # we redistribute under MIT/Apache without exposing source — review each
+  # new MPL dep on entry.
+  "MPL-2.0",
+  # CC0-1.0 = public domain dedication; needed by tinystr/notify chain.
+  "CC0-1.0",
+  # 0BSD (zero-clause BSD), trivially permissive — used by adler etc.
+  "0BSD",
+  # Bitstream-Vera / OFL — bundled font glyph data in some terminal crates.
+  "OFL-1.1",
+  "Bitstream-Vera",
+  "BSL-1.0",
+]
+# Confidence threshold for the license detector. The default 0.8 catches
+# almost all real licenses without false positives.
+confidence-threshold = 0.8
+exceptions = []
+unused-allowed-license = "allow"
+
+# ---------------------------------------------------------------------------
+# Sources
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# audit02 tenet — NO git deps. Every dependency must come from crates.io
+# so cargo-deny advisory + license enforcement actually applies.
+allow-git = []
