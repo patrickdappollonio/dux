@@ -437,7 +437,7 @@ impl App {
         let mut spans = vec![
             Span::styled(" dux ", Style::default().fg(label_fg).bg(bg)),
             Span::styled(
-                format!("v{}", env!("CARGO_PKG_VERSION")),
+                env!("DUX_DISPLAY_VERSION"),
                 Style::default().fg(self.theme.branch_fg).bg(bg),
             ),
         ];
