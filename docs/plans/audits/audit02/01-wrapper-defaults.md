@@ -108,13 +108,13 @@ surface in audit02.
 - `git diff` does not touch any line outside the three wrappers + README + bats file.
 
 ## Acceptance criteria
-- [ ] `claude-amq` line ~83 reads `if [[ "${CLAUDE_AMQ_YOLO:-${CLAUDE_YOLO:-}}" == "1" ]]`.
-- [ ] `claude-amq` line ~27 reads `[[ "${CLAUDE_AMQ_SEED_FROM_PARENT:-}" == "1" ]] || return 0`.
-- [ ] `claude-amq` header comment (line ~10-16) matches the implementation (OFF by default).
-- [ ] `codex-amq` line ~27 wraps the bypass flag in a `CODEX_AMQ_YOLO` gate.
-- [ ] README "Permission model" + "Session seeding" sections present.
-- [ ] `wrappers.bats` covers all 6 cases above; passes locally and in CI.
-- [ ] PR opened: `feat(wrappers): default-deny on YOLO + opt-in session seeding`.
+- [x] `claude-amq` line ~84 reads `if [[ "${CLAUDE_AMQ_YOLO:-${CLAUDE_YOLO:-}}" == "1" ]]` (was estimated at ~83; +1 line shift after the YOLO-banner `printf` was added inside the gate).
+- [x] `claude-amq` line ~28 reads `[[ "${CLAUDE_AMQ_SEED_FROM_PARENT:-}" == "1" ]] || return 0` (was estimated at ~27; +1 line shift after the seed header comment grew from 7 → 8 lines).
+- [x] `claude-amq` header comment (line ~10-17) matches the implementation (OFF by default).
+- [x] `codex-amq` line ~32 wraps the bypass flag in a `CODEX_AMQ_YOLO` gate; `exec` line moved to ~37 (was estimated at ~27 — the gate block was inserted between the existing `amq wake` background spawn and the `exec`, pushing the `exec` down by ~10 lines).
+- [x] README "Permission model" + "Session seeding" sections present.
+- [x] `wrappers.bats` covers all 6 cases above (plus 3 extra: legacy `CLAUDE_YOLO` for both panes, and the `CLAUDE_AMQ_SAFE` deprecation warning); passes locally via `make overlay-test`.
+- [ ] PR opened: `feat(wrappers): default-deny on YOLO + opt-in session seeding` (deferred — caller asked for local-only commit; no push).
 
 ## Known pitfalls
 - Bash arrays + `set -u` + `"${ARR[@]}"` on empty arrays: macOS Bash 3.2

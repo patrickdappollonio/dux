@@ -8,12 +8,13 @@
 # in the worktree.
 #
 # Optional session-history seeding (OFF by default — see notes below):
-#   When CLAUDE_AMQ_SEED_FROM_PARENT=1 is set AND we're in a git worktree
-#   AND the worktree's Claude session dir is empty, copy the parent repo's
-#   session JSONLs into it so `--resume` (interactive picker) can browse
-#   past chats. Avoid combining with `--continue`: the latest parent
-#   session may carry a deferred-tool marker that --continue refuses.
-#   Pair with `resume_args = ["--resume"]` in dux config if enabling.
+#   Set CLAUDE_AMQ_SEED_FROM_PARENT=1 to enable. Be aware: rsync clones the
+#   parent worktree's full Claude history (~100 MB on heavy repos) — disk
+#   amplification N×, possible token-billing escalation, and cross-worktree
+#   info leak (parent transcripts may carry secrets/PII from a different
+#   feature). Pair with `resume_args = ["--resume"]` in dux config if used.
+#   Avoid combining with `--continue`: the latest parent session may carry
+#   a deferred-tool marker that --continue refuses.
 set -euo pipefail
 
 for arg in "$@"; do
@@ -23,8 +24,8 @@ for arg in "$@"; do
 done
 
 seed_session_history() {
-  # On by default. Set CLAUDE_AMQ_NO_SEED=1 to skip.
-  [[ "${CLAUDE_AMQ_NO_SEED:-}" == "1" ]] && return 0
+  # OFF by default. Set CLAUDE_AMQ_SEED_FROM_PARENT=1 to enable.
+  [[ "${CLAUDE_AMQ_SEED_FROM_PARENT:-}" == "1" ]] || return 0
 
   local git_dir git_common_dir main_worktree
   git_dir=$(git -C "$PWD" rev-parse --absolute-git-dir 2>/dev/null) || return 0
@@ -76,12 +77,20 @@ ME=$(printf '%s' "$ME" | tr '[:upper:]' '[:lower:]' | sed 's|[^a-z0-9_-]|-|g; s|
 
 ROOT="${AMQ_GLOBAL_ROOT:-/data/state/amq}"
 
-# Every interactive claude pane gets --dangerously-skip-permissions by
-# default. Set CLAUDE_AMQ_SAFE=1 to opt out (e.g. when working in a
-# repo where you want to confirm each tool call).
+# YOLO is OPT-IN. Set CLAUDE_AMQ_YOLO=1 (or legacy CLAUDE_YOLO=1) to enable.
+# Anthropic CVEs in 2025–26 (CVE-2025-59536 et al) targeted credential
+# exfil through this attack class — default-deny is mandatory in prod.
 EXTRA=()
-if [[ "${CLAUDE_AMQ_SAFE:-}" != "1" ]]; then
+if [[ "${CLAUDE_AMQ_YOLO:-${CLAUDE_YOLO:-}}" == "1" ]]; then
   EXTRA+=(--dangerously-skip-permissions)
+  printf 'claude-amq: YOLO enabled — tool calls will not prompt\n' >&2
+fi
+
+# Transitional warning for users who set the legacy opt-out variable.
+# CLAUDE_AMQ_SAFE used to disable YOLO; since YOLO is now opt-in, the
+# variable is meaningless and silently keeping it set hides intent.
+if [[ -n "${CLAUDE_AMQ_SAFE:-}" ]]; then
+  printf 'claude-amq: CLAUDE_AMQ_SAFE is deprecated; YOLO is now opt-in via CLAUDE_AMQ_YOLO\n' >&2
 fi
 
 # Start the wake-up daemon ourselves with --inject-mode=raw so messages
@@ -95,4 +104,4 @@ fi
 # and exits as a zombie before it can inject anything.
 amq wake --me "$ME" --root "$ROOT" --inject-mode raw </dev/tty >/dev/null 2>&1 &
 
-exec amq coop exec --no-wake --no-init --root "$ROOT" --me "$ME" claude -- "${EXTRA[@]}" "$@"
+exec amq coop exec --no-wake --no-init --root "$ROOT" --me "$ME" claude -- ${EXTRA[@]+"${EXTRA[@]}"} "$@"

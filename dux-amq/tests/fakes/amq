@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Fake `amq` for dux-amq overlay tests.
+#
+# Records its argv (NUL-separated, one arg per line for human readability)
+# into "$AMQ_FAKE_ARGV_FILE" so the calling test can assert what flags
+# were forwarded to the underlying provider (claude/codex/gemini).
+#
+# `amq wake` is invoked in the background by every wrapper before the
+# main `amq coop exec`. We don't care about wake-call argv — they would
+# pollute the recording — so wake invocations exit silently without
+# touching the argv file.
+#
+# All other invocations append a record of the form:
+#
+#   ARGV
+#   <arg0>
+#   <arg1>
+#   ...
+#   END
+#
+# so multiple invocations in the same test can be told apart.
+set -euo pipefail
+
+if [[ "${1:-}" == "wake" ]]; then
+  # Drain stdin (the real wrapper redirects </dev/tty) so we don't hang.
+  exit 0
+fi
+
+if [[ -n "${AMQ_FAKE_ARGV_FILE:-}" ]]; then
+  {
+    printf 'ARGV\n'
+    for arg in "$@"; do
+      printf '%s\n' "$arg"
+    done
+    printf 'END\n'
+  } >>"$AMQ_FAKE_ARGV_FILE"
+fi
+exit 0

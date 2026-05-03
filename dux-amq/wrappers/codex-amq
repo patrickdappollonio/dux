@@ -24,4 +24,14 @@ ROOT="${AMQ_GLOBAL_ROOT:-/data/state/amq}"
 # Stdin must be /dev/tty (see claude-amq for full explanation).
 amq wake --me "$ME" --root "$ROOT" --inject-mode raw </dev/tty >/dev/null 2>&1 &
 
-exec amq coop exec --no-wake --no-init --root "$ROOT" --me "$ME" codex -- --dangerously-bypass-approvals-and-sandbox "$@"
+# YOLO is OPT-IN. Set CODEX_AMQ_YOLO=1 (or legacy CLAUDE_YOLO=1, kept for
+# backwards compat with the old "one switch flips both panes" UX) to pass
+# --dangerously-bypass-approvals-and-sandbox. Default-deny matches the
+# Anthropic 2025–26 CVE mitigation class — see claude-amq for context.
+CODEX_EXTRA=()
+if [[ "${CODEX_AMQ_YOLO:-${CLAUDE_YOLO:-}}" == "1" ]]; then
+  CODEX_EXTRA+=(--dangerously-bypass-approvals-and-sandbox)
+  printf 'codex-amq: YOLO enabled — sandbox bypass active\n' >&2
+fi
+
+exec amq coop exec --no-wake --no-init --root "$ROOT" --me "$ME" codex -- ${CODEX_EXTRA[@]+"${CODEX_EXTRA[@]}"} "$@"

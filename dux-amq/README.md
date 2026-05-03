@@ -11,7 +11,7 @@ This directory does **not** modify dux source. It sits alongside the dux Rust so
 - **Automatic identity**: each dux pane's AMQ handle is its git branch name, lowercased + sanitized
 - **Spot-VM survival**: dux config + sessions, AMQ queue, and Claude session JSONLs all live on a persistent disk (default `/data/state/`)
 - **Past-chat resume** in fresh worktrees via `--continue --fork-session` (bypasses deferred-tool blocks)
-- **YOLO toggle**: `CLAUDE_YOLO=1 dux` adds `--dangerously-skip-permissions` to every pane
+- **YOLO is opt-in** (audit02 P0-A): `CLAUDE_AMQ_YOLO=1` / `CODEX_AMQ_YOLO=1` enable the per-pane `--dangerously-*` flag. See [Permission model](#permission-model).
 
 ## Layout
 
@@ -58,10 +58,51 @@ Launch:
 dux
 ```
 
-YOLO mode for that session:
+YOLO mode for that session (legacy `CLAUDE_YOLO=1` still works for both panes):
 ```bash
-CLAUDE_YOLO=1 dux
+CLAUDE_AMQ_YOLO=1 CODEX_AMQ_YOLO=1 dux
 ```
+
+## Permission model
+
+YOLO is **opt-in** as of audit02 phase 01. The wrappers default-deny on tool
+execution; you must explicitly export an env var per pane to bypass prompts.
+The Anthropic 2025–26 CVE wave (CVE-2025-59536, CVE-2026-21852,
+CVE-2026-25723, CVE-2026-33068, CVE-2026-35020/35021/35022) all exploited
+credential exfil through prompt-injected paths — default-deny is the single
+biggest mitigation.
+
+| Pane     | Env var to enable YOLO              | What it does                                         |
+|----------|-------------------------------------|------------------------------------------------------|
+| claude   | `CLAUDE_AMQ_YOLO=1`                 | passes `--dangerously-skip-permissions`              |
+| codex    | `CODEX_AMQ_YOLO=1`                  | passes `--dangerously-bypass-approvals-and-sandbox`  |
+| (legacy) | `CLAUDE_YOLO=1`                     | enables BOTH for backwards compat                    |
+
+When YOLO is active, the wrapper prints a one-line stderr banner so it's
+visible in the dux pane header. If you previously exported the deprecated
+`CLAUDE_AMQ_SAFE=1` opt-out, the wrapper now prints a transitional warning;
+the variable is otherwise ignored — unset it from your shell rc.
+
+## Session seeding
+
+Cloning the parent worktree's Claude session JSONLs into a fresh worktree
+is **opt-in** (audit02 phase 01). Set `CLAUDE_AMQ_SEED_FROM_PARENT=1` to
+enable.
+
+Trade-offs to weigh before turning it on:
+
+- **Disk amplification**: rsync clones the parent's full Claude history.
+  ~100 MB per worktree on heavy repos; multiplies by N worktrees.
+- **Token billing**: a long inherited history pushes new sessions toward
+  the 1M-context tier earlier than a clean start would.
+- **Cross-worktree info leak**: the parent's transcripts may carry secrets
+  or PII from a different feature; seeding makes them readable from the
+  new pane.
+
+If you enable seeding, pair it with `resume_args = ["--resume"]` in dux
+config so the picker actually shows the seeded chats. Avoid combining with
+`--continue`: the latest parent session may carry a deferred-tool marker
+that `--continue` refuses.
 
 ## Architecture sketch
 
@@ -86,10 +127,10 @@ CLAUDE_YOLO=1 dux
 
 ## Trade-offs
 
-- **No native dux hook** for worktree-create lifecycle, so seeding past-chat history is done in the wrapper (one-shot, on first launch).
-- **Each worktree gets its own snapshot** of past sessions on first launch (~100 MB for a heavy repo). They diverge afterward — by design.
+- **No native dux hook** for worktree-create lifecycle, so seeding past-chat history (when enabled) is done in the wrapper (one-shot, on first launch).
+- **Seeded worktrees get their own snapshot** of past sessions on first launch (~100 MB for a heavy repo). They diverge afterward — by design. See [Session seeding](#session-seeding) for the disk/billing/leak trade-offs.
 - **Identity collisions are possible** if two worktrees normalize to the same handle. Pick distinct branch names.
-- **Compaction risk**: on repos with a heavy session history, `--fork-session` inherits all of it, which can push fresh sessions toward 1M-context billing tier earlier. If that bites, set `CLAUDE_AMQ_NO_SEED=1` per-pane or revert `resume_args` to `["--continue"]`.
+- **Compaction risk** (when seeding is enabled): on repos with a heavy session history, `--fork-session` inherits all of it, which can push fresh sessions toward 1M-context billing tier earlier. If that bites, leave `CLAUDE_AMQ_SEED_FROM_PARENT` unset (the default) or revert `resume_args` to `["--continue"]`.
 
 ## License
 
