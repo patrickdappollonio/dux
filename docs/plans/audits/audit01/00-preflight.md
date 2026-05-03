@@ -66,11 +66,28 @@ the `dux-amq/tests/` bats harness later phases depend on.
 - `cargo test` passes locally and in CI.
 
 ## Acceptance criteria
-- [ ] Four spot-checked facts re-confirmed at HEAD.
-- [ ] Drift count + short hashes recorded.
-- [ ] `cargo fmt`, `clippy -D warnings`, `cargo test`, `shellcheck` green.
-- [ ] `dux-amq/tests/lib/setup.bash` sources cleanly.
-- [ ] `overlay-ci.yml` passes on PR.
+- [x] Four spot-checked facts re-confirmed at HEAD.
+      - `dux-amq/wrappers/codex-amq:27` — unconditional
+        `--dangerously-bypass-approvals-and-sandbox` confirmed.
+      - `dux-amq/wrappers/claude-amq:11` doc says seeding is "OFF by
+        default", but `:26-27` (`CLAUDE_AMQ_NO_SEED` opt-out) implements
+        it as ON by default. Mismatch confirmed.
+      - `dux-amq/scripts/finalize-claude-migration.sh:25` `rsync --delete`
+        confirmed; `:27,:29` non-atomic `mv` then `ln -s` swap confirmed.
+      - `dux-amq/install.sh:23` `grep -oP` confirmed.
+- [x] Drift count + short hashes recorded
+      (`docs/plans/audits/audit01/artifacts/00-preflight-upstream-drift.txt`,
+      7 commits as expected).
+- [x] `cargo fmt`, `clippy -D warnings`, `cargo test`, `shellcheck` green.
+      Two pre-existing failures fixed in commit "chore(audit01): fix
+      pre-existing baseline lint failures" (clippy `unnecessary_cast`
+      ×2 in `src/app/render.rs`; shellcheck SC2015 in `install.sh` and
+      SC2155 in `finalize-claude-migration.sh`).
+- [x] `dux-amq/tests/lib/setup.bash` sources cleanly (verified by
+      `bats dux-amq/tests` — 3/3 passing in `dux-amq/tests/smoke.bats`).
+- [ ] `overlay-ci.yml` passes on PR. <!-- gap: cannot verify without
+      pushing + opening a PR; CI run will be observed once pushed. Local
+      mirror via `make overlay-test` is green. -->
 
 ## References
 - `dux-amq-audit.md` lines 5–11 (drift was 1 at audit; verified 7 at plan).

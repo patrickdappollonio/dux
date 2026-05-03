@@ -1,0 +1,20 @@
+# Upstream drift snapshot — audit01 Phase 00 (preflight)
+#
+# Captured 2026-05-03 on branch `audit01/00-preflight`.
+# Reproduce: `git fetch upstream && git log HEAD..upstream/main --oneline`
+#
+# overlay HEAD     : 16f85bd  (origin/dux-amq-setup at branch-off)
+# preflight HEAD   : 85f6f68  (this branch, before drift artifact commit)
+# upstream/main    : 8411a99
+#
+# Drift: 7 commits behind upstream/main (audit01.md noted 1 commit; plan
+# README expected 7 at plan authoring; verified == 7 at preflight time).
+# Phase 06 (`06-upstream-sync-automation.md`) consumes this snapshot.
+
+8411a99 Publish dux through npm (#208)
+0178242 Show development label for local builds (#209)
+ea63f2e Update logo.
+3dd05eb Fix Shift+Tab in the delete-agent modal (#207)
+40085e8 Fix reverse Shift+Tab navigation in confirmation modals (#205)
+89eeaf3 Clarify global and project provider defaults (#206)
+4aaf0b0 Harden git output parsing and worktree mirroring (#204)
