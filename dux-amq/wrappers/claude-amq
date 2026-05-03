@@ -90,14 +90,38 @@ seed_session_history() {
   fi
 
   mkdir -p "$self_dir"
+  # Audit02 P1-D: previously rsync errors were swallowed via `2>/dev/null
+  # || true` and the wrapper happily reported "seeded N past sessions"
+  # even when the seed was partial (or empty). Capture stderr to a
+  # tempfile, count any warnings, and report partial-seed status
+  # accurately. Seeding is best-effort — we don't fail the wrapper — but
+  # the user must see the error count so a silent partial seed can't
+  # masquerade as success.
+  local rsync_log seed_rc=0
+  rsync_log=$(mktemp -t claude-amq-seed.XXXXXX) || {
+    echo "claude-amq: could not allocate tempfile for seed log; skipping seed" >&2
+    return 0
+  }
   if command -v rsync >/dev/null 2>&1; then
-    rsync -a "$main_dir"/ "$self_dir"/ 2>/dev/null || true
+    if ! rsync -a "$main_dir"/ "$self_dir"/ 2>"$rsync_log"; then
+      seed_rc=$?
+      echo "claude-amq: seed partial (rsync rc=$seed_rc); see $rsync_log" >&2
+    fi
   else
-    cp -r "$main_dir"/. "$self_dir"/ 2>/dev/null || true
+    if ! cp -r "$main_dir"/. "$self_dir"/ 2>"$rsync_log"; then
+      seed_rc=$?
+      echo "claude-amq: seed partial (cp rc=$seed_rc); see $rsync_log" >&2
+    fi
   fi
-  local n
+  local n warn_lines
   n=$(find "$self_dir" -name '*.jsonl' 2>/dev/null | wc -l)
-  echo "claude-amq: seeded $n past sessions from $main_worktree" >&2
+  if [[ -s "$rsync_log" ]]; then
+    warn_lines=$(wc -l <"$rsync_log" | tr -d '[:space:]')
+    echo "claude-amq: seeded $n files (with $warn_lines rsync warnings; see $rsync_log)" >&2
+  else
+    echo "claude-amq: seeded $n past sessions from $main_worktree" >&2
+    rm -f "$rsync_log"
+  fi
 }
 seed_session_history || true
 
@@ -119,6 +143,34 @@ fi
 ME=$(printf '%s' "$ME" | tr '[:upper:]' '[:lower:]' | sed 's|[^a-z0-9_-]|-|g; s|^-\+||; s|-\+$||')
 
 ROOT="${AMQ_GLOBAL_ROOT:-/data/state/amq}"
+
+# Audit02 P1-F: identity collision detection.
+#
+# AMQ stores per-agent state under "$ROOT/agents/<handle>/". The ME
+# normalization above maps disjoint branch names to the same handle —
+# e.g. "Feature/Login" and "feature-login" both become "feature-login".
+# Without a collision check, the second wrapper invocation silently
+# overwrites the first agent's state and steals its inbox.
+#
+# Strategy: stash the original $PWD next to the agent dir on first
+# invocation. Subsequent invocations compare and refuse if the path
+# differs. We compare against $PWD literally (NOT realpath) so users
+# who symlink-mount the same physical worktree to two different
+# locations don't trigger false-positives — the AMQ state is shared
+# either way.
+ME_REGISTRATION="$ROOT/agents/$ME/.dux-amq-source"
+if [[ -f "$ME_REGISTRATION" ]]; then
+  prev=$(cat "$ME_REGISTRATION" 2>/dev/null || true)
+  if [[ -n "$prev" && "$prev" != "$PWD" ]]; then
+    printf '\033[1;31m!\033[0m [dux-amq] identity collision: %s already registered to %s (current: %s).\n' \
+      "$ME" "$prev" "$PWD" >&2
+    printf '            Rename one branch (avoid normalize-collisions) or set AM_ME explicitly.\n' >&2
+    exit 1
+  fi
+fi
+mkdir -p "$ROOT/agents/$ME" 2>/dev/null || true
+# Mode 0644 marker — informational, not a security boundary.
+printf '%s\n' "$PWD" > "$ME_REGISTRATION" 2>/dev/null || true
 
 # YOLO is OPT-IN. Set CLAUDE_AMQ_YOLO=1 (or legacy CLAUDE_YOLO=1) to enable.
 # Anthropic CVEs in 2025–26 (CVE-2025-59536 et al) targeted credential
@@ -160,8 +212,10 @@ fi
 # being dropped to /dev/null — `>2>/dev/null` previously hid the
 # "[amq-verify] dropping unsigned" lines that are the entire signal of
 # this phase actually doing its job.
-mkdir -p "$HOME/.local/share/dux-amq" 2>/dev/null || true
-WAKE_LOG="$HOME/.local/share/dux-amq/wake-$ME.log"
+LOG_DIR="$HOME/.local/share/dux-amq"
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+WAKE_LOG="$LOG_DIR/wake-$ME.log"
+WAKE_PID="$LOG_DIR/wake-$ME.pid"
 
 STATE_ROOT="${STATE_ROOT:-/data/state}"
 LOCAL_BIN="${LOCAL_BIN:-$HOME/.local/bin}"
@@ -175,10 +229,32 @@ if [[ -z "$INJECT_MODE" ]]; then
   fi
 fi
 
+# Audit02 P1-B: replace bare `&` with `setsid … & disown` and a PID
+# file. The bare-`&` form left `amq wake` as a child of the wrapper's
+# bash; if the parent shell hung up (SSH disconnect, terminal closed),
+# the wake daemon got SIGHUP and exited silently — every queued message
+# from peers was then dropped until the next interactive launch.
+#
+# `setsid` puts wake in its own session+process group, decoupled from
+# the controlling TTY. `disown` removes it from bash's job table so
+# `set -e` and shell exit don't reap it. The PID file under
+# $LOG_DIR/wake-$ME.pid lets the doctor tool (Phase 20) check liveness
+# without scanning /proc.
+#
+# Linux note: `setsid(1)` here is util-linux. macOS ships a different
+# implementation that lacks some flags but the bare invocation we use
+# is portable. dux-amq is Linux-only per the README, so this is mostly
+# documentary.
+#
+# Stderr is captured to $WAKE_LOG (audit01 P1-2 hygiene). stdout was
+# previously dropped; we now also append it so the doctor tool can
+# diff the log to spot wake-side errors.
 case "$INJECT_MODE" in
   raw)
-    amq wake --me "$ME" --root "$ROOT" --inject-mode raw \
-      </dev/tty 2>"$WAKE_LOG" &
+    setsid amq wake --me "$ME" --root "$ROOT" --inject-mode raw \
+      </dev/tty >>"$WAKE_LOG" 2>&1 &
+    disown
+    echo $! > "$WAKE_PID"
     ;;
   via)
     # The bridge MUST be a single executable — AMQ doesn't support
@@ -190,16 +266,20 @@ case "$INJECT_MODE" in
       BRIDGE=$(command -v dux-amq-inject-bridge 2>/dev/null || true)
     fi
     if [[ -n "$BRIDGE" && -x "$BRIDGE" ]]; then
-      amq wake --me "$ME" --root "$ROOT" --inject-via "$BRIDGE" \
-        2>"$WAKE_LOG" &
+      setsid amq wake --me "$ME" --root "$ROOT" --inject-via "$BRIDGE" \
+        >>"$WAKE_LOG" 2>&1 &
+      disown
+      echo $! > "$WAKE_PID"
     else
       printf 'claude-amq: dux-amq-inject-bridge not found; wake disabled\n' >&2
     fi
     ;;
   *)
     printf 'claude-amq: DUX_AMQ_INJECT_MODE=%q not understood; using raw\n' "$INJECT_MODE" >&2
-    amq wake --me "$ME" --root "$ROOT" --inject-mode raw \
-      </dev/tty 2>"$WAKE_LOG" &
+    setsid amq wake --me "$ME" --root "$ROOT" --inject-mode raw \
+      </dev/tty >>"$WAKE_LOG" 2>&1 &
+    disown
+    echo $! > "$WAKE_PID"
     ;;
 esac
 

@@ -38,6 +38,12 @@ setup() {
   export STATE_ROOT="$TEST_HOME/state"
   mkdir -p "$STATE_ROOT/dux"
   unset DUX_AMQ_INJECT_MODE
+  # Audit02 Phase 22 (P1-F): pin AMQ_GLOBAL_ROOT under the throwaway
+  # $TEST_HOME so the new identity-collision marker doesn't accumulate
+  # in the host VM's /data/state/amq/agents/testpane/ directory and make
+  # the second test invocation fail with "identity collision".
+  export AMQ_GLOBAL_ROOT="$TEST_HOME/amq"
+  mkdir -p "$AMQ_GLOBAL_ROOT/agents"
 }
 
 teardown() {

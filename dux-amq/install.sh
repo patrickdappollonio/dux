@@ -140,22 +140,29 @@ strip_block() {
 
 # 1. preflight ---------------------------------------------------------------
 [[ -d /data ]] || { warn "/data not mounted — set up a persistent disk first."; exit 1; }
-# Audit01 P1-6: hard-fail on missing tools instead of letting individual install
-# branches discover them later (with confusing errors). `jq` was a soft dep at
-# the VSCode-settings step; promote to required so we can drop the non-portable
-# `grep -oP` PCRE scrape entirely.
-# `realpath` (GNU coreutils) is required by the wrappers' is_dux_worktree
-# helper for canonicalised path-segment containment (audit01 P0-5).
-# `--` is a GNU coreutils-only option, so a stock BSD `realpath` from
-# macOS will fail at wrapper time even if the binary exists. Linux
-# coreutils > 8.x is fine.
-for _tool in curl jq sha256sum tar install git rsync awk sed realpath; do
-  command -v "$_tool" >/dev/null 2>&1 || {
-    warn "missing required tool: $_tool (Debian/Ubuntu: apt-get install -y curl jq tar coreutils git rsync gawk sed)"
-    exit 1
-  }
+# Audit01 P1-6 / Audit02 P1-C: hard-fail on missing tools, but collect ALL
+# misses in one pass so the operator can `apt-get install` the full list in
+# one shot instead of fix → re-run → next-error → repeat.
+#
+# `realpath` (GNU coreutils, audit02 Phase 12) — required by the wrappers'
+#   is_dux_worktree helper for canonicalised path-segment containment
+#   (audit01 P0-5). The `--` arg-separator is GNU-only; stock BSD realpath
+#   on macOS will fail at wrapper time even if the binary exists.
+# `openssl` (audit02 Phase 08) — required by amq-secret-init.sh /
+#   amq-send-signed / amq-receive-verify for HMAC envelope signing.
+# `jq` was a soft dep at the VSCode-settings step; required so we can
+#   drop the non-portable `grep -oP` PCRE scrape entirely.
+missing=()
+for _tool in curl jq sha256sum tar install git rsync awk sed realpath openssl; do
+  command -v "$_tool" >/dev/null 2>&1 || missing+=("$_tool")
 done
 unset _tool
+if (( ${#missing[@]} > 0 )); then
+  warn "missing required tools: ${missing[*]}"
+  warn "  Debian/Ubuntu: apt-get install -y ${missing[*]}"
+  warn "  macOS:         brew install ${missing[*]}"
+  exit 1
+fi
 mkdir -p "$STATE_ROOT"/{claude,agents,codex,gemini,dux,amq,worktrees,scripts} "$LOCAL_BIN"
 ok "state dirs ready under $STATE_ROOT"
 

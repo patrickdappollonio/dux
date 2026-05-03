@@ -35,10 +35,27 @@ ME=$(printf '%s' "$ME" | tr '[:upper:]' '[:lower:]' | sed 's|[^a-z0-9_-]|-|g; s|
 
 ROOT="${AMQ_GLOBAL_ROOT:-/data/state/amq}"
 
+# Audit02 P1-F: identity collision detection. See claude-amq for full
+# rationale.
+ME_REGISTRATION="$ROOT/agents/$ME/.dux-amq-source"
+if [[ -f "$ME_REGISTRATION" ]]; then
+  prev=$(cat "$ME_REGISTRATION" 2>/dev/null || true)
+  if [[ -n "$prev" && "$prev" != "$PWD" ]]; then
+    printf '\033[1;31m!\033[0m [dux-amq] identity collision: %s already registered to %s (current: %s).\n' \
+      "$ME" "$prev" "$PWD" >&2
+    printf '            Rename one branch (avoid normalize-collisions) or set AM_ME explicitly.\n' >&2
+    exit 1
+  fi
+fi
+mkdir -p "$ROOT/agents/$ME" 2>/dev/null || true
+printf '%s\n' "$PWD" > "$ME_REGISTRATION" 2>/dev/null || true
+
 # Audit02 P0-K (T2) + Phase 13 (audit01 P1-1): route through verify+
 # bridge. See claude-amq for the full rationale on TIOCSTI fallback.
-mkdir -p "$HOME/.local/share/dux-amq" 2>/dev/null || true
-WAKE_LOG="$HOME/.local/share/dux-amq/wake-$ME.log"
+LOG_DIR="$HOME/.local/share/dux-amq"
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+WAKE_LOG="$LOG_DIR/wake-$ME.log"
+WAKE_PID="$LOG_DIR/wake-$ME.pid"
 
 STATE_ROOT="${STATE_ROOT:-/data/state}"
 LOCAL_BIN="${LOCAL_BIN:-$HOME/.local/bin}"
@@ -52,10 +69,14 @@ if [[ -z "$INJECT_MODE" ]]; then
   fi
 fi
 
+# Audit02 P1-B: setsid + disown + PID file. See claude-amq for full
+# rationale.
 case "$INJECT_MODE" in
   raw)
-    amq wake --me "$ME" --root "$ROOT" --inject-mode raw \
-      </dev/tty 2>"$WAKE_LOG" &
+    setsid amq wake --me "$ME" --root "$ROOT" --inject-mode raw \
+      </dev/tty >>"$WAKE_LOG" 2>&1 &
+    disown
+    echo $! > "$WAKE_PID"
     ;;
   via)
     BRIDGE="$LOCAL_BIN/dux-amq-inject-bridge"
@@ -63,16 +84,20 @@ case "$INJECT_MODE" in
       BRIDGE=$(command -v dux-amq-inject-bridge 2>/dev/null || true)
     fi
     if [[ -n "$BRIDGE" && -x "$BRIDGE" ]]; then
-      amq wake --me "$ME" --root "$ROOT" --inject-via "$BRIDGE" \
-        2>"$WAKE_LOG" &
+      setsid amq wake --me "$ME" --root "$ROOT" --inject-via "$BRIDGE" \
+        >>"$WAKE_LOG" 2>&1 &
+      disown
+      echo $! > "$WAKE_PID"
     else
       printf 'gemini-amq: dux-amq-inject-bridge not found; wake disabled\n' >&2
     fi
     ;;
   *)
     printf 'gemini-amq: DUX_AMQ_INJECT_MODE=%q not understood; using raw\n' "$INJECT_MODE" >&2
-    amq wake --me "$ME" --root "$ROOT" --inject-mode raw \
-      </dev/tty 2>"$WAKE_LOG" &
+    setsid amq wake --me "$ME" --root "$ROOT" --inject-mode raw \
+      </dev/tty >>"$WAKE_LOG" 2>&1 &
+    disown
+    echo $! > "$WAKE_PID"
     ;;
 esac
 

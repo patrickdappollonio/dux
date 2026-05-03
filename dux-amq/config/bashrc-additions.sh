@@ -29,6 +29,20 @@ _amq_shell_setup_guarded() {
     printf '            re-run install.sh (or rm "%s" if intentional).\n' "$AMQ_BIN" >&2
     return 1
   fi
+  # Audit02 P1-E: refuse when the binary mtime is newer than the recorded
+  # hash file. The full sha256 below would still catch a tampered binary,
+  # but a mismatch is a confusing error message; a "binary newer than
+  # recorded hash" message points the operator straight at the fix
+  # (re-run install.sh, which re-records the hash). Common cases:
+  #   * `apt upgrade` swapped /usr/local/bin/amq under our feet
+  #   * an out-of-band `cp` over $AMQ_BIN by another tool
+  #   * `setfacl`/timestamp resurrection — won't fool sha256, but mtime
+  #     check fires first and produces a clearer banner.
+  if [[ "$AMQ_BIN" -nt "$rec" ]]; then
+    printf '\033[1;31m!\033[0m [dux-amq] amq binary newer than recorded hash (%s) — re-run install.sh\n' "$rec" >&2
+    printf '            (binary: %s)\n' "$AMQ_BIN" >&2
+    return 1
+  fi
   local exp act
   exp=$(awk '{print $1}' "$rec")
   act=$(sha256sum "$AMQ_BIN" 2>/dev/null | awk '{print $1}')
