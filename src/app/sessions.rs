@@ -1245,7 +1245,13 @@ impl App {
             self.set_error("Select a stopped agent first to reconnect.");
             return Ok(());
         };
-        logger::info(&format!("reconnecting session {}", session.id));
+        tracing::info!(
+            target: "dux::sessions",
+            session_id = %session.id,
+            branch = %session.branch_name,
+            provider = %session.provider.as_str(),
+            "reconnecting session",
+        );
         if self.providers.contains_key(&session.id) {
             self.set_info(format!(
                 "Agent \"{}\" is already connected.",

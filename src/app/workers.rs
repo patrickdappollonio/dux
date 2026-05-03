@@ -15,10 +15,12 @@ impl App {
                     self.create_agent_in_flight = false;
                     self.last_pty_size = pty_size;
                     if let Err(err) = self.session_store.upsert_session(&session) {
-                        logger::error(&format!(
-                            "session store upsert failed for {}: {err}",
-                            session.id
-                        ));
+                        tracing::error!(
+                            target: "dux::workers",
+                            session_id = %session.id,
+                            err = %err,
+                            "session store upsert failed",
+                        );
                         self.set_error(format!("Failed to persist session: {err}"));
                         continue;
                     }
@@ -1245,7 +1247,14 @@ pub(crate) fn run_create_agent_job(
     };
     let provider_cfg = provider_config(&config, &session.provider);
     if let Err(hint) = check_provider_available(&provider_cfg) {
-        logger::error(&format!("provider not found for {}: {hint}", session.id));
+        tracing::error!(
+            target: "dux::workers",
+            session_id = %session.id,
+            provider = %session.provider.as_str(),
+            command = %provider_cfg.command,
+            hint = %hint,
+            "provider not found",
+        );
         if owns_worktree {
             let _ = git::remove_worktree(
                 &repo_path,
@@ -1272,7 +1281,14 @@ pub(crate) fn run_create_agent_job(
     ) {
         Ok(client) => client,
         Err(err) => {
-            logger::error(&format!("PTY spawn failed for {}: {err}", session.id));
+            tracing::error!(
+                target: "dux::workers",
+                session_id = %session.id,
+                command = %provider_cfg.command,
+                worktree = %worktree_path.display(),
+                err = %err,
+                "pty spawn failed",
+            );
             if owns_worktree {
                 let _ = git::remove_worktree(
                     &repo_path,
@@ -1287,7 +1303,14 @@ pub(crate) fn run_create_agent_job(
             return;
         }
     };
-    logger::info(&format!("PTY session started for {}", session.id));
+    tracing::info!(
+        target: "dux::workers",
+        session_id = %session.id,
+        provider = %session.provider.as_str(),
+        rows = rows,
+        cols = cols,
+        "pty session started",
+    );
     let _ = worker_tx.send(WorkerEvent::CreateAgentReady(Box::new(AgentReadyData {
         session,
         client,

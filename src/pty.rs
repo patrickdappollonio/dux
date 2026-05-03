@@ -276,7 +276,11 @@ impl PtyClient {
                     }
                 }
                 Err(err) => {
-                    logger::debug(&format!("PTY reader error: {err}"));
+                    tracing::debug!(
+                        target: "dux::pty",
+                        err = %err,
+                        "pty reader error; marking session exited",
+                    );
                     exited.store(true, Ordering::Release);
                     break;
                 }
@@ -301,7 +305,11 @@ impl PtyClient {
     #[allow(dead_code)]
     pub fn snapshot(&self) -> TerminalSnapshot {
         let Ok(terminal) = self.terminal.lock() else {
-            logger::error("pty: terminal mutex poisoned; rendering empty snapshot");
+            tracing::error!(
+                target: "dux::pty",
+                operation = "snapshot",
+                "terminal mutex poisoned; rendering empty snapshot",
+            );
             return TerminalSnapshot::empty();
         };
         terminal.snapshot()
@@ -316,7 +324,11 @@ impl PtyClient {
             return false;
         }
         let Ok(terminal) = self.terminal.lock() else {
-            logger::error("pty: terminal mutex poisoned; skipping snapshot rebuild");
+            tracing::error!(
+                target: "dux::pty",
+                operation = "snapshot_into",
+                "terminal mutex poisoned; skipping snapshot rebuild",
+            );
             return false;
         };
         terminal.snapshot_into(target);
@@ -325,7 +337,11 @@ impl PtyClient {
 
     pub fn scrollback_offset(&self) -> usize {
         let Ok(terminal) = self.terminal.lock() else {
-            logger::error("pty: terminal mutex poisoned; reporting scrollback offset 0");
+            tracing::error!(
+                target: "dux::pty",
+                operation = "scrollback_offset",
+                "terminal mutex poisoned; reporting offset 0",
+            );
             return 0;
         };
         terminal.scrollback_offset()
@@ -568,9 +584,11 @@ impl Drop for PtyClient {
         if let Some(handle) = self.reader_handle.take()
             && let Err(panic) = handle.join()
         {
-            logger::warn(&format!(
-                "pty: reader thread panicked during shutdown: {panic:?}"
-            ));
+            tracing::warn!(
+                target: "dux::pty",
+                panic = ?panic,
+                "reader thread panicked during shutdown",
+            );
         }
     }
 }

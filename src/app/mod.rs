@@ -1135,7 +1135,12 @@ impl App {
         let config = ensure_config(&paths)?;
 
         logger::init(&config.logging, &paths);
-        logger::info("bootstrapping dux");
+        tracing::info!(
+            target: "dux::app",
+            version = env!("CARGO_PKG_VERSION"),
+            config_path = %paths.config_path.display(),
+            "bootstrapping dux",
+        );
 
         // Validate and build runtime keybindings from config.
         if let Err(msg) = validate_keys(&config.keys) {
@@ -1663,7 +1668,12 @@ impl App {
     }
 
     fn report_runtime_error(&mut self, context: &str, err: &dyn std::error::Error) {
-        logger::error(&format!("{context}: {err}"));
+        tracing::error!(
+            target: "dux::app",
+            context = %context,
+            err = %err,
+            "runtime error",
+        );
         self.set_error(format!("{context}: {err}"));
     }
 

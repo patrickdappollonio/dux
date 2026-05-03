@@ -132,6 +132,14 @@ When shelling out to git, **always ensure the command output is immune to user-s
 - Preserve safe failure behavior around project refresh and failed agent startup.
 - **Never use byte-based `.len()` or `[..n]` slicing to truncate user-visible strings.** Terminal output, file paths, and UI text can contain multi-byte UTF-8 characters (box-drawing, block elements, CJK, emoji). Always use `.chars().count()` for length and `.chars().take(n).collect()` (or `char_indices().nth()`) for truncation. Byte-based slicing will panic if the index falls inside a multi-byte character.
 
+### Logging
+
+- **Prefer `tracing::{info,warn,error,debug}!` macros with structured fields** over the legacy `crate::logger::{info,warn,error,debug}` free functions. Structured fields (`session_id = %id`, `agent = %name`, `err = %err`) produce parseable JSON Lines records that downstream tooling (GDPR purge, doctor tool, log-grep aliases) can filter on. The legacy shims still work — they wrap `tracing` under a `dux::legacy` target and sanitize their input — but they erase structure and should not be used in new code.
+- **Always set `target: "dux::<module>"`** on new `tracing!` calls (e.g. `dux::workers`, `dux::pty`, `dux::sessions`). The crate-default `target` would be the calling module path, which is fine but less greppable; explicit targets keep the JSON output stable across refactors.
+- **Sanitize attacker-controlled fields** (git stderr, branch names, PR titles, process names) with `crate::sanitize::for_terminal` before passing them as field values. The legacy shims do this for you; structured `tracing` calls do not, because the JSON encoder handles control-byte escaping but does not rewrite OSC/CSI sequences for grep-safety.
+- **`tracing::error!` is for unexpected failures.** Use `tracing::warn!` for recoverable conditions worth flagging, `tracing::info!` for milestones (session started, project added), and `tracing::debug!` for hot-path noise. Do not log with `tracing::trace!` — the env-filter default is `dux=info`, so `trace` records are dropped.
+- **Never call `tracing::*!` (or any logging shim) from inside `crate::sanitize::*`.** The sanitizer is on the legacy-shim call path; logging from there would recurse and overflow the stack. The `sanitize.rs` module documents this constraint at the top of the file.
+
 ## Verification
 
 Use:
