@@ -1,0 +1,813 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2016
+# (SC2016 fires on jq filters quoted with single quotes — that's the
+#  *correct* form; jq does its own variable expansion via --arg/--argjson.)
+# dux-amq-doctor — single-shot triage tool for a dux + AMQ install.
+# Audit02 Phase 20 (P2-11): produce a diagnostic dump operators can share
+# without leaking host paths or branch names (with --anonymize).
+#
+# Output is human-readable by default. `--json` emits a single JSON
+# object covering the same fields. `--anonymize` redacts:
+#   - $HOME → /HOME/
+#   - worktree paths under dux's `worktrees/` → /WT/branch-N/
+#   - branch / agent names → branch-N / agent-N (numbered in iteration
+#     order, stable per run)
+#
+# Design constraints (audit02 plan §20):
+#   - MUST NOT hang. Every external call is wrapped in `timeout 5`.
+#   - MUST cap inbox enumeration ("100+ messages") so an enormous queue
+#     doesn't make the doctor itself a DoS vector.
+#   - MUST exit 0 even when AMQ is uninitialized — operators run this
+#     *because* something is broken; bailing on a missing queue defeats
+#     the purpose.
+set -euo pipefail
+
+# ----- argv parsing ---------------------------------------------------------
+
+JSON=0
+ANON=0
+while (( $# )); do
+  case "$1" in
+    --json)        JSON=1; shift;;
+    --anonymize)   ANON=1; shift;;
+    -h|--help)
+      cat <<'USAGE'
+usage: dux-amq-doctor [--json] [--anonymize]
+
+  --json        Emit a single JSON object (suitable for `jq`).
+  --anonymize   Redact $HOME, worktree paths, branch names, agent IDs.
+
+Reads:
+  STATE_ROOT       (default: /data/state)
+  DUX_HOME         (default: $STATE_ROOT/dux)
+  AMQ_GLOBAL_ROOT  (default: $STATE_ROOT/amq)
+
+Exits 0 on a healthy *or* uninitialized install. Non-zero only on
+internal scripting errors.
+USAGE
+      exit 0;;
+    *) printf 'doctor: ignoring unknown arg: %s\n' "$1" >&2; shift;;
+  esac
+done
+
+# ----- environment ----------------------------------------------------------
+
+STATE_ROOT="${STATE_ROOT:-/data/state}"
+DUX_HOME="${DUX_HOME:-$STATE_ROOT/dux}"
+AMQ_GLOBAL_ROOT="${AMQ_GLOBAL_ROOT:-$STATE_ROOT/amq}"
+AMQ_BIN_PINNED="${AMQ_BIN:-$STATE_ROOT/amq-bin/amq}"
+
+# Locate install.sh so we can scrape the overlay version pin without
+# hard-coding it in two places. Search order: $DUX_AMQ_INSTALL_SH (test
+# override) → ../install.sh relative to this script → /dev/null.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_SH="${DUX_AMQ_INSTALL_SH:-$SCRIPT_DIR/../install.sh}"
+
+# Wrap every external call so a hung command (a stuck NFS mount, a
+# coreutils binary that wedged on a filesystem trap) cannot stall the
+# doctor itself. Returns the command's stdout on success, "(timeout)" on
+# timeout, "(error)" on any other non-zero exit. The default deadline is
+# 5s; pass a longer override as DOCTOR_TIMEOUT_SEC=N for sections (du,
+# inbox enumeration) that legitimately walk many inodes.
+to() {
+  local out timeout="${DOCTOR_TIMEOUT_SEC:-5}"
+  if out=$(timeout "$timeout" "$@" 2>/dev/null); then
+    printf '%s' "$out"
+  else
+    local rc=$?
+    case "$rc" in
+      124) printf '(timeout)';;
+      127) printf '(not found)';;
+      *)   printf '(error)';;
+    esac
+  fi
+}
+
+# Returns true (0) when $1 is one of the doctor's sentinel error
+# strings. Sections use this to decide whether to render a value or fall
+# back to a placeholder. Centralised so the sentinel set stays in sync.
+is_err() {
+  case "$1" in
+    "(timeout)"|"(error)"|"(not found)"|"") return 0;;
+    *) return 1;;
+  esac
+}
+
+# Color helpers — only emit when stdout is a TTY *and* we're not in JSON
+# mode. Pipes (and `--json`) get plain ASCII for grep-safety.
+if (( JSON == 0 )) && [ -t 1 ]; then
+  C_OK=$'\033[32m'
+  C_WARN=$'\033[33m'
+  C_BAD=$'\033[31m'
+  C_DIM=$'\033[2m'
+  C_OFF=$'\033[0m'
+else
+  C_OK=''; C_WARN=''; C_BAD=''; C_DIM=''; C_OFF=''
+fi
+
+# ----- anonymizer -----------------------------------------------------------
+#
+# Each kind has its own counter and lookup table (associative array).
+# Iteration order is *first-seen-first-numbered* — i.e. whichever branch
+# the agent enumerator hits first becomes branch-1. This is stable
+# within a single doctor run but not across runs (filesystem listing
+# order isn't stable).
+
+declare -A _BRANCHES _AGENTS
+_BRANCH_N=0
+_AGENT_N=0
+
+# IMPORTANT: anon_branch / anon_agent / anon_text mutate process-global
+# associative arrays (_BRANCHES, _AGENTS) via the counter side-effect.
+# Bash subshells (created by `$(...)`, pipelines on the right of |, etc.)
+# do not propagate variable mutations back to the parent. Callers
+# therefore set a local via `<varname>` parameter, never via command
+# substitution. Each helper *does* the printf to stdout for the
+# convenience case (text rendering with no need to reuse the result),
+# but JSON-mode callers must pass `-v <var>` so the counter increment
+# survives.
+anon_branch() {
+  local _name="$1" _outvar="${2:-}"
+  if [[ "$ANON" -eq 0 ]]; then
+    if [[ -n "$_outvar" ]]; then
+      printf -v "$_outvar" '%s' "$_name"
+    else
+      printf '%s' "$_name"
+    fi
+    return 0
+  fi
+  if [[ -z "${_BRANCHES[$_name]:-}" ]]; then
+    _BRANCH_N=$((_BRANCH_N + 1))
+    _BRANCHES[$_name]="branch-$_BRANCH_N"
+  fi
+  if [[ -n "$_outvar" ]]; then
+    printf -v "$_outvar" '%s' "${_BRANCHES[$_name]}"
+  else
+    printf '%s' "${_BRANCHES[$_name]}"
+  fi
+}
+
+anon_agent() {
+  local _name="$1" _outvar="${2:-}"
+  if [[ "$ANON" -eq 0 ]]; then
+    if [[ -n "$_outvar" ]]; then
+      printf -v "$_outvar" '%s' "$_name"
+    else
+      printf '%s' "$_name"
+    fi
+    return 0
+  fi
+  if [[ -z "${_AGENTS[$_name]:-}" ]]; then
+    _AGENT_N=$((_AGENT_N + 1))
+    _AGENTS[$_name]="agent-$_AGENT_N"
+  fi
+  if [[ -n "$_outvar" ]]; then
+    printf -v "$_outvar" '%s' "${_AGENTS[$_name]}"
+  else
+    printf '%s' "${_AGENTS[$_name]}"
+  fi
+}
+
+# Replace $HOME and worktree paths in a single string. Used as a final
+# scrub on output that mixes free text with paths (df, error lines).
+# `anon_text <text> [outvar]` — when `outvar` is set, mutates the named
+# variable (so anon_branch's counter survives); when absent, prints to
+# stdout and any branch increments are lost (acceptable in pure-text
+# rendering paths where order doesn't have to be stable).
+anon_text() {
+  local _s="$1" _outvar="${2:-}"
+  if [[ "$ANON" -ne 0 ]]; then
+    if [[ -n "${HOME:-}" ]]; then
+      _s="${_s//$HOME/\/HOME}"
+    fi
+    # /data/state/dux/worktrees/<branch>/... → /WT/branch-N/...
+    if [[ -d "$DUX_HOME/worktrees" ]]; then
+      local _wt_root="$DUX_HOME/worktrees"
+      while [[ "$_s" == *"$_wt_root/"* ]]; do
+        local _prefix="${_s%%"$_wt_root"/*}"
+        local _rest="${_s#*"$_wt_root"/}"
+        local _branch="${_rest%%/*}"
+        local _tail="${_rest#*/}"
+        [[ "$_tail" == "$_rest" ]] && _tail=""
+        local _repl
+        anon_branch "$_branch" _repl
+        if [[ -n "$_tail" ]]; then
+          _s="${_prefix}/WT/${_repl}/${_tail}"
+        else
+          _s="${_prefix}/WT/${_repl}"
+        fi
+      done
+    fi
+  fi
+  if [[ -n "$_outvar" ]]; then
+    printf -v "$_outvar" '%s' "$_s"
+  else
+    printf '%s' "$_s"
+  fi
+}
+
+# ----- output sinks ---------------------------------------------------------
+#
+# Text mode prints sections incrementally. JSON mode buffers every
+# computed value into name=value pairs and emits one `jq -n` invocation
+# at the end. We use a simple flat key-value array; nesting is handled
+# via dotted keys ("amq.agents", "sessions_db.integrity").
+
+declare -a _JSON_KEYS _JSON_VALS _JSON_KINDS  # kinds: str | num | bool | json
+
+j_set() {
+  # j_set <key> <value> [kind]
+  local key="$1" val="$2" kind="${3:-str}"
+  _JSON_KEYS+=("$key")
+  _JSON_VALS+=("$val")
+  _JSON_KINDS+=("$kind")
+}
+
+# IMPORTANT: under `set -e`, `(( cond ))` exits non-zero when the
+# arithmetic result is zero, which would abort the whole script if the
+# expression sits at function-end. Use `[[ ]]` for the JSON-mode gate
+# (always returns 0 from these helpers) so callers don't trip set -e.
+
+# Print a section header (text mode only).
+section() {
+  if [[ "$JSON" -eq 0 ]]; then
+    printf '\n== %s ==\n' "$*"
+  fi
+}
+
+# Print "key: value" aligned. Text mode only.
+kv() {
+  if [[ "$JSON" -eq 0 ]]; then
+    printf '%-16s %s\n' "$1:" "$2"
+  fi
+}
+
+ok()   { [[ "$JSON" -eq 0 ]] && printf '%s%s%s\n' "$C_OK"   "$*" "$C_OFF"; return 0; }
+warn() { [[ "$JSON" -eq 0 ]] && printf '%s%s%s\n' "$C_WARN" "$*" "$C_OFF"; return 0; }
+bad()  { [[ "$JSON" -eq 0 ]] && printf '%s%s%s\n' "$C_BAD"  "$*" "$C_OFF"; return 0; }
+
+# ============================================================================
+# Section 1: Versions
+# ============================================================================
+sec_versions() {
+  section "Versions"
+  local dux_v amq_v claude_v codex_v gemini_v overlay_v
+
+  # `dux --version` is not implemented in patrickdappollonio/dux v0.4.0
+  # (it tries to acquire the single-instance lock instead — see
+  # src/main.rs). Fall back to scraping the first line of `--help`,
+  # which is the binary's own banner. Same trick install.sh uses on a
+  # fresh install.
+  dux_v="$(to dux --version)"
+  if is_err "$dux_v" || [[ "$dux_v" == *"already running"* ]]; then
+    dux_v="$(to bash -c 'dux --help 2>&1 | head -1')"
+    is_err "$dux_v" && dux_v="(unknown)"
+  fi
+  amq_v="$(to amq --version)"
+  is_err "$amq_v" && amq_v="(unknown)"
+  claude_v="$(to claude --version)"
+  is_err "$claude_v" && claude_v="(missing)"
+  codex_v="$(to codex --version)"
+  is_err "$codex_v" && codex_v="(missing)"
+  gemini_v="$(to gemini --version)"
+  is_err "$gemini_v" && gemini_v="(missing)"
+
+  # Scrape `DUX_AMQ_VERSION="${DUX_AMQ_VERSION:-X.Y.Z}"` from install.sh.
+  # The line uses bash parameter expansion so we need the *default* value
+  # (X.Y.Z), not the literal `${DUX_AMQ_VERSION:-X.Y.Z}` string.
+  overlay_v=""
+  if [[ -r "$INSTALL_SH" ]]; then
+    overlay_v="$(awk '
+      /^DUX_AMQ_VERSION=/ {
+        # Match either DUX_AMQ_VERSION="X" or
+        # DUX_AMQ_VERSION="${DUX_AMQ_VERSION:-X}".
+        if (match($0, /:-[^}]*/)) {
+          v = substr($0, RSTART+2, RLENGTH-2)
+        } else if (match($0, /"[^"]*"/)) {
+          v = substr($0, RSTART+1, RLENGTH-2)
+        }
+        print v; exit
+      }
+    ' "$INSTALL_SH" 2>/dev/null || true)"
+  fi
+  [[ -z "$overlay_v" ]] && overlay_v="(unknown)"
+
+  kv "dux"     "$dux_v"
+  kv "amq"     "$amq_v"
+  kv "claude"  "$claude_v"
+  kv "codex"   "$codex_v"
+  kv "gemini"  "$gemini_v"
+  kv "overlay" "$overlay_v"
+
+  j_set versions.dux     "${dux_v:-}"
+  j_set versions.amq     "${amq_v:-}"
+  j_set versions.claude  "${claude_v:-}"
+  j_set versions.codex   "${codex_v:-}"
+  j_set versions.gemini  "${gemini_v:-}"
+  j_set versions.overlay "$overlay_v"
+}
+
+# ============================================================================
+# Section 2: Binary integrity
+# ============================================================================
+sec_binary_integrity() {
+  section "Binary integrity"
+  local rec="$AMQ_GLOBAL_ROOT/binary.sha256"
+  local status="absent" expected="" actual=""
+  local bin_disp rec_disp sentinel_disp
+  anon_text "$AMQ_BIN_PINNED" bin_disp
+  anon_text "$rec"            rec_disp
+  if [[ -x "$AMQ_BIN_PINNED" && -f "$rec" ]]; then
+    expected="$(awk '{print $1}' "$rec" 2>/dev/null)"
+    actual="$(to sha256sum "$AMQ_BIN_PINNED" | awk '{print $1}')"
+    if [[ -n "$expected" && "$expected" == "$actual" ]]; then
+      status="match"
+      kv "amq binary" "$bin_disp"
+      ok  "  sha256 matches $rec_disp"
+    else
+      status="mismatch"
+      kv "amq binary" "$bin_disp"
+      bad "  sha256 MISMATCH: got ${actual:-<unreadable>}, expected ${expected:-<unset>}"
+    fi
+  elif [[ ! -x "$AMQ_BIN_PINNED" ]]; then
+    status="binary-missing"
+    kv "amq binary" "MISSING ($bin_disp)"
+  else
+    status="record-missing"
+    kv "amq binary" "$bin_disp"
+    warn "  record file missing: $rec_disp"
+  fi
+
+  # TIOCSTI sentinel (Phase 13 — may not exist in this base; that's fine).
+  local sentinel="$DUX_HOME/.tiocsti-state" tio_state="absent"
+  anon_text "$sentinel" sentinel_disp
+  if [[ -e "$sentinel" ]]; then
+    tio_state="present"
+    kv "tiocsti sentinel" "PRESENT ($sentinel_disp) — using --inject-via fallback"
+  else
+    kv "tiocsti sentinel" "absent (TIOCSTI ok or pre-Phase-13)"
+  fi
+
+  j_set binary_integrity.status   "$status"
+  j_set binary_integrity.expected "$expected"
+  j_set binary_integrity.actual   "$actual"
+  j_set binary_integrity.tiocsti_sentinel "$tio_state"
+}
+
+# ============================================================================
+# Section 3: Persistent disk
+# ============================================================================
+sec_persistent_disk() {
+  section "Persistent disk"
+  local df_out
+  if [[ -d /data ]]; then
+    df_out="$(to df -h /data | tail -n +2 | head -1)"
+  else
+    df_out="(no /data mount)"
+  fi
+  kv "df /data" "$(anon_text "$df_out")"
+  j_set disk.df "$df_out"
+
+  if [[ -d "$STATE_ROOT" ]]; then
+    # `du -sh` on a populated /data/state tree is the slowest call in
+    # the whole doctor. Bump its budget to 15s; the rest of the script's
+    # 5s default is fine for the cheap calls that surround it.
+    local top
+    top="$(DOCTOR_TIMEOUT_SEC=15 to bash -c "du -sh '${STATE_ROOT}'/* 2>/dev/null | sort -hr | head -5")"
+    if ! is_err "$top"; then
+      # Build a JSON array of {size,path} entries while iterating the
+      # `du` lines once. JSON consumers shouldn't have to re-parse the
+      # human-readable column layout.
+      local top_json='[]' size path anon_path
+      while IFS=$'\t' read -r size path; do
+        [[ -z "$size" ]] && continue
+        anon_text "$path" anon_path
+        if [[ "$JSON" -eq 0 ]]; then
+          if [[ "$top_json" == "[]" ]]; then
+            printf 'top dirs:\n'
+          fi
+          printf '  %-8s %s\n' "$size" "$anon_path"
+        fi
+        top_json="$(timeout 5 jq -c \
+          --arg size "$size" --arg path "$anon_path" \
+          '. + [{size: $size, path: $path}]' \
+          <<<"$top_json" 2>/dev/null || printf '%s' "$top_json")"
+      done <<<"$top"
+      j_set disk.top_dirs "$top_json" json
+    else
+      kv "top dirs" "$top"
+      # Wrap the sentinel string in a JSON-string literal so the
+      # downstream `setpath` keeps its `kind=str` formatting.
+      j_set disk.top_dirs "$top"
+    fi
+  fi
+}
+
+# ============================================================================
+# Section 4: AMQ
+# ============================================================================
+sec_amq() {
+  section "AMQ"
+  local cfg="$AMQ_GLOBAL_ROOT/meta/config.json"
+  local root_disp cfg_disp
+  anon_text "$AMQ_GLOBAL_ROOT" root_disp
+  anon_text "$cfg"             cfg_disp
+  if [[ ! -f "$cfg" ]]; then
+    kv "queue root" "$root_disp (uninitialized)"
+    warn "  no $cfg_disp — run install.sh"
+    j_set amq.initialized false bool
+    j_set amq.queue_root "$root_disp"
+    return
+  fi
+  kv "queue root" "$root_disp"
+  j_set amq.initialized true bool
+  j_set amq.queue_root "$root_disp"
+
+  # Iterate every agents/ subdir on disk (config.json may be stale —
+  # users add agents at runtime via `amq init --agents <handle>`).
+  local agents_dir="$AMQ_GLOBAL_ROOT/agents"
+  if [[ ! -d "$agents_dir" ]]; then
+    j_set amq.agent_count 0 num
+    return
+  fi
+  local -a agent_list=()
+  local d
+  for d in "$agents_dir"/*; do
+    [[ -d "$d" ]] || continue
+    agent_list+=("$(basename "$d")")
+  done
+  j_set amq.agent_count "${#agent_list[@]}" num
+
+  if (( JSON == 0 )); then
+    printf 'agents (%d):\n' "${#agent_list[@]}"
+  fi
+
+  # Build a JSON array of {name,depth,oldest_age_min} entries.
+  local agents_json="[]"
+  local agent depth oldest_age oldest_min display_name
+  for agent in "${agent_list[@]}"; do
+    local inbox_new="$agents_dir/$agent/inbox/new"
+    if [[ ! -d "$inbox_new" ]]; then
+      depth=0
+      oldest_age="-"
+      oldest_min=-1
+    else
+      # Cap at 100 to bound `find` cost on huge queues.
+      depth="$(to bash -c "find '$inbox_new' -maxdepth 1 -type f 2>/dev/null | head -101 | wc -l" | tr -d ' ')"
+      [[ -z "$depth" || "$depth" == "(timeout)" || "$depth" == "(error)" ]] && depth=0
+      if (( depth >= 101 )); then
+        depth="100+"
+      fi
+      # Oldest message age in minutes (mtime-based — AMQ writes name-as-id
+      # but mtime is the filesystem time and that's what we have).
+      if [[ "$depth" != "0" ]]; then
+        oldest_min="$(to bash -c "
+          oldest=\$(find '$inbox_new' -maxdepth 1 -type f -printf '%T@\n' 2>/dev/null | sort -n | head -1)
+          [[ -n \"\$oldest\" ]] || exit 1
+          now=\$(date +%s)
+          # printf %d truncates the float: bash arithmetic doesn't speak floats.
+          age=\$(( now - \${oldest%.*} ))
+          printf '%d' \$(( age / 60 ))
+        ")"
+        [[ -z "$oldest_min" || "$oldest_min" == "(timeout)" || "$oldest_min" == "(error)" ]] && oldest_min=-1
+        if (( oldest_min < 0 )); then
+          oldest_age="-"
+        elif (( oldest_min < 60 )); then
+          oldest_age="${oldest_min}m"
+        else
+          oldest_age="$((oldest_min / 60))h$((oldest_min % 60))m"
+        fi
+      else
+        oldest_age="-"
+        oldest_min=-1
+      fi
+    fi
+    anon_agent "$agent" display_name
+    if (( JSON == 0 )); then
+      # Color choice:
+      #   - >=60 minutes old, or 100+ depth → bad (red)
+      #   - any pending messages         → warn (yellow)
+      #   - empty inbox                  → dim (operator's eye skips it)
+      local color="$C_DIM" suffix=""
+      if [[ "$depth" == "100+" ]]; then
+        color="$C_BAD"
+        suffix=" (oldest $oldest_age)"
+      elif (( depth > 0 )); then
+        if (( oldest_min >= 60 )); then
+          color="$C_BAD"
+        else
+          color="$C_WARN"
+        fi
+        suffix=" (oldest $oldest_age)"
+      fi
+      printf '  %-30s %s%-5s%s msg%s\n' \
+        "$display_name" "$color" "$depth" "$C_OFF" "$suffix"
+    fi
+    # Build JSON object via jq so embedded names with quotes are escaped.
+    agents_json="$(timeout 5 jq -c \
+      --arg name "$display_name" \
+      --arg depth "$depth" \
+      --argjson oldest_min "$oldest_min" \
+      '. + [{name: $name, depth: $depth, oldest_age_min: $oldest_min}]' \
+      <<<"$agents_json" 2>/dev/null || printf '%s' "$agents_json")"
+  done
+  j_set amq.agents "$agents_json" json
+}
+
+# ============================================================================
+# Section 5: Symlinks
+# ============================================================================
+sec_symlinks() {
+  section "Symlinks"
+  local link target state link_disp target_disp state_disp json='{}'
+  anon_text "$STATE_ROOT" state_disp
+  for link in "$HOME/.claude" "$HOME/.agents" "$HOME/.codex" "$HOME/.gemini"; do
+    anon_text "$link" link_disp
+    if [[ -L "$link" ]]; then
+      target="$(readlink "$link" 2>/dev/null || true)"
+      anon_text "$target" target_disp
+      if [[ "$target" == "$STATE_ROOT/"* ]]; then
+        state="ok"
+        kv "$link_disp" "-> $target_disp"
+      else
+        state="off-persistent"
+        kv "$link_disp" "-> $target_disp"
+        warn "  WARN: target is not under $state_disp"
+      fi
+    elif [[ -e "$link" ]]; then
+      target="$link"
+      target_disp="$link_disp"
+      state="not-symlink"
+      kv "$link_disp" "(real directory, not symlink)"
+      warn "  WARN: not a symlink — install.sh would have made one"
+    else
+      target=""
+      target_disp=""
+      state="missing"
+      kv "$link_disp" "(absent)"
+    fi
+    json="$(timeout 5 jq -c \
+      --arg k "$(basename "$link")" \
+      --arg target "$target_disp" \
+      --arg state "$state" \
+      '. + {($k): {target: $target, state: $state}}' \
+      <<<"$json" 2>/dev/null || printf '%s' "$json")"
+  done
+  j_set symlinks "$json" json
+}
+
+# ============================================================================
+# Section 6: Kernel
+# ============================================================================
+sec_kernel() {
+  section "Kernel"
+  local rel
+  rel="$(to uname -r)"
+  kv "release" "$rel"
+  j_set kernel.release "$rel"
+
+  # The kernel knob name has changed across releases:
+  #   - 6.2+   exposes /proc/sys/dev/tty/legacy_tiocsti (preferred path)
+  #   - older kernels have it as a sysctl-only `dev.tty.legacy_tiocsti`
+  #   - kernels without TIOCSTI mitigation at all have neither, in
+  #     which case TIOCSTI is unconditionally enabled — that's a
+  #     security warning the doctor should surface.
+  local tio="(unsupported-kernel)"
+  if [[ -r /proc/sys/dev/tty/legacy_tiocsti ]]; then
+    tio="$(to cat /proc/sys/dev/tty/legacy_tiocsti)"
+    is_err "$tio" && tio="(unsupported-kernel)"
+  elif command -v sysctl >/dev/null 2>&1; then
+    local s
+    s="$(to sysctl -n dev.tty.legacy_tiocsti)"
+    if ! is_err "$s"; then
+      tio="$s"
+    fi
+  fi
+  kv "dev.tty.legacy_tiocsti" "$tio"
+  j_set kernel.legacy_tiocsti "$tio"
+}
+
+# ============================================================================
+# Section 7: Sessions DB (bash-side)
+# ============================================================================
+sec_sessions_db() {
+  section "Sessions DB"
+  local db="$DUX_HOME/sessions.sqlite3"
+  if [[ ! -f "$db" ]]; then
+    kv "path" "$(anon_text "$db") (absent)"
+    j_set sessions_db.present false bool
+    return
+  fi
+  kv "path" "$(anon_text "$db")"
+  j_set sessions_db.present true bool
+
+  # If sqlite3 isn't on PATH, the Rust subcommand will fill this in.
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    kv "integrity" "(sqlite3 cli missing — see Rust-side section)"
+    j_set sessions_db.integrity "sqlite3-cli-missing"
+    return
+  fi
+  local journal integ
+  journal="$(to sqlite3 "$db" 'PRAGMA journal_mode;')"
+  integ="$(to sqlite3 "$db" 'PRAGMA integrity_check;')"
+  kv "journal_mode" "$journal"
+  kv "integrity"    "$integ"
+  j_set sessions_db.journal_mode "$journal"
+  j_set sessions_db.integrity    "$integ"
+
+  # Per-status counts. Tolerate a missing table (fresh install before
+  # first session) by swallowing sqlite errors via `to`.
+  local counts
+  counts="$(to sqlite3 "$db" "select status, count(*) from agent_sessions group by status;")"
+  if [[ -n "$counts" && "$counts" != "(error)" && "$counts" != "(timeout)" ]]; then
+    if (( JSON == 0 )); then
+      printf 'sessions:\n'
+      printf '%s\n' "$counts" | sed 's/^/  /; s/|/: /'
+    fi
+    j_set sessions_db.counts "$counts"
+  else
+    kv "sessions" "0"
+    j_set sessions_db.counts ""
+  fi
+}
+
+# ============================================================================
+# Section 8: Runtime
+# ============================================================================
+sec_runtime() {
+  section "Runtime"
+  local lockfile="$DUX_HOME/dux.lock"
+  if [[ ! -f "$lockfile" ]]; then
+    kv "dux pid" "(no lockfile)"
+    j_set runtime.dux_pid 0 num
+    return
+  fi
+  local pid
+  pid="$(awk 'NR==1 {print $1}' "$lockfile" 2>/dev/null)"
+  if [[ -z "$pid" || ! -d "/proc/$pid" ]]; then
+    kv "dux pid" "$pid (stale — process not running)"
+    j_set runtime.dux_pid 0 num
+    return
+  fi
+  local rss_kb uptime_s
+  rss_kb="$(awk '/^VmRSS:/ {print $2}' "/proc/${pid}/status" 2>/dev/null || echo 0)"
+  [[ -z "$rss_kb" ]] && rss_kb=0
+  # /proc/$pid/stat field 22 is the process's start time in clock
+  # ticks since boot. /proc/stat's `btime` is the wall-clock boot time
+  # in seconds. The conversion is exact, but field 2 ("comm") can
+  # contain spaces and parens — split on the closing paren first.
+  uptime_s="$(to bash -c "
+    btime=\$(awk '/^btime/ {print \$2}' /proc/stat)
+    stat=\$(cat /proc/${pid}/stat 2>/dev/null) || exit 1
+    rest=\${stat#*) }
+    starttime=\$(printf '%s' \"\$rest\" | awk '{print \$20}')
+    hz=\$(getconf CLK_TCK)
+    [[ -n \"\$btime\" && -n \"\$starttime\" && -n \"\$hz\" ]] || exit 1
+    now=\$(date +%s)
+    printf '%d' \$(( now - btime - starttime / hz ))
+  ")"
+  is_err "$uptime_s" && uptime_s=0
+  local h=$((uptime_s / 3600))
+  local m=$(((uptime_s % 3600) / 60))
+  kv "dux pid"  "$pid (uptime ${h}h${m}m, RSS $((rss_kb / 1024)) MB)"
+  j_set runtime.dux_pid    "$pid"     num
+  j_set runtime.uptime_s   "$uptime_s" num
+  j_set runtime.rss_kb     "$rss_kb"  num
+}
+
+# ============================================================================
+# Section 9: Recent errors
+# ============================================================================
+sec_recent_errors() {
+  section "Recent errors (top 5 from dux.log)"
+  shopt -s nullglob
+  local -a logs=("$DUX_HOME"/dux.log "$DUX_HOME"/dux.log.*)
+  shopt -u nullglob
+  if [[ ${#logs[@]} -eq 0 ]]; then
+    local home_disp
+    anon_text "$DUX_HOME" home_disp
+    kv "log" "(no dux.log under $home_disp)"
+    j_set recent_errors "[]" json
+    return
+  fi
+  # JSON Lines (Phase 09): pull the last 1000 lines, filter ERROR via
+  # jq, take last 5. Fall back to plain grep if jq fails (e.g. legacy
+  # log format). The `cat` list is built up in shell so each path goes
+  # through `printf '%q'`, defeating word-splitting on names with spaces.
+  local errors files=""
+  local f
+  for f in "${logs[@]}"; do
+    files+=" $(printf '%q' "$f")"
+  done
+  errors="$(to bash -c "
+    cat $files 2>/dev/null \
+      | tail -n 1000 \
+      | jq -c 'select(.level==\"ERROR\")' 2>/dev/null \
+      | tail -5
+  ")"
+  if [[ -z "$errors" ]] || is_err "$errors"; then
+    kv "errors" "(none in last 1000 lines)"
+    j_set recent_errors "[]" json
+    return
+  fi
+
+  if [[ "$JSON" -eq 0 ]]; then
+    local line ts msg msg_disp
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      ts="$(timeout 5 jq -r '.timestamp // .ts // ""' <<<"$line" 2>/dev/null)"
+      msg="$(timeout 5 jq -r '.fields.message // .message // .msg // (.fields | tostring) // ""' <<<"$line" 2>/dev/null)"
+      anon_text "$msg" msg_disp
+      printf '  %s %s\n' "$ts" "$msg_disp"
+    done <<<"$errors"
+  fi
+  # Build JSON array, anonymizing each .fields.message inline.
+  local arr
+  if [[ "$ANON" -eq 1 ]]; then
+    # Re-emit each record with .fields.message rewritten. We can't do
+    # the path-walk inside jq, so iterate in bash.
+    local out_lines=""
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      local m m_disp
+      m="$(timeout 5 jq -r '.fields.message // .message // ""' <<<"$line" 2>/dev/null)"
+      anon_text "$m" m_disp
+      out_lines+="$(timeout 5 jq -c --arg new "$m_disp" \
+        'if .fields and .fields.message then .fields.message = $new
+         elif .message            then .message            = $new
+         else . end' <<<"$line" 2>/dev/null)"$'\n'
+    done <<<"$errors"
+    arr="$(timeout 5 jq -s '.' <<<"$out_lines" 2>/dev/null || printf '[]')"
+  else
+    arr="$(timeout 5 jq -s '.' <<<"$errors" 2>/dev/null || printf '[]')"
+  fi
+  j_set recent_errors "$arr" json
+}
+
+# ----- main -----------------------------------------------------------------
+
+sec_versions
+sec_binary_integrity
+sec_persistent_disk
+sec_amq
+sec_symlinks
+sec_kernel
+sec_sessions_db
+sec_runtime
+sec_recent_errors
+
+# JSON emitter — assembles _JSON_KEYS/_VALS/_KINDS into a nested object
+# via jq. Dotted keys produce nested objects; bare keys go at the root.
+if (( JSON == 1 )); then
+  # Build a jq filter `setpath(["a","b"]; $val_n)` per key. We pipe one
+  # set of args at a time so a single bad value doesn't poison the whole
+  # object.
+  out='{}'
+  i=0
+  while (( i < ${#_JSON_KEYS[@]} )); do
+    key="${_JSON_KEYS[$i]}"
+    val="${_JSON_VALS[$i]}"
+    kind="${_JSON_KINDS[$i]}"
+    # Convert dotted key to jq path array: "a.b" → ["a","b"]
+    IFS='.' read -ra parts <<<"$key"
+    path_json="$(printf '%s\n' "${parts[@]}" | jq -R . | jq -s .)"
+    case "$kind" in
+      num)
+        # Coerce to a JSON number; fall back to 0 on garbage.
+        if [[ "$val" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+          out="$(jq -c --argjson p "$path_json" --argjson v "$val" \
+            'setpath($p; $v)' <<<"$out")"
+        else
+          out="$(jq -c --argjson p "$path_json" \
+            'setpath($p; 0)' <<<"$out")"
+        fi
+        ;;
+      bool)
+        if [[ "$val" == "true" ]]; then
+          out="$(jq -c --argjson p "$path_json" 'setpath($p; true)' <<<"$out")"
+        else
+          out="$(jq -c --argjson p "$path_json" 'setpath($p; false)' <<<"$out")"
+        fi
+        ;;
+      json)
+        # Already a JSON literal (object/array/scalar). Validate, fall
+        # back to null on parse failure.
+        if printf '%s' "$val" | jq empty 2>/dev/null; then
+          out="$(jq -c --argjson p "$path_json" --argjson v "$val" \
+            'setpath($p; $v)' <<<"$out")"
+        else
+          out="$(jq -c --argjson p "$path_json" 'setpath($p; null)' <<<"$out")"
+        fi
+        ;;
+      *)
+        # str: feed via --arg so jq does the escaping.
+        out="$(jq -c --argjson p "$path_json" --arg v "$(anon_text "$val")" \
+          'setpath($p; $v)' <<<"$out")"
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  printf '%s\n' "$out"
+fi
+
+exit 0

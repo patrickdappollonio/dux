@@ -35,6 +35,15 @@ fn main() -> Result<()> {
 
     let paths = config::DuxPaths::discover()?;
 
+    if args.first().map(|s| s.as_str()) == Some("doctor") {
+        // No lockfile: doctor is read-only and must work even when a TUI
+        // is already holding the lock (operators run it precisely *because*
+        // dux is misbehaving).
+        let json = args.iter().any(|a| a == "--json");
+        let anonymize = args.iter().any(|a| a == "--anonymize");
+        return cli::run_doctor(&paths, json, anonymize);
+    }
+
     if args.first().map(|s| s.as_str()) == Some("config") {
         let config_args = &args[1..];
         let sub = config_args.first().map(|s| s.as_str()).unwrap_or("");
@@ -99,7 +108,8 @@ fn print_help() {
          Usage:\n\
           dux              Launch the TUI\n\
           dux config       Manage the configuration file\n\
-          dux session      Manage individual sessions (purge for GDPR erasure)\n\n\
+          dux session      Manage individual sessions (purge for GDPR erasure)\n\
+          dux doctor       Print a diagnostic dump (--json, --anonymize)\n\n\
          Config subcommands:\n\
           dux config path          Print the config file path\n\
           dux config diff          Show settings that differ from defaults\n\

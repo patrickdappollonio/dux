@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Result, anyhow, bail};
 
@@ -845,6 +846,206 @@ impl<T, E: std::fmt::Display> WithContextPath<T> for std::result::Result<T, E> {
 }
 
 // ---------------------------------------------------------------------------
+// dux doctor — Audit02 Phase 20 (P2-11)
+// ---------------------------------------------------------------------------
+//
+// The bulk of the diagnostic logic lives in `dux-amq/scripts/dux-amq-doctor`
+// (a bash script — installed by `dux-amq/install.sh`). The Rust wrapper
+// here exists for two reasons:
+//
+//   1. Single entry point. `dux doctor` is more discoverable than a
+//      separately-named binary; users don't have to remember "the
+//      script lives next to dux on $PATH".
+//   2. Sqlite integrity. The bash script optionally shells out to
+//      `sqlite3`; on hosts without it, we still need to surface an
+//      integrity result. The Rust side opens the live `SessionStore`
+//      and runs `PRAGMA integrity_check` directly — no external CLI
+//      required, and we can also count active sessions correctly using
+//      the same model code the TUI uses.
+//
+// We *append* the Rust-side block after the bash output (rather than
+// merging — that would require parsing JSON and stitching, which adds
+// complexity for no operator benefit). If `dux-amq-doctor` isn't on
+// PATH we still print the Rust-side block on its own.
+
+/// Resolve the bash doctor script. Search order:
+///   1. `DUX_AMQ_DOCTOR_BIN` env var (test override + dev iteration).
+///   2. `dux-amq-doctor` on `$PATH` (the install.sh-installed copy).
+///   3. `<exe-dir>/../dux-amq/scripts/dux-amq-doctor` (running from
+///      a `cargo run` build tree).
+///
+/// Returns `None` if no candidate exists; the caller falls back to a
+/// Rust-only diagnostic dump.
+fn resolve_doctor_script() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("DUX_AMQ_DOCTOR_BIN") {
+        let p = PathBuf::from(path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    if let Ok(out) = Command::new("which").arg("dux-amq-doctor").output() {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() {
+                return Some(PathBuf::from(s));
+            }
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("../dux-amq/scripts/dux-amq-doctor");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Top-level entry point for the `dux doctor` subcommand.
+pub fn run_doctor(paths: &DuxPaths, json: bool, anonymize: bool) -> Result<()> {
+    // 1. Run the bash script, if available, and forward its output
+    //    verbatim. We don't capture-and-reprint: the script's coloring
+    //    relies on it owning stdout (it auto-disables when `! -t 1`).
+    let bash_ran = if let Some(script) = resolve_doctor_script() {
+        let mut cmd = Command::new(&script);
+        if json {
+            cmd.arg("--json");
+        }
+        if anonymize {
+            cmd.arg("--anonymize");
+        }
+        match cmd.status() {
+            Ok(status) if status.success() => true,
+            Ok(status) => {
+                eprintln!(
+                    "warning: dux-amq-doctor exited with {} — falling back to Rust-only output",
+                    status.code().unwrap_or(-1),
+                );
+                false
+            }
+            Err(err) => {
+                eprintln!("warning: failed to spawn {}: {err}", script.display());
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    // 2. Append the Rust-side section. In JSON mode we emit a *second*
+    //    JSON object on its own line; consumers that want a single
+    //    object can `jq -s 'add'`. We deliberately don't try to
+    //    re-parse and merge the bash output — that's brittle and the
+    //    operator-facing use case (eyeballing a dump) doesn't need it.
+    if json {
+        emit_rust_section_json(paths, bash_ran)?;
+    } else {
+        emit_rust_section_text(paths, bash_ran)?;
+    }
+    Ok(())
+}
+
+fn emit_rust_section_text(paths: &DuxPaths, bash_ran: bool) -> Result<()> {
+    if !bash_ran {
+        println!(
+            "(dux-amq-doctor not on PATH; emitting Rust-only diagnostics. \
+             Re-run `dux-amq/install.sh` to install the full triage tool.)"
+        );
+    }
+    println!("\n== Sessions DB (Rust-side) ==");
+    let snap = collect_sessions_snapshot(paths);
+    println!("{:<16} {}", "path:", paths.sessions_db_path.display());
+    println!("{:<16} {}", "integrity:", snap.integrity);
+    println!("{:<16} {}", "active:", snap.active);
+    println!("{:<16} {}", "detached:", snap.detached);
+    println!("{:<16} {}", "exited:", snap.exited);
+    println!("{:<16} {}", "orphaned:", snap.orphaned_worktrees);
+    Ok(())
+}
+
+fn emit_rust_section_json(paths: &DuxPaths, _bash_ran: bool) -> Result<()> {
+    let snap = collect_sessions_snapshot(paths);
+    // Hand-roll the JSON to avoid pulling in serde_json::json! macro
+    // chains. The string fields are integrity status names that come
+    // from a bounded set we control, so manual escaping is safe; if
+    // that ever changes we should switch to `serde_json::to_string`.
+    let body = serde_json::json!({
+        "sessions_db_rust": {
+            "path": paths.sessions_db_path.display().to_string(),
+            "integrity": snap.integrity,
+            "active": snap.active,
+            "detached": snap.detached,
+            "exited": snap.exited,
+            "orphaned_worktrees": snap.orphaned_worktrees,
+        }
+    });
+    println!("{body}");
+    Ok(())
+}
+
+/// Lightweight snapshot of the sessions DB used only by `dux doctor`.
+/// Counts are computed once per call; this is a cold-path operator tool
+/// so we don't bother caching.
+struct SessionsSnapshot {
+    integrity: String,
+    active: usize,
+    detached: usize,
+    exited: usize,
+    /// Sessions whose `worktree_path` no longer exists on disk. A
+    /// non-zero count is operator-visible: dux's session-cleanup code
+    /// should have GC'd these.
+    orphaned_worktrees: usize,
+}
+
+fn collect_sessions_snapshot(paths: &DuxPaths) -> SessionsSnapshot {
+    if !paths.sessions_db_path.exists() {
+        return SessionsSnapshot {
+            integrity: "absent".to_string(),
+            active: 0,
+            detached: 0,
+            exited: 0,
+            orphaned_worktrees: 0,
+        };
+    }
+    // SessionStore::open already runs PRAGMA integrity_check and
+    // bails on failure; treat that as the authoritative result.
+    match SessionStore::open(&paths.sessions_db_path) {
+        Ok(store) => {
+            let sessions = store.load_sessions().unwrap_or_default();
+            let mut active = 0usize;
+            let mut detached = 0usize;
+            let mut exited = 0usize;
+            let mut orphaned = 0usize;
+            for s in &sessions {
+                match s.status {
+                    crate::model::SessionStatus::Active => active += 1,
+                    crate::model::SessionStatus::Detached => detached += 1,
+                    crate::model::SessionStatus::Exited => exited += 1,
+                }
+                if !Path::new(&s.worktree_path).exists() {
+                    orphaned += 1;
+                }
+            }
+            SessionsSnapshot {
+                integrity: "ok".to_string(),
+                active,
+                detached,
+                exited,
+                orphaned_worktrees: orphaned,
+            }
+        }
+        Err(err) => SessionsSnapshot {
+            integrity: format!("error: {err}"),
+            active: 0,
+            detached: 0,
+            exited: 0,
+            orphaned_worktrees: 0,
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -939,6 +1140,85 @@ mod tests {
         let mut changes = Vec::new();
         diff_str(&mut changes, "test.key", "same", "same");
         assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn doctor_snapshot_handles_missing_db() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let root = tempdir.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"), // does not exist
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root,
+        };
+        let snap = collect_sessions_snapshot(&paths);
+        assert_eq!(snap.integrity, "absent");
+        assert_eq!(snap.active, 0);
+        assert_eq!(snap.orphaned_worktrees, 0);
+    }
+
+    #[test]
+    fn doctor_snapshot_counts_by_status_and_orphans() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let root = tempdir.path().to_path_buf();
+        let worktrees_root = root.join("worktrees");
+        std::fs::create_dir_all(&worktrees_root).expect("worktrees");
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: worktrees_root.clone(),
+            lock_path: root.join("dux.lock"),
+            root,
+        };
+
+        // Two healthy worktrees on disk; one orphaned (DB row points at
+        // a path that doesn't exist).
+        let live = worktrees_root.join("live-1");
+        std::fs::create_dir_all(&live).expect("live");
+        let live_two = worktrees_root.join("live-2");
+        std::fs::create_dir_all(&live_two).expect("live2");
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        let now = Utc::now();
+        let mk = |id: &str, wt: &str, status: SessionStatus| AgentSession {
+            id: id.to_string(),
+            project_id: "p".to_string(),
+            project_path: None,
+            provider: ProviderKind::new("claude"),
+            source_branch: "main".to_string(),
+            branch_name: format!("b-{id}"),
+            worktree_path: wt.to_string(),
+            title: None,
+            started_providers: Vec::new(),
+            status,
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .upsert_session(&mk("a1", live.to_str().unwrap(), SessionStatus::Active))
+            .unwrap();
+        store
+            .upsert_session(&mk("a2", live.to_str().unwrap(), SessionStatus::Active))
+            .unwrap();
+        store
+            .upsert_session(&mk(
+                "d1",
+                live_two.to_str().unwrap(),
+                SessionStatus::Detached,
+            ))
+            .unwrap();
+        store
+            .upsert_session(&mk("x1", "/no/such/path-xyz-orphan", SessionStatus::Exited))
+            .unwrap();
+        drop(store);
+
+        let snap = collect_sessions_snapshot(&paths);
+        assert_eq!(snap.integrity, "ok");
+        assert_eq!(snap.active, 2);
+        assert_eq!(snap.detached, 1);
+        assert_eq!(snap.exited, 1);
+        assert_eq!(snap.orphaned_worktrees, 1);
     }
 
     #[test]

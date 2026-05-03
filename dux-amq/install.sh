@@ -311,6 +311,12 @@ install -m 0755 "$HERE/wrappers/gemini-amq"  "$LOCAL_BIN/gemini-amq"
 # $PATH so claude-amq's seed step (and Phase 10's purge job) can find it.
 install -m 0755 "$HERE/scripts/encode-claude-project-dir" "$LOCAL_BIN/encode-claude-project-dir"
 install -m 0755 "$HERE/scripts/finalize-claude-migration.sh" "$STATE_ROOT/scripts/finalize-claude-migration.sh"
+# Audit02 Phase 20: triage tool. Operators run `dux-amq-doctor` (or
+# `dux doctor` via the Rust wrapper) to produce a diagnostic dump
+# without leaking host paths (`--anonymize` strips $HOME / branches /
+# agent IDs). Wrapped sections each have a 5–15s timeout so a stuck
+# subsystem can't hang the doctor itself.
+install -m 0755 "$HERE/scripts/dux-amq-doctor" "$LOCAL_BIN/dux-amq-doctor"
 
 # Audit02 P0-K (T2): HMAC envelope tooling. Install the signing helper
 # and the verifier alongside the wrappers — both must be on $PATH so:

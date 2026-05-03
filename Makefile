@@ -28,6 +28,7 @@ overlay-shellcheck:
 	  dux-amq/install.sh \
 	  dux-amq/wrappers/* \
 	  dux-amq/scripts/*.sh \
+	  dux-amq/scripts/dux-amq-doctor \
 	  dux-amq/config/bashrc-additions.sh
 
 overlay-bats:
