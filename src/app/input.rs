@@ -1106,6 +1106,7 @@ impl App {
             self.terminal_selection = None;
             self.in_bracket_paste = false;
             self.raw_input_buf.clear();
+            self.raw_input_parser.clear();
             self.loading_input_buf.clear();
             return Ok(false);
         }
@@ -1115,6 +1116,7 @@ impl App {
             self.terminal_selection = None;
             self.in_bracket_paste = false;
             self.raw_input_buf.clear();
+            self.raw_input_parser.clear();
             self.loading_input_buf.clear();
             let label = match surface {
                 SessionSurface::Agent => "Agent",
@@ -1255,7 +1257,7 @@ impl App {
         use rustix::event::{PollFd, PollFlags, poll};
         use std::io::Read;
 
-        if self.raw_input_buf != [0x1b] {
+        if self.raw_input_parser.pending() != [0x1b] {
             return Ok(false);
         }
 
@@ -1289,16 +1291,24 @@ impl App {
     /// This is the core logic of interactive input handling, split out from
     /// `poll_and_forward_raw_input` so it can be tested without real stdin I/O.
     pub(crate) fn process_raw_input_bytes(&mut self, bytes: &[u8]) -> Result<bool> {
-        self.raw_input_buf.extend_from_slice(bytes);
-
-        // Split into complete sequences and collect actions to avoid borrow
-        // conflicts between raw_input_buf and &mut self methods.
-        let (mut sequences, mut remainder) = crate::raw_input::split_sequences(&self.raw_input_buf);
-        if bytes.is_empty() && remainder == [0x1b] {
-            sequences.push(remainder);
-            remainder = &self.raw_input_buf[self.raw_input_buf.len()..];
+        // Keep compatibility with tests that still seed raw_input_buf
+        // directly, while making the parser the owner of live pending bytes.
+        if self.raw_input_buf.as_slice() != self.raw_input_parser.pending() {
+            self.raw_input_parser
+                .replace_pending(self.raw_input_buf.as_slice());
         }
-        let remainder_len = remainder.len();
+
+        let mut sequences = self.raw_input_parser.feed_sequences(bytes);
+        if bytes.is_empty()
+            && let Some(seq) = self.raw_input_parser.resolve_pending_esc()
+        {
+            sequences.push(crate::raw_input::ParsedSequence {
+                bytes: seq,
+                in_bracket_paste: self.raw_input_parser.in_bracket_paste(),
+            });
+        }
+        self.raw_input_buf = self.raw_input_parser.pending().to_vec();
+        self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
 
         // Collect what to do for each sequence: an intercepted action, a
         // mouse event to handle in the UI, or raw bytes to forward.
@@ -1312,18 +1322,19 @@ impl App {
         // (between ESC[200~ and ESC[201~), skip intercept matching so
         // pasted text never triggers keybindings.
         let mut actions: Vec<SeqAction> = Vec::with_capacity(sequences.len());
-        for seq in &sequences {
-            if *seq == crate::raw_input::BRACKET_PASTE_START {
-                self.in_bracket_paste = true;
+        for parsed in &sequences {
+            let seq = parsed.bytes.as_slice();
+            if seq == crate::raw_input::BRACKET_PASTE_START {
+                self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
                 actions.push(SeqAction::Forward(seq.to_vec()));
                 continue;
             }
-            if *seq == crate::raw_input::BRACKET_PASTE_END {
-                self.in_bracket_paste = false;
+            if seq == crate::raw_input::BRACKET_PASTE_END {
+                self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
                 actions.push(SeqAction::Forward(seq.to_vec()));
                 continue;
             }
-            if self.in_bracket_paste {
+            if parsed.in_bracket_paste {
                 actions.push(SeqAction::Forward(seq.to_vec()));
                 continue;
             }
@@ -1340,11 +1351,6 @@ impl App {
                 actions.push(SeqAction::Forward(seq.to_vec()));
             }
         }
-
-        // Trim buffer to remainder.
-        let buf_len = self.raw_input_buf.len();
-        let keep_from = buf_len - remainder_len;
-        self.raw_input_buf = self.raw_input_buf[keep_from..].to_vec();
 
         // Check once whether the user is scrolled back so we can suppress
         // non-scroll input for the entire batch.
@@ -1394,6 +1400,7 @@ impl App {
                     if self.filtered_macros("").is_empty() {
                         self.set_info("No macros defined for this surface.");
                         self.raw_input_buf.clear();
+                        self.raw_input_parser.clear();
                         return Ok(false);
                     }
                     let prev = self.input_target;
@@ -1405,6 +1412,7 @@ impl App {
                     self.input_target = InputTarget::None;
                     self.terminal_selection = None;
                     self.raw_input_buf.clear();
+                    self.raw_input_parser.clear();
                     return Ok(false);
                 }
                 SeqAction::Intercept(Action::ExitInteractive, _, _) => {
@@ -5132,6 +5140,7 @@ impl App {
         self.terminal_selection = None;
         self.in_bracket_paste = false;
         self.raw_input_buf.clear();
+        self.raw_input_parser.clear();
         self.loading_input_buf.clear();
         if return_to_terminal_list {
             self.left_section = LeftSection::Terminals;
@@ -5356,6 +5365,7 @@ mod tests {
             interactive_patterns: crate::keybindings::InteractiveBytePatterns {
                 bindings: Vec::new(),
             },
+            raw_input_parser: crate::raw_input::RawInputParser::default(),
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
             in_bracket_paste: false,
@@ -9268,6 +9278,52 @@ cyan = "#00ffff"
         assert!(
             app.raw_input_buf.is_empty(),
             "SGR mouse report must not leave a [<...M printable remainder"
+        );
+    }
+
+    #[test]
+    fn fragmented_pending_esc_before_sgr_mouse_does_not_leave_printable_tail() {
+        let mut app = app_with_scrolled_back_pty();
+
+        app.process_raw_input_bytes(b"\x1b").unwrap();
+        assert_eq!(app.raw_input_buf, b"\x1b");
+
+        app.process_raw_input_bytes(b"\x1b[<35;").unwrap();
+        assert_eq!(
+            app.input_target,
+            InputTarget::Agent,
+            "default bindings should keep interactive mode active"
+        );
+        assert_eq!(
+            app.raw_input_buf, b"\x1b[<35;",
+            "incomplete mouse report should stay pending with its ESC prefix"
+        );
+
+        app.process_raw_input_bytes(b"138;12M").unwrap();
+        assert!(
+            app.raw_input_buf.is_empty(),
+            "completed mouse report must not leave a [<...M printable remainder"
+        );
+    }
+
+    #[test]
+    fn app_preserves_alt_key_before_timeout_resolution() {
+        let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["esc"])]);
+        let mut app = app_with_scrolled_back_pty();
+        app.bindings = bindings;
+        app.interactive_patterns = app.bindings.interactive_byte_patterns();
+
+        app.process_raw_input_bytes(b"\x1b").unwrap();
+        app.process_raw_input_bytes(b"x").unwrap();
+
+        assert_eq!(
+            app.input_target,
+            InputTarget::Agent,
+            "ESC followed by a key should stay an Alt-key sequence"
+        );
+        assert!(
+            app.raw_input_buf.is_empty(),
+            "Alt-key sequence should be complete, not a pending bare ESC"
         );
     }
 

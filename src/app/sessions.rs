@@ -2077,6 +2077,7 @@ mod tests {
             interactive_patterns: crate::keybindings::InteractiveBytePatterns {
                 bindings: Vec::new(),
             },
+            raw_input_parser: crate::raw_input::RawInputParser::default(),
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
             in_bracket_paste: false,
