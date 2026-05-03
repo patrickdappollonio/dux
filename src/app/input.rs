@@ -2335,19 +2335,25 @@ impl App {
             // preserved, so the checkbox is hidden and the focus cycle skips
             // over it (Cancel ↔ Delete only).
             let shared = *worktree_shared;
+            if is_reverse_tab(key) {
+                *focus = match (*focus, shared) {
+                    (DeleteAgentFocus::Cancel, false) => DeleteAgentFocus::Checkbox,
+                    (DeleteAgentFocus::Delete, false) => DeleteAgentFocus::Cancel,
+                    (DeleteAgentFocus::Checkbox, _) => DeleteAgentFocus::Delete,
+                    (DeleteAgentFocus::Cancel, true) => DeleteAgentFocus::Delete,
+                    (DeleteAgentFocus::Delete, true) => DeleteAgentFocus::Cancel,
+                };
+                return Ok(false);
+            }
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => self.prompt = PromptState::None,
                 Some(Action::ToggleSelection) => {
-                    let reverse = is_reverse_tab(key);
-                    *focus = match (*focus, shared, reverse) {
-                        (DeleteAgentFocus::Cancel, false, false) => DeleteAgentFocus::Delete,
-                        (DeleteAgentFocus::Delete, false, false) => DeleteAgentFocus::Checkbox,
-                        (DeleteAgentFocus::Checkbox, _, false) => DeleteAgentFocus::Cancel,
-                        (DeleteAgentFocus::Cancel, false, true) => DeleteAgentFocus::Checkbox,
-                        (DeleteAgentFocus::Delete, false, true) => DeleteAgentFocus::Cancel,
-                        (DeleteAgentFocus::Checkbox, _, true) => DeleteAgentFocus::Delete,
-                        (DeleteAgentFocus::Cancel, true, _) => DeleteAgentFocus::Delete,
-                        (DeleteAgentFocus::Delete, true, _) => DeleteAgentFocus::Cancel,
+                    *focus = match (*focus, shared) {
+                        (DeleteAgentFocus::Cancel, false) => DeleteAgentFocus::Delete,
+                        (DeleteAgentFocus::Delete, false) => DeleteAgentFocus::Checkbox,
+                        (DeleteAgentFocus::Checkbox, _) => DeleteAgentFocus::Cancel,
+                        (DeleteAgentFocus::Cancel, true) => DeleteAgentFocus::Delete,
+                        (DeleteAgentFocus::Delete, true) => DeleteAgentFocus::Cancel,
                     };
                 }
                 Some(Action::Confirm) => match *focus {
