@@ -10703,6 +10703,31 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn header_shows_development_version_for_local_builds() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(
+            rendered.contains("dux development"),
+            "expected local build version label, got: {rendered}"
+        );
+    }
+
+    #[test]
     fn header_shows_project_and_global_provider_when_project_is_overridden() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
