@@ -133,6 +133,7 @@ pub struct App {
     /// is still inside) and on any keystroke or modal-close event.
     pub(crate) pressed_button: Option<components::PressedButton>,
     pub(crate) interactive_patterns: InteractiveBytePatterns,
+    pub(crate) raw_input_parser: crate::raw_input::RawInputParser,
     pub(crate) raw_input_buf: Vec<u8>,
     /// Separate buffer for scanning ExitInteractive during the loading phase.
     /// Kept independent of `raw_input_buf` so that suppressed keystrokes
@@ -1192,6 +1193,7 @@ impl App {
             last_mouse_click: None,
             pressed_button: None,
             interactive_patterns,
+            raw_input_parser: crate::raw_input::RawInputParser::default(),
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
             in_bracket_paste: false,

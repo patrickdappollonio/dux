@@ -141,6 +141,172 @@ pub fn translate_sgr_mouse(seq: &[u8], origin_col: u16, origin_row: u16) -> Opti
     Some(format!("\x1b[<{cb};{tx};{ty}{}", final_byte as char).into_bytes())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SequenceStatus {
+    Complete(usize),
+    Incomplete,
+}
+
+/// Incremental parser for terminal input bytes.
+///
+/// Terminals encode a bare Escape, Alt-key chords, CSI/OSC/SS3 controls,
+/// bracket paste markers, UTF-8, and SGR mouse reports on the same byte
+/// stream. This parser keeps incomplete trailing bytes in one place so
+/// callers do not need to splice buffers manually or guess whether a pending
+/// `ESC` is standalone.
+#[derive(Debug, Clone, Default)]
+pub struct RawInputParser {
+    pending: Vec<u8>,
+    in_bracket_paste: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedSequence {
+    pub bytes: Vec<u8>,
+    pub in_bracket_paste: bool,
+}
+
+impl RawInputParser {
+    pub fn feed_sequences(&mut self, bytes: &[u8]) -> Vec<ParsedSequence> {
+        self.pending.extend_from_slice(bytes);
+        let mut sequences = Vec::new();
+
+        loop {
+            if self.pending.is_empty() {
+                break;
+            }
+            match scan_one_sequence(&self.pending) {
+                SequenceStatus::Complete(len) => {
+                    let bytes: Vec<u8> = self.pending.drain(..len).collect();
+                    let in_bracket_paste = self.in_bracket_paste;
+                    if bytes == BRACKET_PASTE_START {
+                        self.in_bracket_paste = true;
+                    } else if bytes == BRACKET_PASTE_END {
+                        self.in_bracket_paste = false;
+                    }
+                    sequences.push(ParsedSequence {
+                        bytes,
+                        in_bracket_paste,
+                    });
+                }
+                SequenceStatus::Incomplete => break,
+            }
+        }
+
+        sequences
+    }
+
+    pub fn resolve_pending_esc(&mut self) -> Option<Vec<u8>> {
+        if self.pending == [0x1b] {
+            self.pending.clear();
+            Some(vec![0x1b])
+        } else {
+            None
+        }
+    }
+
+    pub fn in_bracket_paste(&self) -> bool {
+        self.in_bracket_paste
+    }
+
+    pub fn pending(&self) -> &[u8] {
+        &self.pending
+    }
+
+    pub fn replace_pending(&mut self, bytes: &[u8]) {
+        self.pending.clear();
+        self.pending.extend_from_slice(bytes);
+    }
+
+    pub fn clear(&mut self) {
+        self.pending.clear();
+        self.in_bracket_paste = false;
+    }
+}
+
+fn scan_one_sequence(buf: &[u8]) -> SequenceStatus {
+    if buf.is_empty() {
+        return SequenceStatus::Incomplete;
+    }
+
+    let b = buf[0];
+    if b == 0x1b {
+        // ESC — start of an escape sequence.
+        if buf.len() < 2 {
+            // Bare ESC at end of buffer — could be incomplete.
+            return SequenceStatus::Incomplete;
+        }
+
+        match buf[1] {
+            0x1b => {
+                // A bare ESC followed by another escape sequence. Keep the
+                // first ESC as its own sequence so the second ESC can still
+                // prefix CSI/OSC/SS3 input such as SGR mouse reports.
+                SequenceStatus::Complete(1)
+            }
+            b'[' => {
+                let mut i = 2;
+                loop {
+                    if i >= buf.len() {
+                        return SequenceStatus::Incomplete;
+                    }
+                    let c = buf[i];
+                    i += 1;
+                    if (0x40..=0x7e).contains(&c) {
+                        return SequenceStatus::Complete(i);
+                    }
+                }
+            }
+            b'O' => {
+                if buf.len() < 3 {
+                    SequenceStatus::Incomplete
+                } else {
+                    SequenceStatus::Complete(3)
+                }
+            }
+            b']' => {
+                let mut i = 2;
+                loop {
+                    if i >= buf.len() {
+                        return SequenceStatus::Incomplete;
+                    }
+                    if buf[i] == 0x07 {
+                        return SequenceStatus::Complete(i + 1);
+                    }
+                    if buf[i] == 0x1b {
+                        if i + 1 >= buf.len() {
+                            return SequenceStatus::Incomplete;
+                        }
+                        if buf[i + 1] == b'\\' {
+                            return SequenceStatus::Complete(i + 2);
+                        }
+                        // Malformed OSC: complete the bytes before the new ESC
+                        // and let the outer parser reconsider that ESC next.
+                        return SequenceStatus::Complete(i);
+                    }
+                    i += 1;
+                }
+            }
+            _ => SequenceStatus::Complete(2),
+        }
+    } else if (0xc0..0xfe).contains(&b) {
+        let expected = if b < 0xe0 {
+            2
+        } else if b < 0xf0 {
+            3
+        } else {
+            4
+        };
+        if expected <= buf.len() {
+            SequenceStatus::Complete(expected)
+        } else {
+            SequenceStatus::Incomplete
+        }
+    } else {
+        SequenceStatus::Complete(1)
+    }
+}
+
 /// Splits a raw byte buffer into complete terminal input sequences.
 ///
 /// Returns `(complete, remainder)` where `complete` is a list of byte-slice
@@ -157,107 +323,12 @@ pub fn split_sequences(buf: &[u8]) -> (Vec<&[u8]>, &[u8]) {
 
     while i < buf.len() {
         let start = i;
-        let b = buf[i];
-
-        if b == 0x1b {
-            // ESC — start of an escape sequence.
-            if i + 1 >= buf.len() {
-                // Bare ESC at end of buffer — could be incomplete.
-                return (sequences, &buf[start..]);
+        match scan_one_sequence(&buf[start..]) {
+            SequenceStatus::Complete(len) => {
+                i += len;
+                sequences.push(&buf[start..i]);
             }
-
-            let next = buf[i + 1];
-            match next {
-                0x1b => {
-                    // A bare ESC followed by another escape sequence. Keep
-                    // the first ESC as its own sequence so the second ESC can
-                    // still prefix CSI/OSC/SS3 input such as SGR mouse
-                    // reports. Otherwise ESC ESC [ < ... M would consume the
-                    // first two bytes and leak "[<...M" as printable input.
-                    i += 1;
-                    sequences.push(&buf[start..i]);
-                }
-                b'[' => {
-                    // CSI sequence: ESC [ <params> <final byte 0x40-0x7e>
-                    i += 2; // skip ESC [
-                    loop {
-                        if i >= buf.len() {
-                            // Incomplete CSI — return as remainder.
-                            return (sequences, &buf[start..]);
-                        }
-                        let c = buf[i];
-                        i += 1;
-                        if (0x40..=0x7e).contains(&c) {
-                            // Final byte — sequence complete.
-                            break;
-                        }
-                        // Parameter/intermediate bytes (0x20-0x3f) — keep scanning.
-                    }
-                    sequences.push(&buf[start..i]);
-                }
-                b'O' => {
-                    // SS3 sequence: ESC O <one byte>
-                    if i + 2 >= buf.len() {
-                        return (sequences, &buf[start..]);
-                    }
-                    i += 3; // ESC O <byte>
-                    sequences.push(&buf[start..i]);
-                }
-                b']' => {
-                    // OSC sequence: ESC ] <params> <BEL|ST>
-                    // Terminated by BEL (0x07) or ST (ESC \).
-                    i += 2; // skip ESC ]
-                    loop {
-                        if i >= buf.len() {
-                            // Incomplete OSC — return as remainder.
-                            return (sequences, &buf[start..]);
-                        }
-                        if buf[i] == 0x07 {
-                            // BEL terminator.
-                            i += 1;
-                            break;
-                        }
-                        if buf[i] == 0x1b {
-                            // Possible ST (ESC \).
-                            if i + 1 >= buf.len() {
-                                return (sequences, &buf[start..]);
-                            }
-                            if buf[i + 1] == b'\\' {
-                                i += 2;
-                                break;
-                            }
-                            // Malformed — treat ESC as start of next sequence.
-                            break;
-                        }
-                        i += 1;
-                    }
-                    sequences.push(&buf[start..i]);
-                }
-                _ => {
-                    // Alt+key or other two-byte ESC sequence.
-                    i += 2;
-                    sequences.push(&buf[start..i]);
-                }
-            }
-        } else if (0xc0..0xfe).contains(&b) {
-            // UTF-8 multi-byte lead byte.
-            let expected = if b < 0xe0 {
-                2
-            } else if b < 0xf0 {
-                3
-            } else {
-                4
-            };
-            if i + expected > buf.len() {
-                // Incomplete UTF-8 — return as remainder.
-                return (sequences, &buf[start..]);
-            }
-            i += expected;
-            sequences.push(&buf[start..i]);
-        } else {
-            // Single byte: control chars, printable ASCII, DEL (0x7f).
-            i += 1;
-            sequences.push(&buf[start..i]);
+            SequenceStatus::Incomplete => return (sequences, &buf[start..]),
         }
     }
 
@@ -517,6 +588,109 @@ mod tests {
         assert_eq!(seqs[1], b"\x1b[<35;138;12M");
         assert!(rem.is_empty());
         assert!(is_sgr_mouse(seqs[1]));
+    }
+
+    #[test]
+    fn parser_keeps_fragmented_csi_pending_until_complete() {
+        let mut parser = RawInputParser::default();
+        assert!(parser.feed_sequences(b"\x1b[").is_empty());
+        assert_eq!(parser.pending(), b"\x1b[");
+
+        let seqs = parser.feed_sequences(b"5~");
+        assert_eq!(seqs[0].bytes, b"\x1b[5~".to_vec());
+        assert!(parser.pending().is_empty());
+    }
+
+    #[test]
+    fn parser_resolves_timed_out_bare_esc() {
+        let mut parser = RawInputParser::default();
+        assert!(parser.feed_sequences(b"\x1b").is_empty());
+        assert_eq!(parser.pending(), b"\x1b");
+        assert_eq!(parser.resolve_pending_esc(), Some(b"\x1b".to_vec()));
+        assert!(parser.pending().is_empty());
+    }
+
+    #[test]
+    fn parser_does_not_resolve_pending_csi_as_bare_esc() {
+        let mut parser = RawInputParser::default();
+        assert!(parser.feed_sequences(b"\x1b[").is_empty());
+        assert_eq!(parser.pending(), b"\x1b[");
+        assert!(parser.resolve_pending_esc().is_none());
+        assert_eq!(parser.pending(), b"\x1b[");
+    }
+
+    #[test]
+    fn parser_keeps_alt_key_as_single_sequence() {
+        let mut parser = RawInputParser::default();
+        assert!(parser.feed_sequences(b"\x1b").is_empty());
+        let seqs = parser.feed_sequences(b"x");
+        assert_eq!(seqs[0].bytes, b"\x1bx".to_vec());
+        assert!(parser.pending().is_empty());
+    }
+
+    #[test]
+    fn parser_does_not_strip_mouse_prefix_after_pending_esc() {
+        let mut parser = RawInputParser::default();
+        assert!(parser.feed_sequences(b"\x1b").is_empty());
+        let seqs = parser.feed_sequences(b"\x1b[<35;138;12M");
+        assert_eq!(seqs[0].bytes, b"\x1b".to_vec());
+        assert_eq!(seqs[1].bytes, b"\x1b[<35;138;12M".to_vec());
+        assert!(parser.pending().is_empty());
+    }
+
+    #[test]
+    fn parser_handles_fragmented_esc_then_sgr_mouse() {
+        let mut parser = RawInputParser::default();
+        assert!(parser.feed_sequences(b"\x1b").is_empty());
+        let first = parser.feed_sequences(b"\x1b[<35;");
+        assert_eq!(
+            first,
+            vec![ParsedSequence {
+                bytes: b"\x1b".to_vec(),
+                in_bracket_paste: false,
+            }]
+        );
+        assert_eq!(parser.pending(), b"\x1b[<35;");
+
+        let second = parser.feed_sequences(b"138;12M");
+        assert_eq!(
+            second,
+            vec![ParsedSequence {
+                bytes: b"\x1b[<35;138;12M".to_vec(),
+                in_bracket_paste: false,
+            }]
+        );
+        assert!(parser.pending().is_empty());
+    }
+
+    #[test]
+    fn parser_completes_malformed_osc_before_new_escape() {
+        let mut parser = RawInputParser::default();
+        assert!(parser.feed_sequences(b"\x1b]11;rgb").is_empty());
+        let seqs = parser.feed_sequences(b"\x1b[A");
+        assert_eq!(seqs.len(), 2);
+        assert_eq!(seqs[0].bytes, b"\x1b]11;rgb");
+        assert_eq!(seqs[1].bytes, b"\x1b[A");
+        assert!(parser.pending().is_empty());
+    }
+
+    #[test]
+    fn parser_tracks_bracket_paste_context() {
+        let mut parser = RawInputParser::default();
+        let mut input = Vec::new();
+        input.extend_from_slice(BRACKET_PASTE_START);
+        input.push(0x07);
+        input.extend_from_slice(BRACKET_PASTE_END);
+
+        let seqs = parser.feed_sequences(&input);
+        assert_eq!(seqs.len(), 3);
+        assert_eq!(seqs[0].bytes, BRACKET_PASTE_START);
+        assert!(!seqs[0].in_bracket_paste);
+        assert_eq!(seqs[1].bytes, b"\x07");
+        assert!(seqs[1].in_bracket_paste);
+        assert_eq!(seqs[2].bytes, BRACKET_PASTE_END);
+        assert!(seqs[2].in_bracket_paste);
+        assert!(!parser.in_bracket_paste());
     }
 
     #[test]
