@@ -18,6 +18,7 @@ pub struct SyntaxCache {
 }
 
 impl SyntaxCache {
+    #[allow(clippy::new_without_default)] // exposed via lib.rs (Phase 14); Default-impl is out of scope here
     pub fn new() -> Self {
         Self {
             syntax_set: SyntaxSet::load_defaults_newlines(),

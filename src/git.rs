@@ -47,7 +47,7 @@ pub fn current_branch(repo_path: &Path) -> Result<String> {
         return Err(anyhow!(
             "git symbolic-ref failed for {}: {}",
             repo_path.display(),
-            dux::sanitize::utf8_lossy(&output.stderr)
+            crate::sanitize::utf8_lossy(&output.stderr)
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -107,7 +107,7 @@ pub fn is_dirty(repo_path: &Path) -> Result<bool> {
     if !output.status.success() {
         return Err(anyhow!(
             "git status failed: {}",
-            dux::sanitize::utf8_lossy(&output.stderr)
+            crate::sanitize::utf8_lossy(&output.stderr)
         ));
     }
     Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
@@ -128,7 +128,7 @@ pub fn pull_current_branch(repo_path: &Path) -> Result<()> {
     if !output.status.success() {
         return Err(anyhow!(
             "git pull failed: {}",
-            dux::sanitize::utf8_lossy(&output.stderr)
+            crate::sanitize::utf8_lossy(&output.stderr)
         ));
     }
     Ok(())
@@ -152,7 +152,7 @@ pub fn switch_branch(repo_path: &Path, branch_name: &str) -> Result<()> {
     if !output.status.success() {
         return Err(anyhow!(
             "git switch {branch_name} failed: {}",
-            dux::sanitize::utf8_lossy(&output.stderr).trim()
+            crate::sanitize::utf8_lossy(&output.stderr).trim()
         ));
     }
     Ok(())
@@ -227,7 +227,7 @@ pub fn create_worktree_existing_branch(
     if !output.status.success() {
         return Err(anyhow!(
             "git worktree add failed: {}",
-            dux::sanitize::utf8_lossy(&output.stderr)
+            crate::sanitize::utf8_lossy(&output.stderr)
         ));
     }
     let canonical = worktree_path.canonicalize().unwrap_or(worktree_path);
@@ -275,7 +275,7 @@ pub fn create_worktree_from_start_point(
     if !output.status.success() {
         return Err(anyhow!(
             "git worktree add failed: {}",
-            dux::sanitize::utf8_lossy(&output.stderr)
+            crate::sanitize::utf8_lossy(&output.stderr)
         ));
     }
     let canonical = worktree_path.canonicalize().unwrap_or(worktree_path);
@@ -296,7 +296,7 @@ pub fn head_commit(repo_path: &Path) -> Result<String> {
         return Err(anyhow!(
             "git rev-parse HEAD failed for {}: {}",
             repo_path.display(),
-            dux::sanitize::utf8_lossy(&output.stderr)
+            crate::sanitize::utf8_lossy(&output.stderr)
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -340,7 +340,7 @@ pub fn remove_worktree(
         if worktree_path.exists() {
             return Err(anyhow!(
                 "git worktree remove failed: {}",
-                dux::sanitize::utf8_lossy(&output.stderr)
+                crate::sanitize::utf8_lossy(&output.stderr)
             ));
         }
         // Worktree already gone from disk — prune stale git refs.
@@ -384,7 +384,7 @@ pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<Chan
     if !output.status.success() {
         return Err(anyhow!(
             "git status failed: {}",
-            dux::sanitize::utf8_lossy(&output.stderr)
+            crate::sanitize::utf8_lossy(&output.stderr)
         ));
     }
 
@@ -617,7 +617,7 @@ pub fn stage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
     if !output.status.success() {
         return Err(anyhow!(
             "git add failed: {}",
-            dux::sanitize::utf8_lossy(&output.stderr)
+            crate::sanitize::utf8_lossy(&output.stderr)
         ));
     }
     Ok(())
@@ -631,7 +631,7 @@ pub fn unstage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
     if !output.status.success() {
         return Err(anyhow!(
             "git reset failed: {}",
-            dux::sanitize::utf8_lossy(&output.stderr)
+            crate::sanitize::utf8_lossy(&output.stderr)
         ));
     }
     Ok(())
@@ -654,7 +654,7 @@ pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -
     if !output.status.success() {
         return Err(anyhow!(
             "git checkout failed: {}",
-            dux::sanitize::utf8_lossy(&output.stderr)
+            crate::sanitize::utf8_lossy(&output.stderr)
         ));
     }
     Ok(())
@@ -677,7 +677,7 @@ pub fn staged_diff_text(worktree_path: &Path) -> Result<String> {
     if !output.status.success() {
         return Err(anyhow!(
             "git diff --cached failed: {}",
-            dux::sanitize::utf8_lossy(&output.stderr)
+            crate::sanitize::utf8_lossy(&output.stderr)
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -691,7 +691,7 @@ pub fn commit(worktree_path: &Path, message: &str) -> Result<String> {
     if !output.status.success() {
         return Err(anyhow!(
             "git commit failed: {}",
-            dux::sanitize::utf8_lossy(&output.stderr)
+            crate::sanitize::utf8_lossy(&output.stderr)
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -706,7 +706,7 @@ pub fn push(worktree_path: &Path) -> Result<String> {
     if !output.status.success() {
         return Err(anyhow!(
             "git push failed: {}",
-            dux::sanitize::utf8_lossy(&output.stderr)
+            crate::sanitize::utf8_lossy(&output.stderr)
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -776,7 +776,7 @@ pub fn rename_branch(worktree_path: &Path, old_name: &str, new_name: &str) -> Re
     if !output.status.success() {
         return Err(anyhow!(
             "git branch rename failed: {}",
-            dux::sanitize::utf8_lossy(&output.stderr).trim()
+            crate::sanitize::utf8_lossy(&output.stderr).trim()
         ));
     }
     Ok(())

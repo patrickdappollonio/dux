@@ -89,7 +89,7 @@ fn log(level: LogLevel, message: &str) {
         "{} {:<5} {}\n",
         Utc::now().to_rfc3339(),
         level.as_str(),
-        dux::sanitize::for_terminal(message),
+        crate::sanitize::for_terminal(message),
     );
     if let Ok(mut file) = logger.file.lock() {
         let _ = file.write_all(line.as_bytes());

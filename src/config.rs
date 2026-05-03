@@ -37,6 +37,7 @@ pub struct Config {
     pub editor: EditorConfig,
     pub keys: KeysConfig,
     pub macros: MacrosConfig,
+    pub storage: StorageConfig,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -185,6 +186,27 @@ fn new_project_id() -> String {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
+pub struct StorageConfig {
+    /// Minutes between automatic `sessions.sqlite3` backups via the
+    /// SQLite Online Backup API. Set to 0 to disable. Default: 30.
+    #[serde(default = "default_backup_interval_minutes")]
+    pub backup_interval_minutes: u32,
+}
+
+fn default_backup_interval_minutes() -> u32 {
+    30
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            backup_interval_minutes: default_backup_interval_minutes(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct UiConfig {
     pub left_width_pct: u16,
     pub right_width_pct: u16,
@@ -228,6 +250,7 @@ impl Default for Config {
             editor: EditorConfig::default(),
             keys: KeysConfig::default(),
             macros: MacrosConfig::default(),
+            storage: StorageConfig::default(),
         }
     }
 }
@@ -557,6 +580,7 @@ enum FieldValue {
     Str(String),
     OptStr(Option<String>),
     U16(u16),
+    U32(u32),
     Usize(usize),
     Bool(bool),
     MultilineStr(Option<String>),
@@ -761,6 +785,19 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Str(c.editor.default.clone()),
         },
         ConfigEntry::Blank,
+        ConfigEntry::Section("storage"),
+        ConfigEntry::Field {
+            key: "backup_interval_minutes",
+            comment: Some(CommentSource::Static(
+                "# Minutes between automatic sessions.sqlite3 backups via the SQLite\n\
+                 # Online Backup API. Backups are written to sessions.sqlite3.bak\n\
+                 # next to the live database. Set to 0 to disable. Default: 30.\n\
+                 # On a fresh start dux runs PRAGMA integrity_check; if the live\n\
+                 # database is corrupt, dux refuses to start and points at the .bak.",
+            )),
+            value_fn: |c| FieldValue::U32(c.storage.backup_interval_minutes),
+        },
+        ConfigEntry::Blank,
         ConfigEntry::Keys,
         ConfigEntry::Blank,
         ConfigEntry::Macros,
@@ -805,6 +842,9 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
                         let _ = writeln!(out, "{key} = \"\"");
                     }
                     FieldValue::U16(n) => {
+                        let _ = writeln!(out, "{key} = {n}");
+                    }
+                    FieldValue::U32(n) => {
                         let _ = writeln!(out, "{key} = {n}");
                     }
                     FieldValue::Usize(n) => {

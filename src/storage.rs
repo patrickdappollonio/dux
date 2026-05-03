@@ -1,3 +1,6 @@
+use std::path::Path;
+use std::sync::{Arc, Mutex, MutexGuard};
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
@@ -14,21 +17,55 @@ pub struct StoredPr {
     pub title: String,
 }
 
+/// SQLite-backed persistence for sessions and PR associations.
+///
+/// The connection is wrapped in `Arc<Mutex<Connection>>` so that it can be
+/// shared with background workers (e.g. the periodic backup worker added in
+/// audit02 P1-W). Internally every method locks the mutex before issuing a
+/// query; the lock window is short and uncontended in practice.
 pub struct SessionStore {
-    conn: Connection,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl SessionStore {
-    pub fn open(path: &std::path::Path) -> Result<Self> {
+    /// Open or create a `sessions.sqlite3` database at `path` and run
+    /// startup PRAGMAs plus an integrity check.
+    ///
+    /// On corruption, fails fast with an error message that points at the
+    /// `.bak` file so the operator knows where to recover from.
+    pub fn open(path: &Path) -> Result<Self> {
         let conn =
-            Connection::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-        let store = Self { conn };
+            open_connection(path).with_context(|| format!("failed to open {}", path.display()))?;
+        let store = Self {
+            conn: Arc::new(Mutex::new(conn)),
+        };
         store.migrate()?;
         Ok(store)
     }
 
+    /// Acquire the underlying connection lock. Panics if the mutex is
+    /// poisoned (a previous holder panicked while holding it). Public so
+    /// integration tests can issue `PRAGMA` queries.
+    pub fn conn(&self) -> MutexGuard<'_, Connection> {
+        self.conn.lock().expect("storage mutex poisoned")
+    }
+
+    /// Online-backup the live database to `dst` using SQLite's backup API.
+    ///
+    /// This is safe to run concurrently with normal writes — the backup
+    /// API copies pages atomically and works correctly even when WAL is
+    /// enabled (a hot `cp` of the `.sqlite3` file alone would miss the
+    /// `-wal` and `-shm` companions).
+    pub fn backup_to(&self, dst: &Path) -> Result<()> {
+        let src = self.conn();
+        src.backup(rusqlite::MAIN_DB, dst, None)
+            .with_context(|| format!("backup to {} failed", dst.display()))?;
+        Ok(())
+    }
+
     fn migrate(&self) -> Result<()> {
-        self.conn.execute_batch(
+        let conn = self.conn();
+        conn.execute_batch(
             r#"
             create table if not exists agent_sessions (
                 id text primary key,
@@ -45,15 +82,15 @@ impl SessionStore {
             );
             "#,
         )?;
-        ensure_column(&self.conn, "agent_sessions", "title", "text")?;
-        ensure_column(&self.conn, "agent_sessions", "project_path", "text")?;
+        ensure_column(&conn, "agent_sessions", "title", "text")?;
+        ensure_column(&conn, "agent_sessions", "project_path", "text")?;
         ensure_column(
-            &self.conn,
+            &conn,
             "agent_sessions",
             "started_providers",
             "text not null default '[]'",
         )?;
-        self.conn.execute_batch(
+        conn.execute_batch(
             r#"
             create table if not exists session_prs (
                 session_id text not null,
@@ -66,17 +103,12 @@ impl SessionStore {
             "#,
         )?;
         ensure_column(
-            &self.conn,
+            &conn,
             "session_prs",
             "state",
             "text not null default 'OPEN'",
         )?;
-        ensure_column(
-            &self.conn,
-            "session_prs",
-            "title",
-            "text not null default ''",
-        )?;
+        ensure_column(&conn, "session_prs", "title", "text not null default ''")?;
         Ok(())
     }
 
@@ -89,7 +121,8 @@ impl SessionStore {
         state: &str,
         title: &str,
     ) -> Result<()> {
-        self.conn.execute(
+        let conn = self.conn();
+        conn.execute(
             r#"
             insert into session_prs (session_id, pr_number, owner_repo, state, title)
             values (?1, ?2, ?3, ?4, ?5)
@@ -104,7 +137,8 @@ impl SessionStore {
 
     /// Load all known PRs for a session, ordered by pr_number descending (latest first).
     pub fn load_prs(&self, session_id: &str) -> Result<Vec<StoredPr>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             r#"
             select pr_number, owner_repo, state, title
             from session_prs
@@ -131,7 +165,8 @@ impl SessionStore {
 
     /// Load the latest (highest-numbered) PR for each session that has at least one.
     pub fn load_all_latest_prs(&self) -> Result<Vec<StoredPr>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             r#"
             select session_id, pr_number, owner_repo, state, title
             from session_prs
@@ -157,7 +192,8 @@ impl SessionStore {
     }
 
     pub fn upsert_session(&self, session: &AgentSession) -> Result<()> {
-        self.conn.execute(
+        let conn = self.conn();
+        conn.execute(
             r#"
             insert into agent_sessions
                 (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, status, created_at, updated_at)
@@ -193,7 +229,8 @@ impl SessionStore {
     }
 
     pub fn load_sessions(&self) -> Result<Vec<AgentSession>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             r#"
             select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, status, created_at, updated_at
             from agent_sessions
@@ -228,10 +265,58 @@ impl SessionStore {
     }
 
     pub fn delete_session(&self, id: &str) -> Result<()> {
-        self.conn
-            .execute("delete from agent_sessions where id = ?1", params![id])?;
+        let conn = self.conn();
+        conn.execute("delete from agent_sessions where id = ?1", params![id])?;
         Ok(())
     }
+
+    /// Returns a clone of the inner `Arc<Mutex<Connection>>` so a handle can
+    /// be shared with background workers (e.g. backup worker) without
+    /// transferring ownership.
+    #[allow(dead_code)] // consumed by spawn_backup_worker once wired (Phase 14 step 14.3)
+    pub fn shared_conn(&self) -> Arc<Mutex<Connection>> {
+        Arc::clone(&self.conn)
+    }
+}
+
+/// Open a SQLite connection at `path` with the dux startup PRAGMAs and a
+/// fast-fail integrity check.
+///
+/// The PRAGMA batch enables WAL journaling (so readers don't block writers
+/// and vice-versa), `synchronous = NORMAL` (the right durability/perf
+/// balance for a TUI workload — `OFF` would risk data loss on power-loss),
+/// memory temp tables, a 128 MiB mmap window, an autocheckpoint at 1000
+/// pages (~4 MiB at default page size), and foreign-key enforcement.
+fn open_connection(path: &Path) -> Result<Connection> {
+    let conn = Connection::open(path)?;
+    conn.execute_batch(
+        r#"
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        PRAGMA temp_store = MEMORY;
+        PRAGMA mmap_size = 134217728;
+        PRAGMA wal_autocheckpoint = 1000;
+        PRAGMA foreign_keys = ON;
+        "#,
+    )?;
+
+    // Skip the integrity check for in-memory databases used by unit tests:
+    // they're always pristine, and PRAGMA integrity_check on a freshly
+    // opened :memory: DB can return rows that confuse the path-display
+    // logic (which assumes a real file path).
+    if path != Path::new(":memory:") {
+        let mut stmt = conn.prepare("PRAGMA integrity_check;")?;
+        let result: String = stmt.query_row([], |r| r.get(0))?;
+        if result != "ok" {
+            anyhow::bail!(
+                "sqlite integrity check failed for {}: {result}; restore from {}.bak",
+                path.display(),
+                path.display()
+            );
+        }
+    }
+
+    Ok(conn)
 }
 
 fn parse_time(value: &str) -> Option<DateTime<Utc>> {

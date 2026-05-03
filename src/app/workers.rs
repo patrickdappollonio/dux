@@ -1438,3 +1438,51 @@ fn parse_pr_json_value(obj: &serde_json::Value, owner_repo: &str) -> Option<crat
         owner_repo: owner_repo.to_string(),
     })
 }
+
+// ---- audit02 phase 14: SQLite WAL + integrity + periodic backup -------------
+//
+// `spawn_backup_worker` is added at the end of this file to minimize merge-
+// conflict surface with audit02 phase 04 (which is also touching workers.rs).
+// It owns its own background thread that wakes on a fixed interval and copies
+// the live `sessions.sqlite3` into `sessions.sqlite3.bak` using SQLite's Online
+// Backup API (which is WAL-aware — a hot `cp` is not). Wiring this into
+// `App::new` is intentionally deferred to a follow-up that is allowed to edit
+// `src/app/mod.rs`; this phase is scoped to storage.rs / workers.rs / config.rs.
+
+/// Spawn the periodic-backup worker.
+///
+/// The worker sleeps for `interval`, then asks `storage` to back itself up to
+/// `<paths.root>/sessions.sqlite3.bak`. Errors are logged at warn level and do
+/// not stop the loop — a transient I/O failure shouldn't take down the worker.
+/// If `interval` is zero the function returns immediately without spawning.
+#[allow(dead_code)] // wired from App::new in a follow-up commit (Phase 14 step 14.3 wiring)
+pub fn spawn_backup_worker(
+    storage: std::sync::Arc<crate::storage::SessionStore>,
+    paths: crate::config::DuxPaths,
+    interval: std::time::Duration,
+) {
+    if interval.is_zero() {
+        crate::logger::info("[storage] periodic backup disabled (backup_interval_minutes = 0)");
+        return;
+    }
+    let dst = paths.root.join("sessions.sqlite3.bak");
+    let res = std::thread::Builder::new()
+        .name("storage-backup".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(interval);
+                match storage.backup_to(&dst) {
+                    Ok(()) => {
+                        crate::logger::debug(&format!("[storage] backup ok -> {}", dst.display()))
+                    }
+                    Err(e) => crate::logger::warn(&format!(
+                        "[storage] backup to {} failed: {e}",
+                        dst.display()
+                    )),
+                }
+            }
+        });
+    if let Err(e) = res {
+        crate::logger::warn(&format!("[storage] failed to spawn backup worker: {e}"));
+    }
+}

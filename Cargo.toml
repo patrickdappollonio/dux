@@ -11,7 +11,7 @@ content_inspector = "0.2.4"
 crossterm = "0.29.0"
 home = "0.5.11"
 ratatui = "0.30.0"
-rusqlite = { version = "0.39.0", features = ["bundled", "chrono"] }
+rusqlite = { version = "0.39.0", features = ["bundled", "chrono", "backup"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 toml = { version = "1.1.2", features = ["preserve_order"] }

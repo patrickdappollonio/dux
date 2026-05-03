@@ -13,6 +13,7 @@ mod model;
 mod provider;
 mod pty;
 mod raw_input;
+mod sanitize;
 mod statusline;
 mod storage;
 mod theme;

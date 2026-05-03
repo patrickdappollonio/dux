@@ -1527,22 +1527,22 @@ impl App {
         // branch names, PR titles) and caps length so a runaway error
         // can't blow the status line. See `crate::sanitize`.
         self.status
-            .info(dux::sanitize::truncate(&message.into(), 512));
+            .info(crate::sanitize::truncate(&message.into(), 512));
     }
 
     pub(crate) fn set_busy(&mut self, message: impl Into<String>) {
         self.status
-            .busy(dux::sanitize::truncate(&message.into(), 512));
+            .busy(crate::sanitize::truncate(&message.into(), 512));
     }
 
     pub(crate) fn set_warning(&mut self, message: impl Into<String>) {
         self.status
-            .warning(dux::sanitize::truncate(&message.into(), 512));
+            .warning(crate::sanitize::truncate(&message.into(), 512));
     }
 
     pub(crate) fn set_error(&mut self, message: impl Into<String>) {
         self.status
-            .error(dux::sanitize::truncate(&message.into(), 512));
+            .error(crate::sanitize::truncate(&message.into(), 512));
     }
 
     /// Show a status-line warning when a missing project is highlighted, or
