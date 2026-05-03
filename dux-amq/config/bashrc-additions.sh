@@ -16,13 +16,24 @@ export AMQ_GLOBAL_ROOT="${AMQ_GLOBAL_ROOT:-/data/state/amq}"
 export AMQ_BIN="${AMQ_BIN:-/data/state/amq-bin/amq}"
 _amq_shell_setup_guarded() {
   local rec="${AMQ_GLOBAL_ROOT:-/data/state/amq}/binary.sha256"
-  # Silently no-op if the pinned install hasn't run yet.
-  [[ -x "$AMQ_BIN" && -f "$rec" ]] || return 0
+  # No binary yet → install hasn't run, nothing to guard. Quietly skip.
+  if [[ ! -x "$AMQ_BIN" ]]; then
+    return 0
+  fi
+  # Audit02 N-3: previously this was a silent `return 0` if either the
+  # binary OR the record was missing. That's fail-open: an attacker with
+  # filesystem access could disable the guard by `rm`ing one file. Now
+  # we fail *closed* whenever the binary exists but the record doesn't.
+  if [[ ! -f "$rec" ]]; then
+    printf '\033[1;31m!\033[0m [dux-amq] amq binary present but %s missing — refusing to source shell-setup.\n' "$rec" >&2
+    printf '            re-run install.sh (or rm "%s" if intentional).\n' "$AMQ_BIN" >&2
+    return 1
+  fi
   local exp act
   exp=$(awk '{print $1}' "$rec")
   act=$(sha256sum "$AMQ_BIN" 2>/dev/null | awk '{print $1}')
   if [[ -z "$act" || "$exp" != "$act" ]]; then
-    printf '\033[1;31m!\033[0m amq binary hash mismatch (got %s, expected %s); shell-setup skipped\n' \
+    printf '\033[1;31m!\033[0m [dux-amq] amq binary sha mismatch (got %s, expected %s); shell-setup skipped\n' \
       "${act:-<unreadable>}" "$exp" >&2
     return 1
   fi

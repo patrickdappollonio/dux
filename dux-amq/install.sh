@@ -81,11 +81,19 @@ strip_block() {
       ' "$file" > "$tmp"
       ;;
     md)
+      # Audit02 P0-G: the legacy CLAUDE.md branch used to set s=1 on the
+      # heading and never reset it — anything appended after the AMQ
+      # stanza (a user's own `## Notes` etc.) was deleted to EOF. Fix:
+      # also reset s=0 when awk hits the *next* `## ` sibling heading.
       awk '
         /^<!-- >>> dux-amq v[^ ]+ >>> -->$/ {s=1; next}
         /^<!-- <<< dux-amq v[^ ]+ <<< -->$/ {s=0; next}
-        # Legacy: section heading through end of file is the entire block.
+        # Legacy: explicit end sentinel (added by Phase 02). Only present
+        # in installs from versions that wrote it.
+        /^<!-- end dux-amq legacy -->$/ {s=0; next}
+        # Legacy fallback: heading through next "## " sibling (NOT EOF).
         /^## Multi-agent environment \(AMQ \+ dux\)$/ {s=1; next}
+        s && /^## /                                   {s=0}
         !s
       ' "$file" > "$tmp"
       ;;
@@ -145,9 +153,21 @@ if ! command -v amq >/dev/null 2>&1; then
   } 2>&1 | tee -a "$AMQ_LOG"
   rm -rf "$TMP"; trap - EXIT
 fi
-amq init --root "$STATE_ROOT/amq" --agents claude,codex,gemini --force >/dev/null
+# Audit02 P0-F: don't wipe queue config on re-install. AMQ writes its
+# state under $STATE_ROOT/amq; the presence of `meta/config.json` (the
+# file `amq init --force` overwrites — confirmed via `amq init --help`
+# against pinned v0.34.0) tells us init has already run. Probing a fresh
+# `amq init` shows the layout is `meta/config.json`, `agents/<handle>/`,
+# `threads/` — *not* a top-level `agents.json` as earlier audit notes
+# assumed.
+AMQ_INIT_MARKER="$STATE_ROOT/amq/meta/config.json"
+if [[ ! -f "$AMQ_INIT_MARKER" ]]; then
+  amq init --root "$STATE_ROOT/amq" --agents claude,codex,gemini --force >/dev/null
+  ok "amq queue initialized at $STATE_ROOT/amq"
+else
+  ok "amq queue already initialized at $STATE_ROOT/amq (skipping init)"
+fi
 chmod 700 "$STATE_ROOT/amq"
-ok "amq queue at $STATE_ROOT/amq"
 
 # Audit01 P1-8: pin amq at a controlled absolute path under $STATE_ROOT and
 # record its sha256, so the bashrc guard (in bashrc-additions.sh) can refuse
@@ -162,12 +182,29 @@ ok "amq queue at $STATE_ROOT/amq"
 # install and the Phase 01 tarball-download branch was skipped.
 AMQ_BIN_DIR="$STATE_ROOT/amq-bin"
 AMQ_BIN_PINNED="$AMQ_BIN_DIR/amq"
-AMQ_BIN_SOURCE="$(command -v amq)"
 mkdir -p "$AMQ_BIN_DIR"
-verify_sha256 "$AMQ_BIN_SOURCE" "$AMQ_BINARY_SHA256" "amq binary"
+
+# Audit02 P1-A: don't trust `command -v amq` here — PATH order is
+# unpredictable (a user's own ~/.local/bin/amq from a prior run can
+# shadow $LOCAL_BIN, or vice versa). If the install branch above ran,
+# $LOCAL_BIN/amq is the binary we just verified against $AMQ_SHA256
+# (tarball hash). If the branch was skipped (binary already present),
+# we still hash-check whatever's on PATH before pinning.
+AMQ_FRESH_INSTALL_BIN="$LOCAL_BIN/amq"
+if [[ -x "$AMQ_FRESH_INSTALL_BIN" ]]; then
+  AMQ_BIN_SOURCE="$AMQ_FRESH_INSTALL_BIN"
+else
+  AMQ_BIN_SOURCE="$(command -v amq || true)"
+  [[ -n "$AMQ_BIN_SOURCE" ]] || { warn "amq not found after install"; exit 1; }
+fi
+verify_sha256 "$AMQ_BIN_SOURCE" "$AMQ_BINARY_SHA256" "amq binary at $AMQ_BIN_SOURCE"
 install -m 0755 "$AMQ_BIN_SOURCE" "$AMQ_BIN_PINNED"
+# Audit02 P1-E prep: harden binary.sha256 to read-only (0444). Re-runs
+# of install.sh need to overwrite this file, but on a writable parent
+# dir the redirect succeeds; on read-only mounts we restore u+w first.
+chmod u+w "$STATE_ROOT/amq/binary.sha256" 2>/dev/null || true
 sha256sum "$AMQ_BIN_PINNED" > "$STATE_ROOT/amq/binary.sha256"
-chmod 0644 "$STATE_ROOT/amq/binary.sha256"
+chmod 0444 "$STATE_ROOT/amq/binary.sha256"
 ok "amq binary pinned at $AMQ_BIN_PINNED ($(awk '{print $1}' "$STATE_ROOT/amq/binary.sha256"))"
 
 # 4. AMQ skills (gives Claude/etc. native knowledge of amq) ------------------
@@ -215,6 +252,13 @@ sed "s|REPLACE_AT_INSTALL|$DUX_AMQ_VERSION|g" "$HERE/config/bashrc-additions.sh"
 mkdir -p "$HOME/.claude"
 touch "$HOME/.claude/CLAUDE.md"
 say "rewriting ~/.claude/CLAUDE.md dux-amq stanza (v$DUX_AMQ_VERSION)"
+# Audit02 P0-G: snapshot-then-diff guardrail. Before rewriting CLAUDE.md
+# (a user-owned doc), copy the original to $STATE_ROOT/dux/claude-md.<ts>.bak
+# so an operator can recover if `strip_block` ever does the wrong thing.
+if [[ -s "$HOME/.claude/CLAUDE.md" ]]; then
+  install -m 0644 "$HOME/.claude/CLAUDE.md" \
+    "$STATE_ROOT/dux/claude-md.$(date +%s).bak"
+fi
 strip_block "$HOME/.claude/CLAUDE.md" md
 {
   printf '\n<!-- >>> dux-amq v%s >>> -->\n\n' "$DUX_AMQ_VERSION"
