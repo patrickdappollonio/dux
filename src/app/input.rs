@@ -937,34 +937,53 @@ impl App {
         if self.commit_input.overlay().is_some() {
             return Ok(());
         }
+        if self.staged_diff_in_flight {
+            self.set_warning("Already preparing the staged diff. Wait for it to finish.");
+            return Ok(());
+        }
         let Some(session) = self.selected_session() else {
             self.set_error("Select a session first.");
             return Ok(());
         };
         let worktree = PathBuf::from(&session.worktree_path);
+
+        // Capture the staged diff on a worker thread so a slow git invocation
+        // doesn't freeze the UI. The provider call is kicked off only after
+        // the diff arrives via `WorkerEvent::StagedDiffReady`.
+        self.staged_diff_in_flight = true;
+        self.commit_input
+            .set_overlay("Generating commit message\u{2026}");
+        self.set_busy("Reading staged diff for AI commit message\u{2026}");
+        workers::dispatch_staged_diff(self.worker_tx.clone(), worktree);
+        Ok(())
+    }
+
+    /// Continue the AI commit message workflow once the staged diff has
+    /// been fetched on a worker thread. Spawns the provider one-shot call
+    /// in another worker so we don't block on it either.
+    pub(crate) fn launch_commit_message_provider(&mut self, worktree: PathBuf, diff_text: String) {
+        if diff_text.is_empty() {
+            self.commit_input.clear_overlay();
+            self.set_error("No staged diff found.");
+            return;
+        }
+        let Some(session) = self
+            .sessions
+            .iter()
+            .find(|s| Path::new(&s.worktree_path) == worktree.as_path())
+            .cloned()
+        else {
+            self.commit_input.clear_overlay();
+            self.set_error("Selected session is no longer available.");
+            return;
+        };
         let project_path = session.project_path.as_deref().unwrap_or("");
         let base_prompt = self.config.commit_prompt_for_project(project_path);
-
-        // Capture the staged diff up-front so the provider does not need tool
-        // access to inspect it. The diff is appended after the prompt text.
-        let diff_text = match git::staged_diff_text(&worktree) {
-            Ok(d) if d.is_empty() => {
-                self.set_error("No staged diff found.");
-                return Ok(());
-            }
-            Ok(d) => d,
-            Err(e) => {
-                self.set_error(format!("Failed to read staged diff: {e}"));
-                return Ok(());
-            }
-        };
         let prompt = format!("{base_prompt}\n\n{diff_text}");
 
         let cfg = provider_config(&self.config, &session.provider);
         let prov = provider::create_provider(session.provider.as_str(), cfg);
         let tx = self.worker_tx.clone();
-        self.commit_input
-            .set_overlay("Generating commit message\u{2026}");
         self.set_busy("Generating AI commit message from staged diff\u{2026}");
         thread::spawn(move || match prov.run_oneshot(&prompt, &worktree) {
             Ok(msg) => {
@@ -974,10 +993,13 @@ impl App {
                 let _ = tx.send(WorkerEvent::CommitMessageFailed(e.to_string()));
             }
         });
-        Ok(())
     }
 
     fn execute_commit(&mut self) -> Result<()> {
+        if self.commit_in_flight {
+            self.set_warning("A commit is already in progress. Wait for it to finish.");
+            return Ok(());
+        }
         if self.staged_files.is_empty() {
             self.set_error("No staged changes to commit.");
             return Ok(());
@@ -991,16 +1013,18 @@ impl App {
             return Ok(());
         };
         let worktree = PathBuf::from(&session.worktree_path);
-        match git::commit(&worktree, &self.commit_input.text) {
-            Ok(_) => {
-                self.commit_input.clear();
-                let push_key = self.bindings.label_for(Action::PushToRemote);
-                let ai_key = self.bindings.label_for(Action::GenerateCommitMessage);
-                self.set_info(format!("Changes committed successfully. Press {push_key} to push to remote, or {ai_key} to generate an AI message."));
-                self.reload_changed_files();
-            }
-            Err(e) => self.set_error(format!("Commit failed: {e}")),
-        }
+        let message = self.commit_input.text.clone();
+
+        // Block re-entry by setting `commit_in_flight` and disabling the
+        // commit input overlay; the worker reply (`CommitFinished`) is the
+        // only thing that releases either. We deliberately do NOT block
+        // the UI thread itself — that would re-introduce the freeze this
+        // phase is meant to fix.
+        self.commit_in_flight = true;
+        self.commit_input
+            .set_overlay("Committing staged changes\u{2026}");
+        self.set_busy("Committing staged changes\u{2026}");
+        workers::dispatch_commit(self.worker_tx.clone(), worktree, message);
         Ok(())
     }
 
@@ -5089,6 +5113,7 @@ mod tests {
             default_provider: ProviderKind::from_str("codex"),
             current_branch: "main".to_string(),
             path_missing: false,
+            meta_loaded: true,
         };
         let session = AgentSession {
             id: "session-1".to_string(),
@@ -5206,6 +5231,10 @@ mod tests {
             snapshot_buf: crate::pty::TerminalSnapshot::empty(),
             last_snapshot_id: None,
             terminal_selection: None,
+            last_changed_files_dispatch: None,
+            commit_in_flight: false,
+            staged_diff_in_flight: false,
+            add_project_in_flight: false,
             _single_instance_lock: single_instance_lock,
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
@@ -10229,6 +10258,7 @@ cyan = "#00ffff"
             default_provider: ProviderKind::from_str("gemini"),
             current_branch: "main".to_string(),
             path_missing: false,
+            meta_loaded: true,
         };
         app.config.projects.push(ProjectConfig {
             id: pinned.id.clone(),

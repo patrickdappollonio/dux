@@ -57,6 +57,35 @@ pub struct Project {
     pub default_provider: ProviderKind,
     pub current_branch: String,
     pub path_missing: bool,
+    /// `false` while metadata (is_git_repo, current_branch, remote default)
+    /// is still being resolved on a worker thread. Render code must show a
+    /// "(loading…)" placeholder for any field whose value depends on git
+    /// until this flips to `true`. See
+    /// [`crate::app::workers::dispatch_project_meta`].
+    pub meta_loaded: bool,
+}
+
+impl Project {
+    /// Construct a half-populated `Project` whose git metadata
+    /// (`current_branch`, `path_missing`) is filled in later via a
+    /// `WorkerEvent::ProjectMetaReady`. Render code must check
+    /// [`Project::meta_loaded`] before displaying git-derived fields.
+    pub fn placeholder(
+        id: String,
+        name: String,
+        path: String,
+        default_provider: ProviderKind,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            path,
+            default_provider,
+            current_branch: String::new(),
+            path_missing: false,
+            meta_loaded: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

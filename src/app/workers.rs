@@ -392,6 +392,107 @@ impl App {
                         ));
                     }
                 },
+                WorkerEvent::ProjectMetaReady {
+                    path,
+                    is_git,
+                    current_branch,
+                    remote_default: _,
+                } => {
+                    let path_str = path.to_string_lossy().to_string();
+                    if let Some(proj) = self
+                        .projects
+                        .iter_mut()
+                        .find(|p| Path::new(&p.path) == path.as_path())
+                    {
+                        proj.path_missing = !is_git;
+                        proj.current_branch = if is_git {
+                            current_branch.unwrap_or_else(|| "main".to_string())
+                        } else {
+                            String::new()
+                        };
+                        proj.meta_loaded = true;
+                    } else {
+                        logger::info(&format!(
+                            "ProjectMetaReady arrived for unknown project path {path_str}; \
+                             discarding (project may have been removed)"
+                        ));
+                    }
+                }
+                WorkerEvent::ReloadChangedFilesReady { worktree, result } => {
+                    // Discard out-of-order replies: by the time the worker
+                    // returned, the user may have switched to a different
+                    // session. The currently-selected worktree wins.
+                    let current = self
+                        .selected_session()
+                        .map(|s| PathBuf::from(&s.worktree_path));
+                    if current.as_deref() != Some(worktree.as_path()) {
+                        continue;
+                    }
+                    match result {
+                        Ok((staged, unstaged)) => {
+                            self.staged_files = staged;
+                            self.unstaged_files = unstaged;
+                            self.clamp_files_cursor();
+                        }
+                        Err(err) => {
+                            logger::error(&format!(
+                                "changed_files refresh failed for {}: {err}",
+                                worktree.display()
+                            ));
+                            // Leave the lists empty — the steady-state
+                            // poller will retry on its next tick.
+                        }
+                    }
+                }
+                WorkerEvent::StagedDiffReady { worktree, result } => {
+                    self.staged_diff_in_flight = false;
+                    match result {
+                        Ok(diff) => {
+                            self.launch_commit_message_provider(worktree, diff);
+                        }
+                        Err(err) => {
+                            self.commit_input.clear_overlay();
+                            self.set_error(format!("Failed to read staged diff: {err}"));
+                        }
+                    }
+                }
+                WorkerEvent::CommitFinished {
+                    worktree: _,
+                    message: _,
+                    result,
+                } => {
+                    self.commit_in_flight = false;
+                    self.commit_input.clear_overlay();
+                    match result {
+                        Ok(()) => {
+                            self.commit_input.clear();
+                            let push_key = self.bindings.label_for(Action::PushToRemote);
+                            let ai_key = self.bindings.label_for(Action::GenerateCommitMessage);
+                            self.set_info(format!(
+                                "Changes committed successfully. Press {push_key} to push to remote, or {ai_key} to generate an AI message."
+                            ));
+                            self.reload_changed_files();
+                        }
+                        Err(err) => self.set_error(format!("Commit failed: {err}")),
+                    }
+                }
+                WorkerEvent::AddProjectMetaReady { path, name, result } => {
+                    self.add_project_in_flight = false;
+                    match result {
+                        Ok(meta) => {
+                            if let Err(e) = self.resume_add_project_after_meta(path, name, meta) {
+                                self.set_error(format!("{e:#}"));
+                            }
+                        }
+                        Err(err) => {
+                            logger::error(&format!(
+                                "add project rejected for {}: {err}",
+                                path.display()
+                            ));
+                            self.set_error(err);
+                        }
+                    }
+                }
             }
         }
         self.retry_hung_resume_sessions();
@@ -1198,6 +1299,122 @@ pub(crate) fn run_create_agent_job(
         pty_size: (rows, cols),
         status_message,
     })));
+}
+
+/// Fan out `git is_git_repo` + `current_branch` + `remote_default_branch`
+/// for each provided project path. Each path runs in its own thread, so a
+/// stuck git process for one project cannot delay the rest. Results land
+/// asynchronously on the worker channel as
+/// [`WorkerEvent::ProjectMetaReady`]; the main loop uses them to fill in
+/// the placeholder `Project` rows produced by `load_projects`.
+///
+/// Spawning N short-lived threads is acceptable here — N is typically <20
+/// (the number of projects in `config.toml`) and the alternative (a single
+/// serial thread) would re-introduce the head-of-line blocking the original
+/// synchronous code suffered from.
+pub(crate) fn dispatch_project_meta(tx: Sender<WorkerEvent>, paths: Vec<PathBuf>) {
+    for path in paths {
+        let tx = tx.clone();
+        let _ = thread::Builder::new()
+            .name(format!("project-meta-{}", path.display()))
+            .spawn(move || {
+                let exists = path.exists();
+                let is_git = exists && git::is_git_repo(&path);
+                let current_branch = if is_git {
+                    git::current_branch(&path).ok()
+                } else {
+                    None
+                };
+                let remote_default = if is_git {
+                    git::remote_default_branch(&path)
+                } else {
+                    None
+                };
+                let _ = tx.send(WorkerEvent::ProjectMetaReady {
+                    path,
+                    is_git,
+                    current_branch,
+                    remote_default,
+                });
+            });
+    }
+}
+
+/// Run `git status --porcelain` against `worktree` on a worker thread and
+/// send the result back as [`WorkerEvent::ReloadChangedFilesReady`]. Used
+/// by `App::reload_changed_files`, which used to block the UI thread.
+///
+/// The reply carries the worktree path so out-of-order replies (rapid
+/// session switching) can be discarded by the main loop without clobbering
+/// the currently-selected pane.
+pub(crate) fn dispatch_changed_files(tx: Sender<WorkerEvent>, worktree: PathBuf) {
+    let _ = thread::Builder::new()
+        .name(format!("changed-files-{}", worktree.display()))
+        .spawn(move || {
+            let result = git::changed_files(&worktree).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(WorkerEvent::ReloadChangedFilesReady { worktree, result });
+        });
+}
+
+/// Run `git diff --cached` against `worktree` on a worker thread and send
+/// the result back as [`WorkerEvent::StagedDiffReady`]. Used by the AI
+/// commit-message generator, which used to call `git::staged_diff_text`
+/// inline before spawning the provider thread.
+pub(crate) fn dispatch_staged_diff(tx: Sender<WorkerEvent>, worktree: PathBuf) {
+    let _ = thread::Builder::new()
+        .name(format!("staged-diff-{}", worktree.display()))
+        .spawn(move || {
+            let result = git::staged_diff_text(&worktree).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(WorkerEvent::StagedDiffReady { worktree, result });
+        });
+}
+
+/// Run `git commit -m <message>` against `worktree` on a worker thread.
+/// The caller is responsible for blocking input via `PromptState::Busy*`
+/// before dispatching, and for re-enabling input in the event handler so
+/// the UI stays responsive (and ordering stays correct).
+pub(crate) fn dispatch_commit(tx: Sender<WorkerEvent>, worktree: PathBuf, message: String) {
+    let _ = thread::Builder::new()
+        .name(format!("commit-{}", worktree.display()))
+        .spawn(move || {
+            let result = git::commit(&worktree, &message)
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(WorkerEvent::CommitFinished {
+                worktree,
+                message,
+                result,
+            });
+        });
+}
+
+/// Run the synchronous git probes that gate "add project" — `is_git_repo`,
+/// `current_branch`, and `remote_default_branch` — on a worker thread.
+/// Results land as [`WorkerEvent::AddProjectMetaReady`] so the main loop
+/// can either show the branch-mismatch warning, surface a non-repo error,
+/// or proceed to `finish_add_project`.
+pub(crate) fn dispatch_add_project_meta(tx: Sender<WorkerEvent>, path: PathBuf, name: String) {
+    let _ = thread::Builder::new()
+        .name(format!("add-project-meta-{}", path.display()))
+        .spawn(move || {
+            let result = if !path.exists() {
+                Err(format!("\"{}\" does not exist.", path.display()))
+            } else if !git::is_git_repo(&path) {
+                Err(format!("\"{}\" is not a git repository.", path.display()))
+            } else {
+                match git::current_branch(&path) {
+                    Ok(branch) => {
+                        let remote_default = git::remote_default_branch(&path);
+                        Ok(AddProjectMeta {
+                            current_branch: branch,
+                            remote_default,
+                        })
+                    }
+                    Err(err) => Err(format!("{err:#}")),
+                }
+            };
+            let _ = tx.send(WorkerEvent::AddProjectMetaReady { path, name, result });
+        });
 }
 
 pub(crate) fn browser_entries(dir: &Path) -> Vec<BrowserEntry> {
