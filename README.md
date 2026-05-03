@@ -20,7 +20,7 @@ Every agent runs through a PTY, the same pseudo-terminal your shell uses. That m
 
 **Homebrew (macOS and Linux):**
 
-On macOS, Homebrew is the preferred distribution method. This command installs my tap and then installs dux in one step:
+On macOS, Homebrew is the preferred route. This command taps the source and installs dux in one shot, because life's too short for a two-command install:
 
 ```bash
 brew install patrickdappollonio/tap/dux
@@ -28,20 +28,22 @@ brew install patrickdappollonio/tap/dux
 
 **npm:**
 
-```bash
-npx -y @patrickdappollonio/dux
-```
-
-Or install it globally:
+Install dux globally so the CLI lands on your `PATH`. Installing it as a dependency of some random project technically works, but that's not where terminal apps go to be useful:
 
 ```bash
 npm install -g @patrickdappollonio/dux
 dux
 ```
 
+For a one-off run without keeping it around:
+
+```bash
+npx -y @patrickdappollonio/dux
+```
+
 **Shell (all platforms):**
 
-The install script autodetects your operating system and architecture, then downloads the matching release archive:
+The install script sniffs out your operating system and architecture, then grabs the matching release archive. No guessing which tarball has your name on it:
 
 ```bash
 curl -sSfL https://github.com/patrickdappollonio/dux/releases/latest/download/install.sh | bash
