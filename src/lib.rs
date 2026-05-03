@@ -23,6 +23,8 @@ pub mod logger;
 pub mod model;
 pub mod provider;
 pub mod pty;
+pub mod purge;
+pub mod purge_encoding;
 pub mod raw_input;
 pub mod sanitize;
 pub mod statusline;

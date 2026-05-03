@@ -8,6 +8,10 @@ use crate::config::{self, Config, DuxPaths};
 use crate::git;
 use crate::keybindings::RuntimeBindings;
 use crate::logger;
+use crate::purge::{
+    self, PurgeConfig, PurgePlan, PurgeReport, build_plan, build_plans_for_all,
+    confirm_interactive, execute, notify_amq_peers_of_purge,
+};
 use crate::storage::SessionStore;
 
 // ---------------------------------------------------------------------------
@@ -51,6 +55,226 @@ fn reject_unknown_flags(args: &[String], known: &[&str]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// dux session — GDPR hard-purge command (audit02 Phase 10, P0-J)
+// ---------------------------------------------------------------------------
+
+/// Top-level dispatcher for `dux session <sub>`. Mirrors [`run`] but for
+/// the session-management surface. Today the only mutating subcommand
+/// is `purge`; future additions (e.g. `dux session export`) live here.
+///
+/// All subcommands assume the caller has already acquired the
+/// single-instance lock. See `main.rs::main` for the lock acquisition
+/// (it gates the dispatch to this function).
+pub fn run_session(args: &[String], paths: &DuxPaths) -> Result<()> {
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("");
+    match sub {
+        "purge" => {
+            let rest = &args[1..];
+            reject_unknown_flags_and_positional(rest, &["--yes", "--dry-run", "--hard"])?;
+            run_session_purge(paths, rest)
+        }
+        "purge-all" => {
+            let rest = &args[1..];
+            reject_unknown_flags(rest, &["--yes", "--dry-run"])?;
+            let yes = rest.iter().any(|a| a == "--yes");
+            let dry_run = rest.iter().any(|a| a == "--dry-run");
+            run_session_purge_all(paths, yes, dry_run)
+        }
+        "" | "--help" | "-h" => {
+            print_session_help();
+            Ok(())
+        }
+        other => bail!("unknown session subcommand: {other}\nRun `dux session --help` for usage."),
+    }
+}
+
+/// Like [`reject_unknown_flags`] but tolerant of one positional
+/// argument (the purge target). Anything starting with `-` that is
+/// not in `known` is rejected.
+fn reject_unknown_flags_and_positional(args: &[String], known: &[&str]) -> Result<()> {
+    for arg in args {
+        if arg.starts_with('-') && !known.contains(&arg.as_str()) {
+            bail!("unknown flag: {arg}");
+        }
+    }
+    Ok(())
+}
+
+fn print_session_help() {
+    println!(
+        "\
+dux session — manage individual sessions
+
+Subcommands:
+  dux session purge --hard <target> [--yes] [--dry-run]
+                       Permanently delete a single session and ALL its on-disk
+                       data. <target> is a session uuid or branch name.
+                       Cascades into worktree, provider chat dirs (claude/codex/
+                       gemini), AMQ inbox, log redact (Phase 09), and sqlite row.
+  dux session purge-all [--yes] [--dry-run]
+                       Run purge against every session. Useful for full reset.
+
+Flags:
+  --hard               Required for `purge`. Affirms the destructive intent.
+  --yes                Skip the interactive 'PURGE <branch>' confirmation.
+  --dry-run            Print the plan and exit without changing anything.
+
+Exit codes:
+  0  success (or dry-run)
+  1  any item in the cascade reported an error
+  2  invalid arguments / unknown target / aborted at confirmation"
+    );
+}
+
+fn run_session_purge(paths: &DuxPaths, args: &[String]) -> Result<()> {
+    let mut yes = false;
+    let mut dry_run = false;
+    let mut hard = false;
+    let mut target: Option<String> = None;
+    for arg in args {
+        match arg.as_str() {
+            "--yes" => yes = true,
+            "--dry-run" => dry_run = true,
+            "--hard" => hard = true,
+            s if s.starts_with('-') => bail!("unknown flag: {s}"),
+            other => {
+                if target.is_some() {
+                    bail!("unexpected positional argument: {other}");
+                }
+                target = Some(other.to_string());
+            }
+        }
+    }
+    if !hard {
+        bail!(
+            "`dux session purge` requires --hard to affirm the destructive intent.\n\
+             This command permanently deletes worktree bytes, provider chat history,\n\
+             AMQ inbox, log records, and the sqlite row. There is no undo.\n\
+             Re-run as: dux session purge --hard <target>"
+        );
+    }
+    let Some(target) = target else {
+        bail!("missing target: dux session purge --hard <session-id-or-branch>");
+    };
+
+    if !paths.sessions_db_path.exists() {
+        bail!(
+            "no sessions database found at {} — nothing to purge",
+            paths.sessions_db_path.display()
+        );
+    }
+
+    let storage = SessionStore::open(&paths.sessions_db_path)?;
+    let purge_config = PurgeConfig::default_layout();
+    let plan = build_plan(&storage, paths, &purge_config, &target)?;
+
+    println!("{}", format_plan(&plan, dry_run));
+
+    if !yes && !dry_run {
+        let confirmed = confirm_interactive(&plan)?;
+        if !confirmed {
+            eprintln!("aborted: confirmation phrase did not match");
+            std::process::exit(2);
+        }
+    }
+
+    // Notify peers BEFORE deleting the AMQ inbox so they have a chance
+    // to drain the final message; skipped on dry-run.
+    if !dry_run {
+        notify_amq_peers_of_purge(&plan.branch);
+    }
+
+    let report = execute(&plan, &storage, paths, dry_run)?;
+    eprint!("{}", report.summary());
+    if report.had_errors() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn run_session_purge_all(paths: &DuxPaths, yes: bool, dry_run: bool) -> Result<()> {
+    if !paths.sessions_db_path.exists() {
+        bail!(
+            "no sessions database found at {} — nothing to purge",
+            paths.sessions_db_path.display()
+        );
+    }
+    let storage = SessionStore::open(&paths.sessions_db_path)?;
+    let purge_config = PurgeConfig::default_layout();
+    let plans = build_plans_for_all(&storage, paths, &purge_config)?;
+
+    println!("about to purge {} session(s)", plans.len());
+    for (i, plan) in plans.iter().enumerate() {
+        println!("--- session {} of {} ---", i + 1, plans.len());
+        println!("{}", format_plan(plan, dry_run));
+    }
+
+    if !yes && !dry_run {
+        // For purge-all the confirmation phrase is "PURGE ALL" rather
+        // than per-branch — typing every branch name is impractical
+        // and "ALL" is the magic word that maps to the whole list.
+        eprint!("Type 'PURGE ALL' to confirm: ");
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| anyhow!("failed to read confirmation: {e}"))?;
+        if input.trim() != "PURGE ALL" {
+            eprintln!("aborted: confirmation phrase did not match");
+            std::process::exit(2);
+        }
+    }
+
+    let mut any_errors = false;
+    for plan in &plans {
+        if !dry_run {
+            notify_amq_peers_of_purge(&plan.branch);
+        }
+        let report = execute(plan, &storage, paths, dry_run)?;
+        eprint!("{}", report.summary());
+        any_errors |= report.had_errors();
+    }
+    if any_errors {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn format_plan(plan: &PurgePlan, dry_run: bool) -> String {
+    let header = if dry_run {
+        format!(
+            "DRY-RUN purge plan for session {} (branch {}):",
+            plan.session_id, plan.branch
+        )
+    } else {
+        format!(
+            "purge plan for session {} (branch {}):",
+            plan.session_id, plan.branch
+        )
+    };
+    let mut s = String::new();
+    s.push_str(&header);
+    s.push('\n');
+    for item in &plan.items {
+        s.push_str("  - ");
+        s.push_str(&item.describe());
+        s.push('\n');
+    }
+    s
+}
+
+// Re-export PurgeReport so external tests can inspect outcomes via
+// `dux::cli` if useful. The struct itself lives in `crate::purge`.
+#[allow(dead_code)]
+type _PurgeReportPubReexport = PurgeReport;
+#[allow(dead_code)]
+fn _purge_used_re_exports() {
+    // Touch every imported symbol so a future refactor that drops one
+    // gets a compiler nag instead of a silent dead-code warning.
+    let _ = purge::PurgeOutcome::Done;
 }
 
 fn print_config_help() {

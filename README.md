@@ -217,3 +217,26 @@ Logs go to `dux.log` in the config directory. Control the level in your config:
 level = "info"   # "error", "info", or "debug"
 path = "dux.log" # relative to config dir, or use an absolute path
 ```
+
+### Data lifecycle
+
+dux stores per-session data in several places: the worktree on disk, a row in `sessions.sqlite3`, the AMQ inbox (`/data/state/amq/agents/<branch>/`), the per-provider chat history (`/data/state/{claude,codex,gemini}/projects/<encoded>/`), and structured log records tagged with the session's `session_id`. Most workflows leave that data in place — `dux config reset --all` is a holistic factory reset, but it does not target an individual session.
+
+For GDPR Art 17 right-to-erasure (or just "delete this customer's data"), use `dux session purge`:
+
+```bash
+# Preview the cascade — nothing is changed.
+dux session purge --hard <branch-or-id> --dry-run
+
+# Real run. Asks for the confirmation phrase 'PURGE <branch>'.
+dux session purge --hard <branch-or-id>
+
+# Skip the prompt (e.g. from a script).
+dux session purge --hard <branch-or-id> --yes
+
+# Bulk: erase every session.
+dux session purge-all --dry-run
+dux session purge-all --yes
+```
+
+The cascade runs in a fixed order — worktree → provider chat dirs → AMQ inbox → log redact → sqlite row — so a crash mid-purge leaves a recoverable record in `sessions.sqlite3` and the operator can re-run the same command. Log records are not deleted; their `fields` object is replaced with `{"redacted": true}` so the audit trail (this session was purged on this date) survives without the content.

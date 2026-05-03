@@ -12,6 +12,8 @@ mod logger;
 mod model;
 mod provider;
 mod pty;
+mod purge;
+mod purge_encoding;
 mod raw_input;
 mod sanitize;
 mod statusline;
@@ -63,6 +65,22 @@ fn main() -> Result<()> {
         return cli::run(config_args, &paths);
     }
 
+    if args.first().map(|s| s.as_str()) == Some("session") {
+        let session_args = &args[1..];
+        // Every `dux session` subcommand mutates shared state (the sqlite
+        // db, worktrees, provider chat dirs, log files). Acquire the
+        // single-instance lock so a concurrent TUI cannot interleave a
+        // delete with the cascade. Dry-run still takes the lock — a
+        // peer launching the TUI mid dry-run would see "another instance
+        // is running" which is the right UX (and matches `dux config
+        // reset`'s precedent).
+        if !paths.root.exists() {
+            std::fs::create_dir_all(&paths.root)?;
+        }
+        let _lock = acquire_lock_or_exit(&paths.lock_path);
+        return cli::run_session(session_args, &paths);
+    }
+
     // TUI: always create the root directory (so the lockfile can be
     // opened), acquire the lock, then let bootstrap create everything
     // else. A losing process never touches shared state beyond the
@@ -79,7 +97,8 @@ fn print_help() {
          Terminal UI for AI worktree sessions.\n\n\
          Usage:\n\
           dux              Launch the TUI\n\
-          dux config       Manage the configuration file\n\n\
+          dux config       Manage the configuration file\n\
+          dux session      Manage individual sessions (purge for GDPR erasure)\n\n\
          Config subcommands:\n\
           dux config path          Print the config file path\n\
           dux config diff          Show settings that differ from defaults\n\
@@ -89,6 +108,14 @@ fn print_help() {
           dux config regenerate    Preview a fresh default config (shows diff)\n\
           dux config regenerate --yes\n\
                                    Overwrite the config file with fresh defaults\n\n\
+         Session subcommands:\n\
+          dux session purge --hard <target> [--yes] [--dry-run]\n\
+                                   GDPR-style hard-delete of a single session.\n\
+                                   <target> is a uuid or branch name. Cascades into\n\
+                                   provider chat history, AMQ inbox, worktree,\n\
+                                   sqlite, and structured log records.\n\
+          dux session purge-all [--yes] [--dry-run]\n\
+                                   Same as purge, applied to every session.\n\n\
          Environment variables:\n\
            DUX_HOME    Override the config directory (must be an absolute path).\n\
                        When unset, defaults to:\n\
