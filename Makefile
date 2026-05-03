@@ -1,4 +1,4 @@
-.PHONY: run fmt fmt-check lint lint-fix profiling overlay-shellcheck overlay-bats overlay-test
+.PHONY: run fmt fmt-check lint lint-fix profiling overlay-shellcheck overlay-bats overlay-test test-all-platforms
 
 run:
 	cargo run
@@ -35,3 +35,16 @@ overlay-bats:
 	bats dux-amq/tests
 
 overlay-test: overlay-shellcheck overlay-bats
+
+# audit02 Phase 21 (P1-S): cross-platform test entrypoint stub.
+#
+# A single host can only run native tests for the OS it's booted into,
+# so this target documents that the canonical multi-platform run lives
+# in CI (`pr.yml` / `test.yml` matrix on `ubuntu-24.04` + `macos-14`).
+# Locally, contributors should run `cargo test --all-features` on every
+# host they have access to (typically Linux + macOS).
+test-all-platforms:
+	@echo "Cross-platform tests run via CI matrix (ubuntu-24.04 + macos-14)."
+	@echo "Locally, run 'cargo test --all-features' on each host (Linux + macOS)."
+	@echo "Non-UTF-8 portability tests live in tests/git_portability.rs and"
+	@echo "are gated by #[cfg(unix)] so they cover both kernels."

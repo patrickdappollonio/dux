@@ -25,21 +25,34 @@ jobs:
       id-token: write
       attestations: write
       contents: write
+    # audit02 Phase 21 (P1-S, P2-5) — runners pinned to specific OS
+    # versions instead of `ubuntu-latest`/`macos-latest`. The `*-latest`
+    # alias migrates without warning when GitHub bumps its default,
+    # which has historically broken release builds (e.g. macos-latest
+    # going from 13→14 changed the default arch from x86_64 to arm64).
+    # Pinning gives deterministic toolchains and explicit upgrades.
+    #
+    # macOS runner choices:
+    #   • macos-13 is Intel (x86_64); used for the x86_64-apple-darwin
+    #     target so the build is native and cross-compile pitfalls
+    #     (linker, framework search paths) are avoided.
+    #   • macos-14 is Apple Silicon (arm64); used for the
+    #     aarch64-apple-darwin target for the same reason.
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             archive: dux-linux-amd64.tar.gz
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
             archive: dux-linux-arm64.tar.gz
           - target: x86_64-apple-darwin
-            runner: macos-latest
+            runner: macos-13
             archive: dux-darwin-amd64.tar.gz
           - target: aarch64-apple-darwin
-            runner: macos-latest
+            runner: macos-14
             archive: dux-darwin-arm64.tar.gz
 
     steps:
@@ -147,7 +160,8 @@ jobs:
 
   upload-install-script:
     name: Upload install script
-    runs-on: ubuntu-latest
+    # audit02 Phase 21 (P2-5) — pinned OS version (no `*-latest` drift).
+    runs-on: ubuntu-24.04
     permissions:
       contents: write    # upload install.sh asset
     steps:
@@ -197,7 +211,8 @@ jobs:
 
   update-release-notes:
     name: Append install instructions
-    runs-on: ubuntu-latest
+    # audit02 Phase 21 (P2-5) — pinned OS version (no `*-latest` drift).
+    runs-on: ubuntu-24.04
     permissions:
       contents: write    # edit release body
     # Wait for SHA256SUMS so the rendered release body never references
