@@ -7,7 +7,8 @@ set -euo pipefail
 
 migrate_dir() {
   local src="$1" dst="$2"
-  local bak="${src}.bak.$(date +%Y%m%d-%H%M%S)"
+  local bak
+  bak="${src}.bak.$(date +%Y%m%d-%H%M%S)"
 
   if [[ -L "$src" ]]; then
     echo "✓ $src is already a symlink → $(readlink "$src"). Skipping."

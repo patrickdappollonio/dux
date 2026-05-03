@@ -1351,12 +1351,12 @@ impl App {
                 // navigation feedback here.
                 {
                     use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
-                    let total = self.snapshot_buf.scrollback_total as usize;
+                    let total = self.snapshot_buf.scrollback_total;
                     let visible = term_area.height as usize;
                     if total > 0 && visible > 0 && term_area.width >= 2 {
                         // ratatui position is 0 at the top, content_length-1 at the bottom.
                         // dux's offset is 0 when at the latest (bottom): position = total - offset.
-                        let offset = (self.snapshot_buf.scrollback_offset as usize).min(total);
+                        let offset = self.snapshot_buf.scrollback_offset.min(total);
                         let position = total.saturating_sub(offset);
                         let mut state = ScrollbarState::new(total + visible)
                             .viewport_content_length(visible)

@@ -95,13 +95,15 @@ configure_vscode_remote() {
     ok "wrote $f"
     return 0
   fi
-  jq --argjson new "$entries" '
+  if jq --argjson new "$entries" '
     .["terminal.integrated.commandsToSkipShell"] = (
       ((.["terminal.integrated.commandsToSkipShell"] // []) + $new) | unique
     )
-  ' "$f" > "$f.tmp" && mv "$f.tmp" "$f" \
-    && ok "merged Ctrl-G passthrough into $f" \
-    || warn "could not merge $f"
+  ' "$f" > "$f.tmp" && mv "$f.tmp" "$f"; then
+    ok "merged Ctrl-G passthrough into $f"
+  else
+    warn "could not merge $f"
+  fi
 }
 configure_vscode_remote
 
