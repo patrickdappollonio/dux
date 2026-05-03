@@ -62,6 +62,13 @@ fn append_capped(buf: &mut Vec<u8>, bytes: &[u8], max: usize) {
     }
 }
 
+/// Treat both crossterm's `BackTab` and explicit `Tab + Shift` as reverse-tab.
+/// Some terminals deliver one form, some the other.
+fn is_reverse_tab(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::BackTab)
+        || (matches!(key.code, KeyCode::Tab) && key.modifiers.contains(KeyModifiers::SHIFT))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MouseTarget {
     LeftPane,
@@ -1909,7 +1916,7 @@ impl App {
                                     *tab_completions = candidates;
                                     *tab_index = 0;
                                 }
-                            } else if key.code == KeyCode::BackTab {
+                            } else if is_reverse_tab(key) {
                                 if *tab_index == 0 {
                                     *tab_index = tab_completions.len().saturating_sub(1);
                                 } else {
@@ -2097,7 +2104,7 @@ impl App {
             let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
             let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
             let is_space = key.code == KeyCode::Char(' ');
-            let reverse_tab = key.code == KeyCode::BackTab;
+            let reverse_tab = is_reverse_tab(key);
 
             if matches!(palette_action.or(dialog_action), Some(Action::CloseOverlay)) {
                 self.prompt = PromptState::None;
@@ -2150,7 +2157,7 @@ impl App {
             let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
             let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
             let is_space = key.code == KeyCode::Char(' ');
-            let reverse_tab = key.code == KeyCode::BackTab;
+            let reverse_tab = is_reverse_tab(key);
 
             if matches!(palette_action.or(dialog_action), Some(Action::CloseOverlay)) {
                 self.prompt = PromptState::None;
@@ -2268,7 +2275,7 @@ impl App {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => self.prompt = PromptState::None,
                 Some(Action::ToggleSelection) => {
-                    let reverse = matches!(key.code, KeyCode::BackTab);
+                    let reverse = is_reverse_tab(key);
                     *focus = match (*focus, shared, reverse) {
                         (DeleteAgentFocus::Cancel, false, false) => DeleteAgentFocus::Delete,
                         (DeleteAgentFocus::Delete, false, false) => DeleteAgentFocus::Checkbox,
@@ -2386,7 +2393,7 @@ impl App {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => self.prompt = PromptState::None,
                 Some(Action::ToggleSelection) => {
-                    let reverse = matches!(key.code, KeyCode::BackTab);
+                    let reverse = is_reverse_tab(key);
                     *focus = match (*focus, has_checkbox, reverse) {
                         (ConfirmNonDefaultBranchFocus::Cancel, true, false) => {
                             ConfirmNonDefaultBranchFocus::Add
@@ -2647,7 +2654,7 @@ impl App {
                         edit_state.surface = edit_state.surface.next();
                         return Ok(false);
                     }
-                    if key.code == KeyCode::BackTab {
+                    if is_reverse_tab(key) {
                         edit_state.surface = edit_state.surface.prev();
                         return Ok(false);
                     }
@@ -5005,13 +5012,13 @@ mod tests {
     use super::DOUBLE_CLICK_THRESHOLD;
     use super::components::{ButtonPressedTarget, PressedButton};
     use crate::app::{
-        App, CenterMode, ConfirmKillRunningPrompt, CreateAgentRequest, DeleteAgentFocus, FocusPane,
-        FullscreenOverlay, InputTarget, KillRunningAction, KillRunningFocus,
-        KillRunningFooterAction, KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftItem,
-        LeftSection, MacroBarState, MouseClickTarget, MouseLayoutState, NameNewAgentFocus,
-        OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout, OverlayMouseLayoutState,
-        ProcessInfo, PromptState, PullTarget, ResourceStats, RightSection, RuntimeTargetId,
-        TextInput, WorkerEvent,
+        App, BranchWarningKind, CenterMode, ConfirmKillRunningPrompt, ConfirmNonDefaultBranchFocus,
+        CreateAgentRequest, DeleteAgentFocus, FocusPane, FullscreenOverlay, InputTarget,
+        KillRunningAction, KillRunningFocus, KillRunningFooterAction, KillRunningPrompt,
+        KillableRuntime, KillableRuntimeKind, LeftItem, LeftSection, MacroBarState,
+        MouseClickTarget, MouseLayoutState, NameNewAgentFocus, OverlayCheckbox, OverlayCheckboxId,
+        OverlayMouseLayout, OverlayMouseLayoutState, ProcessInfo, PromptState, PullTarget,
+        ResourceStats, RightSection, RuntimeTargetId, TextInput, WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
@@ -8467,6 +8474,130 @@ cyan = "#00ffff"
                 );
             }
             other => panic!("expected delete-agent confirmation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tab_with_shift_moves_delete_agent_focus_backwards() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmDeleteAgent {
+            session_id: app.sessions[0].id.clone(),
+            branch_name: app.sessions[0].branch_name.clone(),
+            focus: DeleteAgentFocus::Cancel,
+            delete_worktree: false,
+            worktree_shared: false,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::ConfirmDeleteAgent { focus, .. } => {
+                assert_eq!(
+                    *focus,
+                    DeleteAgentFocus::Checkbox,
+                    "Shift-Tab delivered as Tab + Shift should move backward to the checkbox"
+                );
+            }
+            other => panic!("expected delete-agent confirmation, got {other:?}"),
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::ConfirmDeleteAgent { focus, .. } => {
+                assert_eq!(
+                    *focus,
+                    DeleteAgentFocus::Delete,
+                    "Tab + Shift should continue backward from the checkbox to Delete"
+                );
+            }
+            other => panic!("expected delete-agent confirmation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tab_with_shift_moves_non_default_branch_focus_backwards_when_checkbox_present() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmNonDefaultBranch {
+            path: "/tmp/project".to_string(),
+            name: "project".to_string(),
+            current_branch: "feature".to_string(),
+            kind: BranchWarningKind::Known {
+                default_branch: "main".to_string(),
+            },
+            focus: ConfirmNonDefaultBranchFocus::Cancel,
+            checkout_default: true,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::ConfirmNonDefaultBranch { focus, .. } => {
+                assert_eq!(
+                    *focus,
+                    ConfirmNonDefaultBranchFocus::Checkbox,
+                    "Tab + Shift should move backward from Cancel to the checkbox"
+                );
+            }
+            other => panic!("expected non-default-branch confirmation, got {other:?}"),
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::ConfirmNonDefaultBranch { focus, .. } => {
+                assert_eq!(
+                    *focus,
+                    ConfirmNonDefaultBranchFocus::Add,
+                    "Tab + Shift should continue backward from the checkbox to Add"
+                );
+            }
+            other => panic!("expected non-default-branch confirmation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tab_with_shift_moves_non_default_branch_focus_backwards_without_checkbox() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmNonDefaultBranch {
+            path: "/tmp/project".to_string(),
+            name: "project".to_string(),
+            current_branch: "feature".to_string(),
+            kind: BranchWarningKind::Heuristic,
+            focus: ConfirmNonDefaultBranchFocus::Cancel,
+            checkout_default: false,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::ConfirmNonDefaultBranch { focus, .. } => {
+                assert_eq!(
+                    *focus,
+                    ConfirmNonDefaultBranchFocus::Add,
+                    "Tab + Shift should reverse-toggle between the two buttons when no checkbox exists"
+                );
+            }
+            other => panic!("expected non-default-branch confirmation, got {other:?}"),
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::ConfirmNonDefaultBranch { focus, .. } => {
+                assert_eq!(
+                    *focus,
+                    ConfirmNonDefaultBranchFocus::Cancel,
+                    "A second Tab + Shift should cycle back to Cancel"
+                );
+            }
+            other => panic!("expected non-default-branch confirmation, got {other:?}"),
         }
     }
 
