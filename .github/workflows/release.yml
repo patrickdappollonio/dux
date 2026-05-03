@@ -80,6 +80,8 @@ jobs:
         run: cargo set-version "${{ needs.prepare-release.outputs.version }}"
 
       - name: Build
+        env:
+          DUX_RELEASE_BUILD: "1"
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Strip binary
