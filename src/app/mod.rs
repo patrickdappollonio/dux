@@ -193,6 +193,27 @@ pub struct App {
     last_snapshot_id: Option<String>,
     /// Active text selection in the terminal viewport, if any.
     pub(crate) terminal_selection: Option<TerminalSelection>,
+    /// Last time `reload_changed_files` dispatched a one-shot
+    /// `dispatch_changed_files` job. Used to debounce rapid session
+    /// navigation — if the user paged through 10 sessions in a quarter
+    /// second we'd otherwise spawn 10 git processes. The
+    /// `spawn_changed_files_poller` covers steady-state refresh; this
+    /// debounce just needs to suppress thundering herds on selection
+    /// changes.
+    pub(crate) last_changed_files_dispatch: Option<Instant>,
+    /// Set to `true` while a one-shot `commit` worker is in flight so
+    /// `execute_commit` can refuse re-entry. Cleared by
+    /// `WorkerEvent::CommitFinished`.
+    pub(crate) commit_in_flight: bool,
+    /// Set to `true` while a one-shot `staged_diff` worker is in flight
+    /// for the AI-commit-message generator. Cleared by
+    /// `WorkerEvent::StagedDiffReady`.
+    pub(crate) staged_diff_in_flight: bool,
+    /// Set to `true` while an `add_project` git probe is in flight so
+    /// duplicate kicks (e.g. user re-presses Enter on the path prompt)
+    /// don't queue multiple workers. Cleared by
+    /// `WorkerEvent::AddProjectMetaReady`.
+    pub(crate) add_project_in_flight: bool,
     /// Exclusive lock held for the lifetime of this `App` so only one dux
     /// instance runs against a given config directory. Released
     /// automatically on drop (including crashes), so there is nothing to
@@ -1030,6 +1051,60 @@ pub(crate) enum WorkerEvent {
         target_branch: String,
         result: Result<(), String>,
     },
+    /// Per-project git metadata resolved in the background after
+    /// `load_projects` returned placeholders. Filled in via
+    /// [`crate::app::workers::dispatch_project_meta`].
+    #[allow(dead_code)] // remote_default reserved for future "fetch on switch" UX
+    ProjectMetaReady {
+        path: PathBuf,
+        is_git: bool,
+        current_branch: Option<String>,
+        remote_default: Option<String>,
+    },
+    /// Background `git status --porcelain` for the staged/unstaged file
+    /// pane finished. Dispatched via
+    /// [`crate::app::workers::dispatch_changed_files`] when a session
+    /// selection changes (the steady-state poller already runs in the
+    /// background and emits the older `ChangedFilesReady` variant —
+    /// `ReloadChangedFilesReady` is for one-shot reloads tagged with the
+    /// originating worktree so out-of-order replies can't clobber a newer
+    /// selection).
+    ReloadChangedFilesReady {
+        worktree: PathBuf,
+        result: Result<(Vec<ChangedFile>, Vec<ChangedFile>), String>,
+    },
+    /// Background `git diff --cached` for the AI commit-message worker.
+    /// On `Ok` the diff is appended to the prompt; on `Err` the user gets
+    /// a status-line message and the overlay is cleared.
+    StagedDiffReady {
+        worktree: PathBuf,
+        result: Result<String, String>,
+    },
+    /// Background `git commit -m <msg>` finished. The UI was held in a
+    /// busy/locked state by the caller; this event releases it and
+    /// triggers a `reload_changed_files`.
+    #[allow(dead_code)]
+    // worktree+message reserved for richer status-line strings + post-commit log
+    CommitFinished {
+        worktree: PathBuf,
+        message: String,
+        result: Result<(), String>,
+    },
+    /// Background `git is_git_repo` + `git current_branch` for the
+    /// "add project" path. The synchronous `add_project` entry point was
+    /// turned into a kickoff that resolves the metadata in a worker, so
+    /// the UI thread never blocks waiting for git.
+    AddProjectMetaReady {
+        path: PathBuf,
+        name: String,
+        result: Result<AddProjectMeta, String>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AddProjectMeta {
+    pub current_branch: String,
+    pub remote_default: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1196,8 +1271,19 @@ impl App {
             snapshot_buf: TerminalSnapshot::empty(),
             last_snapshot_id: None,
             terminal_selection: None,
+            last_changed_files_dispatch: None,
+            commit_in_flight: false,
+            staged_diff_in_flight: false,
+            add_project_in_flight: false,
             _single_instance_lock: single_instance_lock,
         };
+        // Kick off async git probes for every project so the first frame
+        // can render placeholders immediately. The main loop fills in the
+        // metadata as `ProjectMetaReady` events arrive on the worker
+        // channel.
+        let project_paths = project_paths_for_meta(&app.projects);
+        workers::dispatch_project_meta(app.worker_tx.clone(), project_paths);
+
         app.restore_sessions();
         app.auto_resume_all_sessions();
         app.seed_pr_statuses_from_db();
@@ -1966,16 +2052,37 @@ impl App {
         let worktree = self
             .selected_session()
             .map(|s| PathBuf::from(&s.worktree_path));
-        // Keep the background poller in sync with the currently selected session.
+        // Keep the background poller in sync with the currently selected
+        // session. The poller will pick up the new path on its next tick;
+        // the one-shot dispatch below provides immediate feedback.
         if let Ok(mut guard) = self.watched_worktree.lock() {
             *guard = worktree.clone();
         }
-        let (staged, unstaged) = worktree
-            .and_then(|p| git::changed_files(&p).ok())
-            .unwrap_or_default();
-        self.staged_files = staged;
-        self.unstaged_files = unstaged;
+        // Clear the visible file list immediately. Without this, rapidly
+        // switching sessions paints stale data from the previous session
+        // until the worker reply arrives.
+        self.staged_files = Vec::new();
+        self.unstaged_files = Vec::new();
         self.clamp_files_cursor();
+
+        // Debounce: rapid `Tab` / `Shift-Tab` navigation can trigger this
+        // many times per second. Forking `git status` on every selection
+        // change wastes CPU and floods the worker channel. Cap to one
+        // dispatch per 200 ms; the steady-state poller (see
+        // `spawn_changed_files_poller`) covers the gaps.
+        const RELOAD_DEBOUNCE: Duration = Duration::from_millis(200);
+        let now = Instant::now();
+        let should_dispatch = match self.last_changed_files_dispatch {
+            Some(last) => now.duration_since(last) >= RELOAD_DEBOUNCE,
+            None => true,
+        };
+        if let Some(p) = worktree
+            && should_dispatch
+        {
+            self.last_changed_files_dispatch = Some(now);
+            workers::dispatch_changed_files(self.worker_tx.clone(), p);
+        }
+
         // Opportunistically check PR status for the newly-selected session.
         if let Some(sid) = session_id {
             self.spawn_pr_check_for_session(&sid);
@@ -2354,44 +2461,52 @@ pub(crate) fn refresh_project_defaults(projects: &mut [Project], config: &Config
     }
 }
 
+/// Build the in-memory `Project` list from `config.projects` without
+/// blocking on git. Each project is returned as a placeholder
+/// (`meta_loaded = false`) and the actual git probes —
+/// `is_git_repo`, `current_branch`, `remote_default_branch` — run on
+/// per-project worker threads dispatched separately via
+/// [`workers::dispatch_project_meta`]. The main loop fills in the missing
+/// fields when [`WorkerEvent::ProjectMetaReady`] arrives.
+///
+/// Render code MUST consult [`Project::meta_loaded`] before reading
+/// `current_branch` / `path_missing`, otherwise it will paint a misleading
+/// "main" branch / "not missing" status in the brief window between first
+/// frame and worker reply.
 pub(crate) fn load_projects(config: &Config) -> Vec<Project> {
     let mut projects = Vec::new();
     for project in config.projects.iter() {
-        let (path, missing) = match crate::config::expand_path(&project.path) {
-            Some(expanded) => {
-                let p = PathBuf::from(&expanded);
-                let missing = !p.exists() || !git::is_git_repo(&p);
-                (p, missing)
-            }
-            None => {
-                // Unsafe or invalid path – treat as missing.
-                (PathBuf::from(&project.path), true)
-            }
+        // Path expansion is pure string manipulation — no I/O — so it
+        // stays on the UI thread. Anything that touches the filesystem is
+        // deferred to `dispatch_project_meta`.
+        let path = match crate::config::expand_path(&project.path) {
+            Some(expanded) => PathBuf::from(&expanded),
+            None => PathBuf::from(&project.path),
         };
         let provider = project
             .default_provider
             .as_deref()
             .map(ProviderKind::from_str)
             .unwrap_or_else(|| config.default_provider());
-        projects.push(Project {
-            id: project.id.clone(),
-            name: project.name.clone().unwrap_or_else(|| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("project")
-                    .to_string()
-            }),
-            path: path.to_string_lossy().to_string(),
-            default_provider: provider,
-            current_branch: if missing {
-                String::new()
-            } else {
-                git::current_branch(&path).unwrap_or_else(|_| "main".to_string())
-            },
-            path_missing: missing,
+        let display_name = project.name.clone().unwrap_or_else(|| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("project")
+                .to_string()
         });
+        projects.push(Project::placeholder(
+            project.id.clone(),
+            display_name,
+            path.to_string_lossy().to_string(),
+            provider,
+        ));
     }
     projects
+}
+
+/// Collect the path list to pass into [`workers::dispatch_project_meta`].
+pub(crate) fn project_paths_for_meta(projects: &[Project]) -> Vec<PathBuf> {
+    projects.iter().map(|p| PathBuf::from(&p.path)).collect()
 }
 
 // ── Resource monitor helpers ───────────────────────────────────────────────

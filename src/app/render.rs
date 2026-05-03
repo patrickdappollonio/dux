@@ -456,11 +456,20 @@ impl App {
                 "branch: ",
                 Style::default().fg(label_fg).bg(bg),
             ));
+            // Show "(loading…)" while `dispatch_project_meta` is still
+            // resolving the current branch. Avoids flashing a misleading
+            // value (or empty string) on first paint.
+            let branch_label = if project.meta_loaded {
+                project.current_branch.clone()
+            } else {
+                "(loading\u{2026})".to_string()
+            };
             spans.push(Span::styled(
-                project.current_branch.clone(),
+                branch_label,
                 Style::default().fg(self.theme.branch_fg).bg(bg),
             ));
             if let Some(session) = self.selected_session()
+                && project.meta_loaded
                 && session.branch_name != project.current_branch
             {
                 spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
