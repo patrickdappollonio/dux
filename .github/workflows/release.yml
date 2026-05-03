@@ -8,8 +8,38 @@ permissions:
   contents: write
 
 jobs:
+  prepare-release:
+    name: Prepare release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release_version.outputs.value }}
+      npm_tag: ${{ steps.npm_dist_tag.outputs.value }}
+    steps:
+      - name: Determine release version
+        id: release_version
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          if [ -z "$VERSION" ]; then
+            echo "Failed to extract version from ${{ github.event.release.tag_name }}"
+            exit 1
+          fi
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Determine npm dist tag
+        id: npm_dist_tag
+        env:
+          VERSION: ${{ steps.release_version.outputs.value }}
+        run: |
+          if [[ "$VERSION" == *-* ]]; then
+            echo "value=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: Build ${{ matrix.archive }}
+    needs: prepare-release
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -47,10 +77,7 @@ jobs:
         run: cargo install cargo-edit --locked
 
       - name: Set version from tag
-        run: |
-          VERSION="${{ github.event.release.tag_name }}"
-          VERSION="${VERSION#v}"
-          cargo set-version "$VERSION"
+        run: cargo set-version "${{ needs.prepare-release.outputs.version }}"
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
@@ -65,6 +92,91 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload ${{ github.event.release.tag_name }} ${{ matrix.archive }}
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+          retention-days: 1
+          if-no-files-found: error
+
+  build-npm-package:
+    name: Build npm package
+    needs: [prepare-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Download release archive artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist/artifacts
+          merge-multiple: true
+
+      - name: Build npm package
+        env:
+          RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
+          ARTIFACTS_DIR: dist/artifacts
+        run: node npm/scripts/build_npm_package.mjs
+
+      - name: Upload npm package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: dist/npm/dux-npm-*.tgz
+          retention-days: 1
+          if-no-files-found: error
+
+  publish-npm:
+    name: Publish npm package
+    needs: [prepare-release, build-npm-package]
+    if: ${{ needs.build-npm-package.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          scope: "@patrickdappollonio"
+
+      - name: Update npm
+        run: npm install -g npm@latest
+
+      - name: Download npm package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+          path: dist/npm
+
+      - name: Publish to npm
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+          NPM_TAG: ${{ needs.prepare-release.outputs.npm_tag }}
+        run: |
+          set -euo pipefail
+          tarball="dist/npm/dux-npm-${VERSION}.tgz"
+          if [[ ! -f "$tarball" ]]; then
+            echo "npm tarball $tarball not found"
+            exit 1
+          fi
+
+          publish_cmd=(npm publish "$tarball" --access public)
+          if [[ -n "$NPM_TAG" ]]; then
+            publish_cmd+=(--tag "$NPM_TAG")
+          fi
+
+          echo "+ ${publish_cmd[*]}"
+          "${publish_cmd[@]}"
 
   upload-install-script:
     name: Upload install script

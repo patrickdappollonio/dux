@@ -24,6 +24,19 @@ Every agent runs through a PTY, the same pseudo-terminal your shell uses. That m
 brew install patrickdappollonio/tap/dux
 ```
 
+**npm:**
+
+```bash
+npx -y @patrickdappollonio/dux
+```
+
+Or install it globally:
+
+```bash
+npm install -g @patrickdappollonio/dux
+dux
+```
+
 **Shell:**
 
 ```bash
