@@ -145,7 +145,17 @@ strip_block() {
 }
 
 # 1. preflight ---------------------------------------------------------------
-[[ -d /data ]] || { warn "/data not mounted — set up a persistent disk first."; exit 1; }
+# Audit02 follow-up: don't hardcode /data. The user may set STATE_ROOT to
+# a non-/data path (e.g. test envs, CI). Verify the parent of STATE_ROOT
+# exists; mkdir -p later either creates STATE_ROOT or fails with a clear
+# error. Pure bash (parent extraction via parameter expansion) so this
+# survives `env -i PATH=""` invocations from the bats preflight tests.
+state_root_parent="${STATE_ROOT%/*}"
+[[ -z "$state_root_parent" ]] && state_root_parent="/"
+if [[ ! -d "$state_root_parent" ]]; then
+  warn "Parent of STATE_ROOT ($state_root_parent) does not exist — set up your persistent disk first."
+  exit 1
+fi
 # Audit01 P1-6 / Audit02 P1-C: hard-fail on missing tools, but collect ALL
 # misses in one pass so the operator can `apt-get install` the full list in
 # one shot instead of fix → re-run → next-error → repeat.
