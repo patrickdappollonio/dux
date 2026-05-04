@@ -351,44 +351,84 @@ impl App {
                         }
                     }
                 }
-                WorkerEvent::AddProjectCheckoutCompleted {
-                    path,
-                    name,
+                WorkerEvent::NonDefaultBranchCheckoutCompleted {
+                    action,
                     target_branch,
                     result,
                 } => match result {
-                    Ok(()) => {
-                        let display_name = if name.trim().is_empty() {
-                            std::path::Path::new(&path)
-                                .file_name()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("project")
-                                .to_string()
-                        } else {
-                            name.trim().to_string()
-                        };
-                        if let Err(e) =
-                            self.finish_add_project(path, name, target_branch.clone())
-                        {
-                            self.set_error(format!("{e:#}"));
-                        } else {
-                            // Override the generic "Added project" status from
-                            // finish_add_project with the more informative
-                            // two-step message.
-                            self.set_info(format!(
-                                "Checked out \"{target_branch}\" and added project \"{display_name}\" to workspace."
-                            ));
+                    Ok(()) => match action {
+                        NonDefaultBranchAction::AddProject { path, name } => {
+                            let display_name = if name.trim().is_empty() {
+                                std::path::Path::new(&path)
+                                    .file_name()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("project")
+                                    .to_string()
+                            } else {
+                                name.trim().to_string()
+                            };
+                            if let Err(e) =
+                                self.finish_add_project(path, name, target_branch.clone())
+                            {
+                                self.set_error(format!("{e:#}"));
+                            } else {
+                                // Override the generic "Added project" status from
+                                // finish_add_project with the more informative
+                                // two-step message.
+                                self.set_info(format!(
+                                    "Checked out \"{target_branch}\" and added project \"{display_name}\" to workspace."
+                                ));
+                            }
                         }
-                    }
+                        NonDefaultBranchAction::CreateAgent { mut project } => {
+                            if let Some(existing) =
+                                self.projects.iter_mut().find(|p| p.id == project.id)
+                            {
+                                existing.current_branch = target_branch.clone();
+                            }
+                            project.current_branch = target_branch.clone();
+                            if let Err(e) =
+                                self.open_name_new_agent_prompt(CreateAgentRequest::NewProject {
+                                    project,
+                                    custom_name: None,
+                                    use_existing_branch: false,
+                                })
+                            {
+                                self.set_error(format!("{e:#}"));
+                            } else {
+                                self.set_info(format!(
+                                    "Checked out \"{target_branch}\". Enter a name for the new agent."
+                                ));
+                            }
+                        }
+                    },
                     Err(err) => {
                         // Preserve the full git stderr in the log so
                         // debugging stays possible after the status line
                         // summary is overwritten by the next message.
+                        let path = action.repo_path().to_string();
                         logger::error(&format!(
-                            "add-project checkout failed for {path}: {err}"
+                            "non-default branch checkout failed for {path}: {err}"
                         ));
                         self.set_error(format!(
                             "Couldn't check out \"{target_branch}\" in {path} — resolve in your terminal and retry."
+                        ));
+                    }
+                },
+                WorkerEvent::CreateAgentBranchInspected { project, result } => match result {
+                    Ok((current_branch, warning_kind)) => {
+                        if let Err(err) = self.continue_create_agent_after_branch_inspection(
+                            project,
+                            current_branch,
+                            warning_kind,
+                        ) {
+                            self.set_error(format!("{err:#}"));
+                        }
+                    }
+                    Err(err) => {
+                        self.set_error(format!(
+                            "Couldn't inspect the current branch for project \"{}\": {err}",
+                            project.name
                         ));
                     }
                 },
@@ -914,21 +954,35 @@ impl App {
 
 /// Background job for "Add Project" when the user opted to have dux switch to
 /// the default branch first. Runs `git switch <target_branch>` in the source
-/// repo and reports the outcome via `WorkerEvent::AddProjectCheckoutCompleted`
-/// so the main loop can either call `finish_add_project` or surface the error.
+/// repo and reports the outcome via
+/// `WorkerEvent::NonDefaultBranchCheckoutCompleted` so the main loop can
+/// continue the selected action or surface the error.
 pub(crate) fn run_add_project_checkout_job(
-    path: String,
-    name: String,
+    action: NonDefaultBranchAction,
     target_branch: String,
     worker_tx: Sender<WorkerEvent>,
 ) {
+    let path = action.repo_path().to_string();
     let result = git::switch_branch(Path::new(&path), &target_branch).map_err(|e| format!("{e:#}"));
-    let _ = worker_tx.send(WorkerEvent::AddProjectCheckoutCompleted {
-        path,
-        name,
+    let _ = worker_tx.send(WorkerEvent::NonDefaultBranchCheckoutCompleted {
+        action,
         target_branch,
         result,
     });
+}
+
+pub(crate) fn run_create_agent_branch_inspection_job(
+    project: Project,
+    worker_tx: Sender<WorkerEvent>,
+) {
+    let repo_path = PathBuf::from(&project.path);
+    let result = git::current_branch(&repo_path)
+        .map(|branch| {
+            let warning_kind = branch_warning_kind(&repo_path, &branch);
+            (branch, warning_kind)
+        })
+        .map_err(|err| format!("{err:#}"));
+    let _ = worker_tx.send(WorkerEvent::CreateAgentBranchInspected { project, result });
 }
 
 pub(crate) fn run_create_agent_job(

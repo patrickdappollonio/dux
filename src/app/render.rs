@@ -4197,6 +4197,7 @@ impl App {
                 };
             }
             PromptState::ConfirmNonDefaultBranch {
+                action,
                 current_branch,
                 kind,
                 focus,
@@ -4206,7 +4207,9 @@ impl App {
                 self.render_dim_overlay(frame);
                 let dialog_width = 60u16.min(frame.area().width.max(1));
                 let inner_width = dialog_width.saturating_sub(2);
-                let has_checkbox = matches!(kind, BranchWarningKind::Known { .. });
+                let has_checkbox =
+                    matches!(kind, BranchWarningKind::Known { .. }) && action.allows_add_anyway();
+                let is_create_agent = matches!(action, NonDefaultBranchAction::CreateAgent { .. });
 
                 // Body: warning text + the "new worktrees branch from …" note,
                 // plus a dim info line on the heuristic path explaining why dux
@@ -4214,22 +4217,43 @@ impl App {
                 let mut body_lines = vec![Line::from("")];
                 match kind {
                     BranchWarningKind::Known { default_branch } => {
-                        body_lines.push(Line::from(vec![
-                            Span::raw(" This repository is on branch "),
-                            Span::styled(
-                                current_branch.as_str(),
-                                Style::default().add_modifier(Modifier::BOLD),
-                            ),
-                            Span::raw(", but the"),
-                        ]));
-                        body_lines.push(Line::from(vec![
-                            Span::raw(" remote default branch is "),
-                            Span::styled(
-                                default_branch.as_str(),
-                                Style::default().add_modifier(Modifier::BOLD),
-                            ),
-                            Span::raw("."),
-                        ]));
+                        if is_create_agent {
+                            body_lines
+                                .push(Line::from(" This project checkout has changed and is no"));
+                            body_lines.push(Line::from(vec![
+                                Span::raw(" longer on the default branch "),
+                                Span::styled(
+                                    default_branch.as_str(),
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw("."),
+                            ]));
+                            body_lines.push(Line::from(""));
+                            body_lines.push(Line::from(vec![
+                                Span::raw(" Current branch: "),
+                                Span::styled(
+                                    current_branch.as_str(),
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                            ]));
+                        } else {
+                            body_lines.push(Line::from(vec![
+                                Span::raw(" This repository is on branch "),
+                                Span::styled(
+                                    current_branch.as_str(),
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw(", but the"),
+                            ]));
+                            body_lines.push(Line::from(vec![
+                                Span::raw(" remote default branch is "),
+                                Span::styled(
+                                    default_branch.as_str(),
+                                    Style::default().add_modifier(Modifier::BOLD),
+                                ),
+                                Span::raw("."),
+                            ]));
+                        }
                     }
                     BranchWarningKind::Heuristic => {
                         body_lines.push(Line::from(vec![
@@ -4244,8 +4268,13 @@ impl App {
                     }
                 }
                 body_lines.push(Line::from(""));
+                let worktree_warning = if is_create_agent {
+                    " New agents should branch from the default branch.".to_string()
+                } else {
+                    format!(" New worktrees will branch from \"{current_branch}\".")
+                };
                 body_lines.push(Line::from(Span::styled(
-                    format!(" New worktrees will branch from \"{current_branch}\"."),
+                    worktree_warning,
                     Style::default().fg(self.theme.warning_fg),
                 )));
                 if matches!(kind, BranchWarningKind::Heuristic) {
@@ -4263,7 +4292,10 @@ impl App {
 
                 // Checkbox height is measured up-front so the outer rect can
                 // be sized exactly — mirrors the Delete Agent modal.
-                let checkbox_height = if let BranchWarningKind::Known { default_branch } = kind {
+                let checkbox_height = if has_checkbox {
+                    let BranchWarningKind::Known { default_branch } = kind else {
+                        unreachable!("has_checkbox requires a known default branch");
+                    };
                     let state = if *focus == ConfirmNonDefaultBranchFocus::Checkbox {
                         CheckboxState::Focused
                     } else {
@@ -4309,7 +4341,10 @@ impl App {
                     .wrap(Wrap { trim: false })
                     .render(body_area, frame.buffer_mut());
 
-                let checkbox_rect = if let BranchWarningKind::Known { default_branch } = kind {
+                let checkbox_rect = if has_checkbox {
+                    let BranchWarningKind::Known { default_branch } = kind else {
+                        unreachable!("has_checkbox requires a known default branch");
+                    };
                     let checkbox_state = if *focus == ConfirmNonDefaultBranchFocus::Checkbox {
                         CheckboxState::Focused
                     } else {
@@ -4337,7 +4372,11 @@ impl App {
                 // "Check Out & Add" and "Add Anyway" in the calculation keeps
                 // the layout stable when the user toggles the checkbox —
                 // otherwise the buttons would resize mid-modal.
-                let btn_width = shared_button_width(&["Cancel", "Add Anyway", "Check Out & Add"]);
+                let btn_width = if is_create_agent {
+                    shared_button_width(&["Cancel", "Check Out & Create"])
+                } else {
+                    shared_button_width(&["Cancel", "Add Anyway", "Check Out & Add"])
+                };
                 let gap = 2u16;
                 let total = btn_width * 2 + gap;
                 let left_offset = buttons_area.width.saturating_sub(total) / 2;
@@ -4359,7 +4398,9 @@ impl App {
                 // pressing it will do. When the checkbox is on and we know the
                 // default branch, the action is a two-step (switch + add),
                 // otherwise it's the original "Add Anyway" add-as-is.
-                let add_label = if has_checkbox && *checkout_default {
+                let add_label = if is_create_agent {
+                    "Check Out & Create"
+                } else if has_checkbox && *checkout_default {
                     "Check Out & Add"
                 } else {
                     "Add Anyway"
