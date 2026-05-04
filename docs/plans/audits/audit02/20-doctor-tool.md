@@ -179,14 +179,14 @@ handle (sqlite integrity check, session counts).
 - `dux-amq doctor --anonymize` shows no `/home/<actual-user>` path.
 
 ## Acceptance criteria
-- [ ] `dux-amq-doctor` script exists; installed to `$LOCAL_BIN`.
-- [ ] All 9 sections render correctly on a healthy system.
-- [ ] `--json` output is valid JSON.
-- [ ] `--anonymize` redacts paths + branch names + agent IDs.
-- [ ] `dux doctor` Rust subcommand wraps + adds sqlite integrity.
-- [ ] 4 bats tests pass.
-- [ ] README "Operating dux-amq" section references `dux-amq doctor`.
-- [ ] PR: `feat(observability): dux-amq doctor triage tool (audit01 P2-11)`.
+- [x] `dux-amq-doctor` script exists; installed to `$LOCAL_BIN`.
+- [x] All 9 sections render correctly on a healthy system.
+- [x] `--json` output is valid JSON.
+- [x] `--anonymize` redacts paths + branch names + agent IDs.
+- [x] `dux doctor` Rust subcommand wraps + adds sqlite integrity.
+- [x] 4 bats tests pass (`dux-amq/tests/doctor.bats`).
+- [x] README references `dux doctor` / `dux-amq doctor` (top-level README + `SECURITY.md` Verification section + dux-amq/README "Diagnostics" added in audit02 docs follow-up).
+- [x] PR: `feat(observability): dux-amq doctor triage tool (audit01 P2-11)` — landed via PR #2.
 
 ## Known pitfalls
 - Doctor must NEVER hang. Wrap each section in a 5 s timeout

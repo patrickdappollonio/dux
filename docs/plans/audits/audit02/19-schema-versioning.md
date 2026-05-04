@@ -144,14 +144,14 @@ Add `docs/contributing/schema-policy.md`:
   unexpected changes after migration.
 
 ## Acceptance criteria
-- [ ] `MIGRATIONS` slice with at least 2 entries (initial + state-v2).
-- [ ] `PRAGMA user_version` set after each migration.
-- [ ] `ensure_column` deprecated; new schema additions go via files.
-- [ ] `Config::schema_version` field + migration ladder.
-- [ ] `migrate_config` called from `Config::load`.
-- [ ] `docs/contributing/schema-policy.md` written.
-- [ ] 3 tests pass.
-- [ ] PR: `feat(storage): explicit schema versioning (P1-Y)`.
+- [x] `MIGRATIONS` slice with at least 2 entries (`0001_initial_schema.sql`, `0002_session_state_v2.sql`).
+- [x] `PRAGMA user_version` set after each migration.
+- [x] `ensure_column` deprecated; new schema additions go via files.
+- [x] `Config::schema_version` field + migration ladder (`migrate_config`).
+- [x] `migrate_config` called from `Config::load`.
+- [x] `docs/contributing/schema-policy.md` written.
+- [x] 3 tests pass (`tests/storage_migrations.rs`).
+- [x] PR: `feat(storage): explicit schema versioning (P1-Y)` — landed via PR #2.
 
 ## Known pitfalls
 - Never edit a previously-committed migration. If you need to fix a

@@ -114,7 +114,7 @@ surface in audit02.
 - [x] `codex-amq` line ~32 wraps the bypass flag in a `CODEX_AMQ_YOLO` gate; `exec` line moved to ~37 (was estimated at ~27 — the gate block was inserted between the existing `amq wake` background spawn and the `exec`, pushing the `exec` down by ~10 lines).
 - [x] README "Permission model" + "Session seeding" sections present.
 - [x] `wrappers.bats` covers all 6 cases above (plus 3 extra: legacy `CLAUDE_YOLO` for both panes, and the `CLAUDE_AMQ_SAFE` deprecation warning); passes locally via `make overlay-test`.
-- [ ] PR opened: `feat(wrappers): default-deny on YOLO + opt-in session seeding` (deferred — caller asked for local-only commit; no push).
+- [x] PR opened: `feat(wrappers): default-deny on YOLO + opt-in session seeding` — folded into the `audit02/integration` rollup that landed as PR #2.
 
 ## Known pitfalls
 - Bash arrays + `set -u` + `"${ARR[@]}"` on empty arrays: macOS Bash 3.2

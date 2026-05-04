@@ -182,17 +182,17 @@ Upload `.sig` + `.crt` per asset.
   matches).
 
 ## Acceptance criteria
-- [ ] `deny.toml` at repo root, passes `cargo deny check`.
-- [ ] `pr.yml` and `test.yml` have a `security` job running both
+- [x] `deny.toml` at repo root, passes `cargo deny check`.
+- [x] `pr.yml` and `test.yml` have a `security` job running both
       `cargo audit --deny warnings` and `cargo deny check`.
-- [ ] `release.yml` build uses `cargo auditable build`.
-- [ ] `release.yml` produces an SBOM per target.
-- [ ] `release.yml` calls `actions/attest-build-provenance` (with
+- [x] `release.yml` build uses `cargo auditable build`.
+- [x] `release.yml` produces an SBOM per target (cargo-cyclonedx).
+- [x] `release.yml` calls `actions/attest-build-provenance` (with
       job-level `id-token: write`).
-- [ ] Release uploads `SHA256SUMS`.
-- [ ] tar invocation uses reproducibility flags.
-- [ ] (Optional) cosign signing wired up.
-- [ ] PR: `ci(security): cargo-audit/deny + auditable + SBOM + provenance + SHA256SUMS (P0-I)`.
+- [x] Release uploads `SHA256SUMS`.
+- [x] tar invocation uses reproducibility flags (`--sort=name --owner=0 --group=0 --numeric-owner --mtime=...`).
+- [ ] (Optional) cosign signing wired up — deferred to a follow-up; attestation is sufficient for current threat model.
+- [x] PR: `ci(security): cargo-audit/deny + auditable + SBOM + provenance + SHA256SUMS (P0-I)` — landed via PR #2.
 
 ## Known pitfalls
 - `cargo deny check` on first run will surface license complaints from

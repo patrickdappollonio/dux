@@ -100,12 +100,12 @@ Append to CLAUDE.md or a CONTRIBUTING.md:
 - `markdownlint` clean.
 
 ## Acceptance criteria
-- [ ] `SECURITY.md` has a STRIDE table covering T1–T12.
-- [ ] `docs/operations/threat-model.md` exists with one paragraph per row.
-- [ ] Audit02 plan phase files cross-reference threat IDs.
-- [ ] CLAUDE.md / CONTRIBUTING.md updated with the "must update SECURITY.md
-      when adding attack surface" rule.
-- [ ] PR: `docs(security): living STRIDE threat model + update cadence`.
+- [x] `SECURITY.md` has a STRIDE table covering T1–T12.
+- [x] `docs/operations/threat-model.md` exists with one paragraph per row.
+- [x] Audit02 plan phase files cross-reference threat IDs (T1–T12 referenced from the relevant phase files).
+- [x] CLAUDE.md updated with the "must update SECURITY.md
+      when adding attack surface" rule (`Update SECURITY.md when you add attack surface`).
+- [x] PR: `docs(security): living STRIDE threat model + update cadence` — landed via PR #2.
 
 ## Known pitfalls
 - The threat model will go stale fast unless engineers actually

@@ -127,14 +127,14 @@ fn backup_to_produces_valid_db() {
   start dux — should refuse with the integrity-check error pointing at `.bak`.
 
 ## Acceptance criteria
-- [ ] `storage.rs::open_connection` sets WAL + synchronous + integrity check.
-- [ ] `Storage::backup_to(dst)` implemented using rusqlite's online
+- [x] `storage.rs::open_connection` sets WAL + synchronous + integrity check.
+- [x] `Storage::backup_to(dst)` implemented using rusqlite's online
       backup API.
-- [ ] `spawn_backup_worker` runs on app init when interval > 0.
-- [ ] `StorageConfig::backup_interval_minutes` config field with
+- [x] `spawn_backup_worker` runs on app init when interval > 0.
+- [x] `StorageConfig::backup_interval_minutes` config field with
       sensible default (30).
-- [ ] 3 integration tests pass.
-- [ ] PR: `feat(storage): WAL + integrity check + periodic backup (P1-W)`.
+- [x] 3 integration tests pass (`tests/storage_integration.rs`).
+- [x] PR: `feat(storage): WAL + integrity check + periodic backup (P1-W)` — landed via PR #2.
 
 ## Known pitfalls
 - WAL adds two extra files (`-wal`, `-shm`) — backup procedures must

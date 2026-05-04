@@ -170,14 +170,14 @@ fn end_to_end_log_line_has_no_escapes() {
   literally, not interpret it.
 
 ## Acceptance criteria
-- [ ] `src/sanitize.rs` exists with 4 unit tests passing.
-- [ ] `logger.rs::log` runs `sanitize::for_terminal(message)`.
-- [ ] `set_error`/`set_info` run `sanitize::truncate(..., N)`.
-- [ ] All `String::from_utf8_lossy(&output.stderr)` in `src/git.rs`
+- [x] `src/sanitize.rs` exists with 4 unit tests passing (now 5).
+- [x] `logger.rs::log` runs `sanitize::for_terminal(message)`.
+- [x] `set_error`/`set_info` run `sanitize::truncate(..., N)`.
+- [x] All `String::from_utf8_lossy(&output.stderr)` in `src/git.rs`
       replaced with `sanitize::utf8_lossy`.
-- [ ] Integration test asserts no escape bytes survive.
-- [ ] `cargo clippy --all-targets -- -D warnings` green.
-- [ ] PR: `feat(security): sanitize operator-visible strings (P0-B/C)`.
+- [x] Integration test asserts no escape bytes survive (`tests/sanitize.rs`).
+- [x] `cargo clippy --all-targets -- -D warnings` green.
+- [x] PR: `feat(security): sanitize operator-visible strings (P0-B/C)` — landed via PR #2 (audit02/integration).
 
 ## Known pitfalls
 - The sanitizer is **called from inside `logger::log`**, which means

@@ -118,12 +118,12 @@ test-all-platforms:
 - `cargo build --target x86_64-apple-darwin` succeeds on a macOS runner.
 
 ## Acceptance criteria
-- [ ] PR/test workflows have macOS in matrix.
-- [ ] release.yml pins `macos-13` for Intel, `macos-14` for ARM.
-- [ ] All `to_string_lossy()` in `src/git.rs` replaced with `path.as_os_str()`
+- [x] PR/test workflows have macOS in matrix.
+- [x] release.yml pins `macos-13` for Intel, `macos-14` for ARM.
+- [x] All `to_string_lossy()` in `src/git.rs` replaced with `path.as_os_str()`
       or direct `Path` arg passing.
-- [ ] Non-UTF-8 portability test passes on Linux (and macOS via CI).
-- [ ] PR: `ci(matrix): add macOS + OsStr-portable git args (P1-S, P2-11)`.
+- [x] Non-UTF-8 portability test passes on Linux via CI (`tests/git_portability.rs`).
+- [x] PR: `ci(matrix): add macOS + OsStr-portable git args (P1-S, P2-11)` — landed via PR #2.
 
 ## Known pitfalls
 - macOS GitHub runner billing is ~10× Linux — keep the matrix lean

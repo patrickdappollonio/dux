@@ -123,12 +123,12 @@ Document explicitly:
 - `dux-amq doctor` shows the encryption section after the helper ran.
 
 ## Acceptance criteria
-- [ ] `docs/operations/encryption-at-rest.md` exists and covers options A/B.
-- [ ] `dux-amq/scripts/install-gocryptfs.sh` is executable + idempotent.
-- [ ] Doctor reports mount type when applicable.
-- [ ] SECURITY.md links to the playbook.
-- [ ] README "Production setup" notes the option.
-- [ ] PR: `docs(security): encryption-at-rest playbook (T5, P2-4)`.
+- [x] `docs/operations/encryption-at-rest.md` exists and covers options A/B.
+- [x] `dux-amq/scripts/install-gocryptfs.sh` is executable + idempotent.
+- [ ] Doctor reports mount type when applicable — tracked as a follow-up in `artifacts/25-doctor-followup.txt`. Current doctor only emits a TODO marker for the encryption section.
+- [x] SECURITY.md links to the playbook (T5 row).
+- [x] dux-amq/README "Production setup" notes the option.
+- [x] PR: `docs(security): encryption-at-rest playbook (T5, P2-4)` — landed via PR #2.
 
 ## Known pitfalls
 - gocryptfs `-allow_other` may need `user_allow_other` in

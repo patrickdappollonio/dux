@@ -139,14 +139,14 @@ do not depend on this; both Phase 22 and Phase 13 can land in either order.
   second wrapper invocation refuses with the red banner.
 
 ## Acceptance criteria
-- [ ] All three wrappers use `setsid amq wake … & disown; echo $! > $WAKE_PID`.
-- [ ] `wake-$ME.log` and `wake-$ME.pid` written under `~/.local/share/dux-amq/`.
-- [ ] `install.sh` preflight collects ALL missing tools, fails with one list.
-- [ ] `claude-amq` seed reports rsync error count when non-zero.
-- [ ] Hash guard checks recorded mtime vs binary mtime.
-- [ ] Identity collision detected; refuses to start.
-- [ ] 5 bats tests pass.
-- [ ] PR: `fix(wrappers): wake durability + preflight + identity collision (P1-B/C/D/E/F)`.
+- [x] All three wrappers use `setsid amq wake … & disown; echo $! > $WAKE_PID`.
+- [x] `wake-$ME.log` and `wake-$ME.pid` written under `~/.local/share/dux-amq/`.
+- [x] `install.sh` preflight collects ALL missing tools, fails with one list.
+- [x] `claude-amq` seed reports rsync error count when non-zero.
+- [x] Hash guard checks recorded mtime vs binary mtime.
+- [x] Identity collision detected; refuses to start.
+- [x] 5 bats tests pass (`dux-amq/tests/wrappers-p1.bats`).
+- [x] PR: `fix(wrappers): wake durability + preflight + identity collision (P1-B/C/D/E/F)` — landed via PR #2.
 
 ## Known pitfalls
 - `setsid` on macOS may differ from Linux util-linux; verify on macOS

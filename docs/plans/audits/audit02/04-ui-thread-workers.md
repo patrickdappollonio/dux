@@ -135,11 +135,11 @@ half-populated state.
 - `cargo clippy --all-targets -- -D warnings` green.
 
 ## Acceptance criteria
-- [ ] All 9 sites in the table no longer call `git::*` directly on UI thread.
-- [ ] `WorkerEvent` has 5 new variants; `drain_events` handles each.
-- [ ] `App::new` benchmarks under 100 ms with 10 placeholder projects.
-- [ ] No new panics; placeholder render path covers all loading states.
-- [ ] PR: `perf(app): move blocking git off UI thread (P0-D)`.
+- [x] All 9 sites in the table no longer call `git::*` directly on UI thread.
+- [x] `WorkerEvent` has 5 new variants; `drain_events` handles each (`ProjectMetaReady`, `ReloadChangedFilesReady`, `StagedDiffReady`, `CommitFinished`, `AddProjectMetaReady`).
+- [x] `App::new` benchmarks under 100 ms with 10 placeholder projects.
+- [x] No new panics; placeholder render path covers all loading states.
+- [x] PR: `perf(app): move blocking git off UI thread (P0-D)` — landed via PR #2.
 
 ## Known pitfalls
 - `commit` is order-sensitive (user may type into prompt mid-commit).

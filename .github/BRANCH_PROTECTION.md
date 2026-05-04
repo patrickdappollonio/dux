@@ -11,15 +11,19 @@ GitHub UI (Settings → Branches → Protection rules → main).
   - Required approvals: 1 (CODEOWNERS-aware)
   - Dismiss stale approvals on push: yes
   - Require approval from CODEOWNERS: yes
-- **Required status checks**:
-  - `Format` (cargo fmt)
-  - `Clippy` (cargo clippy -D warnings)
-  - `Test` (cargo test --all-features) — Linux + macOS matrix
-  - `Audit` (cargo audit --deny warnings) — added by Phase 07
-  - `Deny` (cargo deny check) — added by Phase 07
-  - `Shellcheck` (overlay shell scripts) — added by overlay-ci
-  - `Bats` (overlay bats tests) — added by overlay-ci
+- **Required status checks** (the contexts currently enforced on `main`;
+  verify with `gh api /repos/SiavZ/dux-amq-setup/branches/main/protection`):
+  - `Test (ubuntu-24.04)` — `cargo test --all-features` from `.github/workflows/test.yml`
+  - `Test (macos-14)` — same matrix entry, Apple Silicon runner
+  - `Security` — bundles `cargo audit` + `cargo deny check` (Phase 07)
+  - `shell` — `shellcheck` + `bats` from `.github/workflows/overlay-ci.yml`
   - `Strict mode (require branches up to date before merging)`: yes
+- **Recommended (not currently required) but run on every PR**:
+  - `Format` (cargo fmt --check) from `.github/workflows/pr.yml`
+  - `Clippy (ubuntu-24.04)` and `Clippy (macos-14)` (cargo clippy -D warnings)
+  - These run on every PR but are not in the required-contexts list. Add
+    them to the protection if your team treats them as merge gates — the
+    recipe at the bottom of this file shows the syntax.
 - **Disallow force push**: yes (covers force-push to main + delete)
 - **Disallow deletion**: yes
 - **Require signed commits on main**: opt-in if/when GPG enrollment is in place
@@ -39,15 +43,16 @@ GitHub UI (Settings → Branches → Protection rules → main).
 ## Configuration recipe (idempotent)
 
 ```bash
+# Apply the currently-enforced contexts. To also gate on Format/Clippy,
+# add the matching `-f 'required_status_checks[contexts][]=...'` lines.
 gh api -X PUT \
   -H "Accept: application/vnd.github+json" \
   /repos/SiavZ/dux-amq-setup/branches/main/protection \
   -f required_status_checks[strict]=true \
-  -f 'required_status_checks[contexts][]=Format' \
-  -f 'required_status_checks[contexts][]=Clippy' \
-  -f 'required_status_checks[contexts][]=Test' \
-  -f 'required_status_checks[contexts][]=Audit' \
-  -f 'required_status_checks[contexts][]=Deny' \
+  -f 'required_status_checks[contexts][]=Test (ubuntu-24.04)' \
+  -f 'required_status_checks[contexts][]=Test (macos-14)' \
+  -f 'required_status_checks[contexts][]=Security' \
+  -f 'required_status_checks[contexts][]=shell' \
   -f required_pull_request_reviews[required_approving_review_count]=1 \
   -f required_pull_request_reviews[dismiss_stale_reviews]=true \
   -f required_pull_request_reviews[require_code_owner_reviews]=true \

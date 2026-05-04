@@ -90,7 +90,7 @@ phases reference, and snapshot CI green-ness.
 - [x] `cargo fmt`, `clippy -D warnings`, `cargo test`, `make overlay-test` green.
 - [x] `cargo audit` and `cargo deny` install without error (verified locally,
   not yet in CI).
-- [ ] Preflight PR merged.
+- [x] Preflight PR merged — folded into the `audit02/integration` rollup that landed as PR #2.
 
 ## Known pitfalls
 - audit02 lines reference `554255d`. If `git rev-parse HEAD` is far from

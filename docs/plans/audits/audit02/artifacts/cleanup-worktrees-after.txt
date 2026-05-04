@@ -1,0 +1,8 @@
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup                                   0723c9d [audit02/24-p2-bundle]
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup-D                                 af8097a [audit01/standalone]
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup-final                             5d1e500 [audit01/final-validation]
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup-integration                       dc53bc9 [audit01-integration]
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup-p2                                c0d98ca [audit01/p2-bundle]
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup-release                           ca0572c [audit01/release-pipeline]
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-aa951acc  a5e6792 [audit02/06-gha-pinning]
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-ae7400c9  8fcbb2e [audit02/01-wrapper-defaults]

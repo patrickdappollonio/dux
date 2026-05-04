@@ -218,6 +218,80 @@ level = "info"   # "error", "info", or "debug"
 path = "dux.log" # relative to config dir, or use an absolute path
 ```
 
+Records are emitted as **JSON Lines** (one structured object per line) by the
+`tracing` subscriber. Every record carries a `target` such as `dux::workers`,
+`dux::pty`, or `dux::sessions`, plus structured fields (`session_id`,
+`agent`, `err`, …) so log post-processing — GDPR purge filters, the doctor
+tool, simple `jq` greps — works without parsing free-form text. Operator-facing
+strings (git stderr, branch names, PR titles, process names) are sanitized to
+strip ANSI/OSC/DCS sequences before they hit the log, so `tail dux.log` is
+safe even when an upstream emitted hostile bytes.
+
+The log file rotates daily; older days are kept in place next to `dux.log`
+(`dux.log.YYYY-MM-DD`) so you can compress or ship them with normal log
+tooling.
+
+### Resource limits
+
+dux ships with conservative defaults for the resources a single host should
+spend on agent panes. Adjust them in `config.toml`:
+
+```toml
+[limits]
+max_panes = 16                # hard cap on simultaneously-active panes
+max_companion_terminals = 4   # cap on companion (raw shell) terminals
+max_total_scrollback_mb = 256 # soft cap on scrollback grid memory
+disk_high_water_pct = 95      # refuse new agents above this disk usage
+disk_warn_pct = 80            # status-line warning above this disk usage
+enable_scrollback_overflow_autodetach = false
+```
+
+`create_agent` consults these caps and refuses with a status-line error when
+exceeded. The disk watchdog samples free space and bands the status line
+yellow at `disk_warn_pct`, red (refuse new agents) at `disk_high_water_pct`.
+
+### Auto-resume tuning
+
+When `defaults.auto_resume_on_start = true`, dux re-spawns persisted
+sessions on launch. To avoid a thundering herd on spot-VM reboot, the
+resume scheduler is bounded:
+
+```toml
+[auto_resume]
+concurrency = 4   # max parallel PTY spawns
+stale_days = 30   # skip sessions whose worktree mtime is older than this
+stagger_ms = 250  # delay between successive spawn attempts
+```
+
+### Session DB durability
+
+`sessions.sqlite3` opens with `PRAGMA journal_mode=WAL` and
+`PRAGMA synchronous=NORMAL` so a spot-VM preemption mid-write no longer
+corrupts the database. `PRAGMA integrity_check` runs once per launch, and a
+periodic `.backup` is taken to `sessions.sqlite3.bak`. Tune the cadence:
+
+```toml
+[storage]
+backup_interval_minutes = 30  # 0 disables periodic backups
+```
+
+### Diagnostics
+
+`dux doctor` prints a single triage dump that operators can attach to a
+support thread:
+
+```bash
+dux doctor              # human-readable
+dux doctor --json       # machine-parseable
+dux doctor --anonymize  # redact $HOME, branches, agent IDs
+```
+
+The dump covers `sessions.sqlite3` integrity and counts plus, when the
+`dux-amq` overlay is installed, the AMQ binary integrity hash, queue depth,
+oldest message age, kernel `dev.tty.legacy_tiocsti` value, encryption
+posture of `$STATE_ROOT`, and recent auto-resume/purge counters. It is
+read-only and safe to run while the TUI is open.
+
 ### Data lifecycle
 
 dux stores per-session data in several places: the worktree on disk, a row in `sessions.sqlite3`, the AMQ inbox (`/data/state/amq/agents/<branch>/`), the per-provider chat history (`/data/state/{claude,codex,gemini}/projects/<encoded>/`), and structured log records tagged with the session's `session_id`. Most workflows leave that data in place — `dux config reset --all` is a holistic factory reset, but it does not target an individual session.

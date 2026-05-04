@@ -129,14 +129,14 @@ fn scrollback_overflow_detaches_oldest_pane() { ... }
   agent creation; refused.
 
 ## Acceptance criteria
-- [ ] `LimitsConfig` with 5 fields rendered in canonical config.
-- [ ] `create_agent` checks `max_panes` and `disk_high_water_pct`.
-- [ ] `disk_watchdog` worker emits `DiskUsage` events every 60 s.
-- [ ] Status line shows banner at warn/high-water.
-- [ ] Auto-detach on scrollback overflow implemented (or feature-gated
-      behind `[limits]` if too risky for first land).
-- [ ] 3 tests pass.
-- [ ] PR: `feat(limits): pane/scrollback/disk caps (P1-AA)`.
+- [x] `LimitsConfig` with 6 fields rendered in canonical config (`max_panes`, `max_companion_terminals`, `max_total_scrollback_mb`, `disk_high_water_pct`, `disk_warn_pct`, `enable_scrollback_overflow_autodetach`).
+- [x] `create_agent` checks `max_panes` and `disk_high_water_pct`.
+- [x] `disk_watchdog` worker emits `DiskUsage` events every 60 s.
+- [x] Status line shows banner at warn/high-water.
+- [x] Auto-detach on scrollback overflow implemented (feature-gated
+      behind `enable_scrollback_overflow_autodetach`, default off).
+- [x] 3 tests pass (`tests/limits.rs`).
+- [x] PR: `feat(limits): pane/scrollback/disk caps (P1-AA)` — landed via PR #2.
 
 ## Known pitfalls
 - `statvfs` on a bind mount may report the underlying disk's stats

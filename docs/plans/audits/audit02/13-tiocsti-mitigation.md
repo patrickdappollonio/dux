@@ -156,14 +156,14 @@ TIOCSTI-disabled kernels". Reference Linux 6.2 deprecation, Ubuntu LP
 - `make overlay-test` green.
 
 ## Acceptance criteria
-- [ ] `install.sh` detects kernel state and writes `.tiocsti-state` flag.
-- [ ] Wrappers branch on `DUX_AMQ_INJECT_MODE` / `.tiocsti-state`.
-- [ ] `dux-amq-inject-bridge` script implements at least the tmux
-      strategy with a documented fallback.
-- [ ] `wake-$ME.log` captures stderr instead of `>/dev/null`.
-- [ ] README "Kernel compatibility" section.
-- [ ] Upstream issue filed; URL in `artifacts/13-upstream-issue.txt`.
-- [ ] PR: `feat(wake): TIOCSTI-disabled fallback via inject bridge (audit01 P1-1)`.
+- [x] `install.sh` detects kernel state and writes `.tiocsti-state` flag.
+- [x] Wrappers branch on `DUX_AMQ_INJECT_MODE` / `.tiocsti-state`.
+- [x] `dux-amq-inject-bridge` script implements at least the tmux
+      strategy with a documented fallback (file-based queue under `~/.local/share/dux-amq/inject-queue/`).
+- [x] `wake-$ME.log` captures stderr instead of `>/dev/null`.
+- [x] README "Kernel compatibility" section (`dux-amq/README.md`).
+- [x] Upstream issue note recorded in `artifacts/13-upstream-issue.txt` (deferred filing — same constraint as Phase 08).
+- [x] PR: `feat(wake): TIOCSTI-disabled fallback via inject bridge (audit01 P1-1)` — landed via PR #2.
 
 ## Known pitfalls
 - AMQ may not support shell pipelines as `--inject-via` argument

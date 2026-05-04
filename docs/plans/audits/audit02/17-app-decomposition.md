@@ -138,13 +138,13 @@ Avoid `&mut self` when split borrow works.
   overlay (`?` key). No regressions.
 
 ## Acceptance criteria
-- [ ] `App` struct field count ≤ 8 (the 6 sub-structs + config + theme).
-- [ ] `src/app/state/` exists with `{ui,runtime,git,remote}.rs`.
-- [ ] Original 120 fields all migrated; none lost.
-- [ ] `cargo clippy -D warnings` green.
-- [ ] `cargo test` green.
-- [ ] `wc -l src/app/mod.rs` substantially reduced.
-- [ ] PR: `refactor(app): decompose god-object into UiState/RuntimeState/GitState/RemoteState (P1-V)`.
+- [ ] `App` struct field count ≤ 8 (the 6 sub-structs + config + theme) — currently ~5 sub-structs + ~130 leftover fields; phase 3 will continue the migration.
+- [x] `src/app/state/` exists with `ui.rs`, `runtime.rs`, `git.rs` (P1-V phase 1 + phase 2). RemoteState left for a follow-up — gh/PR fields currently live on `RuntimeState`.
+- [x] Fields migrated for the three landed sub-structs; none lost.
+- [x] `cargo clippy -D warnings` green.
+- [x] `cargo test` green.
+- [ ] `wc -l src/app/mod.rs` substantially reduced — currently ~2900 LOC; full reduction depends on the still-pending RemoteState split.
+- [x] PR: `refactor(app): decompose god-object into UiState/RuntimeState/GitState (P1-V)` — phase 1 landed via PR #2; phase 2 (GitState) landed via PR #4.
 
 ## Known pitfalls
 - **Borrow checker is the main enemy.** Use struct-pattern destructuring

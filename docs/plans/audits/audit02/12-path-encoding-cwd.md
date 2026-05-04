@@ -146,14 +146,14 @@ load lib/setup
   encoder's output for the same paths — must match.
 
 ## Acceptance criteria
-- [ ] `encode-claude-project-dir` script exists, installed to `$LOCAL_BIN`.
-- [ ] Wrappers use the encoder (no inline `sed` paths).
-- [ ] All three wrappers replace prefix-glob with `realpath`
+- [x] `encode-claude-project-dir` script exists, installed to `$LOCAL_BIN`.
+- [x] Wrappers use the encoder (no inline `sed` paths).
+- [x] All three wrappers replace prefix-glob with `realpath`
       containment via `is_dux_worktree()`.
-- [ ] Fixture file `claude-paths.txt` has at least 6 entries covering
-      hyphens, underscores, dotted paths, trailing slash.
-- [ ] `encoder-fixtures.bats` passes locally and in CI.
-- [ ] PR: `fix(wrappers): correct path encoder + realpath cwd check (audit01 P0-5)`.
+- [x] Fixture file `claude-paths.txt` has at least 6 entries covering
+      hyphens, underscores, dotted paths, trailing slash (45 lines today).
+- [x] `encoder-fixtures.bats` passes locally and in CI.
+- [x] PR: `fix(wrappers): correct path encoder + realpath cwd check (audit01 P0-5)` — landed via PR #2.
 
 ## Known pitfalls
 - Claude Code's encoder MAY vary by version. Pin against the AMQ

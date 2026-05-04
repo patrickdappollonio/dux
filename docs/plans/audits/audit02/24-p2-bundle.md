@@ -176,17 +176,17 @@ leave it dangling.
   the backtrace (Phase 24.4).
 
 ## Acceptance criteria
-- [ ] `.github/CODEOWNERS` covers patched files + audit deliverables + supply chain.
-- [ ] `SECURITY.md` lives at repo root.
-- [ ] `.github/dependabot.yml` covers cargo + github-actions weekly.
-- [ ] `Cargo.toml` `[profile.release]` has `debug = "line-tables-only"`.
-- [ ] `install.sh` uses `printf '%s'` for paths; preserves mode on jq merge.
-- [ ] `release.yml` has `concurrency:`, reproducible-tar flags, README hard-fail.
-- [ ] `pr.yml` and `overlay-ci.yml` scope push to main.
-- [ ] `storage.rs` warns instead of silent fallback on JSON failures.
-- [ ] `expand_path` post-expansion `..` rejection.
-- [ ] `tests/scrollbar_render.rs` either populated or removed.
-- [ ] PR: `chore(p2): hygiene bundle — CODEOWNERS, SECURITY, dependabot, build profile, et al.`.
+- [x] `.github/CODEOWNERS` covers patched files + audit deliverables + supply chain.
+- [x] `SECURITY.md` lives at repo root.
+- [x] `.github/dependabot.yml` covers cargo + github-actions weekly.
+- [x] `Cargo.toml` `[profile.release]` has `debug = "line-tables-only"`.
+- [x] `install.sh` uses `printf '%s'` for paths; preserves mode on jq merge.
+- [x] `release.yml` has `concurrency:`, reproducible-tar flags, README hard-fail.
+- [x] `pr.yml` and `overlay-ci.yml` scope push to main.
+- [x] `storage.rs` warns instead of silent fallback on JSON failures.
+- [x] `expand_path` post-expansion `..` rejection.
+- [x] `tests/scrollbar_render.rs` either populated or removed (removed; covered by render integration tests).
+- [x] PR: `chore(p2): hygiene bundle — CODEOWNERS, SECURITY, dependabot, build profile, et al.` — landed via PR #2.
 
 ## Known pitfalls
 - `debug = "line-tables-only"` may not be available on all rustc

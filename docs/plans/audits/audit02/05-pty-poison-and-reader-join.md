@@ -136,16 +136,16 @@ fn render_after_terminal_mutex_poison_does_not_panic() {
   rather than tearing down.
 
 ## Acceptance criteria
-- [ ] Three `.expect("terminal mutex poisoned")` replaced with
+- [x] Three `.expect("terminal mutex poisoned")` replaced with
   log-and-return sentinel.
-- [ ] `PtyClient::reader_handle: Option<JoinHandle<()>>` field present.
-- [ ] `Drop for PtyClient` joins the handle (with optional timeout).
-- [ ] Unsafe block at `pty.rs:~496` has SAFETY comment naming the
-  `master` field as the keep-alive.
-- [ ] `master` field uses `#[doc]` + `let _ = &self.master;` instead of
+- [x] `PtyClient::reader_handle: Option<JoinHandle<()>>` field present.
+- [x] `Drop for PtyClient` joins the handle (with optional timeout).
+- [x] Unsafe block at `pty.rs:~496` (now `:558`) has SAFETY comment naming
+  the `master` field as the keep-alive.
+- [x] `master` field uses `#[doc]` + `let _ = &self.master;` instead of
   `#[allow(dead_code)]`.
-- [ ] Optional: poison-recovery integration test added.
-- [ ] PR: `fix(pty): poison-tolerance + reader join + unsafe SAFETY doc`.
+- [x] Optional: poison-recovery integration test added (`tests/pty_integration.rs`).
+- [x] PR: `fix(pty): poison-tolerance + reader join + unsafe SAFETY doc` — landed via PR #2.
 
 ## Known pitfalls
 - A 2 s join timeout on the reader is generous on healthy paths but

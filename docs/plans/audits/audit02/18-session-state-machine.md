@@ -140,14 +140,14 @@ fn live_session_not_persisted_as_live() {
   a discrete step.
 
 ## Acceptance criteria
-- [ ] `SessionState` enum (5 variants) replaces `SessionStatus`.
+- [x] `SessionState` enum (5 variants) introduced (`src/model.rs`); typed `transition()` ships in phase 1. Phase 2 will retire `SessionStatus` once the storage migration lands.
 - [ ] All transitions go through `RuntimeState::*` fns; no direct
-      enum mutation outside that module.
-- [ ] `providers: HashMap` removed (PtyHandle lives inside the state).
-- [ ] Storage serializes via `PersistedSessionState`; migration from
-      old text status validated by a fixture.
-- [ ] 4 tests pass.
-- [ ] PR: `refactor(model): explicit session state machine (P1-Z)`.
+      enum mutation outside that module — phase 2 work, deferred.
+- [ ] `providers: HashMap` removed (PtyHandle lives inside the state) — phase 2 work, blocked on PR #5 merge conflicts.
+- [x] Storage serializes via `PersistedSessionState`; migration from
+      old text status validated by a fixture (`tests/session_state.rs`, schema migration `0002_session_state_v2.sql`).
+- [x] 4 tests pass (`tests/session_state.rs`).
+- [x] PR (phase 1): `refactor(model): introduce SessionState typestate (P1-Z)` — landed via PR #2. Phase 2 PR #5 still pending merge.
 
 ## Known pitfalls
 - The `Live` → `Detached` on persist semantics may surprise users

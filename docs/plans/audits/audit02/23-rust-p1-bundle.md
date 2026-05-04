@@ -146,14 +146,14 @@ fn random_agent_name() -> String {
 - `cargo +nightly miri test` (optional) — sanity check no UB introduced.
 
 ## Acceptance criteria
-- [ ] All git invocation sites with user-controlled positional args
+- [x] All git invocation sites with user-controlled positional args
       use `--`.
-- [ ] `provider.rs` uses `NamedTempFile` (mode 0600); no `remove_file` calls.
-- [ ] `ensure_column` allowlists table/column/sql_type; rejects unsafe.
-- [ ] `serial_test = "3"` in dev-deps; env-var tests marked `#[serial]`.
-- [ ] `petname` panic replaced with `unwrap_or_else(...)`.
-- [ ] New `ensure_column_rejects_injection` test passes.
-- [ ] PR: `chore(rust): P1 hygiene bundle (P1-I/J/K/L/M)`.
+- [x] `provider.rs` uses `NamedTempFile` (mode 0600); no `remove_file` calls.
+- [x] `ensure_column` allowlists table/column/sql_type; rejects unsafe.
+- [x] `serial_test = "3"` in dev-deps; env-var tests marked `#[serial]`.
+- [x] `petname` panic replaced with `unwrap_or_else(...)` (`src/git.rs:742`).
+- [x] New `ensure_column_rejects_injection` test passes.
+- [x] PR: `chore(rust): P1 hygiene bundle (P1-I/J/K/L/M)` — landed via PR #2.
 
 ## Known pitfalls
 - The `--` separator must not be added to git invocations that don't

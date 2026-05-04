@@ -161,6 +161,34 @@ A native upstream fix (HMAC envelope + stdin piping inside AMQ itself) is tracke
 - **Identity collisions are possible** if two worktrees normalize to the same handle. Pick distinct branch names.
 - **Compaction risk** (when seeding is enabled): on repos with a heavy session history, `--fork-session` inherits all of it, which can push fresh sessions toward 1M-context billing tier earlier. If that bites, leave `CLAUDE_AMQ_SEED_FROM_PARENT` unset (the default) or revert `resume_args` to `["--continue"]`.
 
+## Diagnostics
+
+`dux-amq doctor` (audit02 phase 20) prints a self-check dump that
+operators can attach to a support thread. Same output is reachable
+via `dux doctor`, which adds a Rust-side `sessions.sqlite3` integrity
+section on top of the bash-script bundle.
+
+```bash
+dux-amq doctor              # human-readable
+dux-amq doctor --json       # machine-parseable; pipe to `jq`
+dux-amq doctor --anonymize  # redact $HOME, branch names, agent IDs
+```
+
+It reports: AMQ binary integrity (sha256 vs the pin in
+`bashrc-additions.sh`), kernel `dev.tty.legacy_tiocsti` value,
+`sessions.sqlite3` `PRAGMA integrity_check`, encryption posture of
+`$STATE_ROOT`, AMQ queue depth and oldest-message age, the
+`~/.claude` symlink target, free disk space, and the currently-running
+dux PID/uptime/RSS. Each external call is wrapped in `timeout 5`, so
+the tool never hangs even when the underlying piece is broken.
+
+The HMAC envelope (audit02 phase 08) lives at the path pointed to by
+`AMQ_SECRET_PATH` (default `$HOME/.local/share/dux-amq/amq-secret`,
+mode 0600). To rotate, `rm` the file and restart every pane —
+rotation invalidates every in-flight signed envelope by design.
+`dux-amq/scripts/amq-secret-init.sh` regenerates it idempotently on
+the next install.
+
 ## Production setup
 
 The default deployment relies on the cloud provider's at-rest

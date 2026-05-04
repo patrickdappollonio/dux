@@ -74,8 +74,17 @@ The `src/app/` directory splits the TUI into focused submodules. Each file conta
 - **`render.rs`** — All rendering methods (`render`, `render_header`, `render_left`, etc.) and UI helper functions.
 - **`sessions.rs`** — Project and session CRUD (create agent, delete, reconnect, refresh, project browser).
 - **`workers.rs`** — Background thread management (`drain_events`, `spawn_*`, `run_create_agent_job`).
+- **`state/`** — Sub-structs that group related fields off the `App` god-object (audit02 P1-V phase 1+2). Today: `RuntimeState` (worker channels, PTY map, atomics, lockfile, gh/PR tracking, refs watchers), `UiState` (pane focus, scroll offsets, modal stack, mouse layout, welcome state, force-redraw flag), and `GitState` (projects, sessions, change-file caches, commit-message editor, in-flight markers for git workers). The `App` struct still owns these as fields; methods reach through `self.<substruct>.<field>`. New related fields belong on the matching sub-struct, not directly on `App`.
+- **`text_input.rs`** / **`components/`** — small UI widgets and helpers extracted out of `render.rs`.
 
-When making changes, edit only the relevant submodule. If you need to add a new method to `App`, place it in the submodule that matches its concern. If adding a new type or enum, add it to `mod.rs`.
+When making changes, edit only the relevant submodule. If you need to add a new method to `App`, place it in the submodule that matches its concern. If adding a new type or enum, add it to `mod.rs` (or to `state/` when it represents grouped runtime/UI/git state).
+
+## Session lifecycle
+
+Session lifecycle is modeled by two enums in `src/model.rs` (audit02 P1-Z, phase 1):
+
+- **`SessionStatus`** — legacy string-tagged status (`active` | `detached` | `exited`). Persisted on every row today.
+- **`SessionState`** — typed lifecycle replacement (`Created`, `Spawning`, `Live`, `Detached`, `Exited`) with `transition()` enforcing the legal edges (`Created → Spawning → Live | Exited`, `Live ↔ Detached`, `Detached/Exited → Spawning` for re-spawn). Currently introduced **alongside** `SessionStatus`; phase 2 (planned) will retire the string status and fold the PTY handle into the `Live` variant for full typestate. Until then, `SessionState` is exercised by `tests/session_state.rs` and used at the persistence boundary; new lifecycle code should prefer `SessionState::transition` over editing the string status directly.
 
 ## Recommendations For Future Changes
 

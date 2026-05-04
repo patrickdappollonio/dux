@@ -1,0 +1,33 @@
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup                                                                    0723c9d [audit02/24-p2-bundle]
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup-D                                                                  af8097a [audit01/standalone]
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup-final                                                              5d1e500 [audit01/final-validation]
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup-fix-diff                                                           fa3eb04 [fix/diff-empty-statement]
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup-integration                                                        dc53bc9 [audit01-integration]
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup-p2                                                                 c0d98ca [audit01/p2-bundle]
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup-release                                                            ca0572c [audit01/release-pipeline]
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup-rust-patches                                                       bb32227 [audit01/rust-patches]
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup-wrapper-chain                                                      4d1dc11 [audit01/wrapper-chain]
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-a0b284da                                   cf6caeb [audit02/12-path-encoding] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-a0b78513                                   96c27c0 [audit02/07-ci-security-gates] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-a0e0ebd3                                   b603f55 [audit02/19-schema-versioning] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-a107b093                                   28edf81 [audit02/08-amq-message-auth] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-a32f4caf                                   3e5c1c3 [audit02/10-gdpr-purge] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-a395c293                                   8264b56 [audit02/09-tracing-migration] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-a608d6e5                                   dda3d23 [audit02/05-pty-hardening] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-a68746b1                                   c642673 [audit02/20-doctor-tool] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-a7d3f338                                   2f669d9 [audit02/00-preflight] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-a7e33db4                                   411a59c [audit02/integration] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-a924af9e                                   e3bbc97 [audit02/26-threat-model-docs] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-a99d7404                                   003e1bb [audit02/13-tiocsti-mitigation] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-aa052a4f/.claude/worktrees/agent-ade9f051  1197ef5 [worktree-agent-ade9f051] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-aa951acc                                   a5e6792 [audit02/06-gha-pinning] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-abc0ba99                                   b8b2ac9 [audit02/integration-fix-bats] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-ac0cd97a                                   d7d5df9 [audit02/25-encryption-at-rest] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-ac615648                                   2d9423a [audit02/03-sanitizer] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-ad4621c9                                   04bd9ea [audit02/17p2-app-decomposition-full] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-adb1f087                                   fb9d1ea [audit02/11-migration-safety] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-add899e8                                   10d2266 [audit02/14-sqlite-wal] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-ae3f96ee                                   b91ed67 [audit02/04-ui-thread-workers] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-ae7400c9                                   8fcbb2e [audit02/01-wrapper-defaults] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-aef7a125                                   11d9274 [audit02/21-macos-ci-portability] locked
+/home/siavash_kiani_jobzy_fi/Projects/dux-amq-setup/.claude/worktrees/agent-af41c0c0                                   e393c1d [audit02/23-rust-p1-bundle] locked

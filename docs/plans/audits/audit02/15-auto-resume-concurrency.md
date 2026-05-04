@@ -142,13 +142,13 @@ fn stagger_introduces_minimum_delay() {
   `auto_resume` skips it with a debug log line.
 
 ## Acceptance criteria
-- [ ] `AutoResumeConfig` with `concurrency`, `stale_days`, `stagger_ms`.
-- [ ] `auto_resume_all_sessions` uses a bounded scheduler.
-- [ ] Stale filter applied; returns to count of skipped sessions in log.
-- [ ] 3 unit/integration tests pass.
-- [ ] No new deps added (std + existing crossbeam).
-- [ ] Canonical config rendered with `[auto_resume]` section + comments.
-- [ ] PR: `perf(auto-resume): bounded concurrency + staleness filter (P1-U)`.
+- [x] `AutoResumeConfig` with `concurrency`, `stale_days`, `stagger_ms`.
+- [x] `auto_resume_all_sessions` uses a bounded scheduler.
+- [x] Stale filter applied; returns to count of skipped sessions in log.
+- [x] 3 unit/integration tests pass (`tests/auto_resume.rs`).
+- [x] No new deps added (std + existing crossbeam).
+- [x] Canonical config rendered with `[auto_resume]` section + comments.
+- [x] PR: `perf(auto-resume): bounded concurrency + staleness filter (P1-U)` — landed via PR #2.
 
 ## Known pitfalls
 - `Condvar::wait` can spuriously wake; always re-check `*g == 0` in

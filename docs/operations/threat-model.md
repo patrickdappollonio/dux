@@ -60,15 +60,18 @@ way to verify the sender; AMQ wrappers
 `--me` claims.
 
 **Mitigation in code.** Phase 08 adds an HMAC-signed envelope:
-each `amq send` reads a per-VM secret from
-`$STATE_ROOT/amq/secret` (mode 0600, owned by the wrapper user)
-and signs the payload + a monotonic nonce. Receivers verify the
-signature and reject replays. Defense in depth: messages from
-senders not on a per-pane allowlist are escalated from
+each `amq send` (via `dux-amq/scripts/amq-send-signed`) reads a
+per-VM secret from `$AMQ_SECRET_PATH` (default
+`$HOME/.local/share/dux-amq/amq-secret`, mode 0600, owned by the
+wrapper user — initialized by `dux-amq/scripts/amq-secret-init.sh`)
+and signs the payload + a monotonic nonce. Receivers verify via
+`amq-receive-verify` and reject replays. Defense in depth: messages
+from senders not on a per-pane allowlist are escalated from
 `--inject-mode raw` to `--inject-mode confirm`, requiring a human
-keystroke.
+keystroke. To rotate the secret, `rm` the file and restart every
+pane — rotation invalidates every in-flight signed envelope by design.
 
-**Residual risk.** Anyone who can read `$STATE_ROOT/amq/secret`
+**Residual risk.** Anyone who can read `$AMQ_SECRET_PATH`
 can forge messages. Since dux is single-user-on-a-VM, that means
 any code running as the operator can already forge — the HMAC
 limits the blast radius to *post-compromise* attackers, not
@@ -152,7 +155,7 @@ contain PII and live API tokens, all in plaintext.
 
 **Mitigation in code.** Phase 25 documents and tools an
 operator-driven encryption playbook in
-`docs/operations/encryption.md`: the recommended pattern is
+`docs/operations/encryption-at-rest.md`: the recommended pattern is
 `gocryptfs` over `/data/state` for portable VMs and LUKS for
 dedicated hosts. The playbook covers passphrase rotation and
 recovery, and the installer detects the encryption posture and

@@ -177,15 +177,15 @@ records tagged with that session_id. Run with --dry-run first.
 - `cargo clippy --all-targets -- -D warnings` green.
 
 ## Acceptance criteria
-- [ ] `dux session purge --hard <target>` exists and is documented.
-- [ ] Cascades to: sqlite, worktree, provider dirs (claude/codex/gemini),
-      AMQ inbox, log redact (if Phase 09 done).
-- [ ] `--dry-run` prints plan and exits without changes.
-- [ ] Confirmation requires typing "PURGE <branch>" verbatim.
-- [ ] Order of operations: worktree → providers → amq → log → sqlite.
-- [ ] 4 integration tests pass.
-- [ ] README "Data lifecycle" section.
-- [ ] PR: `feat(privacy): hard-purge command for full session erasure (P0-J)`.
+- [x] `dux session purge --hard <target>` exists and is documented (`src/cli.rs::run_session_purge`, README "Data lifecycle").
+- [x] Cascades to: sqlite, worktree, provider dirs (claude/codex/gemini),
+      AMQ inbox, log redact.
+- [x] `--dry-run` prints plan and exits without changes.
+- [x] Confirmation requires typing "PURGE <branch>" verbatim.
+- [x] Order of operations: worktree → providers → amq → log → sqlite (verified in `src/purge.rs::plan_for_session`).
+- [x] 4 integration tests pass (`tests/purge_integration.rs`).
+- [x] README "Data lifecycle" section.
+- [x] PR: `feat(privacy): hard-purge command for full session erasure (P0-J)` — landed via PR #2.
 
 ## Known pitfalls
 - The Claude Code on-disk encoder is **not** documented; we're

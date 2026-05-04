@@ -163,15 +163,15 @@ Add a "Logging" section under "Recommendations For Editing" (CLAUDE.md):
   `dux.log.<yesterday>` + new file for today.
 
 ## Acceptance criteria
-- [ ] `Cargo.toml` adds `tracing`, `tracing-subscriber` (json+env-filter+fmt), `tracing-appender`.
-- [ ] `logger.rs` rewritten over `tracing` with daily rotation + 7-file
+- [x] `Cargo.toml` adds `tracing`, `tracing-subscriber` (json+env-filter+fmt), `tracing-appender`.
+- [x] `logger.rs` rewritten over `tracing` with daily rotation + 7-file
       retention.
-- [ ] All existing `crate::logger::*` call sites still compile (back-compat shims).
-- [ ] At least 5 hot-path call sites migrated to structured `tracing!`
+- [x] All existing `crate::logger::*` call sites still compile (back-compat shims).
+- [x] At least 5 hot-path call sites migrated to structured `tracing!`
       macros (workers.rs / sessions.rs / pty.rs / git.rs / app/mod.rs).
-- [ ] `dux.log` is now JSON Lines.
-- [ ] CLAUDE.md updated with the logging guidance.
-- [ ] PR: `feat(observability): tracing + JSON + rotation (P1-X)`.
+- [x] `dux.log` is now JSON Lines (`tests/logger_jsonlines.rs` proves it).
+- [x] CLAUDE.md updated with the logging guidance.
+- [x] PR: `feat(observability): tracing + JSON + rotation (P1-X)` — landed via PR #2.
 
 ## Known pitfalls
 - `tracing_appender::rolling::Builder` API changed across 0.2.x; pin
