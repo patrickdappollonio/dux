@@ -2,16 +2,18 @@
 //!
 //! Verifies that `src/git.rs` invokes git with `&Path`/`&OsStr` arguments
 //! so non-UTF-8 worktree paths survive the round-trip. This is not
-//! theoretical: macOS HFS+/APFS and Linux ext4 both allow arbitrary
-//! byte sequences in filenames (anything except `/` and `\0`), and
-//! `to_string_lossy()` would silently replace any such byte with U+FFFD
-//! before git ever saw the path — making `git -C` look up the wrong
-//! directory and fail.
+//! theoretical: Linux ext4 allows arbitrary byte sequences in filenames
+//! (anything except `/` and `\0`), and `to_string_lossy()` would silently
+//! replace any such byte with U+FFFD before git ever saw the path —
+//! making `git -C` look up the wrong directory and fail.
 //!
-//! `#[cfg(unix)]` covers both Linux and macOS, so these tests run in
-//! both legs of the `pr.yml`/`test.yml` matrix introduced in Phase 21.
+//! Gated to `#[cfg(target_os = "linux")]` rather than `#[cfg(unix)]`:
+//! macOS APFS rejects non-UTF-8 filenames at the VFS layer with
+//! `EILSEQ` (errno 92), so `std::fs::create_dir` on a non-UTF-8 path
+//! aborts the test before it can exercise the wrapper. Only Linux
+//! filesystems (ext4, xfs, btrfs) accept arbitrary byte sequences.
 
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;

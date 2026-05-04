@@ -101,7 +101,11 @@ teardown() {
   # Use the absolute path to bash so we don't need bash on $PATH.
   local bash_bin
   bash_bin=$(command -v bash)
-  run env -i HOME="$HOME" PATH="$empty_path" "$bash_bin" "$INSTALL_SH"
+  # Forward STATE_ROOT so install.sh's preflight (parent-of-STATE_ROOT
+  # existence check) doesn't trip on a CI runner that has no `/data`
+  # mount. The test isolation in setup() points STATE_ROOT under
+  # $TEST_HOME, whose parent always exists.
+  run env -i HOME="$HOME" PATH="$empty_path" STATE_ROOT="$STATE_ROOT" "$bash_bin" "$INSTALL_SH"
   [ "$status" -ne 0 ]
   # The new aggregate message lists ALL missing tools on one line:
   [[ "$output" == *"missing required tools:"* ]] || {
@@ -123,7 +127,11 @@ teardown() {
   mkdir -p "$empty_path"
   local bash_bin
   bash_bin=$(command -v bash)
-  run env -i HOME="$HOME" PATH="$empty_path" "$bash_bin" "$INSTALL_SH"
+  # Forward STATE_ROOT so install.sh's preflight (parent-of-STATE_ROOT
+  # existence check) doesn't trip on a CI runner that has no `/data`
+  # mount. The test isolation in setup() points STATE_ROOT under
+  # $TEST_HOME, whose parent always exists.
+  run env -i HOME="$HOME" PATH="$empty_path" STATE_ROOT="$STATE_ROOT" "$bash_bin" "$INSTALL_SH"
   [ "$status" -ne 0 ]
   [[ "$output" == *"realpath"* ]] || {
     printf 'realpath missing from preflight list:\n%s\n' "$output" >&2
