@@ -3,7 +3,7 @@ use std::fs;
 use std::io::stdout;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -49,9 +49,14 @@ use crate::statusline::{StatusLine, StatusTone};
 use crate::storage::SessionStore;
 use crate::theme::Theme;
 
+mod state;
+pub(crate) use state::{RuntimeState, UiState};
+
 use text_input::TextInput;
 
 pub struct App {
+    pub(crate) ui: UiState,
+    pub(crate) runtime: RuntimeState,
     pub(crate) config: Config,
     pub(crate) paths: DuxPaths,
     pub(crate) bindings: RuntimeBindings,
@@ -73,35 +78,14 @@ pub struct App {
     pub(crate) terminal_pane_height_pct: u16,
     pub(crate) staged_pane_height_pct: u16,
     pub(crate) commit_pane_height_pct: u16,
-    pub(crate) focus: FocusPane,
     pub(crate) center_mode: CenterMode,
-    pub(crate) left_collapsed: bool,
-    pub(crate) right_collapsed: bool,
-    pub(crate) right_hidden: bool,
-    pub(crate) resize_mode: bool,
-    pub(crate) help_scroll: Option<u16>,
-    pub(crate) last_help_height: u16,
-    pub(crate) last_help_lines: u16,
-    pub(crate) fullscreen_overlay: FullscreenOverlay,
     pub(crate) status: StatusLine,
-    pub(crate) prompt: PromptState,
-    pub(crate) input_target: InputTarget,
     pub(crate) session_surface: SessionSurface,
     pub(crate) clipboard: Clipboard,
-    pub(crate) worker_tx: Sender<WorkerEvent>,
-    pub(crate) worker_rx: Receiver<WorkerEvent>,
-    pub(crate) providers: HashMap<String, PtyClient>,
-    /// When a provider swap happens while the agent's PTY is still running,
-    /// the currently-spawned provider is pinned here so UI labels keep
-    /// showing what's actually running until the user exits and relaunches
-    /// the agent. Cleared whenever the PTY is torn down.
-    pub(crate) running_provider_pins: HashMap<String, ProviderKind>,
-    pub(crate) companion_terminals: HashMap<String, CompanionTerminal>,
     pub(crate) active_terminal_id: Option<String>,
     pub(crate) terminal_return_to_list: bool,
     pub(crate) terminal_counter: usize,
     pub(crate) create_agent_in_flight: bool,
-    pub(crate) pulls_in_flight: HashSet<String>,
     pub(crate) resource_stats_in_flight: bool,
     pub(crate) last_pty_size: (u16, u16),
     /// Tracks when each agent last received PTY data, for the streaming
@@ -118,20 +102,8 @@ pub struct App {
     /// regardless of how fast the event loop is running.
     pub(crate) start_time: Instant,
     pub(crate) readonly_nudge_tick: Option<u64>,
-    pub(crate) watched_worktree: Arc<Mutex<Option<PathBuf>>>,
-    pub(crate) has_active_processes: Arc<AtomicBool>,
     pub(crate) collapsed_projects: HashSet<String>,
     pub(crate) left_items_cache: Vec<LeftItem>,
-    pub(crate) mouse_layout: MouseLayoutState,
-    pub(crate) overlay_layout: OverlayMouseLayoutState,
-    pub(crate) mouse_drag: Option<ResizeDragState>,
-    pub(crate) last_mouse_click: Option<RecentMouseClick>,
-    /// Tracks an in-flight modal-button press: which button received
-    /// mouse-down and whether the cursor is still inside it. Set on
-    /// `MouseEventKind::Down(Left)` over a button, updated on `Drag`,
-    /// cleared on `Up` (firing the button's action only when the cursor
-    /// is still inside) and on any keystroke or modal-close event.
-    pub(crate) pressed_button: Option<components::PressedButton>,
     pub(crate) interactive_patterns: InteractiveBytePatterns,
     pub(crate) raw_input_buf: Vec<u8>,
     /// Separate buffer for scanning ExitInteractive during the loading phase.
@@ -142,32 +114,6 @@ pub struct App {
     /// (`ESC[200~` … `ESC[201~`). Inside a paste, intercept matching is
     /// skipped so pasted text doesn't trigger keybindings.
     pub(crate) in_bracket_paste: bool,
-    pub(crate) macro_bar: Option<MacroBarState>,
-    pub(crate) sigwinch_flag: Arc<AtomicBool>,
-    pub(crate) force_redraw: bool,
-    pub(crate) welcome_tip_index: usize,
-    /// Whether the ASCII logo was rendered in the previous frame.
-    pub(crate) welcome_logo_visible: bool,
-    /// The left-pane selection index when the logo last rendered a tip.
-    pub(crate) welcome_tip_selection: usize,
-    /// When true, show the alternate (duck) logo instead of the text logo.
-    pub(crate) welcome_logo_alt: bool,
-    pub(crate) branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,
-    pub(crate) gh_status: crate::model::GhStatus,
-    pub(crate) github_integration_enabled: bool,
-    pub(crate) pr_banner_at_bottom: bool,
-    pub(crate) pr_statuses: HashMap<String, crate::model::PrInfo>,
-    pub(crate) pr_sync_sessions: Arc<Mutex<Vec<PrSyncEntry>>>,
-    pub(crate) pr_sync_enabled: Arc<AtomicBool>,
-    /// Timestamps of the last PR check per session, to avoid hammering on rapid
-    /// state transitions.
-    pub(crate) pr_last_checked: HashMap<String, Instant>,
-    /// File-system watcher for `.git/refs/heads/` directories. `None` if the
-    /// watcher could not be created (graceful fallback to poll-only).
-    pub(crate) refs_watcher: Option<Arc<Mutex<notify::RecommendedWatcher>>>,
-    /// Maps watched worktree paths back to session IDs so the refs watcher
-    /// can route change events.
-    pub(crate) refs_watch_paths: HashMap<PathBuf, String>,
     /// Session IDs spawned with resume args and the wall-clock time the resume
     /// attempt began. Used for one-shot fallbacks when resume exits quickly or
     /// hangs without rendering visible output.
@@ -219,11 +165,6 @@ pub struct App {
     /// arrives. Drives both the warn/high-water status banners and the
     /// `create_agent` refusal at `[limits].disk_high_water_pct`.
     pub(crate) disk_usage_pct: Option<u8>,
-    /// Exclusive lock held for the lifetime of this `App` so only one dux
-    /// instance runs against a given config directory. Released
-    /// automatically on drop (including crashes), so there is nothing to
-    /// clean up on exit.
-    _single_instance_lock: SingleInstanceLock,
 }
 
 /// Snapshot of session data shared with the branch-sync background worker.
@@ -1101,7 +1042,7 @@ pub(crate) enum WorkerEvent {
     /// the UI thread never blocks waiting for git.
     /// One auto-resume spawn job finished in a worker thread. The PTY
     /// child process is already running; the UI thread inserts the
-    /// returned [`PtyClient`] into `self.providers` and updates the
+    /// returned [`PtyClient`] into `self.runtime.providers` and updates the
     /// session's status. Errors are logged and the session stays
     /// detached. Bounded by `[auto_resume]` config (concurrency, stagger,
     /// staleness filter) — see [`crate::auto_resume::run_scheduler`].
@@ -1203,7 +1144,58 @@ impl App {
         }
         let gh_integration_val = config.ui.github_integration;
         let pr_banner_at_bottom = config.ui.pr_banner_position == "bottom";
+        let ui = UiState {
+            focus: FocusPane::Left,
+            fullscreen_overlay: FullscreenOverlay::None,
+            prompt: PromptState::None,
+            input_target: InputTarget::None,
+            help_scroll: None,
+            last_help_height: 0,
+            last_help_lines: 0,
+            resize_mode: false,
+            left_collapsed: false,
+            right_collapsed: false,
+            right_hidden: false,
+            mouse_layout: MouseLayoutState::default(),
+            overlay_layout: OverlayMouseLayoutState::default(),
+            mouse_drag: None,
+            last_mouse_click: None,
+            pressed_button: None,
+            macro_bar: None,
+            force_redraw: false,
+            welcome_tip_index: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as usize)
+                .unwrap_or(0),
+            welcome_logo_visible: false,
+            welcome_logo_alt: false,
+            welcome_tip_selection: usize::MAX,
+            pr_banner_at_bottom,
+        };
+        let runtime = RuntimeState {
+            worker_tx,
+            worker_rx,
+            providers: HashMap::new(),
+            running_provider_pins: HashMap::new(),
+            companion_terminals: HashMap::new(),
+            pulls_in_flight: HashSet::new(),
+            watched_worktree: Arc::clone(&watched_worktree),
+            has_active_processes: Arc::new(AtomicBool::new(false)),
+            sigwinch_flag,
+            branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
+            gh_status: crate::model::GhStatus::Unknown,
+            github_integration_enabled: gh_integration_val,
+            pr_statuses: HashMap::new(),
+            pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
+            pr_sync_enabled: Arc::new(AtomicBool::new(false)),
+            pr_last_checked: HashMap::new(),
+            refs_watcher: None,
+            refs_watch_paths: HashMap::new(),
+            _single_instance_lock: single_instance_lock,
+        };
         let mut app = Self {
+            ui,
+            runtime,
             show_diff_line_numbers: config.ui.show_diff_line_numbers,
             left_width_pct: config.ui.left_width_pct,
             right_width_pct: config.ui.right_width_pct,
@@ -1228,31 +1220,14 @@ impl App {
             commit_input: TextInput::new()
                 .with_multiline(4)
                 .with_placeholder("Type your commit message\u{2026}"),
-            left_collapsed: false,
-            right_collapsed: false,
-            right_hidden: false,
-            focus: FocusPane::Left,
             center_mode: CenterMode::Agent,
-            resize_mode: false,
-            help_scroll: None,
-            last_help_height: 0,
-            last_help_lines: 0,
-            fullscreen_overlay: FullscreenOverlay::None,
             status,
-            prompt: PromptState::None,
-            input_target: InputTarget::None,
             session_surface: SessionSurface::Agent,
             clipboard: Clipboard::new(),
-            worker_tx,
-            worker_rx,
-            providers: HashMap::new(),
-            running_provider_pins: HashMap::new(),
-            companion_terminals: HashMap::new(),
             active_terminal_id: None,
             terminal_return_to_list: false,
             terminal_counter: 0,
             create_agent_in_flight: false,
-            pulls_in_flight: HashSet::new(),
             resource_stats_in_flight: false,
             last_pty_size: (0, 0),
             last_pty_activity: HashMap::new(),
@@ -1263,39 +1238,12 @@ impl App {
             tick_count: 0,
             start_time: Instant::now(),
             readonly_nudge_tick: None,
-            watched_worktree: Arc::clone(&watched_worktree),
-            has_active_processes: Arc::new(AtomicBool::new(false)),
             collapsed_projects: HashSet::new(),
             left_items_cache: Vec::new(),
-            mouse_layout: MouseLayoutState::default(),
-            overlay_layout: OverlayMouseLayoutState::default(),
-            mouse_drag: None,
-            last_mouse_click: None,
-            pressed_button: None,
             interactive_patterns,
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
             in_bracket_paste: false,
-            macro_bar: None,
-            sigwinch_flag,
-            force_redraw: false,
-            welcome_tip_index: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as usize)
-                .unwrap_or(0),
-            welcome_logo_visible: false,
-            welcome_logo_alt: false,
-            welcome_tip_selection: usize::MAX,
-            branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-            gh_status: crate::model::GhStatus::Unknown,
-            github_integration_enabled: gh_integration_val,
-            pr_banner_at_bottom,
-            pr_statuses: HashMap::new(),
-            pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-            pr_sync_enabled: Arc::new(AtomicBool::new(false)),
-            pr_last_checked: HashMap::new(),
-            refs_watcher: None,
-            refs_watch_paths: HashMap::new(),
             resume_fallback_candidates: HashMap::new(),
             pending_deletions: HashSet::new(),
             deletion_busy_messages: HashMap::new(),
@@ -1308,14 +1256,13 @@ impl App {
             staged_diff_in_flight: false,
             add_project_in_flight: false,
             disk_usage_pct: None,
-            _single_instance_lock: single_instance_lock,
         };
         // Kick off async git probes for every project so the first frame
         // can render placeholders immediately. The main loop fills in the
         // metadata as `ProjectMetaReady` events arrive on the worker
         // channel.
         let project_paths = project_paths_for_meta(&app.projects);
-        workers::dispatch_project_meta(app.worker_tx.clone(), project_paths);
+        workers::dispatch_project_meta(app.runtime.worker_tx.clone(), project_paths);
 
         app.restore_sessions();
         app.auto_resume_all_sessions();
@@ -1345,14 +1292,14 @@ impl App {
 
                 // Check SIGWINCH — needed when bypassing crossterm's event
                 // reader (which would otherwise deliver Resize events).
-                if self.sigwinch_flag.swap(false, Ordering::Relaxed)
+                if self.runtime.sigwinch_flag.swap(false, Ordering::Relaxed)
                     && let Err(err) = crate::io_retry::retry_on_interrupt(|| terminal.autoresize())
                 {
                     self.report_runtime_error("terminal resize failed", &err);
                 }
 
-                if self.force_redraw {
-                    self.force_redraw = false;
+                if self.ui.force_redraw {
+                    self.ui.force_redraw = false;
                     if let Err(err) = terminal.clear() {
                         self.report_runtime_error("force redraw failed", &err);
                     }
@@ -1368,7 +1315,7 @@ impl App {
                 }
 
                 if matches!(
-                    self.input_target,
+                    self.ui.input_target,
                     InputTarget::Agent | InputTarget::Terminal
                 ) {
                     // Interactive mode: read raw stdin and forward to PTY.
@@ -1449,7 +1396,7 @@ impl App {
                             // mode — remaining events must go through the
                             // raw stdin path.
                             if matches!(
-                                self.input_target,
+                                self.ui.input_target,
                                 InputTarget::Agent | InputTarget::Terminal
                             ) {
                                 break;
@@ -1508,7 +1455,7 @@ impl App {
     /// Failures are logged but don't abort startup — a single bad session
     /// shouldn't stop the others. Results land as
     /// [`WorkerEvent::AutoResumeSpawned`] so the UI thread can install the
-    /// returned `PtyClient` into `self.providers` and update session
+    /// returned `PtyClient` into `self.runtime.providers` and update session
     /// status.
     fn auto_resume_all_sessions(&mut self) {
         if !self.config.defaults.auto_resume_on_start {
@@ -1520,7 +1467,7 @@ impl App {
             .sessions
             .iter()
             .filter(|s| Path::new(&s.worktree_path).exists())
-            .filter(|s| !self.providers.contains_key(&s.id))
+            .filter(|s| !self.runtime.providers.contains_key(&s.id))
             .filter(|s| {
                 let stale = crate::auto_resume::is_stale(Path::new(&s.worktree_path), stale_days);
                 if stale {
@@ -1560,7 +1507,7 @@ impl App {
             (24, 80)
         };
         let scrollback_lines = self.config.ui.agent_scrollback_lines;
-        let tx = self.worker_tx.clone();
+        let tx = self.runtime.worker_tx.clone();
 
         thread::Builder::new()
             .name("auto-resume-scheduler".into())
@@ -1599,8 +1546,8 @@ impl App {
     ) {
         // If the user already reconnected this session manually while the
         // background spawn was still in flight, drop the duplicate client
-        // rather than racing it into self.providers.
-        if self.providers.contains_key(&session_id) {
+        // rather than racing it into self.runtime.providers.
+        if self.runtime.providers.contains_key(&session_id) {
             if result.is_ok() {
                 logger::info(&format!(
                     "auto_resume_on_start: discarding duplicate spawn for {session_id} (already active)"
@@ -1610,7 +1557,7 @@ impl App {
         }
         match result {
             Ok(client) => {
-                self.providers.insert(session_id.clone(), client);
+                self.runtime.providers.insert(session_id.clone(), client);
                 if used_resume_args {
                     self.resume_fallback_candidates
                         .insert(session_id.clone(), Instant::now());
@@ -1629,7 +1576,7 @@ impl App {
     /// Populate the in-memory PR status map from the database so the UI shows
     /// PR state immediately on startup, before the first background poll.
     fn seed_pr_statuses_from_db(&mut self) {
-        if !self.github_integration_enabled {
+        if !self.runtime.github_integration_enabled {
             return;
         }
         let stored = self.session_store.load_all_latest_prs().unwrap_or_default();
@@ -1641,7 +1588,7 @@ impl App {
                 "CLOSED" => PrState::Closed,
                 _ => continue,
             };
-            self.pr_statuses.insert(
+            self.runtime.pr_statuses.insert(
                 pr.session_id,
                 PrInfo {
                     number: pr.pr_number,
@@ -1651,24 +1598,24 @@ impl App {
                 },
             );
         }
-        if !self.pr_statuses.is_empty() {
+        if !self.runtime.pr_statuses.is_empty() {
             logger::info(&format!(
                 "[gh-integration] seeded {} PR statuses from database",
-                self.pr_statuses.len(),
+                self.runtime.pr_statuses.len(),
             ));
         }
     }
 
     pub(crate) fn close_top_overlay(&mut self) -> bool {
-        if matches!(self.fullscreen_overlay, FullscreenOverlay::Terminal) {
+        if matches!(self.ui.fullscreen_overlay, FullscreenOverlay::Terminal) {
             let return_to_list = self.terminal_return_to_list;
-            self.fullscreen_overlay = FullscreenOverlay::None;
+            self.ui.fullscreen_overlay = FullscreenOverlay::None;
             self.session_surface = SessionSurface::Agent;
-            self.input_target = InputTarget::None;
+            self.ui.input_target = InputTarget::None;
             if return_to_list {
                 self.left_section = LeftSection::Terminals;
                 self.clamp_terminal_cursor();
-                self.focus = FocusPane::Left;
+                self.ui.focus = FocusPane::Left;
             }
             let key = self.bindings.label_for(Action::ToggleFullscreen);
             self.set_info(format!(
@@ -1676,20 +1623,20 @@ impl App {
             ));
             return true;
         }
-        if !matches!(self.prompt, PromptState::None) {
-            self.prompt = PromptState::None;
+        if !matches!(self.ui.prompt, PromptState::None) {
+            self.ui.prompt = PromptState::None;
             self.set_info("Dismissed dialog. Resume your work in the current pane.");
             return true;
         }
-        if self.help_scroll.is_some() {
-            self.help_scroll = None;
+        if self.ui.help_scroll.is_some() {
+            self.ui.help_scroll = None;
             let key = self.bindings.label_for(Action::ToggleHelp);
             self.set_info(format!("Closed help overlay. Press {key} to reopen."));
             return true;
         }
         if matches!(self.center_mode, CenterMode::Diff { .. }) {
             self.center_mode = CenterMode::Agent;
-            self.focus = FocusPane::Files;
+            self.ui.focus = FocusPane::Files;
             self.set_info("Closed diff view, returned to agent output.");
             return true;
         }
@@ -1718,7 +1665,7 @@ impl App {
     /// activity timestamp used by the left-pane streaming indicator.
     fn poll_pty_activity(&mut self) {
         let now = Instant::now();
-        for (session_id, provider) in &self.providers {
+        for (session_id, provider) in &self.runtime.providers {
             if provider.take_received_data() {
                 self.last_pty_activity.insert(session_id.clone(), now);
             }
@@ -1799,7 +1746,7 @@ impl App {
     }
 
     pub(crate) fn open_resource_monitor(&mut self) {
-        self.prompt = PromptState::ResourceMonitor {
+        self.ui.prompt = PromptState::ResourceMonitor {
             rows: Vec::new(),
             scroll_offset: 0,
             selected_row: 0,
@@ -1816,7 +1763,7 @@ impl App {
     fn resource_monitor_targets(&self) -> Vec<(String, u32)> {
         let mut targets = Vec::new();
         for session in &self.sessions {
-            if let Some(pty) = self.providers.get(&session.id)
+            if let Some(pty) = self.runtime.providers.get(&session.id)
                 && let Some(pid) = pty.child_process_id()
             {
                 let title = session.title.as_deref().unwrap_or(&session.branch_name);
@@ -1824,7 +1771,7 @@ impl App {
                 targets.push((format!("Agent ({provider}): {title}"), pid));
             }
         }
-        for terminal in self.companion_terminals.values() {
+        for terminal in self.runtime.companion_terminals.values() {
             if let Some(pid) = terminal.client.child_process_id() {
                 let label = match &terminal.foreground_cmd {
                     Some(cmd) => format!("Terminal ({cmd}): {}", terminal.label),
@@ -1842,7 +1789,7 @@ impl App {
         }
         self.resource_stats_in_flight = true;
         let targets = self.resource_monitor_targets();
-        let tx = self.worker_tx.clone();
+        let tx = self.runtime.worker_tx.clone();
         thread::spawn(move || {
             let rows = collect_resource_stats(targets);
             let _ = tx.send(WorkerEvent::ResourceStatsReady(rows));
@@ -1877,25 +1824,25 @@ impl App {
                 Ok(())
             }
             "toggle-sidebar" => {
-                self.left_collapsed = !self.left_collapsed;
+                self.ui.left_collapsed = !self.ui.left_collapsed;
                 Ok(())
             }
             "toggle-git-pane" => {
-                self.right_collapsed = !self.right_collapsed;
-                if self.right_collapsed && self.focus == FocusPane::Files {
-                    self.focus = FocusPane::Center;
+                self.ui.right_collapsed = !self.ui.right_collapsed;
+                if self.ui.right_collapsed && self.ui.focus == FocusPane::Files {
+                    self.ui.focus = FocusPane::Center;
                 }
                 Ok(())
             }
             "toggle-remove-git-pane" => {
-                self.right_hidden = !self.right_hidden;
-                if self.right_hidden && self.focus == FocusPane::Files {
-                    self.focus = FocusPane::Center;
+                self.ui.right_hidden = !self.ui.right_hidden;
+                if self.ui.right_hidden && self.ui.focus == FocusPane::Files {
+                    self.ui.focus = FocusPane::Center;
                 }
                 Ok(())
             }
             "help" => {
-                self.help_scroll = Some(0);
+                self.ui.help_scroll = Some(0);
                 Ok(())
             }
             "sort-agents-by-updated" => {
@@ -1915,7 +1862,7 @@ impl App {
                 Ok(())
             }
             "input-debugging" => {
-                self.prompt = PromptState::DebugInput {
+                self.ui.prompt = PromptState::DebugInput {
                     lines: Vec::new(),
                     scroll_offset: 0,
                 };
@@ -1949,22 +1896,22 @@ impl App {
                 Ok(())
             }
             "toggle-github-integration" => {
-                self.github_integration_enabled = !self.github_integration_enabled;
-                self.config.ui.github_integration = self.github_integration_enabled;
+                self.runtime.github_integration_enabled = !self.runtime.github_integration_enabled;
+                self.config.ui.github_integration = self.runtime.github_integration_enabled;
                 let save_result =
                     save_config(&self.paths.config_path, &self.config, &self.bindings);
-                if self.github_integration_enabled
-                    && matches!(self.gh_status, crate::model::GhStatus::Available)
+                if self.runtime.github_integration_enabled
+                    && matches!(self.runtime.gh_status, crate::model::GhStatus::Available)
                 {
                     self.update_pr_sync_sessions();
                     self.spawn_initial_pr_refresh();
-                    self.pr_sync_enabled.store(true, Ordering::Relaxed);
-                } else if !self.github_integration_enabled {
-                    self.pr_statuses.clear();
-                    self.pr_sync_enabled.store(false, Ordering::Relaxed);
+                    self.runtime.pr_sync_enabled.store(true, Ordering::Relaxed);
+                } else if !self.runtime.github_integration_enabled {
+                    self.runtime.pr_statuses.clear();
+                    self.runtime.pr_sync_enabled.store(false, Ordering::Relaxed);
                     self.rebuild_left_items();
                 }
-                let state = if self.github_integration_enabled {
+                let state = if self.runtime.github_integration_enabled {
                     "enabled"
                 } else {
                     "disabled"
@@ -2001,8 +1948,8 @@ impl App {
                 Ok(())
             }
             "toggle-pr-banner-position" => {
-                self.pr_banner_at_bottom = !self.pr_banner_at_bottom;
-                let pos = if self.pr_banner_at_bottom {
+                self.ui.pr_banner_at_bottom = !self.ui.pr_banner_at_bottom;
+                let pos = if self.ui.pr_banner_at_bottom {
                     "bottom"
                 } else {
                     "top"
@@ -2019,7 +1966,7 @@ impl App {
                 Ok(())
             }
             "force-redraw" => {
-                self.force_redraw = true;
+                self.ui.force_redraw = true;
                 self.set_info("Interface redrawn. All screen contents have been repainted.");
                 Ok(())
             }
@@ -2040,7 +1987,7 @@ impl App {
             .map(|(k, v)| (k.clone(), v.text.clone(), v.surface))
             .collect();
         // Preserve declaration order from config file (IndexMap iteration order).
-        self.prompt = PromptState::EditMacros {
+        self.ui.prompt = PromptState::EditMacros {
             entries,
             selected: 0,
             editing: None,
@@ -2180,7 +2127,8 @@ impl App {
     /// the *original* provider until the user exits and relaunches — so the
     /// pane title doesn't lie about what's actually on screen.
     pub(crate) fn running_provider_for(&self, session: &AgentSession) -> ProviderKind {
-        self.running_provider_pins
+        self.runtime
+            .running_provider_pins
             .get(&session.id)
             .cloned()
             .unwrap_or_else(|| session.provider.clone())
@@ -2194,7 +2142,7 @@ impl App {
         // Keep the background poller in sync with the currently selected
         // session. The poller will pick up the new path on its next tick;
         // the one-shot dispatch below provides immediate feedback.
-        if let Ok(mut guard) = self.watched_worktree.lock() {
+        if let Ok(mut guard) = self.runtime.watched_worktree.lock() {
             *guard = worktree.clone();
         }
         // Clear the visible file list immediately. Without this, rapidly
@@ -2219,7 +2167,7 @@ impl App {
             && should_dispatch
         {
             self.last_changed_files_dispatch = Some(now);
-            workers::dispatch_changed_files(self.worker_tx.clone(), p);
+            workers::dispatch_changed_files(self.runtime.worker_tx.clone(), p);
         }
 
         // Opportunistically check PR status for the newly-selected session.
@@ -2334,9 +2282,9 @@ impl App {
     pub(crate) fn open_rename_session(&mut self) -> Result<()> {
         if let Some(session) = self.selected_session().cloned() {
             let current_name = session.title.unwrap_or_else(|| session.branch_name.clone());
-            self.input_target = InputTarget::None;
-            self.fullscreen_overlay = FullscreenOverlay::None;
-            self.prompt = PromptState::RenameSession {
+            self.ui.input_target = InputTarget::None;
+            self.ui.fullscreen_overlay = FullscreenOverlay::None;
+            self.ui.prompt = PromptState::RenameSession {
                 session_id: session.id,
                 input: TextInput::with_text(current_name)
                     .with_char_map(crate::git::agent_name_char_map),
@@ -2398,7 +2346,7 @@ impl App {
             let worktree = session.worktree_path.clone();
             let sid = session.id.clone();
             let new_branch = name.clone();
-            let tx = self.worker_tx.clone();
+            let tx = self.runtime.worker_tx.clone();
             std::thread::spawn(move || {
                 let result = git::rename_branch(Path::new(&worktree), &old_branch, &new_branch)
                     .map_err(|e| e.to_string());
@@ -2451,7 +2399,7 @@ impl App {
 
     /// Refreshes the shared session snapshot used by the branch-sync worker.
     pub(crate) fn update_branch_sync_sessions(&self) {
-        if let Ok(mut guard) = self.branch_sync_sessions.lock() {
+        if let Ok(mut guard) = self.runtime.branch_sync_sessions.lock() {
             *guard = self
                 .sessions
                 .iter()
@@ -2481,33 +2429,34 @@ impl App {
     }
 
     pub(crate) fn clear_companion_terminals_for_session(&mut self, session_id: &str) {
-        self.companion_terminals
+        self.runtime
+            .companion_terminals
             .retain(|_, t| t.session_id != session_id);
         if let Some(ref id) = self.active_terminal_id
-            && !self.companion_terminals.contains_key(id)
+            && !self.runtime.companion_terminals.contains_key(id)
         {
             self.active_terminal_id = None;
         }
     }
 
     pub(crate) fn running_process_count(&self) -> usize {
-        self.providers.len() + self.companion_terminals.len()
+        self.runtime.providers.len() + self.runtime.companion_terminals.len()
     }
 
     pub(crate) fn running_companion_terminal_count(&self) -> usize {
-        self.companion_terminals.len()
+        self.runtime.companion_terminals.len()
     }
 
     /// Returns all running companion terminals as (terminal_id, terminal) pairs,
     /// sorted by creation order (terminal_id encodes the counter).
     pub(crate) fn terminal_items(&self) -> Vec<(&String, &CompanionTerminal)> {
-        let mut items: Vec<_> = self.companion_terminals.iter().collect();
+        let mut items: Vec<_> = self.runtime.companion_terminals.iter().collect();
         items.sort_by_key(|(id, _)| (*id).clone());
         items
     }
 
     pub(crate) fn has_terminal_items(&self) -> bool {
-        !self.companion_terminals.is_empty()
+        !self.runtime.companion_terminals.is_empty()
     }
 
     pub(crate) fn clamp_terminal_cursor(&mut self) {
@@ -2529,7 +2478,8 @@ impl App {
 
     /// Returns the number of running companion terminals for a given session.
     pub(crate) fn session_terminal_count(&self, session_id: &str) -> usize {
-        self.companion_terminals
+        self.runtime
+            .companion_terminals
             .values()
             .filter(|t| t.session_id == session_id)
             .count()
@@ -2539,11 +2489,11 @@ impl App {
         match self.session_surface {
             SessionSurface::Agent => {
                 let session_id = self.selected_session()?.id.as_str();
-                self.providers.get(session_id)
+                self.runtime.providers.get(session_id)
             }
             SessionSurface::Terminal => {
                 let id = self.active_terminal_id.as_ref()?;
-                self.companion_terminals.get(id).map(|t| &t.client)
+                self.runtime.companion_terminals.get(id).map(|t| &t.client)
             }
         }
     }
@@ -2558,7 +2508,7 @@ impl App {
                     Some(s) => s.id.clone(),
                     None => return false,
                 };
-                let provider = self.providers.get(&session_id);
+                let provider = self.runtime.providers.get(&session_id);
                 (session_id, provider)
             }
             SessionSurface::Terminal => {
@@ -2566,7 +2516,7 @@ impl App {
                     Some(id) => id.clone(),
                     None => return false,
                 };
-                let provider = self.companion_terminals.get(&id).map(|t| &t.client);
+                let provider = self.runtime.companion_terminals.get(&id).map(|t| &t.client);
                 (id, provider)
             }
         };

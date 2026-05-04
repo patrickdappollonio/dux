@@ -2,7 +2,7 @@ use super::*;
 
 impl App {
     pub(crate) fn drain_events(&mut self) {
-        while let Ok(event) = self.worker_rx.try_recv() {
+        while let Ok(event) = self.runtime.worker_rx.try_recv() {
             match event {
                 WorkerEvent::CreateAgentProgress(message) => self.set_busy(message),
                 WorkerEvent::CreateAgentReady(boxed) => {
@@ -28,7 +28,7 @@ impl App {
                         &session.worktree_path,
                         &session.id,
                     );
-                    self.providers.insert(session.id.clone(), client);
+                    self.runtime.providers.insert(session.id.clone(), client);
                     self.sessions.insert(0, session.clone());
                     self.mark_session_provider_started(&session.id);
                     self.update_branch_sync_sessions();
@@ -40,8 +40,8 @@ impl App {
                         .unwrap_or(0);
                     self.reload_changed_files();
                     self.show_agent_surface();
-                    self.input_target = InputTarget::Agent;
-                    self.fullscreen_overlay = FullscreenOverlay::Agent;
+                    self.ui.input_target = InputTarget::Agent;
+                    self.ui.fullscreen_overlay = FullscreenOverlay::Agent;
                     self.set_info(status_message);
                 }
                 WorkerEvent::CreateAgentFailed(message) => {
@@ -56,7 +56,7 @@ impl App {
                 WorkerEvent::CommitMessageGenerated(msg) => {
                     self.commit_input.clear_overlay();
                     self.commit_input.set_text(msg);
-                    self.input_target = InputTarget::CommitMessage;
+                    self.ui.input_target = InputTarget::CommitMessage;
                     {
                         let exit_key = self.bindings.label_for(Action::ExitCommitInput);
                         let commit_key = self.bindings.label_for(Action::CommitChanges);
@@ -86,7 +86,7 @@ impl App {
                     target,
                     result,
                 } => {
-                    self.pulls_in_flight.remove(&repo_path);
+                    self.runtime.pulls_in_flight.remove(&repo_path);
                     match target {
                         PullTarget::Project {
                             project_id,
@@ -182,9 +182,9 @@ impl App {
                     }
                 }
                 WorkerEvent::GhStatusChecked(status) => {
-                    self.gh_status = status;
+                    self.runtime.gh_status = status;
                     if matches!(status, crate::model::GhStatus::Available)
-                        && self.github_integration_enabled
+                        && self.runtime.github_integration_enabled
                     {
                         logger::info("[gh-integration] gh CLI is available and authenticated");
                         self.update_pr_sync_sessions();
@@ -194,7 +194,7 @@ impl App {
                     } else {
                         logger::info(&format!(
                             "[gh-integration] gh status: {:?}, integration enabled: {}",
-                            status, self.github_integration_enabled,
+                            status, self.runtime.github_integration_enabled,
                         ));
                     }
                 }
@@ -202,7 +202,7 @@ impl App {
                     let now = Instant::now();
                     let mut changed = false;
                     for (session_id, maybe_pr) in results {
-                        self.pr_last_checked.insert(session_id.clone(), now);
+                        self.runtime.pr_last_checked.insert(session_id.clone(), now);
                         match maybe_pr {
                             Some(pr) => {
                                 // Persist the PR association (including state) so it
@@ -219,11 +219,11 @@ impl App {
                                     state_str,
                                     &pr.title,
                                 );
-                                self.pr_statuses.insert(session_id, pr);
+                                self.runtime.pr_statuses.insert(session_id, pr);
                                 changed = true;
                             }
                             None => {
-                                if self.pr_statuses.remove(&session_id).is_some() {
+                                if self.runtime.pr_statuses.remove(&session_id).is_some() {
                                     changed = true;
                                 }
                             }
@@ -248,7 +248,7 @@ impl App {
                         loading,
                         selected,
                         ..
-                    } = &mut self.prompt
+                    } = &mut self.ui.prompt
                         && *current_dir == dir
                     {
                         *current_entries = entries;
@@ -338,7 +338,7 @@ impl App {
                         last_refresh,
                         first_sample,
                         ..
-                    } = &mut self.prompt
+                    } = &mut self.ui.prompt
                     {
                         *rows = stats;
                         *last_refresh = Instant::now();
@@ -511,7 +511,7 @@ impl App {
         self.retry_hung_resume_sessions();
         // Detect PTY exits.
         let mut exited = Vec::new();
-        for (session_id, provider) in &mut self.providers {
+        for (session_id, provider) in &mut self.runtime.providers {
             if provider.is_exited() || provider.try_wait().is_some() {
                 exited.push(session_id.clone());
             }
@@ -530,6 +530,7 @@ impl App {
             // typically prints 1-2 lines of error; a real session produces
             // far more output and scrollback history.
             let is_minimal = self
+                .runtime
                 .providers
                 .get(session_id)
                 .map(|p| p.has_minimal_output(5))
@@ -540,8 +541,8 @@ impl App {
             let Some(session) = self.sessions.iter().find(|s| s.id == *session_id).cloned() else {
                 continue;
             };
-            self.providers.remove(session_id);
-            self.running_provider_pins.remove(session_id);
+            self.runtime.providers.remove(session_id);
+            self.runtime.running_provider_pins.remove(session_id);
             self.last_pty_activity.remove(session_id);
             logger::info(&format!(
                 "resume args exited without output for agent \"{}\", retrying with regular args",
@@ -549,7 +550,7 @@ impl App {
             ));
             match self.spawn_pty_for_session(&session, false) {
                 Ok(client) => {
-                    self.providers.insert(session_id.clone(), client);
+                    self.runtime.providers.insert(session_id.clone(), client);
                     self.mark_session_status(session_id, SessionStatus::Active);
                     self.mark_session_provider_started(session_id);
                     let proj_name = self.project_name_for_session(&session);
@@ -574,8 +575,8 @@ impl App {
             if retried.contains(session_id) {
                 continue;
             }
-            self.providers.remove(session_id);
-            self.running_provider_pins.remove(session_id);
+            self.runtime.providers.remove(session_id);
+            self.runtime.running_provider_pins.remove(session_id);
             self.last_pty_activity.remove(session_id);
             self.mark_session_status(session_id, SessionStatus::Detached);
         }
@@ -588,9 +589,9 @@ impl App {
             {
                 let key = self.bindings.label_for(Action::ReconnectAgent);
                 if self.session_surface == SessionSurface::Agent {
-                    self.input_target = InputTarget::None;
-                    self.fullscreen_overlay = FullscreenOverlay::None;
-                    self.focus = FocusPane::Left;
+                    self.ui.input_target = InputTarget::None;
+                    self.ui.fullscreen_overlay = FullscreenOverlay::None;
+                    self.ui.focus = FocusPane::Left;
                     self.set_info(format!(
                         "Agent CLI process has exited. Press \"{key}\" to relaunch."
                     ));
@@ -609,13 +610,13 @@ impl App {
         }
 
         let mut exited_terminal_ids = Vec::new();
-        for (terminal_id, terminal) in &mut self.companion_terminals {
+        for (terminal_id, terminal) in &mut self.runtime.companion_terminals {
             if terminal.client.is_exited() || terminal.client.try_wait().is_some() {
                 exited_terminal_ids.push(terminal_id.clone());
             }
         }
         for terminal_id in &exited_terminal_ids {
-            self.companion_terminals.remove(terminal_id);
+            self.runtime.companion_terminals.remove(terminal_id);
         }
         if !exited_terminal_ids.is_empty() {
             // If the active terminal just exited, close the overlay.
@@ -623,10 +624,10 @@ impl App {
                 && exited_terminal_ids.contains(active_id)
             {
                 self.active_terminal_id = None;
-                if self.input_target == InputTarget::Terminal {
-                    self.input_target = InputTarget::None;
+                if self.ui.input_target == InputTarget::Terminal {
+                    self.ui.input_target = InputTarget::None;
                 }
-                self.fullscreen_overlay = FullscreenOverlay::None;
+                self.ui.fullscreen_overlay = FullscreenOverlay::None;
                 self.session_surface = SessionSurface::Agent;
                 self.set_info("Terminal exited. Press the terminal key to launch a new one.");
             }
@@ -635,7 +636,7 @@ impl App {
 
         // Poll foreground process names every ~2 seconds (every 20 ticks).
         if self.tick_count.is_multiple_of(20) {
-            for terminal in self.companion_terminals.values_mut() {
+            for terminal in self.runtime.companion_terminals.values_mut() {
                 terminal.foreground_cmd = terminal.client.foreground_process_name();
             }
         }
@@ -644,19 +645,20 @@ impl App {
         // the overlay is open and enough wall-clock time has elapsed (~2s).
         if let PromptState::ResourceMonitor {
             ref last_refresh, ..
-        } = self.prompt
+        } = self.ui.prompt
             && last_refresh.elapsed() >= Duration::from_secs(2)
         {
             self.spawn_resource_stats_worker();
         }
 
         // Keep the poller's interval flag in sync with whether any runtime PTY is alive.
-        self.has_active_processes
+        self.runtime
+            .has_active_processes
             .store(self.running_process_count() > 0, Ordering::Relaxed);
     }
 
     pub(crate) fn spawn_browser_entries(&self, dir: &Path) {
-        let tx = self.worker_tx.clone();
+        let tx = self.runtime.worker_tx.clone();
         let dir = dir.to_path_buf();
         thread::spawn(move || {
             let entries = browser_entries(&dir);
@@ -743,11 +745,11 @@ impl App {
             let Some(victim) = self.oldest_active_session_id() else {
                 break; // nothing left to detach
             };
-            let Some(client) = self.providers.remove(&victim) else {
+            let Some(client) = self.runtime.providers.remove(&victim) else {
                 break;
             };
             drop(client); // tear down the PTY + free the grid memory
-            self.running_provider_pins.remove(&victim);
+            self.runtime.running_provider_pins.remove(&victim);
             self.last_pty_activity.remove(&victim);
             self.resume_fallback_candidates.remove(&victim);
             self.mark_session_status(&victim, SessionStatus::Detached);
@@ -778,7 +780,8 @@ impl App {
             self.last_pty_size.1 as usize
         };
         const BYTES_PER_CELL: usize = 4;
-        self.providers
+        self.runtime
+            .providers
             .len()
             .saturating_mul(scrollback_lines)
             .saturating_mul(cols)
@@ -791,7 +794,7 @@ impl App {
     pub(crate) fn oldest_active_session_id(&self) -> Option<String> {
         self.sessions
             .iter()
-            .filter(|s| self.providers.contains_key(&s.id))
+            .filter(|s| self.runtime.providers.contains_key(&s.id))
             .min_by_key(|s| s.updated_at)
             .map(|s| s.id.clone())
     }
@@ -807,7 +810,7 @@ impl App {
     /// home that points at `/data` should refuse new agents when `/data`
     /// is full, not when the bind point alone is full.
     pub(crate) fn spawn_disk_watchdog(&self) {
-        let tx = self.worker_tx.clone();
+        let tx = self.runtime.worker_tx.clone();
         let root = self.paths.root.clone();
         thread::Builder::new()
             .name("disk-watchdog".into())
@@ -841,7 +844,7 @@ impl App {
     /// `[limits].enable_scrollback_overflow_autodetach` so this watchdog
     /// is started only when that flag is `true`.
     pub(crate) fn spawn_scrollback_watchdog(&self) {
-        let tx = self.worker_tx.clone();
+        let tx = self.runtime.worker_tx.clone();
         let scrollback_lines = self.config.ui.agent_scrollback_lines;
         // We can't safely peek at the live `PtyClient`s from a worker
         // thread (they hold non-Send fds), so the worker fires a tick on
@@ -875,8 +878,8 @@ impl App {
         if interval_secs == 0 {
             return; // disabled by config
         }
-        let tx = self.worker_tx.clone();
-        let sessions = Arc::clone(&self.branch_sync_sessions);
+        let tx = self.runtime.worker_tx.clone();
+        let sessions = Arc::clone(&self.runtime.branch_sync_sessions);
         thread::spawn(move || {
             let interval = Duration::from_secs(u64::from(interval_secs));
             loop {
@@ -905,7 +908,7 @@ impl App {
     pub(crate) fn spawn_refs_watcher(&mut self) {
         use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 
-        let tx = self.worker_tx.clone();
+        let tx = self.runtime.worker_tx.clone();
         // Build a reverse map of watched paths for event routing.
         let path_to_session: Arc<Mutex<HashMap<PathBuf, String>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -956,8 +959,8 @@ impl App {
 
         match watcher_result {
             Ok(watcher) => {
-                self.refs_watcher = Some(Arc::new(Mutex::new(watcher)));
-                self.refs_watch_paths.clear();
+                self.runtime.refs_watcher = Some(Arc::new(Mutex::new(watcher)));
+                self.runtime.refs_watch_paths.clear();
                 // Populate the path map and start watching existing sessions.
                 let mut paths = HashMap::new();
                 for session in &self.sessions {
@@ -966,7 +969,7 @@ impl App {
                         .join("refs")
                         .join("heads");
                     if refs_dir.is_dir()
-                        && let Some(ref watcher_arc) = self.refs_watcher
+                        && let Some(ref watcher_arc) = self.runtime.refs_watcher
                         && let Ok(mut w) = watcher_arc.lock()
                     {
                         match w.watch(&refs_dir, RecursiveMode::NonRecursive) {
@@ -988,14 +991,14 @@ impl App {
                         }
                     }
                 }
-                self.refs_watch_paths = paths.clone();
+                self.runtime.refs_watch_paths = paths.clone();
                 // Populate the closure's path map so events can route to sessions.
                 if let Ok(mut map) = path_to_session.lock() {
                     *map = paths;
                 }
                 logger::info(&format!(
                     "[gh-integration] refs watcher: initialized, watching {} session(s)",
-                    self.refs_watch_paths.len(),
+                    self.runtime.refs_watch_paths.len(),
                 ));
             }
             Err(e) => {
@@ -1009,10 +1012,10 @@ impl App {
     // -- GitHub PR integration workers --
 
     pub(crate) fn spawn_gh_status_check(&self) {
-        if !self.github_integration_enabled {
+        if !self.runtime.github_integration_enabled {
             return;
         }
-        let tx = self.worker_tx.clone();
+        let tx = self.runtime.worker_tx.clone();
         thread::spawn(move || {
             use crate::model::GhStatus;
             // Step 1: Is `gh` on PATH?
@@ -1055,7 +1058,7 @@ impl App {
             .map(|pr| (pr.session_id.clone(), pr))
             .collect();
 
-        if let Ok(mut guard) = self.pr_sync_sessions.lock() {
+        if let Ok(mut guard) = self.runtime.pr_sync_sessions.lock() {
             *guard = self
                 .sessions
                 .iter()
@@ -1064,16 +1067,16 @@ impl App {
                     branch_name: s.branch_name.clone(),
                     worktree_path: s.worktree_path.clone(),
                     known_pr: known_map.get(&s.id).cloned(),
-                    agent_exited: !self.providers.contains_key(&s.id),
+                    agent_exited: !self.runtime.providers.contains_key(&s.id),
                 })
                 .collect();
         }
     }
 
     pub(crate) fn spawn_pr_sync_worker(&self) {
-        let tx = self.worker_tx.clone();
-        let sessions = Arc::clone(&self.pr_sync_sessions);
-        let enabled = Arc::clone(&self.pr_sync_enabled);
+        let tx = self.runtime.worker_tx.clone();
+        let sessions = Arc::clone(&self.runtime.pr_sync_sessions);
+        let enabled = Arc::clone(&self.runtime.pr_sync_enabled);
         enabled.store(true, Ordering::Relaxed);
         thread::spawn(move || {
             let interval = Duration::from_secs(45);
@@ -1091,8 +1094,8 @@ impl App {
     }
 
     pub(crate) fn spawn_initial_pr_refresh(&self) {
-        let tx = self.worker_tx.clone();
-        let sessions = Arc::clone(&self.pr_sync_sessions);
+        let tx = self.runtime.worker_tx.clone();
+        let sessions = Arc::clone(&self.runtime.pr_sync_sessions);
         thread::spawn(move || {
             let results = run_pr_sync(&sessions);
             if !results.is_empty() {
@@ -1104,13 +1107,13 @@ impl App {
     /// Trigger a one-shot PR check for a single session, unless it was checked
     /// recently (within 10 seconds).
     pub(crate) fn spawn_pr_check_for_session(&mut self, session_id: &str) {
-        if !self.github_integration_enabled
-            || !matches!(self.gh_status, crate::model::GhStatus::Available)
+        if !self.runtime.github_integration_enabled
+            || !matches!(self.runtime.gh_status, crate::model::GhStatus::Available)
         {
             return;
         }
         // Rate-limit: skip if checked within the last 10 seconds.
-        if let Some(last) = self.pr_last_checked.get(session_id)
+        if let Some(last) = self.runtime.pr_last_checked.get(session_id)
             && last.elapsed() < Duration::from_secs(10)
         {
             return;
@@ -1128,9 +1131,9 @@ impl App {
             branch_name: session.branch_name.clone(),
             worktree_path: session.worktree_path.clone(),
             known_pr,
-            agent_exited: !self.providers.contains_key(session_id),
+            agent_exited: !self.runtime.providers.contains_key(session_id),
         };
-        let tx = self.worker_tx.clone();
+        let tx = self.runtime.worker_tx.clone();
         thread::spawn(move || {
             let result = check_pr_for_entry(&entry);
             let _ = tx.send(WorkerEvent::PrStatusReady(vec![(entry.session_id, result)]));
@@ -1138,9 +1141,9 @@ impl App {
     }
 
     pub(crate) fn spawn_changed_files_poller(&self) {
-        let tx = self.worker_tx.clone();
-        let watched = Arc::clone(&self.watched_worktree);
-        let has_agent = Arc::clone(&self.has_active_processes);
+        let tx = self.runtime.worker_tx.clone();
+        let watched = Arc::clone(&self.runtime.watched_worktree);
+        let has_agent = Arc::clone(&self.runtime.has_active_processes);
         thread::spawn(move || {
             loop {
                 let interval = if has_agent.load(Ordering::Relaxed) {
@@ -1176,7 +1179,7 @@ impl App {
             if started_at.elapsed() < Duration::from_millis(timeout_ms) {
                 continue;
             }
-            let Some(provider) = self.providers.get(session_id) else {
+            let Some(provider) = self.runtime.providers.get(session_id) else {
                 continue;
             };
             if provider.has_output() {
@@ -1190,8 +1193,8 @@ impl App {
             let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
                 continue;
             };
-            self.providers.remove(&session_id);
-            self.running_provider_pins.remove(&session_id);
+            self.runtime.providers.remove(&session_id);
+            self.runtime.running_provider_pins.remove(&session_id);
             self.last_pty_activity.remove(&session_id);
             logger::info(&format!(
                 "resume args produced no visible output for agent \"{}\" within timeout, retrying with regular args",
@@ -1199,7 +1202,7 @@ impl App {
             ));
             match self.spawn_pty_for_session(&session, false) {
                 Ok(client) => {
-                    self.providers.insert(session_id.clone(), client);
+                    self.runtime.providers.insert(session_id.clone(), client);
                     self.mark_session_status(&session_id, SessionStatus::Active);
                     self.mark_session_provider_started(&session_id);
                     let proj_name = self.project_name_for_session(&session);
