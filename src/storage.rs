@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 
-use crate::model::{AgentSession, SessionStatus};
+use crate::model::{AgentSession, SessionState, SessionStatus};
 
 /// Ordered list of schema migrations. Each entry is `(version, sql)`.
 ///
@@ -27,12 +27,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
         1,
         include_str!("storage/migrations/0001_initial_schema.sql"),
     ),
-    // TODO(audit02 Phase 18): add `0002_session_state_v2.sql` once the
-    // session state machine lands. The migration shape sketched in
-    // `docs/plans/audits/audit02/19-schema-versioning.md` (§19.3) adds a
-    // `state_json` column to `agent_sessions` and back-fills it from the
-    // existing `status` column. Until Phase 18 merges, leaving the slot
-    // empty keeps `MIGRATIONS` honest — every entry is a real migration.
+    (
+        2,
+        include_str!("storage/migrations/0002_session_state_v2.sql"),
+    ),
 ];
 
 /// Apply any migrations whose version is greater than the database's
@@ -89,6 +87,12 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
         ensure_column(conn, "session_prs", "state", "text not null default 'OPEN'")?;
         ensure_column(conn, "session_prs", "title", "text not null default ''")?;
+        // audit02 P1-Z: nullable state_json column for the new
+        // SessionState machine. Migration 0002 adds this for any DB
+        // tracked via `user_version`; this shim covers the legacy
+        // pre-`user_version` path the same way the older columns are
+        // handled above.
+        ensure_column(conn, "agent_sessions", "state_json", "text")?;
     }
     Ok(())
 }
@@ -235,12 +239,20 @@ impl SessionStore {
 
     pub fn upsert_session(&self, session: &AgentSession) -> Result<()> {
         let conn = self.conn();
+        // audit02 P1-Z phase 1: persist the new `SessionState` JSON
+        // alongside the legacy `status` column. Until `AgentSession`
+        // grows an explicit `state` field (phase 2), we synthesize
+        // one from the legacy status — that round-trips faithfully
+        // because both halves stay in sync per row.
+        let state_json = SessionState::from_legacy_status(&session.status, session.updated_at)
+            .to_json()
+            .ok();
         conn.execute(
             r#"
             insert into agent_sessions
-                (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, status, created_at, updated_at)
+                (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, status, state_json, created_at, updated_at)
             values
-                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
             on conflict(id) do update set
                 project_path=excluded.project_path,
                 provider=excluded.provider,
@@ -250,6 +262,7 @@ impl SessionStore {
                 title=excluded.title,
                 started_providers=excluded.started_providers,
                 status=excluded.status,
+                state_json=excluded.state_json,
                 updated_at=excluded.updated_at
             "#,
             params![
@@ -263,6 +276,7 @@ impl SessionStore {
                 session.title,
                 serialize_started_providers(&session.started_providers),
                 session.status.as_str(),
+                state_json,
                 session.created_at.to_rfc3339(),
                 session.updated_at.to_rfc3339(),
             ],
@@ -274,15 +288,27 @@ impl SessionStore {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             r#"
-            select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, status, created_at, updated_at
+            select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, status, state_json, created_at, updated_at
             from agent_sessions
             order by updated_at desc
             "#,
         )?;
         let rows = stmt.query_map([], |row| {
             let started_providers: String = row.get(8)?;
-            let created_at: String = row.get(10)?;
-            let updated_at: String = row.get(11)?;
+            let legacy_status_str: String = row.get(9)?;
+            let _state_json: Option<String> = row.get(10)?;
+            let created_at: String = row.get(11)?;
+            let updated_at: String = row.get(12)?;
+            // audit02 P1-Z phase 1: the legacy `status` column is
+            // still the canonical answer for `AgentSession.status`.
+            // The new `state_json` column is written on every upsert
+            // so a future phase 2 reader can use it; phase 1 only
+            // reads it for tests and diagnostics. Preferring
+            // `state_json` here would change observable behaviour
+            // (e.g. the `Active` -> `Detached` collapse documented
+            // on `PersistedSessionState`) before the rest of the app
+            // is ready for it.
+            let status = SessionStatus::from_str(&legacy_status_str);
             Ok(AgentSession {
                 id: row.get(0)?,
                 project_id: row.get::<_, String>(1).unwrap_or_default(),
@@ -293,7 +319,7 @@ impl SessionStore {
                 title: row.get(6)?,
                 project_path: row.get(7)?,
                 started_providers: parse_started_providers(&started_providers),
-                status: SessionStatus::from_str(row.get::<_, String>(9)?.as_str()),
+                status,
                 created_at: parse_time(&created_at).unwrap_or_else(Utc::now),
                 updated_at: parse_time(&updated_at).unwrap_or_else(Utc::now),
             })

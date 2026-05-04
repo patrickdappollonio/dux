@@ -1,0 +1,25 @@
+-- 0002_session_state_v2.sql
+--
+-- audit02 P1-Z (Phase 18) — explicit session state machine, phase 1 of 2.
+--
+-- Adds a new `state_json` column to `agent_sessions` that stores the
+-- serialized `PersistedSessionState` alongside the legacy `status`
+-- column. The two coexist on purpose: this migration is the persistence
+-- half of "phase 1", which adds the new state model without yet
+-- ripping out `SessionStatus` or the in-memory `providers` HashMap.
+-- Phase 2 will retire `status` once the new path has soaked.
+--
+-- The column is nullable rather than `NOT NULL` because:
+--   1. Older rows written before this migration have no JSON to copy.
+--   2. The reader in `src/storage.rs` falls back to deriving the state
+--      from `status` when `state_json IS NULL`, so a missing value is
+--      a valid first-load condition, not a corruption signal.
+--
+-- We do not back-fill in pure SQL because the JSON shape is owned by
+-- Rust (`serde_json` + `chrono` round-trips). Back-fill on next read
+-- happens in Rust and is persisted on the next `upsert_session`.
+--
+-- Like every migration in this directory, this file is IMMUTABLE once
+-- committed. To fix a bug here, write 0003_*.sql.
+
+alter table agent_sessions add column state_json text;
