@@ -390,21 +390,21 @@ impl App {
             ])
             .areas(frame.area());
         self.render_header(frame, header);
-        let right_constraint = if self.right_hidden {
+        let right_constraint = if self.ui.right_hidden {
             Constraint::Length(0)
-        } else if self.right_collapsed {
+        } else if self.ui.right_collapsed {
             Constraint::Length(3)
         } else {
             Constraint::Percentage(self.right_width_pct)
         };
 
-        let [left, center, right] = if self.left_collapsed {
+        let [left, center, right] = if self.ui.left_collapsed {
             Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Length(4), Constraint::Min(20), right_constraint])
                 .areas(body)
         } else {
-            let right_pct = if self.right_hidden || self.right_collapsed {
+            let right_pct = if self.ui.right_hidden || self.ui.right_collapsed {
                 0
             } else {
                 self.right_width_pct
@@ -421,8 +421,8 @@ impl App {
                 ])
                 .areas(body)
         };
-        self.mouse_layout.reset(body, left, center, right);
-        self.overlay_layout.reset();
+        self.ui.mouse_layout.reset(body, left, center, right);
+        self.ui.overlay_layout.reset();
         self.render_left(frame, left);
         self.render_center(frame, center);
         self.render_files(frame, right);
@@ -524,10 +524,10 @@ impl App {
     }
 
     fn render_left(&mut self, frame: &mut Frame, area: Rect) {
-        let focused = self.focus == FocusPane::Left;
+        let focused = self.ui.focus == FocusPane::Left;
 
-        if self.left_collapsed {
-            self.mouse_layout.left_list = self.themed_block("", focused).inner(area);
+        if self.ui.left_collapsed {
+            self.ui.mouse_layout.left_list = self.themed_block("", focused).inner(area);
             let collapsed_left_items = self.left_items();
             let items = collapsed_left_items
                 .iter()
@@ -690,7 +690,12 @@ impl App {
                     let label_color = if deleting {
                         self.theme.session_deleting
                     } else {
-                        match self.pr_statuses.get(&session.id).map(|pr| &pr.state) {
+                        match self
+                            .runtime
+                            .pr_statuses
+                            .get(&session.id)
+                            .map(|pr| &pr.state)
+                        {
                             Some(crate::model::PrState::Merged) => self.theme.pr_merged_label,
                             Some(crate::model::PrState::Closed) => self.theme.pr_closed_label,
                             Some(crate::model::PrState::Open) => self.theme.pr_open_label,
@@ -742,7 +747,7 @@ impl App {
             })
             .collect::<Vec<_>>();
         let title = format!("Projects ({})", self.projects.len());
-        self.mouse_layout.left_list = self
+        self.ui.mouse_layout.left_list = self
             .themed_block(&title, projects_focused)
             .inner(projects_area);
         let mut state =
@@ -764,7 +769,7 @@ impl App {
         if let Some(term_area) = terminals_area {
             let terminals_focused = focused && self.left_section == LeftSection::Terminals;
             let term_title = format!("Terminals ({})", terminal_render_data.len());
-            self.mouse_layout.terminal_list = self
+            self.ui.mouse_layout.terminal_list = self
                 .themed_block(&term_title, terminals_focused)
                 .inner(term_area);
             let term_items: Vec<ListItem> = terminal_render_data
@@ -800,29 +805,29 @@ impl App {
                 &mut term_state,
             );
         } else {
-            self.mouse_layout.terminal_list = Rect::default();
+            self.ui.mouse_layout.terminal_list = Rect::default();
         }
     }
 
     fn render_center(&mut self, frame: &mut Frame, area: Rect) {
-        let focused = self.focus == FocusPane::Center;
+        let focused = self.ui.focus == FocusPane::Center;
 
         // Determine if a PR banner should be shown above the center pane.
         let is_input = matches!(
-            (self.input_target, self.session_surface),
+            (self.ui.input_target, self.session_surface),
             (InputTarget::Agent, SessionSurface::Agent)
                 | (InputTarget::Terminal, SessionSurface::Terminal)
         );
         let pr_info = if !is_input {
             self.selected_session()
-                .and_then(|s| self.pr_statuses.get(&s.id))
+                .and_then(|s| self.runtime.pr_statuses.get(&s.id))
                 .cloned()
         } else {
             None
         };
         let pr_banner_height: u16 = if pr_info.is_some() { 1 } else { 0 };
 
-        let (pr_area, pane_area) = if self.pr_banner_at_bottom {
+        let (pr_area, pane_area) = if self.ui.pr_banner_at_bottom {
             let [pane_area, pr_area] = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(1), Constraint::Length(pr_banner_height)])
@@ -844,7 +849,7 @@ impl App {
             CenterMode::Diff { .. } => {
                 self.render_diff(frame, pane_area, focused);
             }
-            CenterMode::Agent if !matches!(self.fullscreen_overlay, FullscreenOverlay::None) => {
+            CenterMode::Agent if !matches!(self.ui.fullscreen_overlay, FullscreenOverlay::None) => {
                 // Skip agent rendering here — fullscreen overlay handles it.
                 // Rendering in both places causes the PTY to be resized twice
                 // per frame (once to the small pane, once to the overlay).
@@ -887,7 +892,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
             .areas(inner);
-        self.mouse_layout.agent_term = Some(content_area);
+        self.ui.mouse_layout.agent_term = Some(content_area);
 
         self.last_diff_height = content_area.height;
 
@@ -979,19 +984,19 @@ impl App {
         // Rotate the tip and randomly pick a logo variant when the logo
         // becomes visible again after being hidden, or when the selected
         // left-pane item changes while the logo stays visible.
-        if !self.welcome_logo_visible || self.welcome_tip_selection != self.selected_left {
-            self.welcome_tip_index = self.welcome_tip_index.wrapping_add(1);
-            self.welcome_logo_alt = std::time::SystemTime::now()
+        if !self.ui.welcome_logo_visible || self.ui.welcome_tip_selection != self.selected_left {
+            self.ui.welcome_tip_index = self.ui.welcome_tip_index.wrapping_add(1);
+            self.ui.welcome_logo_alt = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.subsec_nanos() % 2 == 0)
                 .unwrap_or(false);
         }
-        self.welcome_logo_visible = true;
-        self.welcome_tip_selection = self.selected_left;
+        self.ui.welcome_logo_visible = true;
+        self.ui.welcome_tip_selection = self.selected_left;
 
         // Pick the active logo variant. Fall back to the text logo when the
         // area is too short for the taller duck.
-        let use_alt = self.welcome_logo_alt && area.height >= ASCII_LOGO_ALT_HEIGHT;
+        let use_alt = self.ui.welcome_logo_alt && area.height >= ASCII_LOGO_ALT_HEIGHT;
         let (logo, logo_w, logo_h) = if use_alt {
             (ASCII_LOGO_ALT, ASCII_LOGO_ALT_WIDTH, ASCII_LOGO_ALT_HEIGHT)
         } else {
@@ -1012,7 +1017,7 @@ impl App {
 
         // --- tip pill ---
         if show_tip {
-            let text_fn = &WELCOME_TIPS[self.welcome_tip_index % WELCOME_TIPS.len()];
+            let text_fn = &WELCOME_TIPS[self.ui.welcome_tip_index % WELCOME_TIPS.len()];
             let tip_text = text_fn(&self.bindings);
 
             let pill_span = Span::styled(
@@ -1131,7 +1136,7 @@ impl App {
         let active_surface = self.session_surface;
         let terminal_status = self.selected_companion_terminal_status();
         let is_input = matches!(
-            (self.input_target, active_surface),
+            (self.ui.input_target, active_surface),
             (InputTarget::Agent, SessionSurface::Agent)
                 | (InputTarget::Terminal, SessionSurface::Terminal)
         );
@@ -1144,7 +1149,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
             .areas(inner);
-        self.mouse_layout.agent_term = Some(term_area);
+        self.ui.mouse_layout.agent_term = Some(term_area);
 
         // Get the selected session's PTY screen.
         let session_id = self.selected_session().map(|s| s.id.clone());
@@ -1165,7 +1170,7 @@ impl App {
         let session_active = match active_surface {
             SessionSurface::Agent => session_id
                 .as_ref()
-                .map(|id| self.providers.contains_key(id))
+                .map(|id| self.runtime.providers.contains_key(id))
                 .unwrap_or(false),
             SessionSurface::Terminal => terminal_status.is_running(),
         };
@@ -1379,12 +1384,12 @@ impl App {
         }
 
         if rendered_content {
-            self.welcome_logo_visible = false;
+            self.ui.welcome_logo_visible = false;
         } else {
             match active_surface {
                 SessionSurface::Agent => self.render_ascii_logo(frame, term_area),
                 SessionSurface::Terminal => {
-                    self.welcome_logo_visible = false;
+                    self.ui.welcome_logo_visible = false;
                     self.render_terminal_placeholder(
                         frame,
                         term_area,
@@ -1396,7 +1401,7 @@ impl App {
         }
 
         // Macro bar overlays the hint area when active.
-        if self.macro_bar.is_some() {
+        if self.ui.macro_bar.is_some() {
             self.render_macro_bar(frame, inner);
             return;
         }
@@ -1510,12 +1515,12 @@ impl App {
     }
 
     fn render_files(&mut self, frame: &mut Frame, area: Rect) {
-        if self.right_hidden {
+        if self.ui.right_hidden {
             return;
         }
 
-        if self.right_collapsed {
-            let focused = self.focus == FocusPane::Files;
+        if self.ui.right_collapsed {
+            let focused = self.ui.focus == FocusPane::Files;
             let all_files: Vec<(&str, Color)> = self
                 .unstaged_files
                 .iter()
@@ -1544,7 +1549,7 @@ impl App {
         }
 
         let has_staged = !self.staged_files.is_empty();
-        let focused = self.focus == FocusPane::Files;
+        let focused = self.ui.focus == FocusPane::Files;
 
         if has_staged {
             let pct = self.staged_pane_height_pct.clamp(10, 80);
@@ -1564,7 +1569,7 @@ impl App {
                 RightSection::Unstaged,
                 true,
             );
-            self.mouse_layout.unstaged_list = Some(list_rect);
+            self.ui.mouse_layout.unstaged_list = Some(list_rect);
             self.render_staged_with_commit(frame, chunks[1], focused);
         } else {
             let list_rect = self.render_file_list(
@@ -1575,7 +1580,7 @@ impl App {
                 RightSection::Unstaged,
                 true,
             );
-            self.mouse_layout.unstaged_list = Some(list_rect);
+            self.ui.mouse_layout.unstaged_list = Some(list_rect);
         }
     }
 
@@ -1601,7 +1606,7 @@ impl App {
             RightSection::Staged,
             false,
         );
-        self.mouse_layout.staged_list = Some(list_rect);
+        self.ui.mouse_layout.staged_list = Some(list_rect);
 
         // Commit input block.
         self.render_commit_input_inner(frame, commit_area, pane_focused);
@@ -1619,7 +1624,7 @@ impl App {
         section: RightSection,
         show_hint: bool,
     ) -> Rect {
-        let pane_focused = self.focus == FocusPane::Files;
+        let pane_focused = self.ui.focus == FocusPane::Files;
         let is_active_section = pane_focused && self.right_section == section;
         let title = format!("{title_prefix} ({})", files.len());
         let block = self.themed_block(&title, is_active_section);
@@ -1768,9 +1773,9 @@ impl App {
 
     /// Render the commit input as its own bordered block.
     fn render_commit_input_inner(&mut self, frame: &mut Frame, area: Rect, pane_focused: bool) {
-        self.mouse_layout.commit_area = Some(area);
+        self.ui.mouse_layout.commit_area = Some(area);
         let is_active_section = pane_focused && self.right_section == RightSection::CommitInput;
-        let focused = self.input_target == InputTarget::CommitMessage;
+        let focused = self.ui.input_target == InputTarget::CommitMessage;
 
         let block = self.themed_block("Commit Message", is_active_section || focused);
         let inner = block.inner(area);
@@ -1781,7 +1786,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(1)])
             .areas(inner);
-        self.mouse_layout.commit_text_area = Some(text_area);
+        self.ui.mouse_layout.commit_text_area = Some(text_area);
 
         // Update TextInput's display dimensions to match the available area.
         let text_w = text_area.width as usize;
@@ -1863,7 +1868,7 @@ impl App {
             self.left_items().get(self.selected_left),
             Some(LeftItem::Session(_))
         );
-        let ctx = match self.focus {
+        let ctx = match self.ui.focus {
             FocusPane::Left if self.left_section == LeftSection::Terminals => {
                 HintContext::LeftTerminal
             }
@@ -1960,7 +1965,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
             .areas(inner);
-        self.overlay_layout.active = OverlayMouseLayout::Help;
+        self.ui.overlay_layout.active = OverlayMouseLayout::Help;
 
         // Build help content lines.
         let mut lines: Vec<Line> = Vec::new();
@@ -2158,13 +2163,13 @@ impl App {
         )));
         {
             use crate::model::GhStatus;
-            let (icon, desc) = if !self.github_integration_enabled {
+            let (icon, desc) = if !self.runtime.github_integration_enabled {
                 (
                     "○",
                     "Disabled — enable via command palette (toggle-github-integration)".to_string(),
                 )
             } else {
-                match self.gh_status {
+                match self.runtime.gh_status {
                     GhStatus::Unknown => ("◐", "Checking gh CLI availability…".to_string()),
                     GhStatus::NotInstalled => (
                         "⚠",
@@ -2175,15 +2180,17 @@ impl App {
                         "gh CLI not authenticated — run: gh auth login".to_string(),
                     ),
                     GhStatus::Available => {
-                        let count = self.pr_statuses.len();
+                        let count = self.runtime.pr_statuses.len();
                         let noun = if count == 1 { "session" } else { "sessions" };
                         ("✓", format!("Active — tracking PRs for {count} {noun}"))
                     }
                 }
             };
-            let icon_color = match self.gh_status {
-                GhStatus::Available if self.github_integration_enabled => self.theme.session_active,
-                _ if !self.github_integration_enabled => self.theme.session_exited,
+            let icon_color = match self.runtime.gh_status {
+                GhStatus::Available if self.runtime.github_integration_enabled => {
+                    self.theme.session_active
+                }
+                _ if !self.runtime.github_integration_enabled => self.theme.session_exited,
                 _ => self.theme.warning_fg,
             };
             lines.push(Line::from(vec![
@@ -2196,12 +2203,12 @@ impl App {
 
         // Track content size for scroll clamping in input handler.
         let total_lines = lines.len() as u16;
-        self.last_help_lines = total_lines;
-        self.last_help_height = content_area.height;
+        self.ui.last_help_lines = total_lines;
+        self.ui.last_help_height = content_area.height;
 
         // Clamp scroll offset.
         let max_scroll = total_lines.saturating_sub(content_area.height);
-        let scroll = self.help_scroll.unwrap_or(0).min(max_scroll);
+        let scroll = self.ui.help_scroll.unwrap_or(0).min(max_scroll);
 
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -2248,7 +2255,7 @@ impl App {
     }
 
     fn render_prompt(&mut self, frame: &mut Frame) {
-        match &self.prompt {
+        match &self.ui.prompt {
             PromptState::Command { input, selected } => {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(72, 40, frame.area());
@@ -2346,7 +2353,7 @@ impl App {
                     frame.buffer_mut(),
                     &mut state,
                 );
-                self.overlay_layout.active = OverlayMouseLayout::Command {
+                self.ui.overlay_layout.active = OverlayMouseLayout::Command {
                     input: input_inner,
                     list: list_inner,
                     items: commands.len(),
@@ -2519,7 +2526,7 @@ impl App {
                         frame.buffer_mut(),
                         &mut state,
                     );
-                    self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
+                    self.ui.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
                         input: Some(input_inner),
                         list: list_inner,
                         items: visible.len(),
@@ -2570,7 +2577,7 @@ impl App {
                         frame.buffer_mut(),
                         &mut state,
                     );
-                    self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
+                    self.ui.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
                         input: None,
                         list: list_inner,
                         items: visible.len(),
@@ -2737,7 +2744,7 @@ impl App {
                     .kind(ButtonKind::Confirm)
                     .state(button_state_for(
                         ButtonPressedTarget::ChangeAgentProviderCancel,
-                        self.pressed_button,
+                        self.ui.pressed_button,
                         matches!(prompt.focus, ChangeAgentProviderFocus::Cancel),
                         true,
                     ))
@@ -2747,13 +2754,13 @@ impl App {
                     .kind(ButtonKind::Confirm)
                     .state(button_state_for(
                         ButtonPressedTarget::ChangeAgentProviderApply,
-                        self.pressed_button,
+                        self.ui.pressed_button,
                         matches!(prompt.focus, ChangeAgentProviderFocus::Apply),
                         apply_enabled,
                     ))
                     .render(frame, apply_area, &self.theme);
 
-                self.overlay_layout.active = OverlayMouseLayout::ChangeAgentProvider {
+                self.ui.overlay_layout.active = OverlayMouseLayout::ChangeAgentProvider {
                     list: list_inner,
                     items: prompt.options.len(),
                     offset: state.offset(),
@@ -2916,7 +2923,7 @@ impl App {
                     .kind(ButtonKind::Confirm)
                     .state(button_state_for(
                         ButtonPressedTarget::ChangeDefaultProviderCancel,
-                        self.pressed_button,
+                        self.ui.pressed_button,
                         matches!(prompt.focus, ChangeDefaultProviderFocus::Cancel),
                         true,
                     ))
@@ -2926,13 +2933,13 @@ impl App {
                     .kind(ButtonKind::Confirm)
                     .state(button_state_for(
                         ButtonPressedTarget::ChangeDefaultProviderApply,
-                        self.pressed_button,
+                        self.ui.pressed_button,
                         matches!(prompt.focus, ChangeDefaultProviderFocus::Apply),
                         apply_enabled,
                     ))
                     .render(frame, apply_area, &self.theme);
 
-                self.overlay_layout.active = OverlayMouseLayout::ChangeDefaultProvider {
+                self.ui.overlay_layout.active = OverlayMouseLayout::ChangeDefaultProvider {
                     list: list_inner,
                     items: prompt.options.len(),
                     offset: state.offset(),
@@ -3057,7 +3064,7 @@ impl App {
                     &mut state,
                 );
 
-                self.overlay_layout.active = OverlayMouseLayout::ChangeTheme {
+                self.ui.overlay_layout.active = OverlayMouseLayout::ChangeTheme {
                     list: list_inner,
                     items: prompt.options.len(),
                     offset: state.offset(),
@@ -3167,7 +3174,7 @@ impl App {
                     frame.buffer_mut(),
                     &mut state,
                 );
-                self.overlay_layout.active = OverlayMouseLayout::PickEditor {
+                self.ui.overlay_layout.active = OverlayMouseLayout::PickEditor {
                     list: list_inner,
                     items: editors.len(),
                     offset: state.offset(),
@@ -3331,7 +3338,7 @@ impl App {
                         frame.buffer_mut(),
                         &mut state,
                     );
-                    self.overlay_layout.active = OverlayMouseLayout::KillRunning {
+                    self.ui.overlay_layout.active = OverlayMouseLayout::KillRunning {
                         input: Some(input_inner),
                         list: list_inner,
                         items: visible_indices.len(),
@@ -3354,7 +3361,7 @@ impl App {
                         frame.buffer_mut(),
                         &mut state,
                     );
-                    self.overlay_layout.active = OverlayMouseLayout::KillRunning {
+                    self.ui.overlay_layout.active = OverlayMouseLayout::KillRunning {
                         input: None,
                         list: list_inner,
                         items: visible_indices.len(),
@@ -3443,19 +3450,19 @@ impl App {
                         KillRunningFooterAction::Visible => ButtonPressedTarget::RuntimeKillVisible,
                     };
                     let state =
-                        button_state_for(press_target, self.pressed_button, focused, enabled);
+                        button_state_for(press_target, self.ui.pressed_button, focused, enabled);
                     Button::new(action.button_label())
                         .kind(kind)
                         .state(state)
                         .render(frame, rect, &self.theme);
                     cursor_x += button_widths[index] + gap;
                 }
-                self.overlay_layout.active = OverlayMouseLayout::KillRunning {
-                    input: match self.overlay_layout.active {
+                self.ui.overlay_layout.active = OverlayMouseLayout::KillRunning {
+                    input: match self.ui.overlay_layout.active {
                         OverlayMouseLayout::KillRunning { input, .. } => input,
                         _ => None,
                     },
-                    list: match self.overlay_layout.active {
+                    list: match self.ui.overlay_layout.active {
                         OverlayMouseLayout::KillRunning { list, .. } => list,
                         _ => Rect::default(),
                     },
@@ -3558,7 +3565,7 @@ impl App {
                     .kind(ButtonKind::Confirm)
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmKillCancel,
-                        self.pressed_button,
+                        self.ui.pressed_button,
                         !confirm_prompt.confirm_selected,
                         true,
                     ))
@@ -3568,13 +3575,13 @@ impl App {
                     .kind(ButtonKind::Danger)
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmKillConfirm,
-                        self.pressed_button,
+                        self.ui.pressed_button,
                         confirm_prompt.confirm_selected,
                         true,
                     ))
                     .render(frame, kill_area, &self.theme);
 
-                self.overlay_layout.active = OverlayMouseLayout::ConfirmKillRunning {
+                self.ui.overlay_layout.active = OverlayMouseLayout::ConfirmKillRunning {
                     cancel_button: cancel_area,
                     kill_button: kill_area,
                 };
@@ -3715,7 +3722,7 @@ impl App {
                     .kind(ButtonKind::Confirm)
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmDeleteCancel,
-                        self.pressed_button,
+                        self.ui.pressed_button,
                         *focus == DeleteAgentFocus::Cancel,
                         true,
                     ))
@@ -3725,13 +3732,13 @@ impl App {
                     .kind(ButtonKind::Danger)
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmDeleteConfirm,
-                        self.pressed_button,
+                        self.ui.pressed_button,
                         *focus == DeleteAgentFocus::Delete,
                         true,
                     ))
                     .render(frame, delete_area, &self.theme);
 
-                self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
+                self.ui.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
                     cancel_button: cancel_area,
                     delete_button: delete_area,
                     checkbox: checkbox_rect,
@@ -3800,7 +3807,7 @@ impl App {
                     .kind(ButtonKind::Confirm)
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmDeleteTerminalCancel,
-                        self.pressed_button,
+                        self.ui.pressed_button,
                         !confirm_selected,
                         true,
                     ))
@@ -3810,13 +3817,13 @@ impl App {
                     .kind(ButtonKind::Danger)
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmDeleteTerminalConfirm,
-                        self.pressed_button,
+                        self.ui.pressed_button,
                         *confirm_selected,
                         true,
                     ))
                     .render(frame, delete_area, &self.theme);
 
-                self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteTerminal {
+                self.ui.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteTerminal {
                     cancel_button: cancel_area,
                     delete_button: delete_area,
                 };
@@ -3891,7 +3898,7 @@ impl App {
                     .kind(ButtonKind::Confirm)
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmQuitCancel,
-                        self.pressed_button,
+                        self.ui.pressed_button,
                         !confirm_selected,
                         true,
                     ))
@@ -3901,13 +3908,13 @@ impl App {
                     .kind(ButtonKind::Danger)
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmQuitConfirm,
-                        self.pressed_button,
+                        self.ui.pressed_button,
                         *confirm_selected,
                         true,
                     ))
                     .render(frame, quit_area, &self.theme);
 
-                self.overlay_layout.active = OverlayMouseLayout::ConfirmQuit {
+                self.ui.overlay_layout.active = OverlayMouseLayout::ConfirmQuit {
                     cancel_button: cancel_area,
                     quit_button: quit_area,
                 };
@@ -3975,7 +3982,7 @@ impl App {
                     .kind(ButtonKind::Confirm)
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmDiscardCancel,
-                        self.pressed_button,
+                        self.ui.pressed_button,
                         !confirm_selected,
                         true,
                     ))
@@ -3985,13 +3992,13 @@ impl App {
                     .kind(ButtonKind::Danger)
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmDiscardConfirm,
-                        self.pressed_button,
+                        self.ui.pressed_button,
                         *confirm_selected,
                         true,
                     ))
                     .render(frame, discard_area, &self.theme);
 
-                self.overlay_layout.active = OverlayMouseLayout::ConfirmDiscardFile {
+                self.ui.overlay_layout.active = OverlayMouseLayout::ConfirmDiscardFile {
                     cancel_button: cancel_area,
                     discard_button: discard_area,
                 };
@@ -4169,7 +4176,7 @@ impl App {
                     .kind(ButtonKind::Confirm)
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmNonDefaultBranchCancel,
-                        self.pressed_button,
+                        self.ui.pressed_button,
                         *focus == ConfirmNonDefaultBranchFocus::Cancel,
                         true,
                     ))
@@ -4179,13 +4186,13 @@ impl App {
                     .kind(ButtonKind::Danger)
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmNonDefaultBranchAdd,
-                        self.pressed_button,
+                        self.ui.pressed_button,
                         *focus == ConfirmNonDefaultBranchFocus::Add,
                         true,
                     ))
                     .render(frame, add_area, &self.theme);
 
-                self.overlay_layout.active = OverlayMouseLayout::ConfirmNonDefaultBranch {
+                self.ui.overlay_layout.active = OverlayMouseLayout::ConfirmNonDefaultBranch {
                     cancel_button: cancel_area,
                     add_button: add_area,
                     checkbox: checkbox_rect,
@@ -4263,7 +4270,7 @@ impl App {
                     .kind(ButtonKind::Confirm)
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmUseExistingBranchCancel,
-                        self.pressed_button,
+                        self.ui.pressed_button,
                         !confirm_selected,
                         true,
                     ))
@@ -4275,13 +4282,13 @@ impl App {
                     .kind(ButtonKind::Confirm)
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmUseExistingBranchUse,
-                        self.pressed_button,
+                        self.ui.pressed_button,
                         *confirm_selected,
                         true,
                     ))
                     .render(frame, use_area, &self.theme);
 
-                self.overlay_layout.active = OverlayMouseLayout::ConfirmUseExistingBranch {
+                self.ui.overlay_layout.active = OverlayMouseLayout::ConfirmUseExistingBranch {
                     cancel_button: cancel_area,
                     use_button: use_area,
                 };
@@ -4403,7 +4410,7 @@ impl App {
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
                 Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
-                self.overlay_layout.active = OverlayMouseLayout::RenameSession {
+                self.ui.overlay_layout.active = OverlayMouseLayout::RenameSession {
                     input: input_inner,
                     checkbox: Some(OverlayCheckbox {
                         id: OverlayCheckboxId::RenameSessionBranch,
@@ -4626,7 +4633,7 @@ impl App {
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
                 Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
-                self.overlay_layout.active = OverlayMouseLayout::NameNewAgent {
+                self.ui.overlay_layout.active = OverlayMouseLayout::NameNewAgent {
                     input: input_inner,
                     checkbox: Some(OverlayCheckbox {
                         id: OverlayCheckboxId::NameNewAgentRandomizedPetName,
@@ -4642,7 +4649,7 @@ impl App {
         use super::MacroEditStage;
 
         // Pre-compute the popup layout so we can set the display width for
-        // soft-wrapping before taking the immutable borrow on self.prompt.
+        // soft-wrapping before taking the immutable borrow on self.ui.prompt.
         let popup = centered_rect_exact(64, 20, frame.area());
         {
             // Temporarily borrow prompt mutably to set the text input's
@@ -4651,7 +4658,7 @@ impl App {
             if let PromptState::EditMacros {
                 editing: Some(edit_state),
                 ..
-            } = &mut self.prompt
+            } = &mut self.ui.prompt
                 && edit_state.stage == MacroEditStage::EditText
             {
                 sync_macro_text_input_layout(&mut edit_state.text_input, popup);
@@ -4663,7 +4670,7 @@ impl App {
             selected,
             editing,
             pending_delete,
-        } = &self.prompt
+        } = &self.ui.prompt
         else {
             return;
         };
@@ -4925,7 +4932,7 @@ impl App {
             .kind(ButtonKind::Confirm)
             .state(button_state_for(
                 ButtonPressedTarget::ConfirmDeleteMacroCancel,
-                self.pressed_button,
+                self.ui.pressed_button,
                 !confirm_selected,
                 true,
             ))
@@ -4935,13 +4942,13 @@ impl App {
             .kind(ButtonKind::Danger)
             .state(button_state_for(
                 ButtonPressedTarget::ConfirmDeleteMacroConfirm,
-                self.pressed_button,
+                self.ui.pressed_button,
                 confirm_selected,
                 true,
             ))
             .render(frame, delete_area, &self.theme);
 
-        self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteMacro {
+        self.ui.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteMacro {
             cancel_button: cancel_area,
             delete_button: delete_area,
         };
@@ -5021,7 +5028,7 @@ impl App {
     }
 
     fn render_overlay(&mut self, frame: &mut Frame) {
-        match self.fullscreen_overlay {
+        match self.ui.fullscreen_overlay {
             FullscreenOverlay::Agent => {
                 self.render_fullscreen_agent(frame);
                 return;
@@ -5032,11 +5039,11 @@ impl App {
             }
             FullscreenOverlay::None => {}
         }
-        if !matches!(self.prompt, PromptState::None) {
+        if !matches!(self.ui.prompt, PromptState::None) {
             self.render_prompt(frame);
             return;
         }
-        if self.help_scroll.is_some() {
+        if self.ui.help_scroll.is_some() {
             self.render_help(frame);
         }
     }
@@ -5058,6 +5065,7 @@ impl App {
                 let provider = capitalize(self.running_provider_for(session).as_str());
                 let name = session.title.as_deref().unwrap_or(&session.branch_name);
                 let pr_suffix = self
+                    .runtime
                     .pr_statuses
                     .get(&session.id)
                     .map(|pr| format!(" · {}#{}", pr.owner_repo, pr.number))
@@ -5089,7 +5097,7 @@ impl App {
 
     fn render_macro_bar(&mut self, frame: &mut Frame, area: Rect) {
         let (query, selected, cursor, cursor_fg, cursor_bg) = {
-            let Some(bar) = &self.macro_bar else {
+            let Some(bar) = &self.ui.macro_bar else {
                 return;
             };
             (
@@ -5423,7 +5431,7 @@ impl App {
             inner.width,
             inner.height.saturating_sub(1),
         );
-        self.overlay_layout.active = OverlayMouseLayout::ResourceMonitor {
+        self.ui.overlay_layout.active = OverlayMouseLayout::ResourceMonitor {
             list: row_area,
             items: visual.len(),
             offset: table_state.offset(),
