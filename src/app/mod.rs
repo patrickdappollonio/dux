@@ -1146,6 +1146,7 @@ impl App {
             refs_watcher: None,
             refs_watch_paths: HashMap::new(),
             _single_instance_lock: single_instance_lock,
+            watch_engines: HashMap::new(),
         };
         let git = GitState {
             projects,
@@ -1245,6 +1246,7 @@ impl App {
             loop {
                 self.drain_events();
                 self.poll_pty_activity();
+                self.tick_watch_engines();
                 self.tick_count = self.tick_count.wrapping_add(1);
 
                 // Check SIGWINCH — needed when bypassing crossterm's event
@@ -2456,6 +2458,10 @@ impl App {
             // Strictly speaking the old PTY was already taken out
             // above; this branch documents the swap intent.
         }
+        // Attach a fresh watch engine for the new spawn. Replaces any
+        // engine left over from a prior spawn so config changes between
+        // restarts take effect.
+        self.attach_watch_engine(session_id);
         old_pty
     }
 
@@ -2554,6 +2560,7 @@ impl App {
         session.state = current.into_exited(exit_code, now);
         session.updated_at = now;
         let _ = self.session_store.upsert_session(session);
+        self.detach_watch_engine(session_id);
     }
 
     /// Forcibly remove the session's PTY, returning it to the caller
@@ -2571,7 +2578,7 @@ impl App {
             .find(|candidate| candidate.id == session_id)?;
         let placeholder = SessionState::Created { created_at: now };
         let current = std::mem::replace(&mut session.state, placeholder);
-        match current {
+        let result = match current {
             SessionState::Live { pty_handle, .. } | SessionState::Detached { pty_handle, .. } => {
                 session.state = SessionState::Created { created_at: now };
                 session.updated_at = now;
@@ -2582,6 +2589,113 @@ impl App {
                 session.state = other;
                 None
             }
+        };
+        if result.is_some() {
+            self.detach_watch_engine(session_id);
+        }
+        result
+    }
+
+    /// Build (or rebuild) a [`crate::watch::WatchEngine`] for the given
+    /// session from its provider's `[[providers.<name>.watch]]` rules in
+    /// `config.toml`. Replaces any prior engine. If the provider has no
+    /// rules (the common case until users opt in), removes any existing
+    /// engine and skips engine construction entirely so the per-tick
+    /// matcher loop has no work for this session.
+    pub(crate) fn attach_watch_engine(&mut self, session_id: &str) {
+        let provider_kind = match self.git.sessions.iter().find(|s| s.id == session_id) {
+            Some(s) => s.provider.clone(),
+            None => return,
+        };
+        let rules: Vec<crate::watch::WatchRule> =
+            match self.config.providers.commands.get(provider_kind.as_str()) {
+                Some(cfg) if !cfg.watch.is_empty() => cfg.watch.clone(),
+                _ => {
+                    self.runtime.watch_engines.remove(session_id);
+                    return;
+                }
+            };
+        let (engine, errors) = crate::watch::WatchEngine::new(session_id.to_string(), &rules);
+        for err in &errors {
+            tracing::warn!(
+                target: "dux::watch",
+                session_id = %session_id,
+                provider = %provider_kind.as_str(),
+                error = %err,
+                "watch rule load error",
+            );
+        }
+        if engine.rule_count() > 0 {
+            self.runtime
+                .watch_engines
+                .insert(session_id.to_string(), engine);
+        } else {
+            self.runtime.watch_engines.remove(session_id);
+        }
+    }
+
+    /// Drop the watch engine for `session_id`, if any.
+    pub(crate) fn detach_watch_engine(&mut self, session_id: &str) {
+        self.runtime.watch_engines.remove(session_id);
+    }
+
+    /// Drive every loaded watch engine one tick. Called from the main run
+    /// loop right after `poll_pty_activity`. Skips sessions where the
+    /// user is currently typing interactively (`InputTarget::Agent` and
+    /// the session is the selected one), so an auto-action does not
+    /// arrive in the middle of the user's prompt.
+    pub(crate) fn tick_watch_engines(&mut self) {
+        if self.runtime.watch_engines.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let active_session = if matches!(self.ui.input_target, InputTarget::Agent) {
+            self.selected_session().map(|s| s.id.clone())
+        } else {
+            None
+        };
+        let session_ids: Vec<String> = self.runtime.watch_engines.keys().cloned().collect();
+        for session_id in session_ids {
+            if active_session.as_deref() == Some(session_id.as_str()) {
+                continue;
+            }
+            let snapshot = match self.find_pty_handle(&session_id) {
+                Some(handle) => handle.scan_recent_lines(30),
+                None => continue,
+            };
+            let effects = match self.runtime.watch_engines.get_mut(&session_id) {
+                Some(engine) => engine.observe(&snapshot, now),
+                None => continue,
+            };
+            for effect in effects {
+                self.apply_watch_effect(&session_id, effect);
+            }
+        }
+    }
+
+    fn apply_watch_effect(&mut self, session_id: &str, effect: crate::watch::WatchEffect) {
+        match effect {
+            crate::watch::WatchEffect::SendText { text, append_enter } => {
+                // Translate embedded newlines to Alt-Enter so multi-line
+                // text doesn't accidentally submit; the trailing CR (when
+                // append_enter is true) performs the actual submit.
+                let mut payload = crate::app::input::macro_payload_bytes(&text);
+                if append_enter {
+                    payload.push(b'\r');
+                }
+                if let Some(handle) = self.find_pty_handle(session_id)
+                    && let Err(err) = handle.write_bytes(&payload)
+                {
+                    tracing::warn!(
+                        target: "dux::watch",
+                        session_id = %session_id,
+                        err = %err,
+                        "watch send_text failed",
+                    );
+                }
+            }
+            crate::watch::WatchEffect::StatusInfo(msg) => self.set_info(msg),
+            crate::watch::WatchEffect::StatusWarning(msg) => self.set_warning(msg),
         }
     }
 

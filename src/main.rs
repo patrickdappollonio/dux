@@ -20,6 +20,7 @@ mod sanitize;
 mod statusline;
 mod storage;
 mod theme;
+mod watch;
 
 use std::path::Path;
 

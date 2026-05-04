@@ -5188,6 +5188,7 @@ mod tests {
             refs_watcher: None,
             refs_watch_paths: std::collections::HashMap::new(),
             _single_instance_lock: single_instance_lock,
+            watch_engines: std::collections::HashMap::new(),
         };
         let git = crate::app::GitState {
             projects: vec![project],

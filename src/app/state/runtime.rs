@@ -54,4 +54,9 @@ pub(crate) struct RuntimeState {
     /// automatically on drop (including crashes), so there is nothing to
     /// clean up on exit.
     pub(crate) _single_instance_lock: SingleInstanceLock,
+    /// Per-session watch-rule engines. Attached when a session
+    /// transitions into `SessionState::Live`, removed on exit. Sessions
+    /// whose provider has no rules in the config never get an entry —
+    /// the per-tick scan is then skipped entirely. See `crate::watch`.
+    pub(crate) watch_engines: HashMap<String, crate::watch::WatchEngine>,
 }

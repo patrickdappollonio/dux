@@ -115,6 +115,7 @@ mod tests {
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
             forward_scroll: false,
+            watch: Vec::new(),
         }
     }
 
@@ -128,6 +129,7 @@ mod tests {
             oneshot_output: OneshotOutput::Tempfile,
             install_hint: None,
             forward_scroll: false,
+            watch: Vec::new(),
         }
     }
 
@@ -204,6 +206,7 @@ mod tests {
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
             forward_scroll: false,
+            watch: Vec::new(),
         };
         let prov = create_provider("bad", config);
         let cwd = std::env::temp_dir();
@@ -227,6 +230,7 @@ mod tests {
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
             forward_scroll: false,
+            watch: Vec::new(),
         };
         let prov = create_provider("custom", config);
         let cwd = std::env::temp_dir();

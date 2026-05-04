@@ -219,6 +219,12 @@ pub struct ProviderCommandConfig {
     pub oneshot_output: OneshotOutput,
     pub install_hint: Option<String>,
     pub forward_scroll: bool,
+    /// Optional watch rules. Each rule pairs a regex against the agent's
+    /// terminal output with an action (currently `send_text`) and a
+    /// backoff schedule. See [`crate::watch`] for the engine, and the
+    /// canonical config template for documented example rules.
+    #[serde(default)]
+    pub watch: Vec<crate::watch::WatchRule>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -497,6 +503,7 @@ impl Default for ProviderCommandConfig {
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
             forward_scroll: false,
+            watch: Vec::new(),
         }
     }
 }
@@ -1782,6 +1789,7 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 5] {
                 oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("curl -fsSL https://claude.ai/install.sh | bash".to_string()),
                 forward_scroll: false,
+                watch: Vec::new(),
             },
         ),
         (
@@ -1804,6 +1812,7 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 5] {
                 oneshot_output: OneshotOutput::Tempfile,
                 install_hint: Some("brew install --cask codex".to_string()),
                 forward_scroll: false,
+                watch: Vec::new(),
             },
         ),
         (
@@ -1817,6 +1826,7 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 5] {
                 oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("brew install gemini-cli".to_string()),
                 forward_scroll: false,
+                watch: Vec::new(),
             },
         ),
         (
@@ -1830,6 +1840,7 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 5] {
                 oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("curl -fsSL https://opencode.ai/install | bash".to_string()),
                 forward_scroll: true,
+                watch: Vec::new(),
             },
         ),
         (
@@ -1851,6 +1862,7 @@ fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 5] {
                 oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("curl -fsSL https://gh.io/copilot-install | bash".to_string()),
                 forward_scroll: false,
+                watch: Vec::new(),
             },
         ),
     ]
@@ -1933,6 +1945,38 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
          # own scrollback buffer (e.g. opencode).\n",
     );
     out.push_str(&format!("forward_scroll = {}\n", config.forward_scroll));
+
+    // Watch rules. Documented for every provider; Claude ships with a
+    // copy-pasteable commented example tailored to Anthropic's transient
+    // server-throttle. The commented form is intentional — rules write
+    // bytes into the agent's PTY unprompted, so dux opts users in
+    // explicitly rather than enabling auto-retry by default.
+    out.push_str("# Watch rules. Each rule pairs a regex against agent output with an\n");
+    out.push_str(&format!(
+        "# action; configure as `[[providers.{name}.watch]]` array entries.\n"
+    ));
+    out.push_str(
+        "# Patterns are evaluated against output that may include content from the\n\
+         # project under edit, so the engine caps regex complexity and per-rule fire\n\
+         # budgets — see SECURITY.md (T13) for the threat model.\n",
+    );
+    if name == "claude" {
+        out.push_str("#\n");
+        out.push_str(
+            "# Example: auto-retry when Anthropic surfaces a transient server-side\n\
+             # rate-limit (distinct from the 5-hour usage limit). Claude Code's internal\n\
+             # retry budget exhausts in seconds; this rule waits 1m / 2m / 5m / 10m\n\
+             # before sending \"please continue\" to resume the conversation.\n",
+        );
+        out.push_str("#\n");
+        out.push_str("# [[providers.claude.watch]]\n");
+        out.push_str("# pattern = \"API Error.*Server is temporarily limiting requests\"\n");
+        out.push_str("# action = \"send_text\"\n");
+        out.push_str("# text = \"please continue\"\n");
+        out.push_str("# backoff = { initial_ms = 60000, max_ms = 600000, multiplier = 2.0, jitter_ms = 5000 }\n");
+        out.push_str("# budget = { max_attempts = 5 }\n");
+        out.push_str("# cooldown_ms = 30000\n");
+    }
     out.push('\n');
 }
 
@@ -2434,6 +2478,7 @@ dangerous = true
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
             forward_scroll: false,
+            watch: Vec::new(),
         };
         assert_eq!(cfg.interactive_args(false), ["--interactive"]);
         assert_eq!(cfg.interactive_args(true), ["--resume", "--last"]);
@@ -2447,6 +2492,7 @@ dangerous = true
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
             forward_scroll: false,
+            watch: Vec::new(),
         };
         assert_eq!(unsupported.interactive_args(true), ["--interactive"]);
         assert!(!unsupported.supports_session_resume());
@@ -2466,6 +2512,7 @@ dangerous = true
                     oneshot_output: OneshotOutput::Stdout,
                     install_hint: None,
                     forward_scroll: false,
+                    watch: Vec::new(),
                 },
             )]),
         };
@@ -2495,6 +2542,7 @@ dangerous = true
                     oneshot_output: OneshotOutput::Stdout,
                     install_hint: None,
                     forward_scroll: false,
+                    watch: Vec::new(),
                 },
             )]),
         };
@@ -2818,6 +2866,7 @@ oneshot_output = "stdout"
                     oneshot_output: OneshotOutput::Stdout,
                     install_hint: None,
                     forward_scroll: false,
+                    watch: Vec::new(),
                 },
             )]),
         };
@@ -3042,6 +3091,105 @@ oneshot_output = "stdout"
         );
         let rendered = render_config_default(&config);
         assert!(rendered.contains("\"Multi\" = { text = \"line1\\nline2\", surface = \"both\" }"));
+    }
+
+    /// The canonical config template ships a commented `[[providers.claude.watch]]`
+    /// example so users discover the feature. This is intentionally opt-in:
+    /// rules write bytes into the agent's PTY unprompted.
+    #[test]
+    fn render_provider_config_includes_claude_watch_example() {
+        let rendered = render_default_config();
+        assert!(
+            rendered.contains("# [[providers.claude.watch]]"),
+            "canonical template must ship a commented Claude watch example:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("# pattern = \"API Error.*Server is temporarily limiting requests\""),
+            "Claude watch example must include the throttle pattern:\n{rendered}"
+        );
+        // The example must remain commented out — never active by default.
+        assert!(
+            !rendered.contains("\n[[providers.claude.watch]]"),
+            "Claude watch example must not be uncommented in the default template:\n{rendered}"
+        );
+    }
+
+    /// Other providers get the doc comment but no Claude-specific example.
+    #[test]
+    fn render_provider_config_omits_claude_example_for_other_providers() {
+        let rendered = render_default_config();
+        // The doc comment exists for every provider.
+        assert!(
+            rendered.contains("Configure as `[[providers.codex.watch]]`")
+                || rendered.contains("[[providers.codex.watch]]"),
+            "every provider section should reference its watch table:\n{rendered}"
+        );
+        // But the Claude-specific example pattern must appear at most once.
+        let occurrences = rendered.matches("API Error.*Server is temporarily").count();
+        assert_eq!(
+            occurrences, 1,
+            "Claude-specific example should appear exactly once (Claude only):\n{rendered}"
+        );
+    }
+
+    /// User-authored `[[providers.claude.watch]]` rules in `config.toml`
+    /// must survive a save round-trip without being clobbered or
+    /// reordered. `patch_providers` does not touch the watch array, so
+    /// user comments inside rule bodies are preserved verbatim.
+    #[test]
+    fn save_config_preserves_user_authored_watch_rules() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+
+        // Start from canonical default and append a user-authored rule
+        // (with an inline comment that must survive the round trip).
+        let mut body = render_default_config();
+        body.push_str(
+            "\n# user-added: aggressive retry while debugging\n\
+             [[providers.claude.watch]]\n\
+             pattern = \"my custom error\"\n\
+             action = \"send_text\"\n\
+             text = \"keep going\"\n\
+             # tighter cooldown than the default\n\
+             cooldown_ms = 5000\n",
+        );
+        fs::write(&config_path, &body).expect("write");
+
+        // Load the config and resave (modifying an unrelated field).
+        let parsed: Config = toml::from_str(&body).expect("parse");
+        let mut config = parsed;
+        config.ui.right_width_pct = 31;
+        let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
+        save_config(&config_path, &config, &bindings).expect("save");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        assert!(
+            saved.contains("[[providers.claude.watch]]"),
+            "watch table missing after save:\n{saved}"
+        );
+        assert!(
+            saved.contains("pattern = \"my custom error\""),
+            "watch rule pattern lost after save:\n{saved}"
+        );
+        assert!(
+            saved.contains("# user-added: aggressive retry while debugging"),
+            "user comment above rule lost:\n{saved}"
+        );
+        assert!(
+            saved.contains("# tighter cooldown than the default"),
+            "user comment inside rule lost:\n{saved}"
+        );
+        // Verify the rule still parses on reload.
+        let reloaded: Config = toml::from_str(&saved).expect("reparse");
+        let claude = reloaded
+            .providers
+            .commands
+            .get("claude")
+            .expect("claude config");
+        assert!(
+            claude.watch.iter().any(|r| r.pattern == "my custom error"),
+            "user rule lost on reload"
+        );
     }
 
     #[test]

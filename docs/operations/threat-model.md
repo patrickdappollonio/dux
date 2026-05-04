@@ -382,6 +382,76 @@ on launch, then per-session `auto_resume: <id> started/skipped/failed`.
 
 ---
 
+## T13 — Watch-rule regex evaluated on attacker-influenced PTY output
+
+**Attack scenario.** Phase 26 introduces user-configurable watch
+rules under `[[providers.<name>.watch]]` in `config.toml`. Each
+rule pairs a regex against the agent's terminal output with an
+action — currently only `send_text`, which writes bytes back into
+the agent's PTY when the regex matches. Two distinct abuse paths
+follow:
+
+1. **Regex DoS.** An attacker (a malicious project the agent is
+   editing, or an upstream prompt-injection that gets the model to
+   print specific text) crafts a payload that triggers pathological
+   regex behavior, freezing the UI thread on every render tick.
+2. **Spurious-fire.** An attacker crafts output that *legitimately*
+   matches the user's rule, causing dux to write the rule's
+   `text` (e.g. `"please continue"`) back into the agent. For the
+   shipped default this only resumes a Claude conversation, but a
+   user with a custom rule (e.g. an "auto-yes" pattern) could be
+   tricked into auto-confirming dangerous actions.
+
+**Mitigation in code** (`src/watch/`, `src/app/mod.rs`).
+
+- *Linear-time matching.* Rules compile via the `regex` crate's
+  NFA engine, which is guaranteed linear in input length —
+  catastrophic backtracking is not possible regardless of pattern
+  shape.
+- *Pattern complexity cap.* `RegexBuilder::size_limit(64 KiB)` and
+  `dfa_size_limit(64 KiB)` reject oversized programs at load time;
+  the bad rule is logged and skipped, leaving the rest of the
+  config intact.
+- *Rule cap per provider.* `MAX_RULES_PER_PROVIDER = 32` so a
+  malicious config (or a supply-chain compromise of the canonical
+  template) cannot DoS via thousands of rules.
+- *Per-rule fire budget.* Every rule has a `budget.max_attempts`
+  (default 5). When exhausted, the rule disarms itself for the
+  rest of the session and emits a status warning. Spurious-fire
+  attacks therefore cap at `max_attempts` rule firings, not an
+  unbounded loop.
+- *Cooldown between repeats.* `cooldown_ms` and the
+  `baseline_match_count` dedup mean stale matches still visible in
+  scrollback do not re-arm the rule. A single attacker payload
+  cannot fire more than once per occurrence.
+- *Opt-in defaults.* The canonical config template ships every
+  example rule **commented out**. A fresh install has zero active
+  watch rules; users explicitly uncomment to enable.
+- *Active-pane suppression.* `App::tick_watch_engines` skips
+  effects when the user is interactively typing in the matched
+  session, so an auto-action does not arrive in the middle of the
+  user's prompt.
+- *Manual disarm.* `WatchEngine::disarm` (Phase 3 palette command)
+  lets users immediately silence a rule that misfires.
+
+**Residual risk.** A user who configures a permissive rule (e.g.
+`text = "yes"`, `pattern = "Continue\\?"`) opts into the spurious-
+fire risk for that rule's `max_attempts` budget. We document this
+in the canonical-config comment block above the example. Watch
+rules **never** evaluate during oneshot mode (commit-message
+generation), only during interactive PTY sessions in
+`SessionState::Live`.
+
+**Detection.** `dux.log` records
+`watch rule load error` at WARN whenever a rule fails to compile
+(regex too big, malformed, etc.) and
+`watch send_text failed` at WARN if a PTY write fails after a
+rule fires. The status line surfaces every rule fire
+(`watch rule "X": fired (attempt N/M)`) and budget exhaustion
+(`watch rule "X": budget exhausted; disarming`).
+
+---
+
 ## Maintenance
 
 When you add or change attack surface in this codebase, you must
@@ -389,7 +459,7 @@ update both `SECURITY.md` (the table) and this file (the
 paragraph). PRs that touch the surface listed above without
 updating these documents are blocked at review.
 
-The IDs `T1`–`T12` are stable references; new threats append at
-the end (`T13`, `T14`, …) rather than reshuffling. Retired
+The IDs `T1`–`T13` are stable references; new threats append at
+the end (`T14`, `T15`, …) rather than reshuffling. Retired
 threats are kept in the table with a `~~strikethrough~~` and a
 note pointing to the PR that retired them.

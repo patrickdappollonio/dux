@@ -29,6 +29,8 @@ indexmap = { version = "2.13.0", features = ["serde"] }
 compact_str = "0.9"
 sysinfo = "0.35"
 notify = "7"
+regex = "1"
+rand = { version = "0.8", features = ["small_rng"] }
 opaline = { version = "0.4", features = ["ratatui", "builtin-themes"] }
 tempfile = "3.20.0"
 tracing = "0.1.44"

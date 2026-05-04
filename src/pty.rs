@@ -347,6 +347,24 @@ impl PtyClient {
         terminal.scrollback_offset()
     }
 
+    /// Snapshot the most recent `max_rows` of visible terminal output as a
+    /// single string with `\n` between rows. Trailing whitespace on each
+    /// row is trimmed and empty rows are dropped. Used by
+    /// [`crate::watch::WatchEngine`] to evaluate regex patterns against
+    /// agent output without copying the full grid. Locks the terminal
+    /// mutex briefly; safe to call from the main render loop.
+    pub fn scan_recent_lines(&self, max_rows: usize) -> String {
+        let Ok(terminal) = self.terminal.lock() else {
+            tracing::error!(
+                target: "dux::pty",
+                operation = "scan_recent_lines",
+                "terminal mutex poisoned; returning empty scan",
+            );
+            return String::new();
+        };
+        terminal.scan_recent_lines(max_rows)
+    }
+
     /// Atomically adjust the scrollback offset by the given amount in the
     /// given direction. If the scroll crosses the 0 boundary, PTY ingestion
     /// is paused (entering scrollback) or resumed (returning to the live
@@ -854,6 +872,39 @@ impl TerminalState {
 
     fn scrollback_offset(&self) -> usize {
         self.term.grid().display_offset()
+    }
+
+    /// Render the most recent `max_rows` rows of visible viewport content
+    /// as a single string. Each row is trimmed of trailing whitespace and
+    /// empty rows are dropped. Wide-char spacer cells are skipped. Used
+    /// by the watch engine; see `PtyClient::scan_recent_lines`.
+    fn scan_recent_lines(&self, max_rows: usize) -> String {
+        use std::collections::BTreeMap;
+        let renderable = self.term.renderable_content();
+        let mut by_line: BTreeMap<i32, String> = BTreeMap::new();
+        for indexed in renderable.display_iter {
+            if indexed
+                .cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            {
+                continue;
+            }
+            by_line
+                .entry(indexed.point.line.0)
+                .or_default()
+                .push(indexed.cell.c);
+        }
+        let mut lines: Vec<String> = by_line
+            .into_values()
+            .map(|s| s.trim_end().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if lines.len() > max_rows {
+            let drop = lines.len() - max_rows;
+            lines.drain(..drop);
+        }
+        lines.join("\n")
     }
 
     fn scroll(&mut self, up: bool, amount: usize) {
