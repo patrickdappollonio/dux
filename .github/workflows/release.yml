@@ -76,6 +76,7 @@ jobs:
       # (audit02 6.2 — deterministic version, no `stable` drift).
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
+          toolchain: "1.88.0"
           targets: ${{ matrix.target }}
 
       # audit02 P1-N — release builds run on push events to release tags

@@ -123,6 +123,8 @@ fn pty_read_output_into_alacritty_terminal() {
 fn pty_write_input() {
     use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
     use std::io::{Read, Write};
+    use std::sync::mpsc;
+    use std::time::Instant;
 
     let pty_system = NativePtySystem::default();
     let pair = pty_system
@@ -145,21 +147,57 @@ fn pty_write_input() {
     // Write some text followed by EOF (Ctrl-D).
     writer.write_all(b"test-input\n").expect("write");
     writer.write_all(b"\x04").expect("write eof");
+    let _ = writer.flush();
 
-    // Give it a moment to process.
-    thread::sleep(Duration::from_millis(200));
+    // The PTY reader is a blocking `Box<dyn Read + Send>`. To avoid racing
+    // the kill against the child's echo on slow runners (notably macOS-14
+    // GitHub runners, where the original write→sleep(200ms)→kill→read flow
+    // could land the kill before `cat` had echoed bytes back through the
+    // master), we drain on a background thread and poll the channel until
+    // either we observe "test-input" in the accumulated output or a 5s
+    // deadline elapses. The kill is issued *after* we've seen the bytes
+    // (or timed out), so we never starve the read.
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => return,
+                Ok(n) => {
+                    if tx.send(buf[..n].to_vec()).is_err() {
+                        return;
+                    }
+                }
+                Err(_) => return,
+            }
+        }
+    });
 
-    // Read whatever is available.
-    let mut output = vec![0u8; 4096];
-    // Non-blocking: try to read
+    let needle = b"test-input";
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut output: Vec<u8> = Vec::new();
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let chunk_timeout = std::cmp::min(remaining, Duration::from_millis(100));
+        match rx.recv_timeout(chunk_timeout) {
+            Ok(chunk) => {
+                output.extend_from_slice(&chunk);
+                if output.windows(needle.len()).any(|w| w == needle) {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
     let _ = child.kill();
-    let n = reader.read(&mut output).unwrap_or(0);
-    let text = String::from_utf8_lossy(&output[..n]);
+    let text = String::from_utf8_lossy(&output);
 
     // The output should contain our input echoed back.
     assert!(
         text.contains("test-input"),
-        "Expected 'test-input' in output, got: {text}"
+        "Expected 'test-input' in output (after 5s polling), got: {text}"
     );
 }
 

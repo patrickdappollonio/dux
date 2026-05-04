@@ -425,7 +425,7 @@ impl Default for Config {
                 staged_pane_height_pct: 50,
                 commit_pane_height_pct: 40,
                 agent_scrollback_lines: 10_000,
-                branch_sync_interval: 30,
+                branch_sync_interval: 0,
                 show_diff_line_numbers: false,
                 diff_tab_width: 4,
                 github_integration: true,
@@ -554,7 +554,7 @@ impl Default for UiConfig {
             staged_pane_height_pct: 50,
             commit_pane_height_pct: 40,
             agent_scrollback_lines: 10_000,
-            branch_sync_interval: 30,
+            branch_sync_interval: 0,
             show_diff_line_numbers: false,
             diff_tab_width: 4,
             github_integration: true,
@@ -951,7 +951,7 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "branch_sync_interval",
             comment: Some(CommentSource::Static(
-                "# Interval in seconds for syncing git branch names in the background.\n# Keeps dux in sync if a branch is renamed outside the app.\n# Set to 0 to disable.",
+                "# Interval in seconds for syncing git branch names in the background.\n# Keeps dux's session titles in sync if a branch is renamed outside the app.\n# Default 0 (disabled); set to e.g. 30 to enable polling every 30s.",
             )),
             value_fn: |c| FieldValue::U16(c.ui.branch_sync_interval),
         },
@@ -3122,6 +3122,77 @@ args = [\"-l\"]
         let reloaded: Config = toml::from_str(&saved).expect("parse saved");
         assert_eq!(reloaded.ui.right_width_pct, 30);
         assert_eq!(reloaded.editor.default, "zed");
+    }
+
+    /// Branch-name auto-sync must default to OFF (opt-in only).
+    ///
+    /// Users complained that the setting "re-enables itself on reboot".
+    /// The disable mechanism (set to 0) already worked; the bug was that
+    /// the canonical default was 30s, so fresh installs and
+    /// `dux config regenerate --yes` produced an ON state. Defaulting to
+    /// 0 makes the feature strictly opt-in.
+    #[test]
+    fn branch_sync_interval_defaults_to_zero() {
+        let c = Config::default();
+        assert_eq!(
+            c.ui.branch_sync_interval, 0,
+            "branch_sync_interval default must be 0 (off) — opt-in only"
+        );
+    }
+
+    /// The canonical rendered config must also reflect the OFF default,
+    /// since `dux config regenerate --yes` writes this template verbatim.
+    #[test]
+    fn rendered_default_config_has_branch_sync_off() {
+        let rendered = render_default_config();
+        assert!(
+            rendered.contains("branch_sync_interval = 0"),
+            "canonical config template must default branch_sync_interval to 0:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("branch_sync_interval = 30"),
+            "canonical config template must not ship the legacy 30s default:\n{rendered}"
+        );
+    }
+
+    /// Existing users who explicitly set `branch_sync_interval = 30` in
+    /// their config (because that *was* the prior default) must keep
+    /// their value across an `ensure_config` -> `save_config` round
+    /// trip. Only fresh installs get the new OFF default.
+    #[test]
+    fn ensure_config_preserves_existing_branch_sync_interval() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+
+        // Start from canonical default and explicitly opt the user
+        // into the legacy 30s polling cadence.
+        let default_body = render_default_config();
+        let user_body =
+            default_body.replace("branch_sync_interval = 0", "branch_sync_interval = 30");
+        assert!(
+            user_body.contains("branch_sync_interval = 30"),
+            "test fixture must contain user-set value"
+        );
+        fs::write(&config_path, &user_body).expect("write");
+
+        // Parse, then run through save_config (mirrors what ensure_config
+        // does after a schema-version migration) and re-load.
+        let mut config: Config = toml::from_str(&user_body).expect("parse");
+        // Sanity: parsed value matches what the user wrote, not the new default.
+        assert_eq!(config.ui.branch_sync_interval, 30);
+
+        // Touch an unrelated value and save.
+        config.ui.right_width_pct = 25;
+        let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
+        save_config(&config_path, &config, &bindings).expect("save");
+
+        let saved = fs::read_to_string(&config_path).expect("read");
+        let reloaded: Config = toml::from_str(&saved).expect("parse saved");
+        assert_eq!(
+            reloaded.ui.branch_sync_interval, 30,
+            "user-set branch_sync_interval must NOT be silently flipped \
+             back to the new default on save"
+        );
     }
 
     // ── expand_path tests ────────────────────────────────────────────────
