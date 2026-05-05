@@ -91,6 +91,7 @@ pub enum Action {
     TogglePrBannerPosition,
     ForceReconnectAgent,
     ChangeTheme,
+    ReloadConfig,
 }
 
 /// Where a binding's key combo is matched.
@@ -262,6 +263,7 @@ impl Action {
             Action::TogglePrBannerPosition => "toggle_pr_banner_position",
             Action::ForceReconnectAgent => "force_reconnect_agent",
             Action::ChangeTheme => "change_theme",
+            Action::ReloadConfig => "reload_config",
         }
     }
 
@@ -368,6 +370,7 @@ impl Action {
             }
             Action::ForceReconnectAgent => "Restart the agent without resuming the prior session.",
             Action::ChangeTheme => "Open a picker to switch the dux color theme.",
+            Action::ReloadConfig => "Reload the configuration file.",
         }
     }
 
@@ -450,7 +453,8 @@ impl Action {
             | Action::ForceReconnectAgent
             | Action::ChangeDefaultProvider
             | Action::ChangeProjectDefaultProvider
-            | Action::ChangeTheme => None,
+            | Action::ChangeTheme
+            | Action::ReloadConfig => None,
         }
     }
 }
@@ -610,6 +614,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "change-theme",
             description: "Switch the dux color theme",
+        }),
+    },
+    BindingDef {
+        action: Action::ReloadConfig,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "reload-config",
+            description: "Reload config.toml after validating it",
         }),
     },
     BindingDef {
@@ -2298,6 +2313,17 @@ mod tests {
             .filter_map(|binding| binding.palette_name)
             .collect::<Vec<_>>();
         assert!(names.contains(&"resource-monitor"));
+    }
+
+    #[test]
+    fn filtered_palette_includes_reload_config_command() {
+        let bindings = default_bindings();
+        let results = bindings.filtered_palette("reload");
+        let names = results
+            .iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"reload-config"));
     }
 
     #[test]

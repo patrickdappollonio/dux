@@ -3807,6 +3807,128 @@ impl App {
                     kill_button: kill_area,
                 };
             }
+            PromptState::ConfigReloadFailed {
+                error,
+                recover_old_config,
+                focus,
+            } => {
+                self.render_dim_overlay(frame);
+                let dialog_width = 68.min(frame.area().width.max(1));
+                let inner_width = dialog_width.saturating_sub(2);
+                let checkbox_label = "Recover last working config";
+                let checkbox_state = if *focus == ConfigReloadFailedFocus::Checkbox {
+                    CheckboxState::Focused
+                } else {
+                    CheckboxState::Normal
+                };
+                let checkbox = Checkbox::new(checkbox_label)
+                    .checked(*recover_old_config)
+                    .state(checkbox_state);
+                let checkbox_height = checkbox
+                    .layout(
+                        inner_width,
+                        checkbox.marker_style(Style::default()),
+                        checkbox.label_style(Style::default()),
+                    )
+                    .height;
+
+                let mut body_lines = vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " config.toml could not be reloaded, so the running config was kept.",
+                        Style::default().fg(self.theme.warning_fg),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " Validation error:",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )),
+                ];
+                for line in error.lines().take(6) {
+                    body_lines.push(Line::from(format!(" {line}")));
+                }
+                let body_height = wrapped_line_count(&body_lines, inner_width, false);
+                let area = centered_rect_exact(
+                    dialog_width,
+                    2 + body_height + 1 + checkbox_height + 3,
+                    frame.area(),
+                );
+                self.clear_overlay_area(frame, area);
+                let outer = self.themed_overlay_block("Reload Config Failed");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, checkbox_area, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(body_height),
+                        Constraint::Length(1),
+                        Constraint::Length(checkbox_height),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                Paragraph::new(body_lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let (checkbox_rect, _) = self.render_overlay_checkbox(
+                    frame,
+                    checkbox_area,
+                    checkbox_label,
+                    *recover_old_config,
+                    checkbox_state,
+                    None,
+                );
+                let checkbox = OverlayCheckbox {
+                    id: OverlayCheckboxId::ConfigReloadRecoverOldConfig,
+                    rect: checkbox_rect,
+                };
+
+                let btn_width = shared_button_width(&["Close", "Recover"]);
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+
+                let close_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let apply_area = Rect {
+                    x: close_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                Button::new("Close")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfigReloadFailedClose,
+                        self.pressed_button,
+                        *focus == ConfigReloadFailedFocus::Close,
+                        true,
+                    ))
+                    .render(frame, close_area, &self.theme);
+
+                Button::new("Recover")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfigReloadFailedApply,
+                        self.pressed_button,
+                        *focus == ConfigReloadFailedFocus::Apply,
+                        *recover_old_config,
+                    ))
+                    .render(frame, apply_area, &self.theme);
+
+                self.overlay_layout.active = OverlayMouseLayout::ConfigReloadFailed {
+                    close_button: close_area,
+                    apply_button: apply_area,
+                    checkbox,
+                };
+            }
             PromptState::ConfirmDeleteAgent {
                 branch_name,
                 focus,
