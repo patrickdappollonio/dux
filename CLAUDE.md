@@ -11,6 +11,7 @@ Principles that guide every decision in dux. If a change conflicts with a tenet,
 
 ### UI and Navigation
 
+- **New UI must use the theme engine.** Any new screen, pane, dialog, status text, or visual state must derive colors and styles from `Theme`/`theme.rs` rather than hardcoding visual values. If the existing theme surface lacks the needed meaning, add a semantic theme field first and wire every supported theme through it.
 - **Tab and Shift-Tab navigate between panes.** This is the primary spatial navigation model.
 - **Panes have local key combinations.** A key combo bound in one pane does not necessarily work in another.
 - **Panes have interactive and non-interactive modes.** In interactive mode, all key combos (including global ones) are suppressed and input is forwarded to the PTY. In non-interactive mode, both local and global key combos are active.
