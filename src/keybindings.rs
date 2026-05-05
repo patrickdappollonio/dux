@@ -10,6 +10,7 @@ pub enum Action {
     // Projects pane
     ToggleProject,
     NewAgent,
+    NewAgentFromPr,
     ForkAgent,
     ChangeAgentProvider,
     ChangeDefaultProvider,
@@ -188,6 +189,7 @@ impl Action {
             Action::MoveUp => "move_up",
             Action::ToggleProject => "toggle_project",
             Action::NewAgent => "new_agent",
+            Action::NewAgentFromPr => "new_agent_from_pr",
             Action::ForkAgent => "fork_agent",
             Action::ChangeAgentProvider => "change_agent_provider",
             Action::ChangeDefaultProvider => "change_default_provider",
@@ -272,6 +274,7 @@ impl Action {
             Action::MoveUp => "Navigate up through projects, sessions, files, and lists.",
             Action::ToggleProject => "Collapse or expand the selected project.",
             Action::NewAgent => "Create a new agent session (worktree).",
+            Action::NewAgentFromPr => "Create a new agent session from a GitHub pull request.",
             Action::ForkAgent => "Fork the selected agent into a fresh worktree and session.",
             Action::ChangeAgentProvider => {
                 "Swap the selected agent worktree to a different provider."
@@ -389,6 +392,7 @@ impl Action {
             | Action::ReconnectAgent
             | Action::DeleteSession
             | Action::DeleteTerminal => Some("Projects pane"),
+            Action::NewAgentFromPr => None,
             Action::ExitInteractive
             | Action::OpenMacroBar
             | Action::ToggleFullscreen
@@ -550,6 +554,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "new-agent",
             description: "Create a new agent for the selected project",
+        }),
+    },
+    BindingDef {
+        action: Action::NewAgentFromPr,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "new-agent-from-pr",
+            description: "Create a new agent from a GitHub pull request",
         }),
     },
     BindingDef {
@@ -2207,6 +2222,17 @@ mod tests {
             .filter_map(|binding| binding.palette_name)
             .collect::<Vec<_>>();
         assert!(names.contains(&"fork-agent"));
+    }
+
+    #[test]
+    fn filtered_palette_includes_new_agent_from_pr_command() {
+        let bindings = default_bindings();
+        let results = bindings.filtered_palette("pr");
+        let names = results
+            .iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"new-agent-from-pr"));
     }
 
     #[test]

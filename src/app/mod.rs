@@ -525,6 +525,24 @@ pub(crate) enum NameNewAgentFocus {
     Checkbox,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PullRequestLookup {
+    pub(crate) host: String,
+    pub(crate) owner_repo: String,
+    pub(crate) number: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ResolvedPullRequest {
+    pub(crate) project: Project,
+    pub(crate) host: String,
+    pub(crate) owner_repo: String,
+    pub(crate) number: u64,
+    pub(crate) title: String,
+    pub(crate) state: String,
+    pub(crate) head_ref_name: String,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PromptState {
     None,
@@ -584,6 +602,10 @@ pub(crate) enum PromptState {
         session_id: String,
         input: TextInput,
         rename_branch: bool,
+    },
+    PullRequestInput {
+        project: Project,
+        input: TextInput,
     },
     NameNewAgent {
         request: CreateAgentRequest,
@@ -1052,6 +1074,17 @@ pub(crate) enum CreateAgentRequest {
         custom_name: Option<String>,
         use_existing_branch: bool,
     },
+    PullRequest {
+        project: Project,
+        host: String,
+        owner_repo: String,
+        number: u64,
+        title: String,
+        state: String,
+        head_branch: String,
+        custom_name: Option<String>,
+        use_existing_branch: bool,
+    },
     ForkSession {
         project: Project,
         source_session: Box<AgentSession>,
@@ -1095,6 +1128,9 @@ pub(crate) enum WorkerEvent {
     ResourceStatsReady(Vec<ResourceStats>),
     GhStatusChecked(crate::model::GhStatus),
     PrStatusReady(Vec<(String, Option<crate::model::PrInfo>)>),
+    PullRequestResolved {
+        result: Result<ResolvedPullRequest, String>,
+    },
     RefsChanged(String),
     /// Background `git worktree remove` for a session-initiated delete has
     /// finished. On `Ok`, the boolean indicates whether the branch was
@@ -1494,6 +1530,7 @@ impl App {
                     number: pr.pr_number,
                     state,
                     title: pr.title,
+                    host: pr.host,
                     owner_repo: pr.owner_repo,
                 },
             );
@@ -1683,10 +1720,29 @@ impl App {
         });
     }
 
+    pub(crate) fn github_pr_agent_command_available(&self) -> bool {
+        self.github_integration_enabled
+            && matches!(self.gh_status, crate::model::GhStatus::Available)
+    }
+
+    pub(crate) fn filtered_palette_commands(
+        &self,
+        input: &str,
+    ) -> Vec<&crate::keybindings::RuntimeBinding> {
+        self.bindings
+            .filtered_palette(input)
+            .into_iter()
+            .filter(|binding| {
+                binding.action != Action::NewAgentFromPr || self.github_pr_agent_command_available()
+            })
+            .collect()
+    }
+
     pub(crate) fn execute_command(&mut self, command: String) -> Result<()> {
         let command = command.trim();
         match command {
             "new-agent" => self.create_agent_for_selected_project(),
+            "new-agent-from-pr" => self.open_new_agent_from_pr_prompt(),
             "fork-agent" => self.fork_selected_session(),
             "change-agent-provider" => self.open_change_agent_provider_prompt(),
             "change-default-provider" => self.open_change_default_provider_prompt(),

@@ -245,6 +245,21 @@ pub fn create_worktree(
     create_worktree_from_start_point(repo_path, worktrees_root, project_name, None, custom_name)
 }
 
+pub fn fetch_pull_request_head(repo_path: &Path, pr_number: u64, branch_name: &str) -> Result<()> {
+    let repo = repo_path.to_string_lossy();
+    let refspec = format!("pull/{pr_number}/head:refs/heads/{branch_name}");
+    let output = Command::new("git")
+        .args(["-C", repo.as_ref(), "fetch", "origin", &refspec])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git fetch failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 pub fn create_worktree_from_start_point(
     repo_path: &Path,
     worktrees_root: &Path,
@@ -852,9 +867,15 @@ pub fn agent_name_char_map(text: &str, cursor: usize, ch: char) -> Option<char> 
     Some(ch)
 }
 
-/// Returns `"owner/repo"` parsed from the `origin` remote URL, or `None` if
-/// the remote doesn't point to GitHub or the command fails.
-pub fn remote_owner_repo(worktree_path: &Path) -> Option<String> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitHubRemote {
+    pub host: String,
+    pub owner_repo: String,
+}
+
+/// Returns the GitHub host and `"owner/repo"` parsed from the `origin` remote
+/// URL, or `None` if the remote doesn't point to GitHub or the command fails.
+pub fn remote_github_repo(worktree_path: &Path) -> Option<GitHubRemote> {
     let output = Command::new("git")
         .args([
             "-C",
@@ -869,7 +890,7 @@ pub fn remote_owner_repo(worktree_path: &Path) -> Option<String> {
         return None;
     }
     let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    parse_github_owner_repo(&url)
+    parse_github_remote(&url)
 }
 
 /// Extracts `"owner/repo"` from a GitHub remote URL.
@@ -877,26 +898,49 @@ pub fn remote_owner_repo(worktree_path: &Path) -> Option<String> {
 /// Supports SSH (`git@github.com:owner/repo.git`), HTTPS
 /// (`https://github.com/owner/repo.git`), and bare
 /// (`github.com/owner/repo`) forms.
+#[cfg(test)]
 fn parse_github_owner_repo(url: &str) -> Option<String> {
-    // SSH: git@github.com:owner/repo.git
-    if let Some(rest) = url.strip_prefix("git@github.com:") {
+    parse_github_remote(url).map(|remote| remote.owner_repo)
+}
+
+fn parse_github_remote(url: &str) -> Option<GitHubRemote> {
+    // SSH: git@github.com:owner/repo.git or git@github.example.com:owner/repo.git
+    if let Some(rest) = url.strip_prefix("git@") {
+        let (host, rest) = rest.split_once(':')?;
+        if !is_github_host(host) {
+            return None;
+        }
         let rest = rest.strip_suffix(".git").unwrap_or(rest);
         if rest.contains('/') {
-            return Some(rest.to_string());
+            return Some(GitHubRemote {
+                host: host.to_string(),
+                owner_repo: rest.to_string(),
+            });
         }
     }
+
     // HTTPS / plain: https://github.com/owner/repo.git or github.com/owner/repo
-    let needle = "github.com/";
-    if let Some(idx) = url.find(needle) {
-        let rest = &url[idx + needle.len()..];
-        let rest = rest.strip_suffix(".git").unwrap_or(rest);
-        // Expect exactly "owner/repo"
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let parts: Vec<&str> = without_scheme.splitn(2, '/').collect();
+    if parts.len() == 2 && is_github_host(parts[0]) {
+        let host = parts[0];
+        let rest = parts[1].strip_suffix(".git").unwrap_or(parts[1]);
         let parts: Vec<&str> = rest.splitn(3, '/').collect();
         if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
-            return Some(format!("{}/{}", parts[0], parts[1]));
+            return Some(GitHubRemote {
+                host: host.to_string(),
+                owner_repo: format!("{}/{}", parts[0], parts[1]),
+            });
         }
     }
     None
+}
+
+fn is_github_host(host: &str) -> bool {
+    host == "github.com" || host.starts_with("github.")
 }
 
 fn sync_directory_contents(source: &Path, destination: &Path) -> Result<()> {
@@ -1737,6 +1781,28 @@ mod tests {
         assert_eq!(
             parse_github_owner_repo("https://github.com/octocat/Hello-World/tree/main"),
             Some("octocat/Hello-World".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_github_enterprise_https_url_preserves_host() {
+        assert_eq!(
+            parse_github_remote("https://github.example.com/octocat/Hello-World.git"),
+            Some(GitHubRemote {
+                host: "github.example.com".to_string(),
+                owner_repo: "octocat/Hello-World".to_string(),
+            }),
+        );
+    }
+
+    #[test]
+    fn parse_github_enterprise_ssh_url_preserves_host() {
+        assert_eq!(
+            parse_github_remote("git@github.example.com:octocat/Hello-World.git"),
+            Some(GitHubRemote {
+                host: "github.example.com".to_string(),
+                owner_repo: "octocat/Hello-World".to_string(),
+            }),
         );
     }
 

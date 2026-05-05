@@ -219,6 +219,7 @@ impl App {
                                 let _ = self.session_store.upsert_pr(
                                     &session_id,
                                     pr.number,
+                                    &pr.host,
                                     &pr.owner_repo,
                                     state_str,
                                     &pr.title,
@@ -239,6 +240,32 @@ impl App {
                         self.rebuild_left_items();
                     }
                 }
+                WorkerEvent::PullRequestResolved { result } => match result {
+                    Ok(pr) => {
+                        let request = CreateAgentRequest::PullRequest {
+                            project: pr.project.clone(),
+                            host: pr.host.clone(),
+                            owner_repo: pr.owner_repo.clone(),
+                            number: pr.number,
+                            title: pr.title.clone(),
+                            state: pr.state.clone(),
+                            head_branch: pr.head_ref_name.clone(),
+                            custom_name: Some(pr.head_ref_name.clone()),
+                            use_existing_branch: false,
+                        };
+                        if let Err(err) = self.open_name_new_agent_prompt(request) {
+                            self.set_error(format!("{err:#}"));
+                        } else {
+                            self.set_info(format!(
+                                "Resolved PR #{}: {}. Confirm or edit the branch name.",
+                                pr.number, pr.title
+                            ));
+                        }
+                    }
+                    Err(message) => {
+                        self.set_error(message);
+                    }
+                },
                 WorkerEvent::RefsChanged(session_id) => {
                     logger::debug(&format!(
                         "[gh-integration] refs watcher: triggering PR check for session {}",
@@ -1158,6 +1185,60 @@ pub(crate) fn run_checkout_project_default_branch_inspection_job(
     let _ = worker_tx.send(WorkerEvent::CheckoutProjectDefaultBranchInspected { project, result });
 }
 
+pub(crate) fn run_pull_request_lookup_job(
+    project: Project,
+    raw_input: String,
+    worker_tx: Sender<WorkerEvent>,
+) {
+    let lookup = match git::remote_github_repo(Path::new(&project.path)) {
+        Some(remote) => {
+            super::sessions::parse_pull_request_lookup(&raw_input, &remote.host, &remote.owner_repo)
+        }
+        None => Err(format!(
+            "Project \"{}\" does not have a GitHub origin remote.",
+            project.name
+        )),
+    };
+    let lookup = match lookup {
+        Ok(lookup) => lookup,
+        Err(message) => {
+            let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
+                result: Err(message),
+            });
+            return;
+        }
+    };
+
+    let repo = gh_repo_arg(&lookup.host, &lookup.owner_repo);
+    let output = std::process::Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &lookup.number.to_string(),
+            "--repo",
+            &repo,
+            "--json",
+            "number,title,state,headRefName",
+        ])
+        .output();
+    let result = match output {
+        Ok(output) if output.status.success() => parse_resolved_pull_request_json(
+            &String::from_utf8_lossy(&output.stdout),
+            project,
+            &lookup.host,
+            &lookup.owner_repo,
+        ),
+        Ok(output) => Err(format!(
+            "Failed to resolve PR #{} from {}: {}",
+            lookup.number,
+            lookup.owner_repo,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Err(err) => Err(format!("Failed to run gh pr view: {err}")),
+    };
+    let _ = worker_tx.send(WorkerEvent::PullRequestResolved { result });
+}
+
 pub(crate) fn run_create_agent_job(
     request: CreateAgentRequest,
     paths: DuxPaths,
@@ -1260,6 +1341,88 @@ pub(crate) fn run_create_agent_job(
                     project.name
                 )
             };
+            (
+                project.clone(),
+                project.default_provider.clone(),
+                project.current_branch.clone(),
+                status_message,
+                branch_name,
+                worktree_path,
+                true,
+            )
+        }
+        CreateAgentRequest::PullRequest {
+            project,
+            host,
+            owner_repo,
+            number,
+            title,
+            state,
+            head_branch,
+            custom_name,
+            use_existing_branch,
+        } => {
+            let repo_path = PathBuf::from(&project.path);
+            let resolved_name = custom_name.unwrap_or_else(|| head_branch.clone());
+            let attach_existing =
+                use_existing_branch || git::branch_exists(&repo_path, &resolved_name).is_some();
+
+            if attach_existing {
+                let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
+                    "Attaching to existing branch \"{}\" for PR #{} in project \"{}\"...",
+                    resolved_name, number, project.name
+                )));
+            } else {
+                let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
+                    "Fetching PR #{} from {} into branch \"{}\"...",
+                    number, owner_repo, resolved_name
+                )));
+                if let Err(err) = git::fetch_pull_request_head(&repo_path, number, &resolved_name) {
+                    logger::error(&format!(
+                        "PR worktree fetch failed for {} #{}: {err}",
+                        owner_repo, number
+                    ));
+                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
+                        "Failed to fetch PR #{} from {}: {err}",
+                        number, owner_repo
+                    )));
+                    return;
+                }
+            }
+
+            let (branch_name, worktree_path) = match git::create_worktree_existing_branch(
+                &repo_path,
+                &paths.worktrees_root,
+                &project.name,
+                &resolved_name,
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    logger::error(&format!(
+                        "PR worktree creation failed for {} #{}: {err}",
+                        owner_repo, number
+                    ));
+                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
+                        "Failed to create a worktree for PR #{} in project \"{}\": {err}",
+                        number, project.name
+                    )));
+                    return;
+                }
+            };
+            let status_message = format!(
+                "Created {} agent \"{}\" from PR #{} ({}) in project \"{}\".",
+                project.default_provider.as_str(),
+                branch_name,
+                number,
+                title,
+                project.name
+            );
+            logger::info(&format!(
+                "created PR worktree from {} #{} ({state}) {}",
+                owner_repo,
+                number,
+                pull_request_url(&host, &owner_repo, number)
+            ));
             (
                 project.clone(),
                 project.default_provider.clone(),
@@ -1505,8 +1668,14 @@ fn run_pr_sync(
 /// no reason to check for newer PRs. This reduces API calls from O(sessions)
 /// to O(active_sessions) for repos with many completed agents.
 fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<crate::model::PrInfo> {
-    let owner_repo = git::remote_owner_repo(Path::new(&entry.worktree_path))
-        .or_else(|| entry.known_pr.as_ref().map(|pr| pr.owner_repo.clone()))?;
+    let remote = git::remote_github_repo(Path::new(&entry.worktree_path));
+    let (host, owner_repo) = if let Some(remote) = remote {
+        (remote.host, remote.owner_repo)
+    } else if let Some(known) = &entry.known_pr {
+        (known.host.clone(), known.owner_repo.clone())
+    } else {
+        return None;
+    };
 
     if let Some(ref known) = entry.known_pr {
         let is_terminal = known.state == "MERGED" || known.state == "CLOSED";
@@ -1522,7 +1691,7 @@ fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<crate::model::PrInfo> {
             // Terminal PR but agent is still running — it might push new commits
             // and open a follow-up PR, so we still check for newer PRs.
             if let Some(newer) =
-                discover_pr_by_branch(&entry.branch_name, &owner_repo, &entry.session_id)
+                discover_pr_by_branch(&entry.branch_name, &host, &owner_repo, &entry.session_id)
                 && newer.number > known.pr_number
             {
                 return Some(newer);
@@ -1531,10 +1700,15 @@ fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<crate::model::PrInfo> {
         }
 
         // Open PR: refresh its current state via `gh pr view`.
-        if let Some(pr) = view_pr_by_number(known.pr_number, &known.owner_repo, &entry.session_id) {
+        if let Some(pr) = view_pr_by_number(
+            known.pr_number,
+            &known.host,
+            &known.owner_repo,
+            &entry.session_id,
+        ) {
             // Also check if a newer PR was opened.
             if let Some(newer) =
-                discover_pr_by_branch(&entry.branch_name, &owner_repo, &entry.session_id)
+                discover_pr_by_branch(&entry.branch_name, &host, &owner_repo, &entry.session_id)
                 && newer.number > pr.number
             {
                 return Some(newer);
@@ -1544,7 +1718,7 @@ fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<crate::model::PrInfo> {
     }
 
     // No known PR — discover by branch name.
-    discover_pr_by_branch(&entry.branch_name, &owner_repo, &entry.session_id)
+    discover_pr_by_branch(&entry.branch_name, &host, &owner_repo, &entry.session_id)
 }
 
 /// Reconstruct a PrInfo from stored data without a network call.
@@ -1561,6 +1735,7 @@ fn reconstruct_from_stored(stored: &crate::storage::StoredPr) -> Option<crate::m
         number: stored.pr_number,
         state,
         title: stored.title.clone(),
+        host: stored.host.clone(),
         owner_repo: stored.owner_repo.clone(),
     })
 }
@@ -1568,16 +1743,18 @@ fn reconstruct_from_stored(stored: &crate::storage::StoredPr) -> Option<crate::m
 /// Check a known PR by number using `gh pr view`.
 fn view_pr_by_number(
     number: u64,
+    host: &str,
     owner_repo: &str,
     session_id: &str,
 ) -> Option<crate::model::PrInfo> {
+    let repo = gh_repo_arg(host, owner_repo);
     let output = std::process::Command::new("gh")
         .args([
             "pr",
             "view",
             &number.to_string(),
             "--repo",
-            owner_repo,
+            &repo,
             "--json",
             "number,state,title",
         ])
@@ -1593,15 +1770,17 @@ fn view_pr_by_number(
     }
 
     let text = String::from_utf8_lossy(&output.stdout);
-    parse_pr_json_object(text.trim(), owner_repo)
+    parse_pr_json_object(text.trim(), host, owner_repo)
 }
 
 /// Discover a PR by branch name using `gh pr list --state all`.
 fn discover_pr_by_branch(
     branch: &str,
+    host: &str,
     owner_repo: &str,
     session_id: &str,
 ) -> Option<crate::model::PrInfo> {
+    let repo = gh_repo_arg(host, owner_repo);
     let output = std::process::Command::new("gh")
         .args([
             "pr",
@@ -1609,7 +1788,7 @@ fn discover_pr_by_branch(
             "--head",
             branch,
             "--repo",
-            owner_repo,
+            &repo,
             "--state",
             "all",
             "--json",
@@ -1631,17 +1810,21 @@ fn discover_pr_by_branch(
     let text = String::from_utf8_lossy(&output.stdout);
     let arr: Vec<serde_json::Value> = serde_json::from_str(text.trim()).ok()?;
     let obj = arr.first()?;
-    parse_pr_json_value(obj, owner_repo)
+    parse_pr_json_value(obj, host, owner_repo)
 }
 
 /// Parse a single PR JSON object (from `gh pr view` output).
-fn parse_pr_json_object(json: &str, owner_repo: &str) -> Option<crate::model::PrInfo> {
+fn parse_pr_json_object(json: &str, host: &str, owner_repo: &str) -> Option<crate::model::PrInfo> {
     let obj: serde_json::Value = serde_json::from_str(json).ok()?;
-    parse_pr_json_value(&obj, owner_repo)
+    parse_pr_json_value(&obj, host, owner_repo)
 }
 
 /// Extract PrInfo from a serde_json::Value.
-fn parse_pr_json_value(obj: &serde_json::Value, owner_repo: &str) -> Option<crate::model::PrInfo> {
+fn parse_pr_json_value(
+    obj: &serde_json::Value,
+    host: &str,
+    owner_repo: &str,
+) -> Option<crate::model::PrInfo> {
     use crate::model::{PrInfo, PrState};
 
     let number = obj.get("number")?.as_u64()?;
@@ -1662,6 +1845,95 @@ fn parse_pr_json_value(obj: &serde_json::Value, owner_repo: &str) -> Option<crat
         number,
         state,
         title,
+        host: normalize_github_host(host).to_string(),
         owner_repo: owner_repo.to_string(),
     })
+}
+
+fn parse_resolved_pull_request_json(
+    json: &str,
+    project: Project,
+    host: &str,
+    owner_repo: &str,
+) -> Result<ResolvedPullRequest, String> {
+    let obj: serde_json::Value = serde_json::from_str(json.trim())
+        .map_err(|err| format!("gh returned invalid PR JSON: {err}"))?;
+    let number = obj
+        .get("number")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "gh PR response did not include a PR number.".to_string())?;
+    let title = obj
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let state = obj
+        .get("state")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let head_ref_name = obj
+        .get("headRefName")
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "gh PR response did not include a head branch.".to_string())?
+        .to_string();
+    Ok(ResolvedPullRequest {
+        project,
+        host: host.to_string(),
+        owner_repo: owner_repo.to_string(),
+        number,
+        title,
+        state,
+        head_ref_name,
+    })
+}
+
+fn pull_request_url(host: &str, owner_repo: &str, number: u64) -> String {
+    let host = normalize_github_host(host);
+    format!("https://{host}/{owner_repo}/pull/{number}")
+}
+
+fn gh_repo_arg(host: &str, owner_repo: &str) -> String {
+    let host = normalize_github_host(host);
+    if host == "github.com" {
+        owner_repo.to_string()
+    } else {
+        format!("{host}/{owner_repo}")
+    }
+}
+
+fn normalize_github_host(host: &str) -> &str {
+    if host.trim().is_empty() {
+        "github.com"
+    } else {
+        host
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gh_repo_arg_uses_owner_repo_for_github_dot_com() {
+        assert_eq!(gh_repo_arg("github.com", "owner/repo"), "owner/repo");
+        assert_eq!(gh_repo_arg("", "owner/repo"), "owner/repo");
+    }
+
+    #[test]
+    fn gh_repo_arg_includes_host_for_enterprise() {
+        assert_eq!(
+            gh_repo_arg("github.example.com", "owner/repo"),
+            "github.example.com/owner/repo"
+        );
+    }
+
+    #[test]
+    fn pull_request_url_defaults_empty_host_to_github_dot_com() {
+        assert_eq!(
+            pull_request_url("", "owner/repo", 12),
+            "https://github.com/owner/repo/pull/12"
+        );
+    }
 }
