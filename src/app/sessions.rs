@@ -122,6 +122,7 @@ impl App {
             path,
             default_provider: self.config.default_provider(),
             current_branch: branch,
+            branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         });
         self.rebuild_left_items();
@@ -173,6 +174,7 @@ impl App {
         }
 
         project.current_branch = current_branch;
+        project.branch_status = ProjectBranchStatus::Leading;
         self.open_name_new_agent_prompt(CreateAgentRequest::NewProject {
             project,
             custom_name: None,
@@ -250,6 +252,31 @@ impl App {
         thread::spawn(move || {
             super::workers::run_create_agent_branch_inspection_job(project, worker_tx);
         });
+    }
+
+    pub(crate) fn checkout_selected_project_default_branch(&mut self) -> Result<()> {
+        let Some(project) = self.selected_project().cloned() else {
+            self.set_error("Select a project first.");
+            return Ok(());
+        };
+
+        if project.path_missing {
+            self.set_warning(format!(
+                "Cannot check out default branch: path not found for \"{}\"",
+                project.name
+            ));
+            return Ok(());
+        }
+
+        self.set_busy(format!(
+            "Checking the default branch for project \"{}\"...",
+            project.name
+        ));
+        let worker_tx = self.worker_tx.clone();
+        thread::spawn(move || {
+            super::workers::run_checkout_project_default_branch_inspection_job(project, worker_tx);
+        });
+        Ok(())
     }
 
     pub(crate) fn dispatch_create_agent_request(
@@ -2172,6 +2199,7 @@ mod tests {
             path: "/tmp/project".to_string(),
             default_provider: ProviderKind::from_str(provider),
             current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         }
     }
@@ -2321,6 +2349,7 @@ mod tests {
             path: path.to_string(),
             default_provider: ProviderKind::from_str(provider),
             current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         }
     }

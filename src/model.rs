@@ -55,7 +55,15 @@ pub struct Project {
     pub path: String,
     pub default_provider: ProviderKind,
     pub current_branch: String,
+    pub branch_status: ProjectBranchStatus,
     pub path_missing: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectBranchStatus {
+    Leading,
+    NotLeading,
+    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

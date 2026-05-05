@@ -39,8 +39,8 @@ use crate::keybindings::{
 use crate::lockfile::SingleInstanceLock;
 use crate::logger;
 use crate::model::{
-    AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProviderKind, SessionStatus,
-    SessionSurface,
+    AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProjectBranchStatus, ProviderKind,
+    SessionStatus, SessionSurface,
 };
 use crate::provider;
 use crate::pty::PtyClient;
@@ -642,10 +642,20 @@ pub(crate) fn branch_warning_kind(path: &Path, branch: &str) -> Option<BranchWar
     }
 }
 
+pub(crate) fn branch_status_from_warning(
+    warning_kind: Option<&BranchWarningKind>,
+) -> ProjectBranchStatus {
+    match warning_kind {
+        Some(_) => ProjectBranchStatus::NotLeading,
+        None => ProjectBranchStatus::Leading,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum NonDefaultBranchAction {
     AddProject { path: String, name: String },
     CreateAgent { project: Project },
+    CheckoutProjectDefault { project: Project },
 }
 
 impl NonDefaultBranchAction {
@@ -653,6 +663,7 @@ impl NonDefaultBranchAction {
         match self {
             Self::AddProject { path, .. } => path,
             Self::CreateAgent { project } => &project.path,
+            Self::CheckoutProjectDefault { project } => &project.path,
         }
     }
 
@@ -1090,6 +1101,14 @@ pub(crate) enum WorkerEvent {
         project: Project,
         result: Result<(String, Option<BranchWarningKind>), String>,
     },
+    ProjectBranchStatusReady {
+        project_id: String,
+        result: Result<(String, ProjectBranchStatus), String>,
+    },
+    CheckoutProjectDefaultBranchInspected {
+        project: Project,
+        result: Result<(String, Option<BranchWarningKind>), String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1270,6 +1289,7 @@ impl App {
     pub fn run(&mut self) -> Result<()> {
         self.spawn_changed_files_poller();
         self.spawn_branch_sync_worker();
+        self.spawn_project_branch_status_checks();
         self.spawn_gh_status_check();
         let mut terminal = ratatui::init();
         execute!(stdout(), EnableMouseCapture)?;
@@ -2435,6 +2455,7 @@ pub(crate) fn load_projects(config: &Config) -> Vec<Project> {
             } else {
                 git::current_branch(&path).unwrap_or_else(|_| "main".to_string())
             },
+            branch_status: ProjectBranchStatus::Unknown,
             path_missing: missing,
         });
     }

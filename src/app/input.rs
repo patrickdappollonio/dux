@@ -549,6 +549,9 @@ impl App {
                 Action::NewAgent => self.create_agent_for_selected_project()?,
                 Action::ForkAgent => self.fork_selected_session()?,
                 Action::RefreshProject => self.refresh_selected_project()?,
+                Action::CheckoutProjectDefaultBranch => {
+                    self.checkout_selected_project_default_branch()?
+                }
                 Action::ShowTerminal => self.show_or_open_first_terminal()?,
                 Action::DeleteSession => self.confirm_delete_selected_session()?,
                 Action::RenameSession => self.open_rename_session()?,
@@ -4013,6 +4016,7 @@ impl App {
             let reason = match action {
                 NonDefaultBranchAction::AddProject { .. } => "before adding the project",
                 NonDefaultBranchAction::CreateAgent { .. } => "before creating the agent",
+                NonDefaultBranchAction::CheckoutProjectDefault { .. } => "for the selected project",
             };
             self.dispatch_non_default_branch_checkout(action, target, reason.to_string());
         } else {
@@ -4024,6 +4028,9 @@ impl App {
                 }
                 NonDefaultBranchAction::CreateAgent { .. } => {
                     self.set_error("Check out the default branch before creating an agent.");
+                }
+                NonDefaultBranchAction::CheckoutProjectDefault { .. } => {
+                    self.set_error("Check out the default branch before retrying.");
                 }
             }
         }
@@ -5221,8 +5228,8 @@ mod tests {
     use crate::editor::{DetectedEditor, EditorKind};
     use crate::keybindings::{Action, BINDING_DEFS, BindingScope, RuntimeBindings};
     use crate::model::{
-        AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProviderKind, SessionStatus,
-        SessionSurface,
+        AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProjectBranchStatus,
+        ProviderKind, SessionStatus, SessionSurface,
     };
     use crate::pty::PtyClient;
     use crate::statusline::StatusLine;
@@ -5347,6 +5354,7 @@ mod tests {
             path: root.to_string_lossy().to_string(),
             default_provider: ProviderKind::from_str("codex"),
             current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         };
         let session = AgentSession {
@@ -6441,6 +6449,49 @@ mod tests {
         assert!(matches!(app.prompt, PromptState::None));
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
         assert!(app.status.text().contains("Couldn't check out \"main\""));
+    }
+
+    #[test]
+    fn project_branch_status_ready_marks_project_not_leading() {
+        let mut app = test_app(default_bindings());
+
+        app.worker_tx
+            .send(WorkerEvent::ProjectBranchStatusReady {
+                project_id: app.projects[0].id.clone(),
+                result: Ok(("feature".to_string(), ProjectBranchStatus::NotLeading)),
+            })
+            .unwrap();
+
+        app.drain_events();
+
+        assert_eq!(app.projects[0].current_branch, "feature");
+        assert_eq!(
+            app.projects[0].branch_status,
+            ProjectBranchStatus::NotLeading
+        );
+    }
+
+    #[test]
+    fn checkout_project_default_success_marks_project_leading() {
+        let mut app = test_app(default_bindings());
+        let mut project = app.projects[0].clone();
+        project.current_branch = "feature".to_string();
+        project.branch_status = ProjectBranchStatus::NotLeading;
+        app.projects[0] = project.clone();
+
+        app.worker_tx
+            .send(WorkerEvent::NonDefaultBranchCheckoutCompleted {
+                action: NonDefaultBranchAction::CheckoutProjectDefault { project },
+                target_branch: "main".to_string(),
+                result: Ok(()),
+            })
+            .unwrap();
+
+        app.drain_events();
+
+        assert_eq!(app.projects[0].current_branch, "main");
+        assert_eq!(app.projects[0].branch_status, ProjectBranchStatus::Leading);
+        assert!(app.status.text().contains("Checked out \"main\""));
     }
 
     #[test]
@@ -8893,8 +8944,10 @@ cyan = "#00ffff"
     fn tab_with_shift_moves_non_default_branch_focus_backwards_when_checkbox_present() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmNonDefaultBranch {
-            path: "/tmp/project".to_string(),
-            name: "project".to_string(),
+            action: NonDefaultBranchAction::AddProject {
+                path: "/tmp/project".to_string(),
+                name: "project".to_string(),
+            },
             current_branch: "feature".to_string(),
             kind: BranchWarningKind::Known {
                 default_branch: "main".to_string(),
@@ -8936,8 +8989,10 @@ cyan = "#00ffff"
     fn tab_with_shift_moves_non_default_branch_focus_backwards_without_checkbox() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmNonDefaultBranch {
-            path: "/tmp/project".to_string(),
-            name: "project".to_string(),
+            action: NonDefaultBranchAction::AddProject {
+                path: "/tmp/project".to_string(),
+                name: "project".to_string(),
+            },
             current_branch: "feature".to_string(),
             kind: BranchWarningKind::Heuristic,
             focus: ConfirmNonDefaultBranchFocus::Cancel,
@@ -10822,6 +10877,7 @@ cyan = "#00ffff"
             path: app.paths.root.join("pinned").display().to_string(),
             default_provider: ProviderKind::from_str("gemini"),
             current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         };
         app.config.projects.push(ProjectConfig {
@@ -10938,6 +10994,7 @@ cyan = "#00ffff"
             path: app.paths.root.join("pinned").display().to_string(),
             default_provider: ProviderKind::from_str("gemini"),
             current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         };
         app.config.projects.push(ProjectConfig {

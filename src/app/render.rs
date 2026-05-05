@@ -557,9 +557,20 @@ impl App {
                                 } else {
                                     "▾"
                                 };
+                            let icon = if project.branch_status == ProjectBranchStatus::NotLeading {
+                                "!"
+                            } else {
+                                icon
+                            };
                             ListItem::new(Line::from(Span::styled(
                                 icon,
-                                Style::default().fg(self.theme.project_icon),
+                                Style::default().fg(
+                                    if project.branch_status == ProjectBranchStatus::NotLeading {
+                                        self.theme.warning_fg
+                                    } else {
+                                        self.theme.project_icon
+                                    },
+                                ),
                             )))
                         }
                     }
@@ -659,6 +670,12 @@ impl App {
                             spans.push(Span::styled(
                                 format!(" ({count})"),
                                 Style::default().fg(self.theme.provider_label_fg),
+                            ));
+                        }
+                        if project.branch_status == ProjectBranchStatus::NotLeading {
+                            spans.push(Span::styled(
+                                " !",
+                                Style::default().fg(self.theme.warning_fg),
                             ));
                         }
                         ListItem::new(Line::from(spans))

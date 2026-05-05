@@ -20,6 +20,7 @@ pub enum Action {
     OpenWorktreeInEditor,
     ChooseWorktreeEditor,
     RefreshProject,
+    CheckoutProjectDefaultBranch,
     ReconnectAgent,
     DeleteSession,
     DeleteTerminal,
@@ -196,6 +197,7 @@ impl Action {
             Action::OpenWorktreeInEditor => "open_worktree_in_editor",
             Action::ChooseWorktreeEditor => "choose_worktree_editor",
             Action::RefreshProject => "refresh_project",
+            Action::CheckoutProjectDefaultBranch => "checkout_project_default_branch",
             Action::ReconnectAgent => "reconnect_agent",
             Action::DeleteSession => "delete_session",
             Action::DeleteTerminal => "delete_terminal",
@@ -288,6 +290,9 @@ impl Action {
                 "Open a picker and choose which editor should open the selected agent worktree."
             }
             Action::RefreshProject => "Git pull the selected project checkout.",
+            Action::CheckoutProjectDefaultBranch => {
+                "Check out the default branch for the selected project."
+            }
             Action::ReconnectAgent => "Restart the CLI for the selected agent.",
             Action::DeleteSession => "Delete the selected session and worktree.",
             Action::DeleteTerminal => "Delete the selected companion terminal.",
@@ -376,6 +381,7 @@ impl Action {
             | Action::OpenWorktreeInEditor
             | Action::ChooseWorktreeEditor
             | Action::RefreshProject
+            | Action::CheckoutProjectDefaultBranch
             | Action::InteractAgent
             | Action::ReconnectAgent
             | Action::DeleteSession
@@ -692,6 +698,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "pull-project",
             description: "Git pull the selected project checkout",
+        }),
+    },
+    BindingDef {
+        action: Action::CheckoutProjectDefaultBranch,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "checkout-project-default-branch",
+            description: "Check out the selected project's default branch",
         }),
     },
     BindingDef {
