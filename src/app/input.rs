@@ -9,6 +9,7 @@ const MAX_RIGHT_WIDTH_PCT: u16 = 50;
 const MIN_CENTER_WIDTH_PCT: u16 = 20;
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 const ESC_AMBIGUITY_TIMEOUT: Duration = Duration::from_millis(25);
+const NON_DEFAULT_BRANCH_HOVER_STATUS: &str = "Repo isn't on the default branch. Press Ctrl+P and run checkout-project-default-branch to check out main.";
 
 /// Maximum size of `loading_input_buf`. During the loading phase we
 /// accumulate bytes only to detect a (possibly multi-byte) ExitInteractive
@@ -3539,6 +3540,31 @@ impl App {
         }
     }
 
+    fn update_non_default_branch_hover_status(&mut self, column: u16, row: u16) {
+        let hovering_not_leading_project = match self.mouse_target(column, row) {
+            Some(MouseTarget::LeftRow(index)) => self
+                .left_items()
+                .get(index)
+                .and_then(|item| match item {
+                    LeftItem::Project(project_index) => self.projects.get(*project_index),
+                    LeftItem::Session(_) => None,
+                })
+                .is_some_and(|project| {
+                    !project.path_missing
+                        && project.branch_status == ProjectBranchStatus::NotLeading
+                }),
+            _ => false,
+        };
+
+        if hovering_not_leading_project {
+            self.set_warning(NON_DEFAULT_BRANCH_HOVER_STATUS);
+        } else if self.status.tone() == crate::statusline::StatusTone::Warning
+            && self.status.text() == NON_DEFAULT_BRANCH_HOVER_STATUS
+        {
+            self.set_info("");
+        }
+    }
+
     fn register_mouse_click(
         &mut self,
         target: MouseClickTarget,
@@ -5083,6 +5109,9 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) if self.mouse_drag.take().is_some() => {
                 self.persist_pane_widths();
             }
+            MouseEventKind::Moved => {
+                self.update_non_default_branch_hover_status(mouse.column, mouse.row);
+            }
             MouseEventKind::ScrollDown => match self.mouse_target(mouse.column, mouse.row) {
                 Some(MouseTarget::LeftRow(_)) => {
                     self.handle_left_mouse_wheel(true, mouse.column, mouse.row)
@@ -5321,8 +5350,8 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex, mpsc};
 
-    use super::DOUBLE_CLICK_THRESHOLD;
     use super::components::{ButtonPressedTarget, PressedButton};
+    use super::{DOUBLE_CLICK_THRESHOLD, NON_DEFAULT_BRANCH_HOVER_STATUS};
     use crate::app::{
         App, BranchWarningKind, CenterMode, ConfigReloadFailedFocus, ConfirmKillRunningPrompt,
         ConfirmNonDefaultBranchFocus, CreateAgentRequest, DeleteAgentFocus, FocusPane,
@@ -7115,6 +7144,28 @@ not_a_real_action = ["x"]
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 1));
 
         assert_eq!(app.focus, FocusPane::Left);
+    }
+
+    #[test]
+    fn mouse_hover_non_default_project_shows_status_reason() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.projects[0].branch_status = ProjectBranchStatus::NotLeading;
+
+        app.handle_mouse(mouse(MouseEventKind::Moved, 2, 1));
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
+        assert_eq!(app.status.text(), NON_DEFAULT_BRANCH_HOVER_STATUS);
+    }
+
+    #[test]
+    fn mouse_hover_ordinary_project_does_not_show_non_default_status() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Moved, 2, 1));
+
+        assert_eq!(app.status.text(), "ready");
     }
 
     #[test]
@@ -11344,6 +11395,38 @@ cyan = "#00ffff"
         assert!(
             rendered.contains("dux development"),
             "expected local build version label, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn non_default_project_uses_double_exclamation_marker() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.projects[0].branch_status = ProjectBranchStatus::NotLeading;
+        app.rebuild_left_items();
+
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(
+            rendered.contains("demo (1) ‼"),
+            "expected non-default project marker, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("demo (1) !"),
+            "old non-default project marker should not render"
         );
     }
 
