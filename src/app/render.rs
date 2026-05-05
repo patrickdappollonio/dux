@@ -586,6 +586,10 @@ impl App {
                             Span::styled(dot.to_string(), Style::default().fg(dot_color)),
                         ]))
                     }
+                    LeftItem::EmptyProjectsSeparator => ListItem::new(Line::from(Span::styled(
+                        "─",
+                        Style::default().fg(self.theme.header_separator_fg),
+                    ))),
                 })
                 .collect::<Vec<_>>();
             let mut state = ListState::default().with_selected(Some(self.selected_left));
@@ -764,6 +768,13 @@ impl App {
                         .collect::<Vec<_>>(),
                     ))
                 }
+                LeftItem::EmptyProjectsSeparator => ListItem::new(Line::from(vec![
+                    Span::styled("── ", Style::default().fg(self.theme.header_separator_fg)),
+                    Span::styled(
+                        "Empty projects",
+                        Style::default().fg(self.theme.provider_label_fg),
+                    ),
+                ])),
             })
             .collect::<Vec<_>>();
         let title = format!("Projects ({})", self.projects.len());

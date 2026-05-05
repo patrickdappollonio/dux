@@ -527,12 +527,11 @@ impl App {
             return self.handle_left_terminal_key(key);
         }
 
-        let item_count = self.left_items().len();
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
             match action {
                 Action::MoveDown => {
-                    if self.selected_left + 1 < item_count {
-                        self.selected_left += 1;
+                    if let Some(next) = self.next_selectable_left_item_after(self.selected_left) {
+                        self.selected_left = next;
                         self.close_diff_view();
                         self.reload_changed_files();
                         self.update_missing_project_warning();
@@ -543,11 +542,15 @@ impl App {
                         self.close_diff_view();
                     }
                 }
-                Action::MoveUp if self.selected_left > 0 => {
-                    self.selected_left -= 1;
-                    self.close_diff_view();
-                    self.reload_changed_files();
-                    self.update_missing_project_warning();
+                Action::MoveUp => {
+                    if let Some(prev) =
+                        self.previous_selectable_left_item_before(self.selected_left)
+                    {
+                        self.selected_left = prev;
+                        self.close_diff_view();
+                        self.reload_changed_files();
+                        self.update_missing_project_warning();
+                    }
                 }
                 Action::FocusAgent | Action::ExitInteractive => {
                     self.activate_selected_left_item()?
@@ -611,9 +614,14 @@ impl App {
                     } else {
                         // Jump back to projects section.
                         self.left_section = LeftSection::Projects;
-                        let item_count = self.left_items().len();
-                        if item_count > 0 {
-                            self.selected_left = item_count - 1;
+                        if let Some(last) = self
+                            .left_items()
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .find_map(|(idx, item)| item.is_selectable().then_some(idx))
+                        {
+                            self.selected_left = last;
                             self.close_diff_view();
                         }
                     }
@@ -3428,6 +3436,9 @@ impl App {
             }
             let index = usize::from(row.saturating_sub(self.mouse_layout.left_list.y));
             if index < self.left_items().len() {
+                if !self.is_selectable_left_item(index) {
+                    return Some(MouseTarget::LeftPane);
+                }
                 return Some(MouseTarget::LeftRow(index));
             }
             return Some(MouseTarget::LeftPane);
@@ -3568,7 +3579,7 @@ impl App {
     }
 
     fn set_left_selection(&mut self, index: usize) {
-        if index >= self.left_items().len() {
+        if !self.is_selectable_left_item(index) {
             return;
         }
         self.focus = FocusPane::Left;
@@ -4792,6 +4803,7 @@ impl App {
                     self.reconnect_selected_session()?;
                 }
             }
+            Some(LeftItem::EmptyProjectsSeparator) => {}
             None => {}
         }
         Ok(())
@@ -4909,12 +4921,12 @@ impl App {
         self.set_left_selection(target_index);
 
         if down {
-            if self.selected_left + 1 < self.left_items().len() {
-                self.selected_left += 1;
+            if let Some(next) = self.next_selectable_left_item_after(self.selected_left) {
+                self.selected_left = next;
                 self.reload_changed_files();
             }
-        } else if self.selected_left > 0 {
-            self.selected_left -= 1;
+        } else if let Some(prev) = self.previous_selectable_left_item_before(self.selected_left) {
+            self.selected_left = prev;
             self.reload_changed_files();
         }
     }
@@ -7621,6 +7633,58 @@ not_a_real_action = ["x"]
 
         assert_eq!(app.selected_left, 0);
         assert!(matches!(app.center_mode, CenterMode::Agent));
+    }
+
+    fn append_empty_projects(app: &mut App, count: usize) {
+        let path = app.projects[0].path.clone();
+        for idx in 0..count {
+            app.projects.push(Project {
+                id: format!("empty-project-{idx}"),
+                name: format!("empty {idx}"),
+                path: path.clone(),
+                default_provider: ProviderKind::from_str("codex"),
+                current_branch: "main".to_string(),
+                branch_status: ProjectBranchStatus::Unknown,
+                path_missing: false,
+            });
+        }
+    }
+
+    #[test]
+    fn left_navigation_skips_empty_projects_separator() {
+        let mut app = test_app(default_bindings());
+        append_empty_projects(&mut app, 4);
+        app.config.ui.empty_project_separator_min_projects = 5;
+        app.rebuild_left_items();
+        app.selected_left = 1;
+        app.focus = FocusPane::Left;
+
+        assert!(matches!(
+            app.left_items().get(2),
+            Some(LeftItem::EmptyProjectsSeparator)
+        ));
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.selected_left, 3);
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.selected_left, 1);
+    }
+
+    #[test]
+    fn mouse_click_empty_projects_separator_keeps_selection() {
+        let mut app = test_app(default_bindings());
+        append_empty_projects(&mut app, 4);
+        app.config.ui.empty_project_separator_min_projects = 5;
+        app.rebuild_left_items();
+        install_mouse_layout(&mut app);
+        app.selected_left = 1;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 3));
+
+        assert_eq!(app.selected_left, 1);
     }
 
     #[test]

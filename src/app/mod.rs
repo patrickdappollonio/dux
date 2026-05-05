@@ -1047,10 +1047,91 @@ pub(crate) enum LeftSection {
     Terminals,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LeftItem {
     Project(usize),
     Session(usize),
+    EmptyProjectsSeparator,
+}
+
+impl LeftItem {
+    pub(crate) fn is_selectable(self) -> bool {
+        matches!(self, LeftItem::Project(_) | LeftItem::Session(_))
+    }
+}
+
+pub(crate) fn build_left_items(
+    projects: &[Project],
+    sessions: &[AgentSession],
+    collapsed_projects: &HashSet<String>,
+    empty_project_separator_min_projects: u16,
+) -> Vec<LeftItem> {
+    let split_empty_projects = empty_project_separator_min_projects > 0
+        && projects.len() >= usize::from(empty_project_separator_min_projects);
+    let mut items = Vec::new();
+    let mut empty_projects = Vec::new();
+
+    for (project_index, project) in projects.iter().enumerate() {
+        let has_sessions = sessions
+            .iter()
+            .any(|session| session.project_id == project.id);
+        if split_empty_projects && !has_sessions {
+            empty_projects.push(project_index);
+            continue;
+        }
+        push_project_left_items(
+            &mut items,
+            project_index,
+            project,
+            sessions,
+            collapsed_projects,
+        );
+    }
+
+    if !items.is_empty() && !empty_projects.is_empty() {
+        items.push(LeftItem::EmptyProjectsSeparator);
+        for project_index in empty_projects {
+            let project = &projects[project_index];
+            push_project_left_items(
+                &mut items,
+                project_index,
+                project,
+                sessions,
+                collapsed_projects,
+            );
+        }
+    } else {
+        for project_index in empty_projects {
+            let project = &projects[project_index];
+            push_project_left_items(
+                &mut items,
+                project_index,
+                project,
+                sessions,
+                collapsed_projects,
+            );
+        }
+    }
+
+    items
+}
+
+fn push_project_left_items(
+    items: &mut Vec<LeftItem>,
+    project_index: usize,
+    project: &Project,
+    sessions: &[AgentSession],
+    collapsed_projects: &HashSet<String>,
+) {
+    items.push(LeftItem::Project(project_index));
+    if project.path_missing || collapsed_projects.contains(&project.id) {
+        return;
+    }
+    for (session_index, session) in sessions.iter().enumerate() {
+        if session.project_id == project.id {
+            items.push(LeftItem::Session(session_index));
+        }
+    }
 }
 
 pub(crate) struct CompanionTerminal {
@@ -2035,19 +2116,54 @@ impl App {
     }
 
     pub(crate) fn rebuild_left_items(&mut self) {
-        let mut items = Vec::new();
-        for (project_index, project) in self.projects.iter().enumerate() {
-            items.push(LeftItem::Project(project_index));
-            if project.path_missing || self.collapsed_projects.contains(&project.id) {
-                continue;
-            }
-            for (session_index, session) in self.sessions.iter().enumerate() {
-                if session.project_id == project.id {
-                    items.push(LeftItem::Session(session_index));
-                }
-            }
+        self.left_items_cache = build_left_items(
+            &self.projects,
+            &self.sessions,
+            &self.collapsed_projects,
+            self.config.ui.empty_project_separator_min_projects,
+        );
+        self.ensure_selectable_left_item();
+    }
+
+    pub(crate) fn is_selectable_left_item(&self, index: usize) -> bool {
+        self.left_items()
+            .get(index)
+            .is_some_and(|item| item.is_selectable())
+    }
+
+    pub(crate) fn next_selectable_left_item_after(&self, index: usize) -> Option<usize> {
+        self.left_items()
+            .iter()
+            .enumerate()
+            .skip(index.saturating_add(1))
+            .find_map(|(idx, item)| item.is_selectable().then_some(idx))
+    }
+
+    pub(crate) fn previous_selectable_left_item_before(&self, index: usize) -> Option<usize> {
+        self.left_items()
+            .iter()
+            .enumerate()
+            .take(index)
+            .rev()
+            .find_map(|(idx, item)| item.is_selectable().then_some(idx))
+    }
+
+    pub(crate) fn ensure_selectable_left_item(&mut self) {
+        if self.left_items_cache.is_empty() {
+            self.selected_left = 0;
+            return;
         }
-        self.left_items_cache = items;
+        if self.selected_left >= self.left_items_cache.len() {
+            self.selected_left = self.left_items_cache.len().saturating_sub(1);
+        }
+        if self.left_items_cache[self.selected_left].is_selectable() {
+            return;
+        }
+        if let Some(next) = self.next_selectable_left_item_after(self.selected_left) {
+            self.selected_left = next;
+        } else if let Some(prev) = self.previous_selectable_left_item_before(self.selected_left) {
+            self.selected_left = prev;
+        }
     }
 
     pub(crate) fn sort_sessions_by_updated(&mut self) {
@@ -2106,6 +2222,7 @@ impl App {
                     .iter()
                     .find(|project| project.id == session.project_id)
             }),
+            Some(LeftItem::EmptyProjectsSeparator) => None,
             None => None,
         }
     }
@@ -2723,6 +2840,175 @@ pub(crate) fn provider_config(config: &Config, provider: &ProviderKind) -> Provi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_project(id: &str) -> Project {
+        Project {
+            id: id.to_string(),
+            name: id.to_string(),
+            path: format!("/tmp/{id}"),
+            default_provider: ProviderKind::from_str("codex"),
+            current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Unknown,
+            path_missing: false,
+        }
+    }
+
+    fn test_session(id: &str, project_id: &str, created_offset: i64) -> AgentSession {
+        let now = Utc::now() + chrono::Duration::seconds(created_offset);
+        AgentSession {
+            id: id.to_string(),
+            project_id: project_id.to_string(),
+            project_path: Some(format!("/tmp/{project_id}")),
+            provider: ProviderKind::from_str("codex"),
+            source_branch: "main".to_string(),
+            branch_name: id.to_string(),
+            worktree_path: format!("/tmp/worktrees/{id}"),
+            title: None,
+            started_providers: Vec::new(),
+            status: SessionStatus::Detached,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn build_left_items_does_not_split_below_threshold() {
+        let projects = vec![
+            test_project("project-1"),
+            test_project("project-2"),
+            test_project("project-3"),
+            test_project("project-4"),
+        ];
+        let sessions = vec![test_session("session-1", "project-2", 0)];
+
+        let items = build_left_items(&projects, &sessions, &HashSet::new(), 5);
+
+        assert_eq!(
+            items,
+            vec![
+                LeftItem::Project(0),
+                LeftItem::Project(1),
+                LeftItem::Session(0),
+                LeftItem::Project(2),
+                LeftItem::Project(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_left_items_splits_empty_projects_at_threshold() {
+        let projects = vec![
+            test_project("project-1"),
+            test_project("project-2"),
+            test_project("project-3"),
+            test_project("project-4"),
+            test_project("project-5"),
+        ];
+        let sessions = vec![
+            test_session("session-1", "project-2", 0),
+            test_session("session-2", "project-4", 0),
+        ];
+
+        let items = build_left_items(&projects, &sessions, &HashSet::new(), 5);
+
+        assert_eq!(
+            items,
+            vec![
+                LeftItem::Project(1),
+                LeftItem::Session(0),
+                LeftItem::Project(3),
+                LeftItem::Session(1),
+                LeftItem::EmptyProjectsSeparator,
+                LeftItem::Project(0),
+                LeftItem::Project(2),
+                LeftItem::Project(4),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_left_items_moves_project_above_separator_when_session_is_added() {
+        let projects = vec![
+            test_project("project-1"),
+            test_project("project-2"),
+            test_project("project-3"),
+            test_project("project-4"),
+            test_project("project-5"),
+        ];
+        let sessions = vec![
+            test_session("session-1", "project-2", 0),
+            test_session("session-2", "project-4", 0),
+            test_session("session-3", "project-3", 0),
+        ];
+
+        let items = build_left_items(&projects, &sessions, &HashSet::new(), 5);
+
+        assert_eq!(
+            items,
+            vec![
+                LeftItem::Project(1),
+                LeftItem::Session(0),
+                LeftItem::Project(2),
+                LeftItem::Session(2),
+                LeftItem::Project(3),
+                LeftItem::Session(1),
+                LeftItem::EmptyProjectsSeparator,
+                LeftItem::Project(0),
+                LeftItem::Project(4),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_left_items_keeps_session_sort_order_within_project_grouping() {
+        let projects = vec![
+            test_project("project-1"),
+            test_project("project-2"),
+            test_project("project-3"),
+            test_project("project-4"),
+            test_project("project-5"),
+        ];
+        let mut sessions = vec![
+            test_session("older", "project-2", 0),
+            test_session("newer", "project-2", 10),
+            test_session("other", "project-4", 5),
+        ];
+        sessions.sort_by_key(|session| std::cmp::Reverse(session.created_at));
+
+        let items = build_left_items(&projects, &sessions, &HashSet::new(), 5);
+
+        assert_eq!(
+            items,
+            vec![
+                LeftItem::Project(1),
+                LeftItem::Session(0),
+                LeftItem::Session(2),
+                LeftItem::Project(3),
+                LeftItem::Session(1),
+                LeftItem::EmptyProjectsSeparator,
+                LeftItem::Project(0),
+                LeftItem::Project(2),
+                LeftItem::Project(4),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_left_items_can_disable_empty_project_split() {
+        let projects = vec![
+            test_project("project-1"),
+            test_project("project-2"),
+            test_project("project-3"),
+            test_project("project-4"),
+            test_project("project-5"),
+        ];
+        let sessions = vec![test_session("session-1", "project-2", 0)];
+
+        let items = build_left_items(&projects, &sessions, &HashSet::new(), 0);
+
+        assert!(!items.contains(&LeftItem::EmptyProjectsSeparator));
+        assert_eq!(items[0], LeftItem::Project(0));
+    }
 
     #[test]
     fn current_process_is_descendant_of_pid_1() {

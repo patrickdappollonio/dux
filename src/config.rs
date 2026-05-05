@@ -188,6 +188,7 @@ pub struct UiConfig {
     pub left_width_pct: u16,
     pub right_width_pct: u16,
     pub terminal_pane_height_pct: u16,
+    pub empty_project_separator_min_projects: u16,
     pub staged_pane_height_pct: u16,
     pub commit_pane_height_pct: u16,
     pub agent_scrollback_lines: usize,
@@ -214,6 +215,7 @@ impl Default for Config {
                 left_width_pct: 20,
                 right_width_pct: 23,
                 terminal_pane_height_pct: 35,
+                empty_project_separator_min_projects: 5,
                 staged_pane_height_pct: 50,
                 commit_pane_height_pct: 40,
                 agent_scrollback_lines: 10_000,
@@ -339,6 +341,7 @@ impl Default for UiConfig {
             left_width_pct: 17,
             right_width_pct: 19,
             terminal_pane_height_pct: 35,
+            empty_project_separator_min_projects: 5,
             staged_pane_height_pct: 50,
             commit_pane_height_pct: 40,
             agent_scrollback_lines: 10_000,
@@ -676,6 +679,14 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::U16(c.ui.terminal_pane_height_pct),
         },
         ConfigEntry::Field {
+            key: "empty_project_separator_min_projects",
+            comment: Some(CommentSource::Static(
+                "# Separate projects with no agents below an \"Empty projects\" divider once\n\
+                 # the total project count reaches this number. Set to 0 to disable.",
+            )),
+            value_fn: |c| FieldValue::U16(c.ui.empty_project_separator_min_projects),
+        },
+        ConfigEntry::Field {
             key: "staged_pane_height_pct",
             comment: Some(CommentSource::Static(
                 "# Height percentage of the right pane used by the staged changes and commit sections.\n# The remaining space goes to the unstaged changes list.",
@@ -896,6 +907,12 @@ pub fn save_config(
         "ui",
         "terminal_pane_height_pct",
         config.ui.terminal_pane_height_pct,
+    );
+    patch_table_u16(
+        &mut doc,
+        "ui",
+        "empty_project_separator_min_projects",
+        config.ui.empty_project_separator_min_projects,
     );
     patch_table_u16(
         &mut doc,
@@ -1773,6 +1790,7 @@ mod tests {
         assert!(rendered.contains("args = []"));
         assert!(rendered.contains("[ui]"));
         assert!(rendered.contains("agent_scrollback_lines = 10000"));
+        assert!(rendered.contains("empty_project_separator_min_projects = 5"));
         assert!(rendered.contains("staged_pane_height_pct = "));
         assert!(rendered.contains("commit_pane_height_pct = "));
         assert!(rendered.contains("[editor]"));
@@ -1902,6 +1920,7 @@ terminal_pane_height_pct = 35
 agent_scrollback_lines = 10000
 "#;
         let parsed: Config = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(parsed.ui.empty_project_separator_min_projects, 5);
         assert_eq!(parsed.ui.staged_pane_height_pct, 50);
         assert_eq!(parsed.ui.commit_pane_height_pct, 40);
     }
