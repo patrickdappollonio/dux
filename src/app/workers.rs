@@ -404,22 +404,17 @@ impl App {
                             } else {
                                 name.trim().to_string()
                             };
-                            if let Err(e) =
-                                self.finish_add_project(
-                                    path,
-                                    name,
-                                    target_branch.clone(),
-                                    leading_branch,
-                                )
-                            {
+                            let status_message = format!(
+                                "Checked out \"{target_branch}\" and added project \"{display_name}\" to workspace."
+                            );
+                            if let Err(e) = self.finish_add_project_with_status(
+                                path,
+                                name,
+                                target_branch.clone(),
+                                leading_branch,
+                                status_message,
+                            ) {
                                 self.set_error(format!("{e:#}"));
-                            } else {
-                                // Override the generic "Added project" status from
-                                // finish_add_project with the more informative
-                                // two-step message.
-                                self.set_info(format!(
-                                    "Checked out \"{target_branch}\" and added project \"{display_name}\" to workspace."
-                                ));
                             }
                         }
                         NonDefaultBranchAction::CheckoutProjectDefault { project } => {
@@ -523,7 +518,7 @@ impl App {
                             project.name
                         )),
                     }
-                }
+                },
                 WorkerEvent::ConfigReloadReady(result) => match *result {
                     Ok(config) => {
                         if let Err(err) = self.apply_reloaded_config(config) {
@@ -555,6 +550,9 @@ impl App {
                         ));
                     }
                 },
+                WorkerEvent::ProjectPersistenceCompleted { action, result } => {
+                    self.apply_project_persistence_result(action, result);
+                }
             }
         }
         self.retry_hung_resume_sessions();
@@ -703,6 +701,141 @@ impl App {
         // Keep the poller's interval flag in sync with whether any runtime PTY is alive.
         self.has_active_processes
             .store(self.running_process_count() > 0, Ordering::Relaxed);
+    }
+
+    fn apply_project_persistence_result(
+        &mut self,
+        action: ProjectPersistenceAction,
+        result: Result<(), String>,
+    ) {
+        if let Err(err) = result {
+            match action {
+                ProjectPersistenceAction::Add { project, .. } => {
+                    self.set_error(format!(
+                        "Could not save project \"{}\" to the database: {err}",
+                        project.name
+                    ));
+                }
+                ProjectPersistenceAction::Remove { project_name, .. } => {
+                    self.set_error(format!(
+                        "Could not remove project \"{project_name}\" from the database: {err}"
+                    ));
+                }
+                ProjectPersistenceAction::Delete { project_name, .. } => {
+                    self.set_error(format!(
+                        "Could not finish deleting project \"{project_name}\" from the database: {err}"
+                    ));
+                }
+                ProjectPersistenceAction::UpdateDefaultProvider { project_name, .. } => {
+                    self.set_error(format!(
+                        "Could not save the provider change for project \"{project_name}\": {err}"
+                    ));
+                }
+            }
+            return;
+        }
+
+        match action {
+            ProjectPersistenceAction::Add {
+                project,
+                status_message,
+            } => {
+                self.projects.push(project);
+                self.rebuild_left_items();
+                self.set_info(status_message);
+            }
+            ProjectPersistenceAction::Remove {
+                project_id,
+                project_name,
+            } => {
+                self.projects.retain(|project| project.id != project_id);
+                self.rebuild_left_items();
+                self.selected_left = self.selected_left.saturating_sub(1);
+                self.set_info(format!("Removed project \"{project_name}\" from app"));
+            }
+            ProjectPersistenceAction::Delete {
+                project_id,
+                project_name,
+            } => {
+                self.projects.retain(|project| project.id != project_id);
+                self.rebuild_left_items();
+                self.selected_left = self.selected_left.saturating_sub(1);
+                self.reload_changed_files();
+                self.set_info(format!(
+                    "Deleted project \"{project_name}\" and all its agents"
+                ));
+            }
+            ProjectPersistenceAction::UpdateDefaultProvider {
+                project_id,
+                project_name,
+                provider,
+                global_default,
+            } => {
+                if let Some(project) = self
+                    .projects
+                    .iter_mut()
+                    .find(|project| project.id == project_id)
+                {
+                    project.explicit_default_provider = provider.clone();
+                }
+                refresh_project_defaults(&mut self.projects, &self.config);
+                self.rebuild_left_items();
+                let message = match provider {
+                    Some(provider) => format!(
+                        "Project provider for \"{}\" changed to {}. Future agents in this project will use it; existing agents keep their current provider.",
+                        project_name,
+                        provider.as_str(),
+                    ),
+                    None => format!(
+                        "\"{}\" now inherits the global default provider ({}). Future agents in this project will use it; existing agents keep their current provider.",
+                        project_name,
+                        global_default.as_str(),
+                    ),
+                };
+                self.set_info(message);
+            }
+        }
+    }
+
+    pub(crate) fn spawn_project_persistence(&self, action: ProjectPersistenceAction) {
+        let db_path = self.paths.sessions_db_path.clone();
+        let tx = self.worker_tx.clone();
+        thread::spawn(move || {
+            let result = (|| -> Result<()> {
+                let store = SessionStore::open(&db_path)?;
+                match &action {
+                    ProjectPersistenceAction::Add { project, .. } => {
+                        store.upsert_project(&crate::config::ProjectConfig {
+                            id: project.id.clone(),
+                            path: project.path.clone(),
+                            name: Some(project.name.clone()),
+                            default_provider: project
+                                .explicit_default_provider
+                                .as_ref()
+                                .map(|provider| provider.as_str().to_string()),
+                            leading_branch: project.leading_branch.clone(),
+                        })?;
+                    }
+                    ProjectPersistenceAction::Remove { project_id, .. }
+                    | ProjectPersistenceAction::Delete { project_id, .. } => {
+                        store.delete_project(project_id)?;
+                    }
+                    ProjectPersistenceAction::UpdateDefaultProvider {
+                        project_id,
+                        provider,
+                        ..
+                    } => {
+                        store.update_project_default_provider(
+                            project_id,
+                            provider.as_ref().map(|provider| provider.as_str()),
+                        )?;
+                    }
+                }
+                Ok(())
+            })()
+            .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(WorkerEvent::ProjectPersistenceCompleted { action, result });
+        });
     }
 
     pub(crate) fn spawn_browser_entries(&self, dir: &Path) {
@@ -1978,6 +2111,7 @@ mod tests {
             id: "project-1".to_string(),
             name: "demo".to_string(),
             path: tmp.path().to_string_lossy().to_string(),
+            explicit_default_provider: None,
             default_provider: ProviderKind::from_str("codex"),
             leading_branch: Some("main".to_string()),
             current_branch: "main".to_string(),

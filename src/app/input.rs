@@ -982,8 +982,7 @@ impl App {
             return Ok(());
         };
         let worktree = PathBuf::from(&session.worktree_path);
-        let project_path = session.project_path.as_deref().unwrap_or("");
-        let base_prompt = self.config.commit_prompt_for_project(project_path);
+        let base_prompt = self.config.default_commit_prompt();
 
         // Capture the staged diff up-front so the provider does not need tool
         // access to inspect it. The diff is appended after the prompt text.
@@ -5543,12 +5542,22 @@ mod tests {
             id: "project-1".to_string(),
             name: "demo".to_string(),
             path: root.to_string_lossy().to_string(),
+            explicit_default_provider: None,
             default_provider: ProviderKind::from_str("codex"),
             leading_branch: Some("main".to_string()),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         };
+        session_store
+            .upsert_project(&ProjectConfig {
+                id: project.id.clone(),
+                path: project.path.clone(),
+                name: Some(project.name.clone()),
+                default_provider: None,
+                leading_branch: project.leading_branch.clone(),
+            })
+            .expect("seed project");
         let session = AgentSession {
             id: "session-1".to_string(),
             project_id: project.id.clone(),
@@ -7570,6 +7579,7 @@ not_a_real_action = ["x"]
                 id: format!("empty-project-{idx}"),
                 name: format!("empty {idx}"),
                 path: path.clone(),
+                explicit_default_provider: None,
                 default_provider: ProviderKind::from_str("codex"),
                 leading_branch: Some("main".to_string()),
                 current_branch: "main".to_string(),
@@ -11374,35 +11384,27 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.config.defaults.provider = "codex".to_string();
 
-        // project-1 inherits the global default (no explicit override).
-        app.config.projects.push(ProjectConfig {
-            id: app.projects[0].id.clone(),
-            path: app.projects[0].path.clone(),
-            name: Some(app.projects[0].name.clone()),
-            default_provider: None,
-            leading_branch: Some("main".to_string()),
-            commit_prompt: None,
-        });
-
         // project-2 pins itself to "gemini" and must not be touched.
         let pinned = Project {
             id: "project-2".to_string(),
             name: "pinned".to_string(),
             path: app.paths.root.join("pinned").display().to_string(),
+            explicit_default_provider: Some(ProviderKind::from_str("gemini")),
             default_provider: ProviderKind::from_str("gemini"),
             leading_branch: Some("main".to_string()),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         };
-        app.config.projects.push(ProjectConfig {
-            id: pinned.id.clone(),
-            path: pinned.path.clone(),
-            name: Some(pinned.name.clone()),
-            default_provider: Some("gemini".to_string()),
-            leading_branch: Some("main".to_string()),
-            commit_prompt: None,
-        });
+        app.session_store
+            .upsert_project(&ProjectConfig {
+                id: pinned.id.clone(),
+                path: pinned.path.clone(),
+                name: Some(pinned.name.clone()),
+                default_provider: Some("gemini".to_string()),
+                leading_branch: Some("main".to_string()),
+            })
+            .expect("seed pinned project");
         app.projects.push(pinned);
 
         let original_session_provider = app.sessions[0].provider.clone();
@@ -11459,14 +11461,6 @@ cyan = "#00ffff"
     fn change_default_provider_rejects_current_selection_without_mutating_config() {
         let mut app = test_app(default_bindings());
         app.config.defaults.provider = "codex".to_string();
-        app.config.projects.push(ProjectConfig {
-            id: app.projects[0].id.clone(),
-            path: app.projects[0].path.clone(),
-            name: Some(app.projects[0].name.clone()),
-            default_provider: None,
-            leading_branch: Some("main".to_string()),
-            commit_prompt: None,
-        });
 
         app.open_change_default_provider_prompt()
             .expect("open default provider picker");
@@ -11497,33 +11491,27 @@ cyan = "#00ffff"
     fn change_project_default_provider_updates_selected_project_only() {
         let mut app = test_app(default_bindings());
         app.config.defaults.provider = "codex".to_string();
-        app.config.projects.push(ProjectConfig {
-            id: app.projects[0].id.clone(),
-            path: app.projects[0].path.clone(),
-            name: Some(app.projects[0].name.clone()),
-            default_provider: None,
-            leading_branch: Some("main".to_string()),
-            commit_prompt: None,
-        });
 
         let pinned = Project {
             id: "project-2".to_string(),
             name: "pinned".to_string(),
             path: app.paths.root.join("pinned").display().to_string(),
+            explicit_default_provider: Some(ProviderKind::from_str("gemini")),
             default_provider: ProviderKind::from_str("gemini"),
             leading_branch: Some("main".to_string()),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         };
-        app.config.projects.push(ProjectConfig {
-            id: pinned.id.clone(),
-            path: pinned.path.clone(),
-            name: Some(pinned.name.clone()),
-            default_provider: Some("gemini".to_string()),
-            leading_branch: Some("main".to_string()),
-            commit_prompt: None,
-        });
+        app.session_store
+            .upsert_project(&ProjectConfig {
+                id: pinned.id.clone(),
+                path: pinned.path.clone(),
+                name: Some(pinned.name.clone()),
+                default_provider: Some("gemini".to_string()),
+                leading_branch: Some("main".to_string()),
+            })
+            .expect("seed pinned project");
         app.projects.push(pinned);
 
         app.open_change_project_default_provider_prompt()
@@ -11547,18 +11535,18 @@ cyan = "#00ffff"
 
         app.apply_change_project_default_provider()
             .expect("apply project provider");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        app.drain_events();
 
         assert_eq!(app.config.defaults.provider, "codex");
-        let persisted = crate::config::ensure_config(&app.paths).expect("reload config");
+        let persisted = app.session_store.load_projects().expect("load projects");
         let inherited_cfg = persisted
-            .projects
             .iter()
             .find(|project| project.id == "project-1")
             .expect("project-1 config");
         assert_eq!(inherited_cfg.default_provider.as_deref(), Some("claude"));
 
         let pinned_cfg = persisted
-            .projects
             .iter()
             .find(|project| project.id == "project-2")
             .expect("project-2 config");
@@ -11582,14 +11570,10 @@ cyan = "#00ffff"
     fn change_project_default_provider_can_revert_to_global_default() {
         let mut app = test_app(default_bindings());
         app.config.defaults.provider = "codex".to_string();
-        app.config.projects.push(ProjectConfig {
-            id: app.projects[0].id.clone(),
-            path: app.projects[0].path.clone(),
-            name: Some(app.projects[0].name.clone()),
-            default_provider: Some("gemini".to_string()),
-            leading_branch: Some("main".to_string()),
-            commit_prompt: None,
-        });
+        app.session_store
+            .update_project_default_provider(&app.projects[0].id, Some("gemini"))
+            .expect("seed project override");
+        app.projects[0].explicit_default_provider = Some(ProviderKind::from_str("gemini"));
         app.projects[0].default_provider = ProviderKind::from_str("gemini");
 
         app.open_change_project_default_provider_prompt()
@@ -11607,10 +11591,11 @@ cyan = "#00ffff"
 
         app.apply_change_project_default_provider()
             .expect("apply inherit global");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        app.drain_events();
 
-        let persisted = crate::config::ensure_config(&app.paths).expect("reload config");
+        let persisted = app.session_store.load_projects().expect("load projects");
         let config = persisted
-            .projects
             .iter()
             .find(|project| project.id == "project-1")
             .expect("project-1 config");
@@ -11655,14 +11640,7 @@ cyan = "#00ffff"
 
         let mut app = test_app(default_bindings());
         app.config.defaults.provider = "claude".to_string();
-        app.config.projects.push(ProjectConfig {
-            id: app.projects[0].id.clone(),
-            path: app.projects[0].path.clone(),
-            name: Some(app.projects[0].name.clone()),
-            default_provider: Some("codex".to_string()),
-            leading_branch: Some("main".to_string()),
-            commit_prompt: None,
-        });
+        app.projects[0].explicit_default_provider = Some(ProviderKind::from_str("codex"));
         app.projects[0].default_provider = ProviderKind::from_str("codex");
         app.sessions[0].provider = ProviderKind::from_str("gemini");
         app.rebuild_left_items();
@@ -11706,14 +11684,7 @@ cyan = "#00ffff"
 
         let mut app = test_app(default_bindings());
         app.config.defaults.provider = "codex".to_string();
-        app.config.projects.push(ProjectConfig {
-            id: app.projects[0].id.clone(),
-            path: app.projects[0].path.clone(),
-            name: Some(app.projects[0].name.clone()),
-            default_provider: None,
-            leading_branch: Some("main".to_string()),
-            commit_prompt: None,
-        });
+        app.projects[0].explicit_default_provider = None;
         app.projects[0].default_provider = ProviderKind::from_str("codex");
         app.sessions[0].provider = ProviderKind::from_str("codex");
         app.rebuild_left_items();

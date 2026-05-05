@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 
+use crate::config::ProjectConfig;
 use crate::model::{AgentSession, SessionStatus};
 
 /// A stored PR association loaded from the database.
@@ -47,6 +48,41 @@ impl SessionStore {
             );
             "#,
         )?;
+        self.conn.execute_batch(
+            r#"
+            create table if not exists projects (
+                id text primary key,
+                path text not null unique,
+                name text,
+                default_provider text,
+                leading_branch text,
+                sort_order integer not null default 0,
+                created_at text not null,
+                updated_at text not null
+            );
+            "#,
+        )?;
+        ensure_column(&self.conn, "projects", "name", "text")?;
+        ensure_column(&self.conn, "projects", "default_provider", "text")?;
+        ensure_column(&self.conn, "projects", "leading_branch", "text")?;
+        ensure_column(
+            &self.conn,
+            "projects",
+            "sort_order",
+            "integer not null default 0",
+        )?;
+        ensure_column(
+            &self.conn,
+            "projects",
+            "created_at",
+            "text not null default ''",
+        )?;
+        ensure_column(
+            &self.conn,
+            "projects",
+            "updated_at",
+            "text not null default ''",
+        )?;
         ensure_column(&self.conn, "agent_sessions", "title", "text")?;
         ensure_column(&self.conn, "agent_sessions", "project_path", "text")?;
         ensure_column(
@@ -87,6 +123,125 @@ impl SessionStore {
             "text not null default ''",
         )?;
         ensure_column(&self.conn, "session_prs", "url", "text not null default ''")?;
+        Ok(())
+    }
+
+    /// Insert or update a project. If a project with the same path already
+    /// exists under a different id, keep the existing id so sessions remain
+    /// attached and refresh the editable metadata.
+    pub fn upsert_project(&self, project: &ProjectConfig) -> Result<()> {
+        let sort_order = self.next_project_sort_order()?;
+        self.upsert_project_at(project, sort_order)
+    }
+
+    pub fn upsert_project_at(&self, project: &ProjectConfig, sort_order: i64) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let updated = self.conn.execute(
+            r#"
+            update projects
+            set path = ?2,
+                name = ?3,
+                default_provider = ?4,
+                leading_branch = ?5,
+                sort_order = ?6,
+                updated_at = ?7
+            where id = ?1
+            "#,
+            params![
+                project.id,
+                project.path,
+                project.name,
+                project.default_provider,
+                project.leading_branch,
+                sort_order,
+                now,
+            ],
+        )?;
+        if updated > 0 {
+            return Ok(());
+        }
+
+        self.conn.execute(
+            r#"
+            insert into projects
+                (id, path, name, default_provider, leading_branch, sort_order, created_at, updated_at)
+            values
+                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+            on conflict(path) do update set
+                name=excluded.name,
+                default_provider=excluded.default_provider,
+                leading_branch=excluded.leading_branch,
+                sort_order=excluded.sort_order,
+                updated_at=excluded.updated_at
+            "#,
+            params![
+                project.id,
+                project.path,
+                project.name,
+                project.default_provider,
+                project.leading_branch,
+                sort_order,
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn next_project_sort_order(&self) -> Result<i64> {
+        self.conn
+            .query_row(
+                "select coalesce(max(sort_order) + 1, 0) from projects",
+                [],
+                |row| row.get(0),
+            )
+            .context("failed to compute next project sort order")
+    }
+
+    pub fn load_projects(&self) -> Result<Vec<ProjectConfig>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            select id, path, name, default_provider, leading_branch
+            from projects
+            order by sort_order, name collate nocase, path collate nocase
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ProjectConfig {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                name: row.get(2)?,
+                default_provider: row.get(3)?,
+                leading_branch: row.get(4)?,
+            })
+        })?;
+
+        let mut projects = Vec::new();
+        for row in rows {
+            projects.push(row?);
+        }
+        Ok(projects)
+    }
+
+    pub fn update_project_default_provider(
+        &self,
+        project_id: &str,
+        default_provider: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            update projects
+            set default_provider = ?2,
+                updated_at = ?3
+            where id = ?1
+            "#,
+            params![project_id, default_provider, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_project(&self, id: &str) -> Result<()> {
+        self.conn
+            .execute("delete from projects where id = ?1", params![id])?;
         Ok(())
     }
 
@@ -381,6 +536,54 @@ mod tests {
             loaded[0].started_providers,
             vec!["claude".to_string(), "codex".to_string()]
         );
+    }
+
+    #[test]
+    fn projects_round_trip_all_project_fields() {
+        let store = test_store();
+        let project = ProjectConfig {
+            id: "project-1".to_string(),
+            path: "$CODE/dux".to_string(),
+            name: Some("dux".to_string()),
+            default_provider: Some("codex".to_string()),
+            leading_branch: Some("main".to_string()),
+        };
+
+        store.upsert_project(&project).unwrap();
+
+        let loaded = store.load_projects().unwrap();
+        assert_eq!(loaded, vec![project]);
+    }
+
+    #[test]
+    fn project_path_conflict_keeps_existing_id() {
+        let store = test_store();
+        store
+            .upsert_project(&ProjectConfig {
+                id: "stable-id".to_string(),
+                path: "/repo".to_string(),
+                name: Some("old".to_string()),
+                default_provider: None,
+                leading_branch: Some("main".to_string()),
+            })
+            .unwrap();
+
+        store
+            .upsert_project(&ProjectConfig {
+                id: "new-id".to_string(),
+                path: "/repo".to_string(),
+                name: Some("new".to_string()),
+                default_provider: Some("claude".to_string()),
+                leading_branch: Some("trunk".to_string()),
+            })
+            .unwrap();
+
+        let loaded = store.load_projects().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "stable-id");
+        assert_eq!(loaded[0].name.as_deref(), Some("new"));
+        assert_eq!(loaded[0].default_provider.as_deref(), Some("claude"));
+        assert_eq!(loaded[0].leading_branch.as_deref(), Some("trunk"));
     }
 }
 

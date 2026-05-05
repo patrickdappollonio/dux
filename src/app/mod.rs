@@ -27,8 +27,8 @@ use uuid::Uuid;
 
 use crate::clipboard::Clipboard;
 use crate::config::{
-    Config, DuxPaths, MacroSurface, ProjectConfig, ProviderCommandConfig, check_provider_available,
-    ensure_config, save_config, validate_keys,
+    Config, DuxPaths, MacroSurface, ProviderCommandConfig, check_provider_available, ensure_config,
+    save_config, validate_keys,
 };
 use crate::diff::SyntaxCache;
 use crate::editor::DetectedEditor;
@@ -1263,6 +1263,10 @@ pub(crate) enum WorkerEvent {
     },
     ConfigReloadReady(Box<Result<Config, String>>),
     ConfigRecoverCompleted(Result<(), String>),
+    ProjectPersistenceCompleted {
+        action: ProjectPersistenceAction,
+        result: Result<(), String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1272,6 +1276,28 @@ pub(crate) enum PullTarget {
         project_name: String,
     },
     Session,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ProjectPersistenceAction {
+    Add {
+        project: Project,
+        status_message: String,
+    },
+    Remove {
+        project_id: String,
+        project_name: String,
+    },
+    Delete {
+        project_id: String,
+        project_name: String,
+    },
+    UpdateDefaultProvider {
+        project_id: String,
+        project_name: String,
+        provider: Option<ProviderKind>,
+        global_default: ProviderKind,
+    },
 }
 
 mod components;
@@ -1290,7 +1316,7 @@ impl App {
         paths: DuxPaths,
         single_instance_lock: SingleInstanceLock,
     ) -> Result<Self> {
-        let config = ensure_config(&paths)?;
+        let mut config = ensure_config(&paths)?;
 
         logger::init(&config.logging, &paths);
         logger::info("bootstrapping dux");
@@ -1312,7 +1338,8 @@ impl App {
         signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&sigwinch_flag))?;
 
         let session_store = SessionStore::open(&paths.sessions_db_path)?;
-        let projects = load_projects(&config);
+        migrate_config_projects_to_store(&mut config, &paths, &bindings, &session_store)?;
+        let projects = load_projects(&session_store.load_projects()?, &config);
         let sessions = session_store.load_sessions()?;
         let (worker_tx, worker_rx) = mpsc::channel();
         let watched_worktree: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
@@ -2063,7 +2090,7 @@ impl App {
         self.pr_banner_at_bottom = config.ui.pr_banner_position == "bottom";
         self.config = config;
 
-        self.projects = load_projects(&self.config);
+        refresh_project_defaults(&mut self.projects, &self.config);
         self.selected_left = self
             .selected_left
             .min(self.projects.len().saturating_sub(1));
@@ -2255,27 +2282,14 @@ impl App {
         }
     }
 
-    pub(crate) fn project_config(&self, project_id: &str) -> Option<&ProjectConfig> {
-        self.config
-            .projects
-            .iter()
-            .find(|project| project.id == project_id)
-    }
-
-    pub(crate) fn project_config_mut(&mut self, project_id: &str) -> Option<&mut ProjectConfig> {
-        self.config
-            .projects
-            .iter_mut()
-            .find(|project| project.id == project_id)
-    }
-
     pub(crate) fn project_explicit_default_provider(
         &self,
         project_id: &str,
     ) -> Option<ProviderKind> {
-        self.project_config(project_id)
-            .and_then(|project| project.default_provider.as_deref())
-            .map(ProviderKind::from_str)
+        self.projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .and_then(|project| project.explicit_default_provider.clone())
     }
 
     pub(crate) fn project_uses_explicit_default_provider(&self, project_id: &str) -> bool {
@@ -2691,19 +2705,19 @@ impl App {
 pub(crate) fn refresh_project_defaults(projects: &mut [Project], config: &Config) {
     let fallback = config.default_provider();
     for project in projects.iter_mut() {
-        let explicit = config
-            .projects
-            .iter()
-            .find(|cfg| cfg.id == project.id)
-            .and_then(|cfg| cfg.default_provider.as_deref())
-            .map(ProviderKind::from_str);
-        project.default_provider = explicit.unwrap_or_else(|| fallback.clone());
+        project.default_provider = project
+            .explicit_default_provider
+            .clone()
+            .unwrap_or_else(|| fallback.clone());
     }
 }
 
-pub(crate) fn load_projects(config: &Config) -> Vec<Project> {
+pub(crate) fn load_projects(
+    project_configs: &[crate::config::ProjectConfig],
+    config: &Config,
+) -> Vec<Project> {
     let mut projects = Vec::new();
-    for project in config.projects.iter() {
+    for project in project_configs {
         let (path, missing) = match crate::config::expand_path(&project.path) {
             Some(expanded) => {
                 let p = PathBuf::from(&expanded);
@@ -2738,6 +2752,10 @@ pub(crate) fn load_projects(config: &Config) -> Vec<Project> {
                     .to_string()
             }),
             path: path.to_string_lossy().to_string(),
+            explicit_default_provider: project
+                .default_provider
+                .as_deref()
+                .map(ProviderKind::from_str),
             default_provider: provider,
             leading_branch,
             current_branch,
@@ -2746,6 +2764,23 @@ pub(crate) fn load_projects(config: &Config) -> Vec<Project> {
         });
     }
     projects
+}
+
+pub(crate) fn migrate_config_projects_to_store(
+    config: &mut Config,
+    paths: &DuxPaths,
+    bindings: &RuntimeBindings,
+    session_store: &SessionStore,
+) -> Result<()> {
+    if config.projects.is_empty() {
+        return Ok(());
+    }
+
+    for (index, project) in config.projects.iter().enumerate() {
+        session_store.upsert_project_at(project, index as i64)?;
+    }
+    config.projects.clear();
+    save_config(&paths.config_path, config, bindings)
 }
 
 // ── Resource monitor helpers ───────────────────────────────────────────────
@@ -2880,6 +2915,7 @@ mod tests {
             id: id.to_string(),
             name: id.to_string(),
             path: format!("/tmp/{id}"),
+            explicit_default_provider: None,
             default_provider: ProviderKind::from_str("codex"),
             leading_branch: Some("main".to_string()),
             current_branch: "main".to_string(),
@@ -3043,6 +3079,55 @@ mod tests {
 
         assert!(!items.contains(&LeftItem::EmptyProjectsSeparator));
         assert_eq!(items[0], LeftItem::Project(0));
+    }
+
+    #[test]
+    fn migrates_legacy_config_projects_to_sqlite_and_strips_config() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root: root.clone(),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).expect("worktrees");
+        std::fs::write(
+            &paths.config_path,
+            r#"
+[defaults]
+provider = "codex"
+
+[[projects]]
+id = "project-1"
+path = "$CODE/dux"
+name = "dux"
+default_provider = "claude"
+leading_branch = "main"
+"#,
+        )
+        .expect("write config");
+
+        let mut config = ensure_config(&paths).expect("load config");
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+
+        migrate_config_projects_to_store(&mut config, &paths, &bindings, &store)
+            .expect("migrate projects");
+
+        assert!(config.projects.is_empty());
+        let projects = store.load_projects().expect("load projects");
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].id, "project-1");
+        assert_eq!(projects[0].path, "$CODE/dux");
+        assert_eq!(projects[0].name.as_deref(), Some("dux"));
+        assert_eq!(projects[0].default_provider.as_deref(), Some("claude"));
+        assert_eq!(projects[0].leading_branch.as_deref(), Some("main"));
+
+        let saved = std::fs::read_to_string(&paths.config_path).expect("read config");
+        assert!(!saved.contains("[[projects]]"));
+        assert!(!saved.contains("project-1"));
     }
 
     #[test]

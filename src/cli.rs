@@ -273,14 +273,6 @@ fn run_diff_summary(current: &Config) -> Result<()> {
     // [providers.*]
     diff_providers(&mut changes, &defaults, current);
 
-    // [[projects]]
-    if !current.projects.is_empty() {
-        changes.push(format!(
-            "projects: {} project(s) configured",
-            current.projects.len()
-        ));
-    }
-
     // [macros]
     if !current.macros.entries.is_empty() {
         changes.push(format!(
