@@ -549,6 +549,9 @@ impl App {
                 Action::NewAgent => self.create_agent_for_selected_project()?,
                 Action::ForkAgent => self.fork_selected_session()?,
                 Action::RefreshProject => self.refresh_selected_project()?,
+                Action::CheckoutProjectDefaultBranch => {
+                    self.checkout_selected_project_default_branch()?
+                }
                 Action::ShowTerminal => self.show_or_open_first_terminal()?,
                 Action::DeleteSession => self.confirm_delete_selected_session()?,
                 Action::RenameSession => self.open_rename_session()?,
@@ -2508,6 +2511,7 @@ impl App {
         }
 
         if let PromptState::ConfirmNonDefaultBranch {
+            action,
             focus,
             kind,
             checkout_default,
@@ -2515,8 +2519,10 @@ impl App {
         } = &mut self.prompt
         {
             // Checkbox is only reachable in the confident (Known) path.
-            // Heuristic warnings have no checkbox, so focus cycles Cancel ↔ Add.
-            let has_checkbox = matches!(kind, BranchWarningKind::Known { .. });
+            // Heuristic warnings and create-agent prompts have no checkbox,
+            // so focus cycles Cancel ↔ Add.
+            let has_checkbox =
+                matches!(kind, BranchWarningKind::Known { .. }) && action.allows_add_anyway();
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => self.prompt = PromptState::None,
                 Some(Action::ToggleSelection) => {
@@ -3982,10 +3988,9 @@ impl App {
     }
 
     fn resolve_confirm_non_default_branch(&mut self) -> bool {
-        let (path, name, branch, checkout_default, default_branch) = match &self.prompt {
+        let (action, branch, checkout_default, default_branch) = match &self.prompt {
             PromptState::ConfirmNonDefaultBranch {
-                path,
-                name,
+                action,
                 current_branch,
                 kind,
                 checkout_default,
@@ -3996,8 +4001,7 @@ impl App {
                     BranchWarningKind::Heuristic => None,
                 };
                 (
-                    path.clone(),
-                    name.clone(),
+                    action.clone(),
                     current_branch.clone(),
                     *checkout_default && default_branch.is_some(),
                     default_branch,
@@ -4009,9 +4013,26 @@ impl App {
         if checkout_default {
             // Safe: `checkout_default` is only true when `default_branch` is `Some`.
             let target = default_branch.expect("checkout_default implies known default branch");
-            self.dispatch_add_project_checkout(path, name, target);
-        } else if let Err(e) = self.finish_add_project(path, name, branch) {
-            self.set_error(format!("{e:#}"));
+            let reason = match action {
+                NonDefaultBranchAction::AddProject { .. } => "before adding the project",
+                NonDefaultBranchAction::CreateAgent { .. } => "before creating the agent",
+                NonDefaultBranchAction::CheckoutProjectDefault { .. } => "for the selected project",
+            };
+            self.dispatch_non_default_branch_checkout(action, target, reason.to_string());
+        } else {
+            match action {
+                NonDefaultBranchAction::AddProject { path, name } => {
+                    if let Err(e) = self.finish_add_project(path, name, branch) {
+                        self.set_error(format!("{e:#}"));
+                    }
+                }
+                NonDefaultBranchAction::CreateAgent { .. } => {
+                    self.set_error("Check out the default branch before creating an agent.");
+                }
+                NonDefaultBranchAction::CheckoutProjectDefault { .. } => {
+                    self.set_error("Check out the default branch before retrying.");
+                }
+            }
         }
         false
     }
@@ -4117,12 +4138,14 @@ impl App {
             }
             OverlayCheckboxId::NonDefaultBranchCheckoutDefault => {
                 if let PromptState::ConfirmNonDefaultBranch {
+                    action,
                     kind,
                     checkout_default,
                     focus,
                     ..
                 } = &mut self.prompt
                     && matches!(kind, BranchWarningKind::Known { .. })
+                    && action.allows_add_anyway()
                 {
                     *checkout_default = !*checkout_default;
                     *focus = ConfirmNonDefaultBranchFocus::Checkbox;
@@ -5195,17 +5218,18 @@ mod tests {
         CreateAgentRequest, DeleteAgentFocus, FocusPane, FullscreenOverlay, InputTarget,
         KillRunningAction, KillRunningFocus, KillRunningFooterAction, KillRunningPrompt,
         KillableRuntime, KillableRuntimeKind, LeftItem, LeftSection, MacroBarState,
-        MouseClickTarget, MouseLayoutState, NameNewAgentFocus, OverlayCheckbox, OverlayCheckboxId,
-        OverlayMouseLayout, OverlayMouseLayoutState, ProcessInfo, PromptState, PullTarget,
-        ResourceStats, RightSection, RuntimeTargetId, TextInput, WorkerEvent,
+        MouseClickTarget, MouseLayoutState, NameNewAgentFocus, NonDefaultBranchAction,
+        OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout, OverlayMouseLayoutState,
+        ProcessInfo, PromptState, PullTarget, ResourceStats, RightSection, RuntimeTargetId,
+        TextInput, WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
     use crate::editor::{DetectedEditor, EditorKind};
     use crate::keybindings::{Action, BINDING_DEFS, BindingScope, RuntimeBindings};
     use crate::model::{
-        AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProviderKind, SessionStatus,
-        SessionSurface,
+        AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProjectBranchStatus,
+        ProviderKind, SessionStatus, SessionSurface,
     };
     use crate::pty::PtyClient;
     use crate::statusline::StatusLine;
@@ -5253,10 +5277,66 @@ mod tests {
         )
     }
 
+    fn run_git(cwd: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn init_test_repo(path: &std::path::Path) {
+        run_git(path, &["init", "-b", "main"]);
+        run_git(path, &["config", "user.name", "test"]);
+        run_git(path, &["config", "user.email", "t@t"]);
+        run_git(path, &["commit", "--allow-empty", "-m", "init"]);
+    }
+
+    fn set_remote_default(path: &std::path::Path, branch: &str) {
+        run_git(
+            path,
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{branch}"),
+                "HEAD",
+            ],
+        );
+        run_git(
+            path,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                &format!("refs/remotes/origin/{branch}"),
+            ],
+        );
+    }
+
+    fn complete_create_agent_branch_inspection(
+        app: &mut App,
+        branch: &str,
+        warning_kind: Option<BranchWarningKind>,
+    ) {
+        let project = app.projects[0].clone();
+        app.worker_tx
+            .send(WorkerEvent::CreateAgentBranchInspected {
+                project,
+                result: Ok((branch.to_string(), warning_kind)),
+            })
+            .unwrap();
+        app.drain_events();
+    }
+
     fn test_app(bindings: RuntimeBindings) -> App {
         let tmp = tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
         std::mem::forget(tmp);
+        init_test_repo(&root);
 
         let paths = DuxPaths {
             config_path: root.join("config.toml"),
@@ -5274,6 +5354,7 @@ mod tests {
             path: root.to_string_lossy().to_string(),
             default_provider: ProviderKind::from_str("codex"),
             current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         };
         let session = AgentSession {
@@ -6235,6 +6316,7 @@ mod tests {
         let mut app = test_app(default_bindings());
 
         app.create_agent_for_selected_project().unwrap();
+        complete_create_agent_branch_inspection(&mut app, "main", None);
 
         match &app.prompt {
             PromptState::NameNewAgent {
@@ -6254,11 +6336,171 @@ mod tests {
     }
 
     #[test]
+    fn create_agent_known_non_default_branch_opens_checkout_modal() {
+        let mut app = test_app(default_bindings());
+        let repo_path = PathBuf::from(&app.projects[0].path);
+        set_remote_default(&repo_path, "main");
+        run_git(&repo_path, &["switch", "-c", "feature"]);
+
+        app.create_agent_for_selected_project().unwrap();
+        complete_create_agent_branch_inspection(
+            &mut app,
+            "feature",
+            Some(BranchWarningKind::Known {
+                default_branch: "main".to_string(),
+            }),
+        );
+
+        match &app.prompt {
+            PromptState::ConfirmNonDefaultBranch {
+                action,
+                current_branch,
+                kind,
+                checkout_default,
+                ..
+            } => {
+                assert!(matches!(action, NonDefaultBranchAction::CreateAgent { .. }));
+                assert_eq!(current_branch, "feature");
+                assert!(matches!(
+                    kind,
+                    BranchWarningKind::Known { default_branch } if default_branch == "main"
+                ));
+                assert!(*checkout_default);
+            }
+            other => panic!("expected non-default branch prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_agent_unknown_default_on_feature_sets_error() {
+        let mut app = test_app(default_bindings());
+        let repo_path = PathBuf::from(&app.projects[0].path);
+        run_git(&repo_path, &["switch", "-c", "feature"]);
+
+        app.create_agent_for_selected_project().unwrap();
+        complete_create_agent_branch_inspection(
+            &mut app,
+            "feature",
+            Some(BranchWarningKind::Heuristic),
+        );
+
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            app.status
+                .text()
+                .contains("Can't determine the default branch")
+        );
+    }
+
+    #[test]
+    fn create_agent_unknown_default_on_main_opens_name_prompt() {
+        let mut app = test_app(default_bindings());
+
+        app.create_agent_for_selected_project().unwrap();
+        complete_create_agent_branch_inspection(&mut app, "main", None);
+
+        assert!(matches!(app.prompt, PromptState::NameNewAgent { .. }));
+    }
+
+    #[test]
+    fn create_agent_checkout_success_opens_name_prompt_and_updates_branch() {
+        let mut app = test_app(default_bindings());
+        let mut project = app.projects[0].clone();
+        project.current_branch = "feature".to_string();
+
+        app.worker_tx
+            .send(WorkerEvent::NonDefaultBranchCheckoutCompleted {
+                action: NonDefaultBranchAction::CreateAgent { project },
+                target_branch: "main".to_string(),
+                result: Ok(()),
+            })
+            .unwrap();
+
+        app.drain_events();
+
+        assert_eq!(app.projects[0].current_branch, "main");
+        match &app.prompt {
+            PromptState::NameNewAgent { request, .. } => match request {
+                CreateAgentRequest::NewProject { project, .. } => {
+                    assert_eq!(project.current_branch, "main");
+                }
+                other => panic!("expected new project request, got {other:?}"),
+            },
+            other => panic!("expected name-new-agent prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_agent_checkout_failure_sets_error_without_name_prompt() {
+        let mut app = test_app(default_bindings());
+        let project = app.projects[0].clone();
+
+        app.worker_tx
+            .send(WorkerEvent::NonDefaultBranchCheckoutCompleted {
+                action: NonDefaultBranchAction::CreateAgent { project },
+                target_branch: "main".to_string(),
+                result: Err("switch failed".to_string()),
+            })
+            .unwrap();
+
+        app.drain_events();
+
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(app.status.text().contains("Couldn't check out \"main\""));
+    }
+
+    #[test]
+    fn project_branch_status_ready_marks_project_not_leading() {
+        let mut app = test_app(default_bindings());
+
+        app.worker_tx
+            .send(WorkerEvent::ProjectBranchStatusReady {
+                project_id: app.projects[0].id.clone(),
+                result: Ok(("feature".to_string(), ProjectBranchStatus::NotLeading)),
+            })
+            .unwrap();
+
+        app.drain_events();
+
+        assert_eq!(app.projects[0].current_branch, "feature");
+        assert_eq!(
+            app.projects[0].branch_status,
+            ProjectBranchStatus::NotLeading
+        );
+    }
+
+    #[test]
+    fn checkout_project_default_success_marks_project_leading() {
+        let mut app = test_app(default_bindings());
+        let mut project = app.projects[0].clone();
+        project.current_branch = "feature".to_string();
+        project.branch_status = ProjectBranchStatus::NotLeading;
+        app.projects[0] = project.clone();
+
+        app.worker_tx
+            .send(WorkerEvent::NonDefaultBranchCheckoutCompleted {
+                action: NonDefaultBranchAction::CheckoutProjectDefault { project },
+                target_branch: "main".to_string(),
+                result: Ok(()),
+            })
+            .unwrap();
+
+        app.drain_events();
+
+        assert_eq!(app.projects[0].current_branch, "main");
+        assert_eq!(app.projects[0].branch_status, ProjectBranchStatus::Leading);
+        assert!(app.status.text().contains("Checked out \"main\""));
+    }
+
+    #[test]
     fn create_agent_prefills_name_when_randomized_default_enabled() {
         let mut app = test_app(default_bindings());
         app.config.defaults.enable_randomized_pet_name_by_default = true;
 
         app.create_agent_for_selected_project().unwrap();
+        complete_create_agent_branch_inspection(&mut app, "main", None);
 
         match &app.prompt {
             PromptState::NameNewAgent {
@@ -6279,6 +6521,7 @@ mod tests {
     fn name_prompt_toggle_randomized_name_fills_and_clears_input() {
         let mut app = test_app(default_bindings());
         app.create_agent_for_selected_project().unwrap();
+        complete_create_agent_branch_inspection(&mut app, "main", None);
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
@@ -8701,8 +8944,10 @@ cyan = "#00ffff"
     fn tab_with_shift_moves_non_default_branch_focus_backwards_when_checkbox_present() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmNonDefaultBranch {
-            path: "/tmp/project".to_string(),
-            name: "project".to_string(),
+            action: NonDefaultBranchAction::AddProject {
+                path: "/tmp/project".to_string(),
+                name: "project".to_string(),
+            },
             current_branch: "feature".to_string(),
             kind: BranchWarningKind::Known {
                 default_branch: "main".to_string(),
@@ -8744,8 +8989,10 @@ cyan = "#00ffff"
     fn tab_with_shift_moves_non_default_branch_focus_backwards_without_checkbox() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmNonDefaultBranch {
-            path: "/tmp/project".to_string(),
-            name: "project".to_string(),
+            action: NonDefaultBranchAction::AddProject {
+                path: "/tmp/project".to_string(),
+                name: "project".to_string(),
+            },
             current_branch: "feature".to_string(),
             kind: BranchWarningKind::Heuristic,
             focus: ConfirmNonDefaultBranchFocus::Cancel,
@@ -8823,6 +9070,7 @@ cyan = "#00ffff"
     fn mouse_click_name_prompt_checkbox_toggles_randomized_name() {
         let mut app = test_app(default_bindings());
         app.create_agent_for_selected_project().unwrap();
+        complete_create_agent_branch_inspection(&mut app, "main", None);
         install_name_new_agent_overlay(&mut app);
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 12));
@@ -10629,6 +10877,7 @@ cyan = "#00ffff"
             path: app.paths.root.join("pinned").display().to_string(),
             default_provider: ProviderKind::from_str("gemini"),
             current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         };
         app.config.projects.push(ProjectConfig {
@@ -10745,6 +10994,7 @@ cyan = "#00ffff"
             path: app.paths.root.join("pinned").display().to_string(),
             default_provider: ProviderKind::from_str("gemini"),
             current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         };
         app.config.projects.push(ProjectConfig {

@@ -65,27 +65,17 @@ impl App {
         }
         let branch = git::current_branch(&path)?;
 
-        // Check whether the current branch matches the remote default branch.
-        // Two-tier warning: confident when origin/HEAD is available, heuristic
-        // when it isn't but the branch name doesn't look like a main branch.
-        let warning_kind = match git::remote_default_branch(&path) {
-            Some(default) if default != branch => Some(BranchWarningKind::Known {
-                default_branch: default,
-            }),
-            Some(_) => None, // on the default branch — no warning
-            None if branch != "main" && branch != "master" => Some(BranchWarningKind::Heuristic),
-            None => None, // looks like main/master — no warning
-        };
-
-        if let Some(kind) = warning_kind {
+        if let Some(kind) = branch_warning_kind(&path, &branch) {
             // Default the checkbox to on for the confident path so hitting
             // Enter resolves the warning in the way users typically want —
             // "switch to main, then add". The heuristic path ignores this
             // field (no checkbox is shown).
             let checkout_default = matches!(kind, BranchWarningKind::Known { .. });
             self.prompt = PromptState::ConfirmNonDefaultBranch {
-                path: path.to_string_lossy().to_string(),
-                name,
+                action: NonDefaultBranchAction::AddProject {
+                    path: path.to_string_lossy().to_string(),
+                    name,
+                },
                 current_branch: branch,
                 kind,
                 focus: ConfirmNonDefaultBranchFocus::Cancel,
@@ -132,6 +122,7 @@ impl App {
             path,
             default_provider: self.config.default_provider(),
             current_branch: branch,
+            branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         });
         self.rebuild_left_items();
@@ -150,6 +141,40 @@ impl App {
             return Ok(());
         }
 
+        self.dispatch_create_agent_branch_inspection(project);
+        Ok(())
+    }
+
+    pub(crate) fn continue_create_agent_after_branch_inspection(
+        &mut self,
+        mut project: Project,
+        current_branch: String,
+        warning_kind: Option<BranchWarningKind>,
+    ) -> Result<()> {
+        if let Some(kind) = warning_kind {
+            match kind {
+                BranchWarningKind::Known { .. } => {
+                    project.current_branch = current_branch.clone();
+                    self.prompt = PromptState::ConfirmNonDefaultBranch {
+                        action: NonDefaultBranchAction::CreateAgent { project },
+                        current_branch,
+                        kind,
+                        focus: ConfirmNonDefaultBranchFocus::Cancel,
+                        checkout_default: true,
+                    };
+                }
+                BranchWarningKind::Heuristic => {
+                    self.set_error(format!(
+                        "Can't determine the default branch for project \"{}\" while it is on \"{}\". Check out the leading branch in your terminal, then create the agent.",
+                        project.name, current_branch
+                    ));
+                }
+            }
+            return Ok(());
+        }
+
+        project.current_branch = current_branch;
+        project.branch_status = ProjectBranchStatus::Leading;
         self.open_name_new_agent_prompt(CreateAgentRequest::NewProject {
             project,
             custom_name: None,
@@ -176,7 +201,7 @@ impl App {
         })
     }
 
-    fn open_name_new_agent_prompt(&mut self, request: CreateAgentRequest) -> Result<()> {
+    pub(crate) fn open_name_new_agent_prompt(&mut self, request: CreateAgentRequest) -> Result<()> {
         let randomize_name = self.config.defaults.enable_randomized_pet_name_by_default;
         let mut input = TextInput::new().with_char_map(crate::git::agent_name_char_map);
         let mut randomized_name = None;
@@ -200,21 +225,58 @@ impl App {
 
     /// Spawns a background worker that runs `git switch <target_branch>` in
     /// the source repo before registering the project. On success, the
-    /// `WorkerEvent::AddProjectCheckoutCompleted` handler calls
-    /// `finish_add_project`; on failure it surfaces the git error.
-    pub(crate) fn dispatch_add_project_checkout(
+    /// `WorkerEvent::NonDefaultBranchCheckoutCompleted` handler continues the
+    /// selected action; on failure it surfaces the git error.
+    pub(crate) fn dispatch_non_default_branch_checkout(
         &mut self,
-        path: String,
-        name: String,
+        action: NonDefaultBranchAction,
         target_branch: String,
+        reason: String,
     ) {
+        let path = action.repo_path().to_string();
         self.set_busy(format!(
-            "Checking out \"{target_branch}\" in {path} before adding the project..."
+            "Checking out \"{target_branch}\" in {path} {reason}..."
         ));
         let worker_tx = self.worker_tx.clone();
         thread::spawn(move || {
-            super::workers::run_add_project_checkout_job(path, name, target_branch, worker_tx);
+            super::workers::run_add_project_checkout_job(action, target_branch, worker_tx);
         });
+    }
+
+    pub(crate) fn dispatch_create_agent_branch_inspection(&mut self, project: Project) {
+        self.set_busy(format!(
+            "Checking the current branch for project \"{}\" before creating an agent...",
+            project.name
+        ));
+        let worker_tx = self.worker_tx.clone();
+        thread::spawn(move || {
+            super::workers::run_create_agent_branch_inspection_job(project, worker_tx);
+        });
+    }
+
+    pub(crate) fn checkout_selected_project_default_branch(&mut self) -> Result<()> {
+        let Some(project) = self.selected_project().cloned() else {
+            self.set_error("Select a project first.");
+            return Ok(());
+        };
+
+        if project.path_missing {
+            self.set_warning(format!(
+                "Cannot check out default branch: path not found for \"{}\"",
+                project.name
+            ));
+            return Ok(());
+        }
+
+        self.set_busy(format!(
+            "Checking the default branch for project \"{}\"...",
+            project.name
+        ));
+        let worker_tx = self.worker_tx.clone();
+        thread::spawn(move || {
+            super::workers::run_checkout_project_default_branch_inspection_job(project, worker_tx);
+        });
+        Ok(())
     }
 
     pub(crate) fn dispatch_create_agent_request(
@@ -2137,6 +2199,7 @@ mod tests {
             path: "/tmp/project".to_string(),
             default_provider: ProviderKind::from_str(provider),
             current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         }
     }
@@ -2286,6 +2349,7 @@ mod tests {
             path: path.to_string(),
             default_provider: ProviderKind::from_str(provider),
             current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         }
     }

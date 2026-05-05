@@ -98,6 +98,11 @@ impl App {
                                     && let Some(branch_name) = branch_name
                                 {
                                     existing.current_branch = branch_name;
+                                    let warning = branch_warning_kind(
+                                        Path::new(&existing.path),
+                                        &existing.current_branch,
+                                    );
+                                    existing.branch_status = branch_status_from_warning(warning.as_ref());
                                 }
                                 self.set_info(format!(
                                     "Refreshed project \"{}\". Local branch is up to date with remote.",
@@ -351,47 +356,159 @@ impl App {
                         }
                     }
                 }
-                WorkerEvent::AddProjectCheckoutCompleted {
-                    path,
-                    name,
+                WorkerEvent::NonDefaultBranchCheckoutCompleted {
+                    action,
                     target_branch,
                     result,
                 } => match result {
-                    Ok(()) => {
-                        let display_name = if name.trim().is_empty() {
-                            std::path::Path::new(&path)
-                                .file_name()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("project")
-                                .to_string()
-                        } else {
-                            name.trim().to_string()
-                        };
-                        if let Err(e) =
-                            self.finish_add_project(path, name, target_branch.clone())
-                        {
-                            self.set_error(format!("{e:#}"));
-                        } else {
-                            // Override the generic "Added project" status from
-                            // finish_add_project with the more informative
-                            // two-step message.
+                    Ok(()) => match action {
+                        NonDefaultBranchAction::AddProject { path, name } => {
+                            let display_name = if name.trim().is_empty() {
+                                std::path::Path::new(&path)
+                                    .file_name()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("project")
+                                    .to_string()
+                            } else {
+                                name.trim().to_string()
+                            };
+                            if let Err(e) =
+                                self.finish_add_project(path, name, target_branch.clone())
+                            {
+                                self.set_error(format!("{e:#}"));
+                            } else {
+                                // Override the generic "Added project" status from
+                                // finish_add_project with the more informative
+                                // two-step message.
+                                self.set_info(format!(
+                                    "Checked out \"{target_branch}\" and added project \"{display_name}\" to workspace."
+                                ));
+                            }
+                        }
+                        NonDefaultBranchAction::CreateAgent { mut project } => {
+                            if let Some(existing) =
+                                self.projects.iter_mut().find(|p| p.id == project.id)
+                            {
+                                existing.current_branch = target_branch.clone();
+                                existing.branch_status = ProjectBranchStatus::Leading;
+                            }
+                            project.current_branch = target_branch.clone();
+                            project.branch_status = ProjectBranchStatus::Leading;
+                            if let Err(e) =
+                                self.open_name_new_agent_prompt(CreateAgentRequest::NewProject {
+                                    project,
+                                    custom_name: None,
+                                    use_existing_branch: false,
+                                })
+                            {
+                                self.set_error(format!("{e:#}"));
+                            } else {
+                                self.set_info(format!(
+                                    "Checked out \"{target_branch}\". Enter a name for the new agent."
+                                ));
+                            }
+                        }
+                        NonDefaultBranchAction::CheckoutProjectDefault { project } => {
+                            if let Some(existing) =
+                                self.projects.iter_mut().find(|p| p.id == project.id)
+                            {
+                                existing.current_branch = target_branch.clone();
+                                existing.branch_status = ProjectBranchStatus::Leading;
+                            }
                             self.set_info(format!(
-                                "Checked out \"{target_branch}\" and added project \"{display_name}\" to workspace."
+                                "Checked out \"{target_branch}\" for project \"{}\".",
+                                project.name
                             ));
                         }
-                    }
+                    },
                     Err(err) => {
                         // Preserve the full git stderr in the log so
                         // debugging stays possible after the status line
                         // summary is overwritten by the next message.
+                        let path = action.repo_path().to_string();
                         logger::error(&format!(
-                            "add-project checkout failed for {path}: {err}"
+                            "non-default branch checkout failed for {path}: {err}"
                         ));
                         self.set_error(format!(
                             "Couldn't check out \"{target_branch}\" in {path} — resolve in your terminal and retry."
                         ));
                     }
                 },
+                WorkerEvent::CreateAgentBranchInspected { project, result } => match result {
+                    Ok((current_branch, warning_kind)) => {
+                        if let Some(existing) =
+                            self.projects.iter_mut().find(|p| p.id == project.id)
+                        {
+                            existing.current_branch = current_branch.clone();
+                            existing.branch_status = branch_status_from_warning(warning_kind.as_ref());
+                        }
+                        if let Err(err) = self.continue_create_agent_after_branch_inspection(
+                            project,
+                            current_branch,
+                            warning_kind,
+                        ) {
+                            self.set_error(format!("{err:#}"));
+                        }
+                    }
+                    Err(err) => {
+                        self.set_error(format!(
+                            "Couldn't inspect the current branch for project \"{}\": {err}",
+                            project.name
+                        ));
+                    }
+                },
+                WorkerEvent::ProjectBranchStatusReady { project_id, result } => match result {
+                    Ok((current_branch, branch_status)) => {
+                        if let Some(project) =
+                            self.projects.iter_mut().find(|p| p.id == project_id)
+                        {
+                            project.current_branch = current_branch;
+                            project.branch_status = branch_status;
+                        }
+                    }
+                    Err(err) => {
+                        logger::debug(&format!(
+                            "project branch status inspection failed for {project_id}: {err}"
+                        ));
+                    }
+                },
+                WorkerEvent::CheckoutProjectDefaultBranchInspected { project, result } => {
+                    match result {
+                        Ok((current_branch, warning_kind)) => match warning_kind {
+                            Some(BranchWarningKind::Known { default_branch }) => {
+                                let mut project = project;
+                                project.current_branch = current_branch;
+                                self.dispatch_non_default_branch_checkout(
+                                    NonDefaultBranchAction::CheckoutProjectDefault { project },
+                                    default_branch,
+                                    "for the selected project".to_string(),
+                                );
+                            }
+                            Some(BranchWarningKind::Heuristic) => {
+                                self.set_error(format!(
+                                    "Can't determine the default branch for project \"{}\" while it is on \"{}\". Resolve the default branch in your terminal and retry.",
+                                    project.name, current_branch
+                                ));
+                            }
+                            None => {
+                                if let Some(existing) =
+                                    self.projects.iter_mut().find(|p| p.id == project.id)
+                                {
+                                    existing.current_branch = current_branch.clone();
+                                    existing.branch_status = ProjectBranchStatus::Leading;
+                                }
+                                self.set_info(format!(
+                                    "Project \"{}\" is already on the leading branch \"{}\".",
+                                    project.name, current_branch
+                                ));
+                            }
+                        },
+                        Err(err) => self.set_error(format!(
+                            "Couldn't inspect the default branch for project \"{}\": {err}",
+                            project.name
+                        )),
+                    }
+                }
             }
         }
         self.retry_hung_resume_sessions();
@@ -587,6 +704,16 @@ impl App {
                 }
             }
         });
+    }
+
+    pub(crate) fn spawn_project_branch_status_checks(&self) {
+        for project in self.projects.iter().filter(|project| !project.path_missing) {
+            let project = project.clone();
+            let worker_tx = self.worker_tx.clone();
+            thread::spawn(move || {
+                run_project_branch_status_job(project, worker_tx);
+            });
+        }
     }
 
     // -- Git refs watcher for push detection --
@@ -914,21 +1041,63 @@ impl App {
 
 /// Background job for "Add Project" when the user opted to have dux switch to
 /// the default branch first. Runs `git switch <target_branch>` in the source
-/// repo and reports the outcome via `WorkerEvent::AddProjectCheckoutCompleted`
-/// so the main loop can either call `finish_add_project` or surface the error.
+/// repo and reports the outcome via
+/// `WorkerEvent::NonDefaultBranchCheckoutCompleted` so the main loop can
+/// continue the selected action or surface the error.
 pub(crate) fn run_add_project_checkout_job(
-    path: String,
-    name: String,
+    action: NonDefaultBranchAction,
     target_branch: String,
     worker_tx: Sender<WorkerEvent>,
 ) {
+    let path = action.repo_path().to_string();
     let result = git::switch_branch(Path::new(&path), &target_branch).map_err(|e| format!("{e:#}"));
-    let _ = worker_tx.send(WorkerEvent::AddProjectCheckoutCompleted {
-        path,
-        name,
+    let _ = worker_tx.send(WorkerEvent::NonDefaultBranchCheckoutCompleted {
+        action,
         target_branch,
         result,
     });
+}
+
+pub(crate) fn run_create_agent_branch_inspection_job(
+    project: Project,
+    worker_tx: Sender<WorkerEvent>,
+) {
+    let repo_path = PathBuf::from(&project.path);
+    let result = git::current_branch(&repo_path)
+        .map(|branch| {
+            let warning_kind = branch_warning_kind(&repo_path, &branch);
+            (branch, warning_kind)
+        })
+        .map_err(|err| format!("{err:#}"));
+    let _ = worker_tx.send(WorkerEvent::CreateAgentBranchInspected { project, result });
+}
+
+pub(crate) fn run_project_branch_status_job(project: Project, worker_tx: Sender<WorkerEvent>) {
+    let repo_path = PathBuf::from(&project.path);
+    let result = git::current_branch(&repo_path)
+        .map(|branch| {
+            let warning_kind = branch_warning_kind(&repo_path, &branch);
+            (branch, branch_status_from_warning(warning_kind.as_ref()))
+        })
+        .map_err(|err| format!("{err:#}"));
+    let _ = worker_tx.send(WorkerEvent::ProjectBranchStatusReady {
+        project_id: project.id,
+        result,
+    });
+}
+
+pub(crate) fn run_checkout_project_default_branch_inspection_job(
+    project: Project,
+    worker_tx: Sender<WorkerEvent>,
+) {
+    let repo_path = PathBuf::from(&project.path);
+    let result = git::current_branch(&repo_path)
+        .map(|branch| {
+            let warning_kind = branch_warning_kind(&repo_path, &branch);
+            (branch, warning_kind)
+        })
+        .map_err(|err| format!("{err:#}"));
+    let _ = worker_tx.send(WorkerEvent::CheckoutProjectDefaultBranchInspected { project, result });
 }
 
 pub(crate) fn run_create_agent_job(

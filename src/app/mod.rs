@@ -39,8 +39,8 @@ use crate::keybindings::{
 use crate::lockfile::SingleInstanceLock;
 use crate::logger;
 use crate::model::{
-    AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProviderKind, SessionStatus,
-    SessionSurface,
+    AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProjectBranchStatus, ProviderKind,
+    SessionStatus, SessionSurface,
 };
 use crate::provider;
 use crate::pty::PtyClient;
@@ -593,8 +593,7 @@ pub(crate) enum PromptState {
         pending_delete: Option<PendingMacroDelete>,
     },
     ConfirmNonDefaultBranch {
-        path: String,
-        name: String,
+        action: NonDefaultBranchAction,
         current_branch: String,
         kind: BranchWarningKind,
         focus: ConfirmNonDefaultBranchFocus,
@@ -630,6 +629,47 @@ pub(crate) enum BranchWarningKind {
     Known { default_branch: String },
     /// `origin/HEAD` unavailable; current branch is not `main` or `master`.
     Heuristic,
+}
+
+pub(crate) fn branch_warning_kind(path: &Path, branch: &str) -> Option<BranchWarningKind> {
+    match git::remote_default_branch(path) {
+        Some(default) if default != branch => Some(BranchWarningKind::Known {
+            default_branch: default,
+        }),
+        Some(_) => None,
+        None if branch != "main" && branch != "master" => Some(BranchWarningKind::Heuristic),
+        None => None,
+    }
+}
+
+pub(crate) fn branch_status_from_warning(
+    warning_kind: Option<&BranchWarningKind>,
+) -> ProjectBranchStatus {
+    match warning_kind {
+        Some(_) => ProjectBranchStatus::NotLeading,
+        None => ProjectBranchStatus::Leading,
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum NonDefaultBranchAction {
+    AddProject { path: String, name: String },
+    CreateAgent { project: Project },
+    CheckoutProjectDefault { project: Project },
+}
+
+impl NonDefaultBranchAction {
+    pub(crate) fn repo_path(&self) -> &str {
+        match self {
+            Self::AddProject { path, .. } => path,
+            Self::CreateAgent { project } => &project.path,
+            Self::CheckoutProjectDefault { project } => &project.path,
+        }
+    }
+
+    pub(crate) fn allows_add_anyway(&self) -> bool {
+        matches!(self, Self::AddProject { .. })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1047,15 +1087,27 @@ pub(crate) enum WorkerEvent {
         session_id: String,
         result: Result<bool, String>,
     },
-    /// Background `git switch <target_branch>` run from the "Add Project"
-    /// warning modal has finished. On `Ok`, the main loop proceeds with
-    /// `finish_add_project` using `target_branch`. On `Err`, the formatted
-    /// git error is surfaced and the project is not added.
-    AddProjectCheckoutCompleted {
-        path: String,
-        name: String,
+    /// Background `git switch <target_branch>` run from a non-default branch
+    /// warning modal has finished. On `Ok`, the main loop continues the
+    /// original action. On `Err`, the formatted git error is surfaced.
+    NonDefaultBranchCheckoutCompleted {
+        action: NonDefaultBranchAction,
         target_branch: String,
         result: Result<(), String>,
+    },
+    /// Background inspection of the selected project checkout before opening
+    /// the New Agent prompt.
+    CreateAgentBranchInspected {
+        project: Project,
+        result: Result<(String, Option<BranchWarningKind>), String>,
+    },
+    ProjectBranchStatusReady {
+        project_id: String,
+        result: Result<(String, ProjectBranchStatus), String>,
+    },
+    CheckoutProjectDefaultBranchInspected {
+        project: Project,
+        result: Result<(String, Option<BranchWarningKind>), String>,
     },
 }
 
@@ -1237,6 +1289,7 @@ impl App {
     pub fn run(&mut self) -> Result<()> {
         self.spawn_changed_files_poller();
         self.spawn_branch_sync_worker();
+        self.spawn_project_branch_status_checks();
         self.spawn_gh_status_check();
         let mut terminal = ratatui::init();
         execute!(stdout(), EnableMouseCapture)?;
@@ -2402,6 +2455,7 @@ pub(crate) fn load_projects(config: &Config) -> Vec<Project> {
             } else {
                 git::current_branch(&path).unwrap_or_else(|_| "main".to_string())
             },
+            branch_status: ProjectBranchStatus::Unknown,
             path_missing: missing,
         });
     }
