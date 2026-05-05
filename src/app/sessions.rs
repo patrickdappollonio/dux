@@ -204,6 +204,31 @@ impl App {
         })
     }
 
+    pub(crate) fn create_agent_from_existing_worktree(&mut self) -> Result<()> {
+        let Some(project) = self.selected_project().cloned() else {
+            self.set_error("Select a project first.");
+            return Ok(());
+        };
+
+        if project.path_missing {
+            self.set_warning(format!("Project path not found: {}", project.path));
+            return Ok(());
+        }
+
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.prompt = PromptState::PickProjectWorktree(PickProjectWorktreePrompt {
+            project: project.clone(),
+            entries: Vec::new(),
+            loading: true,
+            selected: None,
+            error: None,
+        });
+        self.spawn_project_worktrees_worker(project);
+        self.set_busy("Loading git worktrees for the selected project...");
+        Ok(())
+    }
+
     pub(crate) fn fork_selected_session(&mut self) -> Result<()> {
         let Some(source_session) = self.selected_session().cloned() else {
             self.set_error("Select an agent session first to fork.");
@@ -266,20 +291,31 @@ impl App {
     }
 
     pub(crate) fn open_name_new_agent_prompt(&mut self, request: CreateAgentRequest) -> Result<()> {
-        let explicit_name = match &request {
+        let initial_name = match &request {
             CreateAgentRequest::NewProject { custom_name, .. }
-            | CreateAgentRequest::ForkSession { custom_name, .. } => custom_name.clone(),
+            | CreateAgentRequest::ForkSession { custom_name, .. }
+            | CreateAgentRequest::ForkExternalWorktree { custom_name, .. } => custom_name.clone(),
             CreateAgentRequest::PullRequest {
                 custom_name,
                 head_branch,
                 ..
             } => custom_name.clone().or_else(|| Some(head_branch.clone())),
+            CreateAgentRequest::ExistingManagedWorktree {
+                custom_name,
+                worktree_path,
+                ..
+            } => custom_name.clone().or_else(|| {
+                worktree_path
+                    .file_name()
+                    .and_then(|part| part.to_str())
+                    .map(str::to_string)
+            }),
         };
         let randomize_name =
-            explicit_name.is_none() && self.config.defaults.enable_randomized_pet_name_by_default;
+            initial_name.is_none() && self.config.defaults.enable_randomized_pet_name_by_default;
         let mut input = TextInput::new().with_char_map(crate::git::agent_name_char_map);
         let mut randomized_name = None;
-        if let Some(name) = explicit_name {
+        if let Some(name) = initial_name {
             input.set_text(name);
         } else if randomize_name {
             let name = crate::git::docker_style_name();
@@ -297,6 +333,13 @@ impl App {
             focus: NameNewAgentFocus::Input,
         };
         Ok(())
+    }
+
+    pub(crate) fn open_name_new_agent_prompt_for_request(
+        &mut self,
+        request: CreateAgentRequest,
+    ) -> Result<()> {
+        self.open_name_new_agent_prompt(request)
     }
 
     /// Spawns a background worker that runs `git switch <target_branch>` in

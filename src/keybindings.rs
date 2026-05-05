@@ -11,6 +11,7 @@ pub enum Action {
     ToggleProject,
     NewAgent,
     NewAgentFromPr,
+    NewAgentFromWorktree,
     ForkAgent,
     ChangeAgentProvider,
     ChangeDefaultProvider,
@@ -194,6 +195,7 @@ impl Action {
             Action::ToggleProject => "toggle_project",
             Action::NewAgent => "new_agent",
             Action::NewAgentFromPr => "new_agent_from_pr",
+            Action::NewAgentFromWorktree => "new_agent_from_worktree",
             Action::ForkAgent => "fork_agent",
             Action::ChangeAgentProvider => "change_agent_provider",
             Action::ChangeDefaultProvider => "change_default_provider",
@@ -283,6 +285,7 @@ impl Action {
             Action::ToggleProject => "Collapse or expand the selected project.",
             Action::NewAgent => "Create a new agent session (worktree).",
             Action::NewAgentFromPr => "Create a new agent session from a GitHub pull request.",
+            Action::NewAgentFromWorktree => "Create a new agent from an existing git worktree.",
             Action::ForkAgent => "Fork the selected agent into a fresh worktree and session.",
             Action::ChangeAgentProvider => {
                 "Swap the selected agent worktree to a different provider."
@@ -395,6 +398,7 @@ impl Action {
             | Action::MoveUp
             | Action::ToggleProject
             | Action::NewAgent
+            | Action::NewAgentFromWorktree
             | Action::ForkAgent
             | Action::ChangeAgentProvider
             | Action::FocusAgent
@@ -585,6 +589,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "new-agent-from-pr",
             description: "Create a new agent from a GitHub pull request",
+        }),
+    },
+    BindingDef {
+        action: Action::NewAgentFromWorktree,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "new-agent-from-worktree",
+            description: "Create a new agent from an existing git worktree",
         }),
     },
     BindingDef {

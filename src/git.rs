@@ -11,6 +11,27 @@ use content_inspector::{ContentType, inspect};
 use crate::logger;
 use crate::model::ChangedFile;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitWorktree {
+    pub path: PathBuf,
+    pub head: Option<String>,
+    pub branch_name: Option<String>,
+    pub detached: bool,
+}
+
+impl GitWorktree {
+    pub fn label(&self) -> String {
+        if let Some(branch_name) = &self.branch_name {
+            return branch_name.clone();
+        }
+        if let Some(head) = &self.head {
+            let short = head.chars().take(7).collect::<String>();
+            return format!("detached {short}");
+        }
+        "detached HEAD".to_string()
+    }
+}
+
 /// Where a branch was found when checking for its existence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BranchLocation {
@@ -93,6 +114,77 @@ pub fn is_git_repo(path: &Path) -> bool {
         .output()
         .map(|out| out.status.success())
         .unwrap_or(false)
+}
+
+pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktree>> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "worktree",
+            "list",
+            "--porcelain",
+            "-z",
+        ])
+        .output()
+        .with_context(|| format!("failed to list worktrees for {}", repo_path.display()))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git worktree list failed for {}: {}",
+            repo_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    parse_worktree_list_porcelain_z(&output.stdout)
+}
+
+pub fn parse_worktree_list_porcelain_z(bytes: &[u8]) -> Result<Vec<GitWorktree>> {
+    let mut worktrees = Vec::new();
+    let mut current: Option<GitWorktree> = None;
+
+    for raw in bytes.split(|byte| *byte == 0) {
+        if raw.is_empty() {
+            if let Some(entry) = current.take() {
+                worktrees.push(entry);
+            }
+            continue;
+        }
+        let token = String::from_utf8_lossy(raw);
+        if let Some(path) = token.strip_prefix("worktree ") {
+            if let Some(entry) = current.take() {
+                worktrees.push(entry);
+            }
+            current = Some(GitWorktree {
+                path: PathBuf::from(path),
+                head: None,
+                branch_name: None,
+                detached: false,
+            });
+        } else if let Some(head) = token.strip_prefix("HEAD ") {
+            if let Some(entry) = &mut current {
+                entry.head = Some(head.to_string());
+            }
+        } else if let Some(branch) = token.strip_prefix("branch ") {
+            if let Some(entry) = &mut current {
+                entry.branch_name = Some(
+                    branch
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(branch)
+                        .to_string(),
+                );
+            }
+        } else if token == "detached"
+            && let Some(entry) = &mut current
+        {
+            entry.detached = true;
+        }
+    }
+
+    if let Some(entry) = current {
+        worktrees.push(entry);
+    }
+
+    Ok(worktrees)
 }
 
 pub fn is_dirty(repo_path: &Path) -> Result<bool> {
@@ -1148,6 +1240,22 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         wt
+    }
+
+    #[test]
+    fn parse_worktree_list_porcelain_z_handles_branches_detached_and_spaces() {
+        let input = b"worktree /repo/main checkout\0HEAD 1111111111111111111111111111111111111111\0branch refs/heads/main\0\0worktree /repo/feature\0HEAD 2222222222222222222222222222222222222222\0branch refs/heads/feature/x\0\0worktree /repo/detached\0HEAD abcdef1234567890\0detached\0\0";
+
+        let entries = parse_worktree_list_porcelain_z(input).unwrap();
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].path, PathBuf::from("/repo/main checkout"));
+        assert_eq!(entries[0].branch_name.as_deref(), Some("main"));
+        assert_eq!(entries[0].label(), "main");
+        assert_eq!(entries[1].branch_name.as_deref(), Some("feature/x"));
+        assert_eq!(entries[2].branch_name, None);
+        assert!(entries[2].detached);
+        assert_eq!(entries[2].label(), "detached abcdef1");
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {

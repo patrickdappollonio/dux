@@ -72,6 +72,8 @@ Grab the latest release for your platform from the [Releases](https://github.com
 
 dux organizes work around **projects** (git repos) and **agents** (worktree sessions). When you create an agent, dux branches off a new git worktree so the agent has its own isolated copy of the code. No conflicts with your main checkout, no stepping on other agents' changes.
 
+Already have a Git worktree you want dux to use? The `new-agent-from-worktree` command in the palette lets you pick from existing worktrees for the selected project. If the worktree is already managed by dux, dux reuses it and reconnects like a continuable session; if it's outside dux's managed worktree directory, dux copies it into a fresh managed worktree first so the original checkout is left alone.
+
 The interface has three panes:
 
 - **Left:** your projects and agent sessions

@@ -487,6 +487,43 @@ pub(crate) struct ChangeThemePrompt {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct ProjectWorktreeEntry {
+    pub(crate) path: PathBuf,
+    pub(crate) branch_name: String,
+    pub(crate) is_managed_by_dux: bool,
+    pub(crate) existing_session_id: Option<String>,
+    pub(crate) is_external: bool,
+    pub(crate) is_project_checkout: bool,
+    pub(crate) is_selectable: bool,
+}
+
+impl ProjectWorktreeEntry {
+    pub(crate) fn display_name(&self) -> String {
+        self.path
+            .file_name()
+            .and_then(|part| part.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| self.path.display().to_string())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ProjectWorktreeVisualRow {
+    Header(&'static str),
+    Empty(String),
+    Entry(usize),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PickProjectWorktreePrompt {
+    pub(crate) project: Project,
+    pub(crate) entries: Vec<ProjectWorktreeEntry>,
+    pub(crate) loading: bool,
+    pub(crate) selected: Option<usize>,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct ConfirmKillRunningPrompt {
     pub(crate) previous: KillRunningPrompt,
     pub(crate) action: KillRunningAction,
@@ -571,6 +608,7 @@ pub(crate) enum PromptState {
     ChangeDefaultProvider(ChangeDefaultProviderPrompt),
     ChangeProjectDefaultProvider(ChangeProjectDefaultProviderPrompt),
     ChangeTheme(ChangeThemePrompt),
+    PickProjectWorktree(PickProjectWorktreePrompt),
     KillRunning(KillRunningPrompt),
     ConfirmKillRunning(ConfirmKillRunningPrompt),
     ConfigReloadFailed {
@@ -767,6 +805,132 @@ pub(crate) fn build_visual_rows(rows: &[ResourceStats], expanded: &HashSet<u32>)
         }
     }
     visual
+}
+
+pub(crate) fn project_worktree_visual_rows(
+    entries: &[ProjectWorktreeEntry],
+    loading: bool,
+    error: Option<&str>,
+) -> Vec<ProjectWorktreeVisualRow> {
+    if loading {
+        return vec![ProjectWorktreeVisualRow::Empty(
+            "Loading project worktrees...".to_string(),
+        )];
+    }
+    if let Some(error) = error {
+        return vec![ProjectWorktreeVisualRow::Empty(format!(
+            "Could not load worktrees: {error}"
+        ))];
+    }
+
+    let available = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.is_selectable)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let project_checkout = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.is_project_checkout)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let disabled = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| !entry.is_selectable && !entry.is_project_checkout)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+
+    let mut rows = Vec::new();
+    rows.push(ProjectWorktreeVisualRow::Header("Available Worktrees"));
+    if available.is_empty() {
+        rows.push(ProjectWorktreeVisualRow::Empty(
+            "No available worktrees. Worktrees that already have agents are shown below."
+                .to_string(),
+        ));
+    } else {
+        rows.extend(available.into_iter().map(ProjectWorktreeVisualRow::Entry));
+    }
+    if !disabled.is_empty() {
+        rows.push(ProjectWorktreeVisualRow::Header("Already Has Agent"));
+        rows.extend(disabled.into_iter().map(ProjectWorktreeVisualRow::Entry));
+    }
+    if !project_checkout.is_empty() {
+        rows.push(ProjectWorktreeVisualRow::Header("Project Checkout"));
+        rows.extend(
+            project_checkout
+                .into_iter()
+                .map(ProjectWorktreeVisualRow::Entry),
+        );
+    }
+    rows
+}
+
+pub(crate) fn selectable_project_worktree_indices(entries: &[ProjectWorktreeEntry]) -> Vec<usize> {
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| entry.is_selectable.then_some(index))
+        .collect()
+}
+
+fn canonical_or_original(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+pub(crate) fn classify_project_worktrees(
+    project: &Project,
+    paths: &DuxPaths,
+    sessions: &[AgentSession],
+    worktrees: Vec<git::GitWorktree>,
+) -> Vec<ProjectWorktreeEntry> {
+    let managed_project_root = paths.worktrees_root.join(&project.name);
+    let project_checkout_path = canonical_or_original(Path::new(&project.path));
+    let session_by_path = sessions
+        .iter()
+        .map(|session| {
+            (
+                canonical_or_original(Path::new(&session.worktree_path)),
+                session.id.clone(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut entries = worktrees
+        .into_iter()
+        .map(|worktree| {
+            let canonical_path = canonical_or_original(&worktree.path);
+            let existing_session_id = session_by_path.get(&canonical_path).cloned();
+            let is_project_checkout = canonical_path == project_checkout_path;
+            let is_managed_by_dux = git::is_under(&managed_project_root, &worktree.path);
+            let is_external = !is_managed_by_dux;
+            let is_selectable = existing_session_id.is_none() && !is_project_checkout;
+            ProjectWorktreeEntry {
+                path: canonical_path,
+                branch_name: worktree.label(),
+                is_managed_by_dux,
+                existing_session_id,
+                is_external,
+                is_project_checkout,
+                is_selectable,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    entries.sort_by(|a, b| {
+        a.is_selectable
+            .cmp(&b.is_selectable)
+            .reverse()
+            .then_with(|| a.is_project_checkout.cmp(&b.is_project_checkout))
+            .then_with(|| {
+                a.branch_name
+                    .to_lowercase()
+                    .cmp(&b.branch_name.to_lowercase())
+            })
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    entries
 }
 
 #[derive(Clone, Debug)]
@@ -967,6 +1131,11 @@ pub(crate) enum OverlayMouseLayout {
         apply_button: Rect,
     },
     PickEditor {
+        list: Rect,
+        items: usize,
+        offset: usize,
+    },
+    PickProjectWorktree {
         list: Rect,
         items: usize,
         offset: usize,
@@ -1230,6 +1399,19 @@ pub(crate) enum CreateAgentRequest {
         source_label: String,
         custom_name: Option<String>,
     },
+    ExistingManagedWorktree {
+        project: Project,
+        worktree_path: PathBuf,
+        branch_name: String,
+        custom_name: Option<String>,
+    },
+    ForkExternalWorktree {
+        project: Project,
+        source_worktree_path: PathBuf,
+        source_label: String,
+        source_branch: String,
+        custom_name: Option<String>,
+    },
 }
 
 pub(crate) enum WorkerEvent {
@@ -1252,6 +1434,10 @@ pub(crate) enum WorkerEvent {
     BrowserEntriesReady {
         dir: PathBuf,
         entries: Vec<BrowserEntry>,
+    },
+    ProjectWorktreesReady {
+        project_id: String,
+        result: Result<Vec<ProjectWorktreeEntry>, String>,
     },
     ClipboardCopyCompleted {
         /// Human-readable success message shown in the status bar.
@@ -1953,6 +2139,7 @@ impl App {
         match command {
             "new-agent" => self.create_agent_for_selected_project(),
             "new-agent-from-pr" => self.open_new_agent_from_pr_prompt(),
+            "new-agent-from-worktree" => self.create_agent_from_existing_worktree(),
             "fork-agent" => self.fork_selected_session(),
             "change-agent-provider" => self.open_change_agent_provider_prompt(),
             "change-default-provider" => self.open_change_default_provider_prompt(),
@@ -3348,6 +3535,155 @@ leading_branch = "main"
         expanded.insert(999);
         let visual = build_visual_rows(&rows, &expanded);
         assert_eq!(visual.len(), 3);
+    }
+
+    #[test]
+    fn classify_project_worktrees_marks_managed_external_and_existing_agent() {
+        let root =
+            std::env::temp_dir().join(format!("dux-classify-worktrees-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        let managed = root.join("worktrees").join("demo").join("managed-orphan");
+        let external = root.join("external checkout");
+        let existing = root.join("worktrees").join("demo").join("existing-agent");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&managed).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        fs::create_dir_all(&existing).unwrap();
+
+        let project = Project {
+            id: "project-1".to_string(),
+            name: "demo".to_string(),
+            path: repo.to_string_lossy().to_string(),
+            explicit_default_provider: None,
+            default_provider: ProviderKind::new("codex"),
+            leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
+            current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Leading,
+            path_missing: false,
+        };
+        let paths = DuxPaths {
+            root: root.clone(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("lock"),
+        };
+        let sessions = vec![AgentSession {
+            id: "session-1".to_string(),
+            project_id: project.id.clone(),
+            project_path: Some(project.path.clone()),
+            provider: ProviderKind::new("codex"),
+            source_branch: "main".to_string(),
+            branch_name: "existing".to_string(),
+            worktree_path: existing.to_string_lossy().to_string(),
+            title: None,
+            started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
+            status: SessionStatus::Detached,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }];
+        let worktrees = vec![
+            git::GitWorktree {
+                path: repo.clone(),
+                head: Some("0000000".to_string()),
+                branch_name: Some("main".to_string()),
+                detached: false,
+            },
+            git::GitWorktree {
+                path: managed.clone(),
+                head: Some("1111111".to_string()),
+                branch_name: Some("managed-orphan".to_string()),
+                detached: false,
+            },
+            git::GitWorktree {
+                path: external.clone(),
+                head: Some("2222222".to_string()),
+                branch_name: Some("feature".to_string()),
+                detached: false,
+            },
+            git::GitWorktree {
+                path: existing.clone(),
+                head: Some("3333333".to_string()),
+                branch_name: Some("existing".to_string()),
+                detached: false,
+            },
+        ];
+
+        let entries = classify_project_worktrees(&project, &paths, &sessions, worktrees);
+        let managed_entry = entries
+            .iter()
+            .find(|entry| entry.path == managed.canonicalize().unwrap())
+            .unwrap();
+        assert!(managed_entry.is_managed_by_dux);
+        assert!(!managed_entry.is_external);
+        assert!(managed_entry.is_selectable);
+
+        let external_entry = entries
+            .iter()
+            .find(|entry| entry.path == external.canonicalize().unwrap())
+            .unwrap();
+        assert!(!external_entry.is_managed_by_dux);
+        assert!(external_entry.is_external);
+        assert!(external_entry.is_selectable);
+
+        let existing_entry = entries
+            .iter()
+            .find(|entry| entry.path == existing.canonicalize().unwrap())
+            .unwrap();
+        assert_eq!(
+            existing_entry.existing_session_id.as_deref(),
+            Some("session-1")
+        );
+        assert!(!existing_entry.is_selectable);
+
+        let project_checkout_entry = entries
+            .iter()
+            .find(|entry| entry.path == repo.canonicalize().unwrap())
+            .unwrap();
+        assert!(project_checkout_entry.is_project_checkout);
+        assert!(!project_checkout_entry.is_selectable);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn project_worktree_visual_rows_separate_project_checkout() {
+        let entries = vec![
+            ProjectWorktreeEntry {
+                path: PathBuf::from("/repo/managed"),
+                branch_name: "feature".to_string(),
+                is_managed_by_dux: true,
+                existing_session_id: None,
+                is_external: false,
+                is_project_checkout: false,
+                is_selectable: true,
+            },
+            ProjectWorktreeEntry {
+                path: PathBuf::from("/repo/main"),
+                branch_name: "main".to_string(),
+                is_managed_by_dux: false,
+                existing_session_id: None,
+                is_external: true,
+                is_project_checkout: true,
+                is_selectable: false,
+            },
+        ];
+
+        let rows = project_worktree_visual_rows(&entries, false, None);
+
+        assert!(matches!(
+            rows.first(),
+            Some(ProjectWorktreeVisualRow::Header("Available Worktrees"))
+        ));
+        assert!(
+            rows.iter()
+                .any(|row| matches!(row, ProjectWorktreeVisualRow::Header("Project Checkout")))
+        );
+        assert_eq!(selectable_project_worktree_indices(&entries), vec![0]);
     }
 
     #[test]

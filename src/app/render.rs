@@ -3419,6 +3419,174 @@ impl App {
                     offset: state.offset(),
                 };
             }
+            PromptState::PickProjectWorktree(prompt) => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(78, 58, frame.area());
+                self.clear_overlay_area(frame, area);
+
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let move_down = self.bindings.label_for(Action::MoveDown);
+                let move_up = self.bindings.label_for(Action::MoveUp);
+                let mut bottom_spans = vec![Span::raw(" ")];
+                bottom_spans.extend(self.theme.key_badge_default(&move_down));
+                bottom_spans.push(Span::styled(
+                    " down  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&move_up));
+                bottom_spans.push(Span::styled(
+                    " up  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
+                bottom_spans.push(Span::styled(
+                    " use  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&close_key));
+                bottom_spans.push(Span::styled(
+                    " cancel",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+
+                let [details_area, list_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(4), Constraint::Min(6)])
+                    .areas(area);
+
+                let detail_lines = vec![
+                    Line::from(vec![
+                        Span::styled(" Project: ", Style::default().fg(self.theme.hint_desc_fg)),
+                        Span::styled(
+                            prompt.project.name.as_str(),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(" Repo: ", Style::default().fg(self.theme.hint_desc_fg)),
+                        Span::styled(
+                            prompt.project.path.as_str(),
+                            Style::default().fg(self.theme.text_fg),
+                        ),
+                    ]),
+                ];
+                Paragraph::new(detail_lines)
+                    .block(
+                        self.themed_overlay_block("New Agent From Worktree")
+                            .title_bottom(Line::from(bottom_spans)),
+                    )
+                    .render(details_area, frame.buffer_mut());
+
+                let rows = project_worktree_visual_rows(
+                    &prompt.entries,
+                    prompt.loading,
+                    prompt.error.as_deref(),
+                );
+                let path_col = prompt
+                    .entries
+                    .iter()
+                    .map(|entry| entry.display_name().chars().count())
+                    .max()
+                    .unwrap_or(8)
+                    .clamp(8, 24);
+                let items = rows
+                    .iter()
+                    .map(|row| match row {
+                        ProjectWorktreeVisualRow::Header(label) => {
+                            ListItem::new(Line::from(Span::styled(
+                                format!(" {label}"),
+                                Style::default()
+                                    .fg(self.theme.help_section_header_fg)
+                                    .add_modifier(Modifier::BOLD),
+                            )))
+                        }
+                        ProjectWorktreeVisualRow::Empty(message) => {
+                            ListItem::new(Line::from(Span::styled(
+                                format!("  {message}"),
+                                Style::default().fg(self.theme.hint_dim_desc_fg),
+                            )))
+                        }
+                        ProjectWorktreeVisualRow::Entry(index) => {
+                            let entry = &prompt.entries[*index];
+                            let style = if entry.is_selectable {
+                                Style::default().fg(self.theme.text_fg)
+                            } else {
+                                Style::default().fg(self.theme.hint_dim_desc_fg)
+                            };
+                            let kind = if entry.is_project_checkout {
+                                "project"
+                            } else if entry.is_external {
+                                "external"
+                            } else {
+                                "managed"
+                            };
+                            let session_suffix = entry
+                                .existing_session_id
+                                .as_ref()
+                                .map(|id| format!("  agent {id}"))
+                                .unwrap_or_default();
+                            let kind_style = if !entry.is_selectable {
+                                Style::default().fg(self.theme.hint_dim_desc_fg)
+                            } else if entry.is_managed_by_dux {
+                                Style::default().fg(self.theme.branch_fg)
+                            } else {
+                                Style::default().fg(self.theme.hint_desc_fg)
+                            };
+                            let branch_label_style = Style::default().fg(if entry.is_selectable {
+                                self.theme.branch_fg
+                            } else {
+                                self.theme.hint_dim_desc_fg
+                            });
+                            let branch_value_style = Style::default().fg(if entry.is_selectable {
+                                self.theme.hint_desc_fg
+                            } else {
+                                self.theme.hint_dim_desc_fg
+                            });
+                            let name = git::ellipsize_middle(&entry.display_name(), path_col);
+                            ListItem::new(Line::from(vec![
+                                Span::styled(
+                                    format!("  {:path_col$}", name),
+                                    style.add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(format!("  {:<8}", kind), kind_style),
+                                Span::styled("  branch: ", branch_label_style),
+                                Span::styled(entry.branch_name.as_str(), branch_value_style),
+                                Span::styled(
+                                    session_suffix,
+                                    Style::default().fg(self.theme.hint_dim_desc_fg),
+                                ),
+                            ]))
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let selected_visual = prompt.selected.and_then(|selected| {
+                    rows.iter().position(|row| {
+                        matches!(row, ProjectWorktreeVisualRow::Entry(index) if *index == selected)
+                    })
+                });
+                let mut state = ListState::default().with_selected(selected_visual);
+                let list_block = Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
+                let list_inner = list_block.inner(list_area);
+                StatefulWidget::render(
+                    List::new(items)
+                        .block(list_block)
+                        .highlight_style(self.theme.selection_style()),
+                    list_area,
+                    frame.buffer_mut(),
+                    &mut state,
+                );
+                self.overlay_layout.active = OverlayMouseLayout::PickProjectWorktree {
+                    list: list_inner,
+                    items: rows.len(),
+                    offset: state.offset(),
+                };
+            }
             PromptState::KillRunning(prompt) => {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(78, 72, frame.area());
@@ -4931,6 +5099,7 @@ impl App {
                 hint_para.render(hint_area, frame.buffer_mut());
             }
             PromptState::NameNewAgent {
+                request,
                 input,
                 randomize_name,
                 focus,
@@ -4956,9 +5125,26 @@ impl App {
                     .saturating_add(1);
                 let checkbox_spacing = 1;
                 let footer_spacing = 1;
+                let context_line = match request {
+                    CreateAgentRequest::ExistingManagedWorktree { worktree_path, .. } => {
+                        Some(format!(
+                            " This starts a fresh agent session in {}.",
+                            worktree_path.display()
+                        ))
+                    }
+                    CreateAgentRequest::ForkExternalWorktree {
+                        source_worktree_path,
+                        ..
+                    } => Some(format!(
+                        " External worktree will be copied into a fresh managed dux worktree: {}.",
+                        source_worktree_path.display()
+                    )),
+                    _ => None,
+                };
+                let context_height = u16::from(context_line.is_some());
                 let area = centered_rect_exact(
                     dialog_width,
-                    8 + checkbox_spacing + checkbox_height + footer_spacing,
+                    8 + context_height + checkbox_spacing + checkbox_height + footer_spacing,
                     frame.area(),
                 );
                 self.clear_overlay_area(frame, area);
@@ -4967,10 +5153,19 @@ impl App {
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
 
-                let [label_area, input_area, _, checkbox_area, _, hint_area] = Layout::default()
+                let [
+                    label_area,
+                    context_area,
+                    input_area,
+                    _,
+                    checkbox_area,
+                    _,
+                    hint_area,
+                ] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(1),
+                        Constraint::Length(context_height),
                         Constraint::Length(3),
                         Constraint::Length(checkbox_spacing),
                         Constraint::Length(checkbox_height),
@@ -4979,11 +5174,24 @@ impl App {
                     ])
                     .areas(inner);
 
+                let label = if matches!(request, CreateAgentRequest::ExistingManagedWorktree { .. })
+                {
+                    " Enter a display name for the new agent:"
+                } else {
+                    " Enter a name for the new agent (used as branch name):"
+                };
                 Paragraph::new(Line::from(Span::styled(
-                    " Enter a name for the new agent (used as branch name):",
+                    label,
                     Style::default().fg(self.theme.input_label_fg),
                 )))
                 .render(label_area, frame.buffer_mut());
+                if let Some(context_line) = context_line {
+                    Paragraph::new(Line::from(Span::styled(
+                        git::ellipsize_middle(&context_line, inner.width as usize),
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )))
+                    .render(context_area, frame.buffer_mut());
+                }
 
                 // Input field with cursor indicator.
                 let display = if input.cursor < input.text.len() {

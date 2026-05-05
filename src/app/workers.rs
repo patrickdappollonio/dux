@@ -258,6 +258,41 @@ impl App {
                         *selected = 0;
                     }
                 }
+                WorkerEvent::ProjectWorktreesReady { project_id, result } => {
+                    let mut status_after_update: Option<Result<&'static str, String>> = None;
+                    if let PromptState::PickProjectWorktree(prompt) = &mut self.prompt
+                        && prompt.project.id == project_id
+                    {
+                        prompt.loading = false;
+                        match result {
+                            Ok(entries) => {
+                                prompt.selected =
+                                    selectable_project_worktree_indices(&entries).into_iter().next();
+                                prompt.entries = entries;
+                                prompt.error = None;
+                                status_after_update = Some(Ok(
+                                    "Choose an available worktree to launch a new agent.",
+                                ));
+                            }
+                            Err(error) => {
+                                let project_name = prompt.project.name.clone();
+                                prompt.entries.clear();
+                                prompt.selected = None;
+                                prompt.error = Some(error.clone());
+                                status_after_update = Some(Err(format!(
+                                    "Failed to load worktrees for project \"{}\": {error}",
+                                    project_name
+                                )));
+                            }
+                        }
+                    }
+                    if let Some(status) = status_after_update {
+                        match status {
+                            Ok(message) => self.set_info(message),
+                            Err(message) => self.set_error(message),
+                        }
+                    }
+                }
                 WorkerEvent::WorktreeRemoveCompleted { session_id, result } => {
                     // Always clear the in-flight guard so the session is
                     // interactive again — whether we're about to remove it
@@ -865,6 +900,10 @@ impl App {
             self.providers.insert(session.id.clone(), client);
             self.sessions.insert(0, session.clone());
             self.mark_session_provider_started(&session.id);
+            if request.resume {
+                self.resume_fallback_candidates
+                    .insert(session.id.clone(), Instant::now());
+            }
             self.update_branch_sync_sessions();
             self.rebuild_left_items();
             self.selected_left = self
@@ -971,6 +1010,21 @@ impl App {
             let _ = tx.send(WorkerEvent::BrowserEntriesReady {
                 dir: dir.clone(),
                 entries,
+            });
+        });
+    }
+
+    pub(crate) fn spawn_project_worktrees_worker(&self, project: Project) {
+        let tx = self.worker_tx.clone();
+        let paths = self.paths.clone();
+        let sessions = self.sessions.clone();
+        thread::spawn(move || {
+            let result = git::list_worktrees(Path::new(&project.path))
+                .map(|worktrees| classify_project_worktrees(&project, &paths, &sessions, worktrees))
+                .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(WorkerEvent::ProjectWorktreesReady {
+                project_id: project.id,
+                result,
             });
         });
     }
@@ -1515,6 +1569,8 @@ pub(crate) fn run_create_agent_job(
         branch_name,
         worktree_path,
         owns_worktree,
+        title,
+        launch_with_resume,
     ) = match request {
         CreateAgentRequest::NewProject {
             project,
@@ -1626,6 +1682,8 @@ pub(crate) fn run_create_agent_job(
                 branch_name,
                 worktree_path,
                 true,
+                None,
+                false,
             )
         }
         CreateAgentRequest::PullRequest {
@@ -1708,6 +1766,8 @@ pub(crate) fn run_create_agent_job(
                 branch_name,
                 worktree_path,
                 true,
+                None,
+                false,
             )
         }
         CreateAgentRequest::ForkSession {
@@ -1789,6 +1849,115 @@ pub(crate) fn run_create_agent_job(
                 branch_name,
                 worktree_path,
                 true,
+                None,
+                false,
+            )
+        }
+        CreateAgentRequest::ExistingManagedWorktree {
+            project,
+            worktree_path,
+            branch_name,
+            custom_name,
+        } => {
+            let agent_name = custom_name.clone().unwrap_or_else(|| branch_name.clone());
+            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
+                "Launching {} in existing worktree \"{}\"...",
+                project.default_provider.as_str(),
+                worktree_path.display(),
+            )));
+            let status_message = format!(
+                "Imported {} agent \"{}\" from existing managed worktree for project \"{}\".",
+                project.default_provider.as_str(),
+                agent_name,
+                project.name
+            );
+            (
+                project.clone(),
+                project.default_provider.clone(),
+                branch_name.clone(),
+                status_message,
+                branch_name,
+                worktree_path,
+                false,
+                custom_name,
+                true,
+            )
+        }
+        CreateAgentRequest::ForkExternalWorktree {
+            project,
+            source_worktree_path,
+            source_label,
+            source_branch,
+            custom_name,
+        } => {
+            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
+                "Creating a managed worktree from external worktree \"{source_label}\"...",
+            )));
+            let source_head = match git::head_commit(&source_worktree_path) {
+                Ok(head) => head,
+                Err(err) => {
+                    logger::error(&format!(
+                        "failed to resolve HEAD for {}: {err}",
+                        source_worktree_path.display()
+                    ));
+                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
+                        "Failed to inspect external worktree \"{source_label}\": {err}",
+                    )));
+                    return;
+                }
+            };
+            let repo_path = PathBuf::from(&project.path);
+            let (branch_name, worktree_path) = match git::create_worktree_from_start_point(
+                &repo_path,
+                &paths.worktrees_root,
+                &project.name,
+                Some(&source_head),
+                custom_name.as_deref(),
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    logger::error(&format!(
+                        "external worktree fork creation failed for {}: {err}",
+                        project.path
+                    ));
+                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
+                        "Failed to create a managed worktree from external worktree \"{source_label}\": {err}",
+                    )));
+                    return;
+                }
+            };
+            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
+                "Copying dirty and untracked files from external worktree \"{source_label}\"...",
+            )));
+            if let Err(err) = git::mirror_worktree_contents(&source_worktree_path, &worktree_path) {
+                logger::error(&format!(
+                    "failed to mirror external worktree {} into {}: {err}",
+                    source_worktree_path.display(),
+                    worktree_path.display()
+                ));
+                let _ = git::remove_worktree(&repo_path, &worktree_path, &branch_name);
+                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
+                    "Failed to copy external worktree contents from \"{source_label}\": {err}",
+                )));
+                return;
+            }
+            let status_message = format!(
+                "Created {} agent \"{}\" from external worktree \"{}\" in project \"{}\". Dirty and untracked files were copied into the managed worktree.",
+                project.default_provider.as_str(),
+                branch_name,
+                source_label,
+                project.name
+            );
+            (
+                project.clone(),
+                project.default_provider.clone(),
+                source_branch,
+                status_message,
+                branch_name,
+                worktree_path,
+                true,
+                None,
+                false,
             )
         }
     };
@@ -1806,6 +1975,11 @@ pub(crate) fn run_create_agent_job(
             branch_name
         ));
     }
+    let started_providers = if launch_with_resume {
+        vec![provider.as_str().to_string()]
+    } else {
+        Vec::new()
+    };
     let session = AgentSession {
         id: Uuid::new_v4().to_string(),
         project_id: project.id.clone(),
@@ -1814,8 +1988,8 @@ pub(crate) fn run_create_agent_job(
         source_branch,
         branch_name,
         worktree_path: worktree_path.to_string_lossy().to_string(),
-        title: None,
-        started_providers: Vec::new(),
+        title,
+        started_providers,
         desired_running: true,
         auto_reopen_enabled: true,
         status: SessionStatus::Active,
@@ -1835,16 +2009,24 @@ pub(crate) fn run_create_agent_job(
         let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(hint));
         return;
     }
-    let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
-        "Launching {} in a fresh session...",
-        session.provider.as_str()
-    )));
+    let launch_message = if launch_with_resume {
+        format!(
+            "Continuing {} in the existing worktree...",
+            session.provider.as_str()
+        )
+    } else {
+        format!(
+            "Launching {} in a fresh session...",
+            session.provider.as_str()
+        )
+    };
+    let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(launch_message));
     // crossterm::terminal::size() returns (cols, rows).
     let (cols, rows) = term_size;
     let request = AgentLaunchRequest {
         session,
         provider_config: provider_cfg,
-        resume: false,
+        resume: launch_with_resume,
         pty_size: (rows, cols),
         scrollback_lines: config.ui.agent_scrollback_lines,
         kind: AgentLaunchKind::Create {

@@ -91,6 +91,7 @@ enum PromptMouseTarget {
     BrowseProjectInput,
     BrowseProjectItem(usize),
     PickEditorItem(usize),
+    PickProjectWorktreeItem(usize),
     ChangeThemeItem(usize),
     ChangeAgentProviderItem(usize),
     ChangeAgentProviderCancel,
@@ -214,6 +215,7 @@ impl ButtonPressedTarget {
             | PromptMouseTarget::BrowseProjectInput
             | PromptMouseTarget::BrowseProjectItem(_)
             | PromptMouseTarget::PickEditorItem(_)
+            | PromptMouseTarget::PickProjectWorktreeItem(_)
             | PromptMouseTarget::ChangeThemeItem(_)
             | PromptMouseTarget::ChangeAgentProviderItem(_)
             | PromptMouseTarget::ChangeDefaultProviderItem(_)
@@ -560,6 +562,7 @@ impl App {
                     self.open_project_browser()?;
                 }
                 Action::NewAgent => self.create_agent_for_selected_project()?,
+                Action::NewAgentFromWorktree => self.create_agent_from_existing_worktree()?,
                 Action::ForkAgent => self.fork_selected_session()?,
                 Action::RefreshProject => self.refresh_selected_project()?,
                 Action::CheckoutProjectDefaultBranch => {
@@ -2159,6 +2162,39 @@ impl App {
             return Ok(false);
         }
 
+        if let PromptState::PickProjectWorktree(prompt) = &mut self.prompt {
+            match self.bindings.lookup(&key, BindingScope::Palette) {
+                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+                Some(Action::MoveDown) => {
+                    let selectable = selectable_project_worktree_indices(&prompt.entries);
+                    if let Some(current) = prompt.selected
+                        && let Some(position) = selectable.iter().position(|idx| *idx == current)
+                        && let Some(next) = selectable.get(position + 1)
+                    {
+                        prompt.selected = Some(*next);
+                    } else if prompt.selected.is_none() {
+                        prompt.selected = selectable.into_iter().next();
+                    }
+                }
+                Some(Action::MoveUp) => {
+                    let selectable = selectable_project_worktree_indices(&prompt.entries);
+                    if let Some(current) = prompt.selected
+                        && let Some(position) = selectable.iter().position(|idx| *idx == current)
+                        && position > 0
+                    {
+                        prompt.selected = Some(selectable[position - 1]);
+                    } else if prompt.selected.is_none() {
+                        prompt.selected = selectable.into_iter().next();
+                    }
+                }
+                Some(Action::Confirm) => {
+                    self.open_selected_project_worktree_agent_prompt()?;
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+
         if let PromptState::ChangeAgentProvider(prompt) = &mut self.prompt {
             let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
             let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
@@ -2768,6 +2804,27 @@ impl App {
                                 "Forking agent \"{source_label}\" as \"{name}\" by cloning its current worktree contents into a fresh session...",
                             )
                         }
+                        CreateAgentRequest::ExistingManagedWorktree {
+                            project,
+                            worktree_path,
+                            ..
+                        } => {
+                            format!(
+                                "Starting agent \"{name}\" in existing worktree {} for project \"{}\"...",
+                                worktree_path.display(),
+                                project.name
+                            )
+                        }
+                        CreateAgentRequest::ForkExternalWorktree {
+                            project,
+                            source_label,
+                            ..
+                        } => {
+                            format!(
+                                "Copying external worktree \"{source_label}\" into a managed worktree \"{name}\" for project \"{}\"...",
+                                project.name
+                            )
+                        }
                     };
                     set_create_agent_request_custom_name(&mut request, name);
                     self.dispatch_create_agent_request(request, msg)?;
@@ -3168,6 +3225,13 @@ impl App {
                 ..
             } => Self::overlay_row_at(list, offset, items, column, row)
                 .map(PromptMouseTarget::PickEditorItem),
+            OverlayMouseLayout::PickProjectWorktree {
+                list,
+                items,
+                offset,
+                ..
+            } => Self::overlay_row_at(list, offset, items, column, row)
+                .map(PromptMouseTarget::PickProjectWorktreeItem),
             OverlayMouseLayout::ResourceMonitor { .. } => None,
             OverlayMouseLayout::ChangeTheme {
                 list,
@@ -3993,6 +4057,83 @@ impl App {
         }
     }
 
+    fn set_project_worktree_selection_from_visual_row(&mut self, visual_index: usize) {
+        let entry_index = match &self.prompt {
+            PromptState::PickProjectWorktree(prompt) => {
+                let rows = project_worktree_visual_rows(
+                    &prompt.entries,
+                    prompt.loading,
+                    prompt.error.as_deref(),
+                );
+                rows.get(visual_index).and_then(|row| match row {
+                    ProjectWorktreeVisualRow::Entry(index)
+                        if prompt
+                            .entries
+                            .get(*index)
+                            .is_some_and(|entry| entry.is_selectable) =>
+                    {
+                        Some(*index)
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        };
+        let Some(entry_index) = entry_index else {
+            return;
+        };
+        if let PromptState::PickProjectWorktree(prompt) = &mut self.prompt {
+            prompt.selected = Some(entry_index);
+        }
+    }
+
+    fn open_selected_project_worktree_agent_prompt(&mut self) -> Result<()> {
+        let (project, entry) = match &self.prompt {
+            PromptState::PickProjectWorktree(prompt) => {
+                let Some(selected) = prompt.selected else {
+                    self.set_error("No available worktree is selected.");
+                    return Ok(());
+                };
+                let Some(entry) = prompt.entries.get(selected).cloned() else {
+                    self.set_error("No available worktree is selected.");
+                    return Ok(());
+                };
+                if !entry.is_selectable {
+                    self.set_error("That worktree already has an agent.");
+                    return Ok(());
+                }
+                (prompt.project.clone(), entry)
+            }
+            _ => return Ok(()),
+        };
+
+        let request = if entry.is_external {
+            CreateAgentRequest::ForkExternalWorktree {
+                project,
+                source_worktree_path: entry.path.clone(),
+                source_label: entry.display_name(),
+                source_branch: entry.branch_name.clone(),
+                custom_name: None,
+            }
+        } else {
+            let managed_root = self.paths.worktrees_root.join(&project.name);
+            let default_name = entry
+                .path
+                .strip_prefix(&managed_root)
+                .ok()
+                .map(|relative| relative.to_string_lossy().to_string())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| entry.display_name());
+            CreateAgentRequest::ExistingManagedWorktree {
+                project,
+                worktree_path: entry.path.clone(),
+                branch_name: entry.branch_name.clone(),
+                custom_name: Some(default_name),
+            }
+        };
+        self.open_name_new_agent_prompt_for_request(request)
+    }
+
     fn next_change_agent_provider_focus(
         current: ChangeAgentProviderFocus,
         forward: bool,
@@ -4262,7 +4403,9 @@ impl App {
                     project.name
                 )
             }
-            CreateAgentRequest::ForkSession { .. } => unreachable!(),
+            CreateAgentRequest::ForkSession { .. }
+            | CreateAgentRequest::ExistingManagedWorktree { .. }
+            | CreateAgentRequest::ForkExternalWorktree { .. } => unreachable!(),
         };
         if let Err(e) = self.dispatch_create_agent_request(request, msg) {
             self.set_error(format!("{e:#}"));
@@ -4559,6 +4702,15 @@ impl App {
                 self.set_pick_editor_selection(index);
                 if double_click {
                     self.open_selected_pick_editor();
+                }
+            }
+            PromptMouseTarget::PickProjectWorktreeItem(index) => {
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                self.set_project_worktree_selection_from_visual_row(index);
+                if double_click && let Err(err) = self.open_selected_project_worktree_agent_prompt()
+                {
+                    self.set_error(format!("{err:#}"));
                 }
             }
             PromptMouseTarget::ChangeThemeItem(index) => {
@@ -5448,7 +5600,9 @@ fn set_create_agent_request_custom_name(request: &mut CreateAgentRequest, name: 
     match request {
         CreateAgentRequest::NewProject { custom_name, .. }
         | CreateAgentRequest::ForkSession { custom_name, .. }
-        | CreateAgentRequest::PullRequest { custom_name, .. } => {
+        | CreateAgentRequest::PullRequest { custom_name, .. }
+        | CreateAgentRequest::ExistingManagedWorktree { custom_name, .. }
+        | CreateAgentRequest::ForkExternalWorktree { custom_name, .. } => {
             *custom_name = Some(name);
         }
     }
@@ -5463,15 +5617,15 @@ mod tests {
     use super::DOUBLE_CLICK_THRESHOLD;
     use super::components::{ButtonPressedTarget, PressedButton};
     use crate::app::{
-        App, BranchWarningKind, CenterMode, ConfigReloadFailedFocus, ConfirmKillRunningPrompt,
-        ConfirmNonDefaultBranchFocus, CreateAgentBranchInspection, CreateAgentRequest,
-        DeleteAgentFocus, FocusPane, FullscreenOverlay, InputTarget, KillRunningAction,
-        KillRunningFocus, KillRunningFooterAction, KillRunningPrompt, KillableRuntime,
-        KillableRuntimeKind, LeftItem, LeftSection, MacroBarState, MouseClickTarget,
-        MouseLayoutState, NameNewAgentFocus, NonDefaultBranchAction, OverlayCheckbox,
-        OverlayCheckboxId, OverlayMouseLayout, OverlayMouseLayoutState, ProcessInfo, PromptState,
-        PullTarget, ResolvedPullRequest, ResourceStats, RightSection, RuntimeTargetId, TextInput,
-        WorkerEvent,
+        AgentLaunchKind, App, BranchWarningKind, CenterMode, ConfigReloadFailedFocus,
+        ConfirmKillRunningPrompt, ConfirmNonDefaultBranchFocus, CreateAgentBranchInspection,
+        CreateAgentRequest, DeleteAgentFocus, FocusPane, FullscreenOverlay, InputTarget,
+        KillRunningAction, KillRunningFocus, KillRunningFooterAction, KillRunningPrompt,
+        KillableRuntime, KillableRuntimeKind, LeftItem, LeftSection, MacroBarState,
+        MouseClickTarget, MouseLayoutState, NameNewAgentFocus, NonDefaultBranchAction,
+        OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout, OverlayMouseLayoutState,
+        PickProjectWorktreePrompt, ProcessInfo, ProjectWorktreeEntry, PromptState, PullTarget,
+        ResolvedPullRequest, ResourceStats, RightSection, RuntimeTargetId, TextInput, WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
@@ -6940,6 +7094,226 @@ not_a_real_action = ["x"]
             other => panic!("expected name-new-agent prompt, got {other:?}"),
         }
         assert!(!app.create_agent_in_flight);
+    }
+
+    #[test]
+    fn palette_command_opens_project_worktree_picker() {
+        let mut app = test_app(default_bindings());
+        app.selected_left = 0;
+
+        app.execute_command("new-agent-from-worktree".to_string())
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::PickProjectWorktree(prompt) => {
+                assert_eq!(prompt.project.id, app.projects[0].id);
+                assert!(prompt.loading);
+                assert!(prompt.entries.is_empty());
+            }
+            other => panic!("expected PickProjectWorktree prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn disabled_project_worktree_entries_cannot_be_selected_or_confirmed() {
+        let mut app = test_app(default_bindings());
+        let project = app.projects[0].clone();
+        app.prompt = PromptState::PickProjectWorktree(PickProjectWorktreePrompt {
+            project,
+            entries: vec![ProjectWorktreeEntry {
+                path: PathBuf::from("/tmp/has-agent"),
+                branch_name: "main".to_string(),
+                is_managed_by_dux: true,
+                existing_session_id: Some("session-1".to_string()),
+                is_external: false,
+                is_project_checkout: false,
+                is_selectable: false,
+            }],
+            loading: false,
+            selected: None,
+            error: None,
+        });
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(matches!(
+            app.prompt,
+            PromptState::PickProjectWorktree(PickProjectWorktreePrompt { selected: None, .. })
+        ));
+    }
+
+    #[test]
+    fn selecting_managed_orphan_worktree_opens_name_prompt() {
+        let mut app = test_app(default_bindings());
+        let project = app.projects[0].clone();
+        let worktree_path = app.paths.worktrees_root.join("demo").join("orphan");
+        app.prompt = PromptState::PickProjectWorktree(PickProjectWorktreePrompt {
+            project,
+            entries: vec![ProjectWorktreeEntry {
+                path: worktree_path.clone(),
+                branch_name: "orphan".to_string(),
+                is_managed_by_dux: true,
+                existing_session_id: None,
+                is_external: false,
+                is_project_checkout: false,
+                is_selectable: true,
+            }],
+            loading: false,
+            selected: Some(0),
+            error: None,
+        });
+
+        app.open_selected_project_worktree_agent_prompt().unwrap();
+
+        match &app.prompt {
+            PromptState::NameNewAgent { request, input, .. } => match request {
+                CreateAgentRequest::ExistingManagedWorktree {
+                    project,
+                    worktree_path: selected_path,
+                    branch_name,
+                    ..
+                } => {
+                    assert_eq!(project.id, app.projects[0].id);
+                    assert_eq!(selected_path, &worktree_path);
+                    assert_eq!(branch_name, "orphan");
+                    assert_eq!(input.text, "orphan");
+                }
+                other => panic!("expected ExistingManagedWorktree request, got {other:?}"),
+            },
+            other => panic!("expected NameNewAgent prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn managed_worktree_default_name_overrides_randomized_default() {
+        let mut app = test_app(default_bindings());
+        app.config.defaults.enable_randomized_pet_name_by_default = true;
+        let project = app.projects[0].clone();
+        let worktree_path = app.paths.worktrees_root.join("demo").join("managed-name");
+        app.prompt = PromptState::PickProjectWorktree(PickProjectWorktreePrompt {
+            project,
+            entries: vec![ProjectWorktreeEntry {
+                path: worktree_path,
+                branch_name: "feature/other-name".to_string(),
+                is_managed_by_dux: true,
+                existing_session_id: None,
+                is_external: false,
+                is_project_checkout: false,
+                is_selectable: true,
+            }],
+            loading: false,
+            selected: Some(0),
+            error: None,
+        });
+
+        app.open_selected_project_worktree_agent_prompt().unwrap();
+
+        match &app.prompt {
+            PromptState::NameNewAgent {
+                input,
+                randomize_name,
+                randomized_name,
+                ..
+            } => {
+                assert_eq!(input.text, "managed-name");
+                assert!(!*randomize_name);
+                assert!(randomized_name.is_none());
+            }
+            other => panic!("expected NameNewAgent prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn imported_managed_worktree_is_tracked_for_resume_fallback() {
+        let mut app = test_app(default_bindings());
+        let worktree = app.paths.worktrees_root.join("demo").join("imported");
+        std::fs::create_dir_all(&worktree).expect("imported worktree");
+        let session = AgentSession {
+            id: "imported-session".to_string(),
+            project_id: app.projects[0].id.clone(),
+            project_path: Some(app.projects[0].path.clone()),
+            provider: ProviderKind::from_str("codex"),
+            source_branch: "main".to_string(),
+            branch_name: "main".to_string(),
+            worktree_path: worktree.to_string_lossy().to_string(),
+            title: Some("imported".to_string()),
+            started_providers: vec!["codex".to_string()],
+            desired_running: true,
+            auto_reopen_enabled: true,
+            status: SessionStatus::Active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let args = vec!["-c".to_string(), "sleep 1".to_string()];
+        let client = PtyClient::spawn("/bin/sh", &args, &worktree, 24, 80, 1_000)
+            .expect("spawn imported agent");
+
+        let request = app.agent_launch_request(
+            session.clone(),
+            true,
+            AgentLaunchKind::Create {
+                status_message: "imported".to_string(),
+                repo_path: app.projects[0].path.clone(),
+                owns_worktree: false,
+            },
+        );
+        app.worker_tx
+            .send(WorkerEvent::AgentLaunchReady(Box::new(
+                crate::app::AgentLaunchReadyData { request, client },
+            )))
+            .unwrap();
+        app.drain_events();
+
+        assert!(app.resume_fallback_candidates.contains_key(&session.id));
+        assert_eq!(
+            app.sessions
+                .iter()
+                .find(|candidate| candidate.id == session.id)
+                .and_then(|candidate| candidate.title.as_deref()),
+            Some("imported")
+        );
+    }
+
+    #[test]
+    fn selecting_external_worktree_opens_name_prompt_with_fork_request() {
+        let mut app = test_app(default_bindings());
+        let project = app.projects[0].clone();
+        let worktree_path = PathBuf::from("/tmp/external-checkout");
+        app.prompt = PromptState::PickProjectWorktree(PickProjectWorktreePrompt {
+            project,
+            entries: vec![ProjectWorktreeEntry {
+                path: worktree_path.clone(),
+                branch_name: "feature".to_string(),
+                is_managed_by_dux: false,
+                existing_session_id: None,
+                is_external: true,
+                is_project_checkout: false,
+                is_selectable: true,
+            }],
+            loading: false,
+            selected: Some(0),
+            error: None,
+        });
+
+        app.open_selected_project_worktree_agent_prompt().unwrap();
+
+        match &app.prompt {
+            PromptState::NameNewAgent { request, .. } => match request {
+                CreateAgentRequest::ForkExternalWorktree {
+                    source_worktree_path,
+                    source_branch,
+                    ..
+                } => {
+                    assert_eq!(source_worktree_path, &worktree_path);
+                    assert_eq!(source_branch, "feature");
+                }
+                other => panic!("expected ForkExternalWorktree request, got {other:?}"),
+            },
+            other => panic!("expected NameNewAgent prompt, got {other:?}"),
+        }
     }
 
     #[test]
