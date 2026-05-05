@@ -361,6 +361,17 @@ impl App {
         if self.macro_bar.is_some() {
             return self.handle_macro_bar_key(key);
         }
+        if matches!(self.fullscreen_overlay, FullscreenOverlay::Diff)
+            && (self.bindings.lookup(&key, BindingScope::Center) == Some(Action::ExitInteractive)
+                || self.bindings.lookup(&key, BindingScope::Left) == Some(Action::ExitInteractive))
+        {
+            self.close_top_overlay();
+            return Ok(false);
+        }
+        if self.diff_comment_editor.is_some() {
+            self.handle_inline_diff_comment_key(key);
+            return Ok(false);
+        }
         // Interactive mode is handled at the event-loop level via raw stdin
         // passthrough (poll_and_forward_raw_input). When the input target is
         // Agent or Terminal, crossterm's event reader is not called, so
@@ -727,10 +738,21 @@ impl App {
 
     fn handle_center_key(&mut self, key: KeyEvent) -> Result<()> {
         let in_diff = matches!(self.center_mode, CenterMode::Diff { .. });
-        if let Some(action) = self.bindings.lookup(&key, BindingScope::Center) {
+        let action = if in_diff {
+            self.bindings
+                .lookup(&key, BindingScope::Diff)
+                .or_else(|| self.bindings.lookup(&key, BindingScope::Center))
+        } else {
+            self.bindings.lookup(&key, BindingScope::Center)
+        };
+        if let Some(action) = action {
             match action {
                 Action::FocusAgent if !in_diff => self.activate_center_agent()?,
+                Action::FocusAgent if in_diff => self.open_diff_comment_editor_for_selected_row(),
                 Action::ExitInteractive if !in_diff => self.activate_center_agent()?,
+                Action::ExitInteractive if in_diff => {
+                    self.close_top_overlay();
+                }
                 Action::ShowTerminal if !in_diff => self.show_or_open_first_terminal()?,
                 Action::DeleteSession if !in_diff => self.confirm_delete_selected_session()?,
                 Action::RenameSession if !in_diff => self.open_rename_session()?,
@@ -772,22 +794,23 @@ impl App {
                     }
                 }
                 Action::ScrollLineUp => {
-                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
-                        *scroll = scroll.saturating_sub(1);
+                    if in_diff {
+                        self.move_diff_selection(-1);
                     } else if self.last_pty_size.0 > 0 {
                         self.scroll_pty(ScrollDirection::Up, 1);
                     }
                 }
                 Action::ScrollLineDown => {
-                    if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
-                        let max_scroll = self
-                            .last_diff_visual_lines
-                            .saturating_sub(self.last_diff_height.max(1));
-                        *scroll = (*scroll + 1).min(max_scroll);
+                    if in_diff {
+                        self.move_diff_selection(1);
                     } else if self.last_pty_size.0 > 0 {
                         self.scroll_pty(ScrollDirection::Down, 1);
                     }
                 }
+                Action::MoveUp if in_diff => self.move_diff_selection(-1),
+                Action::MoveDown if in_diff => self.move_diff_selection(1),
+                Action::DeleteDiffComment if in_diff => self.delete_selected_diff_comment(),
+                Action::SendDiffComments => self.send_diff_comments_to_agent(),
                 Action::ScrollToBottom => {
                     if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
                         let max_scroll = self
@@ -1679,6 +1702,18 @@ impl App {
                     self.raw_input_parser.clear();
                     return Ok(false);
                 }
+                SeqAction::Intercept(Action::SendDiffComments, _, _) => {
+                    flush_forward_batch(
+                        &mut forward_batch,
+                        is_scrolled_back,
+                        &mut needs_selection_clear,
+                        self.selected_terminal_surface_client(),
+                    );
+                    self.send_diff_comments_to_agent();
+                    self.raw_input_buf.clear();
+                    self.raw_input_parser.clear();
+                    return Ok(false);
+                }
                 SeqAction::Intercept(Action::ExitInteractive, _, _) => {
                     flush_forward_batch(
                         &mut forward_batch,
@@ -1877,6 +1912,26 @@ impl App {
         }
 
         Ok(false)
+    }
+
+    fn handle_inline_diff_comment_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc
+            || self.bindings.lookup(&key, BindingScope::Global) == Some(Action::CloseOverlay)
+        {
+            self.cancel_active_diff_comment_editor();
+            return;
+        }
+        if key.code == KeyCode::Enter {
+            self.save_active_diff_comment_editor();
+            return;
+        }
+        if self.bindings.lookup(&key, BindingScope::Diff) == Some(Action::DeleteDiffComment) {
+            self.delete_selected_diff_comment();
+            return;
+        }
+        if let Some(editor) = &mut self.diff_comment_editor {
+            editor.input.handle_key(key);
+        }
     }
 
     fn handle_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -5638,6 +5693,101 @@ impl App {
         );
     }
 
+    fn move_diff_selection(&mut self, delta: isize) {
+        let (commentable, current) = match &self.center_mode {
+            CenterMode::Diff {
+                rows, selected_row, ..
+            } => {
+                let commentable: Vec<usize> = rows
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, row)| row.anchor.is_some().then_some(idx))
+                    .collect();
+                (commentable, *selected_row)
+            }
+            _ => return,
+        };
+        if commentable.is_empty() {
+            if let CenterMode::Diff { selected_row, .. } = &mut self.center_mode {
+                *selected_row = None;
+            }
+            return;
+        }
+        let current = current.unwrap_or(commentable[0]);
+        let pos = commentable
+            .iter()
+            .position(|idx| *idx == current)
+            .unwrap_or(0);
+        let next_pos = if delta < 0 {
+            pos.saturating_sub(delta.unsigned_abs())
+        } else {
+            (pos + delta as usize).min(commentable.len().saturating_sub(1))
+        };
+        let next = commentable[next_pos];
+        if let CenterMode::Diff { selected_row, .. } = &mut self.center_mode {
+            *selected_row = Some(next);
+        }
+        self.keep_diff_source_row_visible(next);
+        let max_scroll = self
+            .last_diff_visual_lines
+            .saturating_sub(self.last_diff_height.max(1));
+        if let CenterMode::Diff { scroll, .. } = &mut self.center_mode {
+            *scroll = (*scroll).min(max_scroll);
+        }
+    }
+
+    fn keep_diff_source_row_visible(&mut self, source_row: usize) {
+        let Some(visual_row) = self
+            .last_diff_visual_rows
+            .iter()
+            .position(|idx| *idx == source_row)
+        else {
+            return;
+        };
+        let visual_row = visual_row as u16;
+        let height = self.last_diff_height.max(1);
+        if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
+            if visual_row < *scroll {
+                *scroll = visual_row;
+            } else if visual_row >= scroll.saturating_add(height) {
+                *scroll = visual_row.saturating_sub(height.saturating_sub(1));
+            }
+        }
+    }
+
+    fn select_diff_row_from_mouse(&mut self, column: u16, row: u16, open_editor: bool) {
+        let Some(area) = self.mouse_layout.agent_term else {
+            return;
+        };
+        if !contains_point(area, column, row) {
+            return;
+        }
+        let visual = usize::from(row.saturating_sub(area.y))
+            + match self.center_mode {
+                CenterMode::Diff { scroll, .. } => usize::from(scroll),
+                _ => return,
+            };
+        let Some(source_row) = self.last_diff_visual_rows.get(visual).copied() else {
+            return;
+        };
+        let anchor = if let CenterMode::Diff {
+            rows, selected_row, ..
+        } = &mut self.center_mode
+        {
+            if rows.get(source_row).is_some_and(|row| row.anchor.is_some()) {
+                *selected_row = Some(source_row);
+                rows[source_row].anchor.clone()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if open_editor && let Some(anchor) = anchor {
+            self.open_diff_comment_editor_for_anchor(anchor);
+        }
+    }
+
     fn update_dragged_panes(&mut self, column: u16, row: u16) {
         let body = self.mouse_layout.body;
         if body.width == 0 {
@@ -5783,6 +5933,17 @@ impl App {
             return false;
         }
 
+        if matches!(self.fullscreen_overlay, FullscreenOverlay::Diff)
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && !self
+                .mouse_layout
+                .agent_term
+                .is_some_and(|rect| contains_point(rect, mouse.column, mouse.row))
+        {
+            self.close_top_overlay();
+            return false;
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row) {
@@ -5828,7 +5989,17 @@ impl App {
                         let double_click =
                             self.register_mouse_click(MouseClickTarget::CenterPane, None);
                         self.focus = FocusPane::Center;
-                        if double_click {
+                        if matches!(self.center_mode, CenterMode::Diff { .. }) {
+                            let marker_click = self
+                                .mouse_layout
+                                .agent_term
+                                .is_some_and(|area| mouse.column < area.x.saturating_add(2));
+                            self.select_diff_row_from_mouse(
+                                mouse.column,
+                                mouse.row,
+                                double_click || marker_click,
+                            );
+                        } else if double_click {
                             self.activate_center_agent_from_mouse();
                         }
                     }
@@ -6278,6 +6449,7 @@ mod tests {
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
+    use crate::diff::{DiffAnchor, DiffRow, DiffRowTag, DiffSide};
     use crate::editor::{DetectedEditor, EditorKind};
     use crate::keybindings::{Action, BINDING_DEFS, BindingScope, RuntimeBindings};
     use crate::model::{
@@ -6441,6 +6613,9 @@ mod tests {
             updated_at: now,
         };
         let (worker_tx, worker_rx) = mpsc::channel();
+        session_store
+            .upsert_session(&session)
+            .expect("persist test session");
         let single_instance_lock = crate::lockfile::SingleInstanceLock::acquire(&paths.lock_path)
             .expect("single-instance lock for test App");
         let mut app = App {
@@ -6501,6 +6676,9 @@ mod tests {
             prev_scrollback_offset: 0,
             last_diff_height: 0,
             last_diff_visual_lines: 0,
+            last_diff_visual_rows: Vec::new(),
+            diff_comments: std::collections::HashMap::new(),
+            diff_comment_editor: None,
             theme: Theme::default_dark(),
             tick_count: 0,
             start_time: std::time::Instant::now(),
@@ -8611,6 +8789,7 @@ not_a_real_action = ["x"]
 
         assert_eq!(app.focus, FocusPane::Center);
         assert!(matches!(app.center_mode, CenterMode::Diff { .. }));
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Diff);
     }
 
     #[test]
@@ -8971,7 +9150,13 @@ not_a_real_action = ["x"]
                 Line::from("two"),
                 Line::from("three"),
             ]),
+            rows: Arc::new(vec![
+                crate::diff::DiffRow { anchor: None },
+                crate::diff::DiffRow { anchor: None },
+                crate::diff::DiffRow { anchor: None },
+            ]),
             scroll: 0,
+            selected_row: None,
             gutter_width: 0,
             worktree_path: String::new(),
             rel_path: String::new(),
@@ -8990,15 +9175,265 @@ not_a_real_action = ["x"]
     fn open_fake_diff(app: &mut App) {
         app.center_mode = CenterMode::Diff {
             lines: Arc::new(vec![Line::from("diff")]),
+            rows: Arc::new(vec![crate::diff::DiffRow { anchor: None }]),
             scroll: 0,
+            selected_row: None,
             gutter_width: 0,
             worktree_path: String::new(),
             rel_path: String::new(),
         };
     }
 
+    fn diff_anchor(line_number: usize, text: &str) -> DiffAnchor {
+        DiffAnchor {
+            rel_path: "README.md".to_string(),
+            side: DiffSide::New,
+            line_number,
+            line_content: text.to_string(),
+            tag: DiffRowTag::Add,
+        }
+    }
+
+    fn open_commentable_diff(app: &mut App) {
+        let anchor = diff_anchor(45, "## title");
+        app.center_mode = CenterMode::Diff {
+            lines: Arc::new(vec![Line::from("@@"), Line::from("+## title")]),
+            rows: Arc::new(vec![
+                DiffRow { anchor: None },
+                DiffRow {
+                    anchor: Some(anchor),
+                },
+            ]),
+            scroll: 0,
+            selected_row: Some(1),
+            gutter_width: 0,
+            worktree_path: String::new(),
+            rel_path: "README.md".to_string(),
+        };
+        app.last_diff_height = 5;
+        app.last_diff_visual_lines = 2;
+        app.last_diff_visual_rows = vec![0, 1];
+    }
+
     #[test]
-    fn left_move_down_closes_open_diff_when_moving_between_agents() {
+    fn diff_comment_prompt_includes_line_anchor_and_comment_text() {
+        let mut app = test_app(default_bindings());
+        let anchor = diff_anchor(45, "## title");
+        let key = crate::app::DiffCommentKey::new("session-1", &anchor);
+
+        app.save_diff_comment(key, "Use an h4 instead".to_string());
+        let prompt = app.build_diff_comments_prompt().expect("prompt");
+
+        assert!(prompt.contains("On README.md line 45:"));
+        assert!(prompt.contains("\t## title"));
+        assert!(prompt.contains("Feedback:"));
+        assert!(prompt.contains("\tUse an h4 instead"));
+
+        let stored = app.session_store.load_diff_comments().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].comment_text, "Use an h4 instead");
+    }
+
+    #[test]
+    fn empty_diff_comment_save_removes_existing_comment() {
+        let mut app = test_app(default_bindings());
+        let anchor = diff_anchor(45, "## title");
+        let key = crate::app::DiffCommentKey::new("session-1", &anchor);
+
+        app.save_diff_comment(key.clone(), "Change heading".to_string());
+        assert_eq!(app.pending_diff_comment_count_for_selected_session(), 1);
+
+        app.save_diff_comment(key, "   ".to_string());
+        assert_eq!(app.pending_diff_comment_count_for_selected_session(), 0);
+        assert!(app.session_store.load_diff_comments().unwrap().is_empty());
+    }
+
+    #[test]
+    fn orphaned_diff_comments_are_comments_missing_from_current_diff_anchors() {
+        let mut app = test_app(default_bindings());
+        open_commentable_diff(&mut app);
+        let matching = crate::app::DiffCommentKey::new("session-1", &diff_anchor(45, "## title"));
+        let orphaned = crate::app::DiffCommentKey::new("session-1", &diff_anchor(45, "**title**"));
+
+        app.save_diff_comment(matching, "Visible comment".to_string());
+        app.save_diff_comment(orphaned, "Orphaned comment".to_string());
+
+        let orphaned = app.current_diff_orphaned_comments();
+        assert_eq!(orphaned.len(), 1);
+        assert_eq!(orphaned[0].text, "Orphaned comment");
+        assert_eq!(orphaned[0].key.line_content, "**title**");
+    }
+
+    #[test]
+    fn delete_diff_comment_action_removes_selected_line_comment() {
+        let mut app = test_app(default_bindings());
+        open_commentable_diff(&mut app);
+        app.focus = FocusPane::Center;
+        let key = crate::app::DiffCommentKey::new("session-1", &diff_anchor(45, "## title"));
+
+        app.save_diff_comment(key, "Visible comment".to_string());
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert_eq!(app.pending_diff_comment_count_for_selected_session(), 0);
+        assert!(app.session_store.load_diff_comments().unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_diff_comment_action_removes_first_orphan_when_no_line_comment_is_selected() {
+        let mut app = test_app(default_bindings());
+        open_commentable_diff(&mut app);
+        app.focus = FocusPane::Center;
+        let key = crate::app::DiffCommentKey::new("session-1", &diff_anchor(45, "**title**"));
+
+        app.save_diff_comment(key, "Orphaned comment".to_string());
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert_eq!(app.pending_diff_comment_count_for_selected_session(), 0);
+        assert!(app.session_store.load_diff_comments().unwrap().is_empty());
+    }
+
+    #[test]
+    fn persisted_diff_comments_hydrate_into_app_comment_map() {
+        let app = test_app(default_bindings());
+
+        app.session_store
+            .upsert_diff_comment(
+                "session-1",
+                "README.md",
+                DiffSide::New,
+                45,
+                "## title",
+                "Use h4 here",
+            )
+            .unwrap();
+        let comments = crate::app::load_app_diff_comments(&app.session_store);
+
+        assert_eq!(comments.len(), 1);
+        let comment = comments.values().next().unwrap();
+        assert_eq!(comment.key.session_id, "session-1");
+        assert_eq!(comment.key.rel_path, "README.md");
+        assert_eq!(comment.text, "Use h4 here");
+    }
+
+    #[test]
+    fn mouse_double_click_on_diff_row_opens_comment_editor() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        open_commentable_diff(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 2));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 2));
+
+        assert!(app.diff_comment_editor.is_some());
+    }
+
+    #[test]
+    fn enter_opens_inline_comment_editor_for_selected_diff_row() {
+        let mut app = test_app(default_bindings());
+        open_commentable_diff(&mut app);
+        app.focus = FocusPane::Center;
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(app.diff_comment_editor.is_some());
+    }
+
+    #[test]
+    fn inline_comment_editor_saves_on_enter() {
+        let mut app = test_app(default_bindings());
+        open_commentable_diff(&mut app);
+        app.focus = FocusPane::Center;
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        for ch in "Use an h4 instead".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(app.diff_comment_editor.is_none());
+        assert_eq!(app.pending_diff_comment_count_for_selected_session(), 1);
+        let prompt = app.build_diff_comments_prompt().expect("prompt");
+        assert!(prompt.contains("\tUse an h4 instead"));
+    }
+
+    #[test]
+    fn a_key_does_not_open_diff_comment_editor() {
+        let mut app = test_app(default_bindings());
+        open_commentable_diff(&mut app);
+        app.focus = FocusPane::Center;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(app.diff_comment_editor.is_none());
+    }
+
+    #[test]
+    fn ctrl_g_closes_fullscreen_diff() {
+        let mut app = test_app(default_bindings());
+        open_commentable_diff(&mut app);
+        app.focus = FocusPane::Center;
+        app.fullscreen_overlay = FullscreenOverlay::Diff;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+        assert!(matches!(app.center_mode, CenterMode::Agent));
+    }
+
+    #[test]
+    fn ctrl_g_closes_fullscreen_diff_while_comment_editor_is_open() {
+        let mut app = test_app(default_bindings());
+        open_commentable_diff(&mut app);
+        app.focus = FocusPane::Center;
+        app.fullscreen_overlay = FullscreenOverlay::Diff;
+        app.open_diff_comment_editor_for_selected_row();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+        assert!(matches!(app.center_mode, CenterMode::Agent));
+        assert!(app.diff_comment_editor.is_none());
+    }
+
+    #[test]
+    fn clicking_outside_fullscreen_diff_closes_it() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        open_commentable_diff(&mut app);
+        app.focus = FocusPane::Center;
+        app.fullscreen_overlay = FullscreenOverlay::Diff;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
+
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+        assert!(matches!(app.center_mode, CenterMode::Agent));
+    }
+
+    #[test]
+    fn clicking_inside_fullscreen_diff_keeps_it_open() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        open_commentable_diff(&mut app);
+        app.focus = FocusPane::Center;
+        app.fullscreen_overlay = FullscreenOverlay::Diff;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 2));
+
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Diff);
+        assert!(matches!(app.center_mode, CenterMode::Diff { .. }));
+    }
+
+    #[test]
+    fn left_move_down_preserves_open_fullscreen_diff_when_moving_between_agents() {
         let mut app = test_app(default_bindings());
         let now = Utc::now();
         app.sessions.push(AgentSession {
@@ -9026,11 +9461,11 @@ not_a_real_action = ["x"]
             .unwrap();
 
         assert_eq!(app.selected_left, 2);
-        assert!(matches!(app.center_mode, CenterMode::Agent));
+        assert!(matches!(app.center_mode, CenterMode::Diff { .. }));
     }
 
     #[test]
-    fn left_move_up_closes_open_diff() {
+    fn left_move_up_preserves_open_fullscreen_diff() {
         let mut app = test_app(default_bindings());
         app.selected_left = 1;
         app.focus = FocusPane::Left;
@@ -9040,7 +9475,7 @@ not_a_real_action = ["x"]
             .unwrap();
 
         assert_eq!(app.selected_left, 0);
-        assert!(matches!(app.center_mode, CenterMode::Agent));
+        assert!(matches!(app.center_mode, CenterMode::Diff { .. }));
     }
 
     fn append_empty_projects(app: &mut App, count: usize) {
@@ -9104,7 +9539,7 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn mouse_click_different_left_row_closes_open_diff() {
+    fn mouse_click_different_left_row_preserves_open_fullscreen_diff() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
         app.selected_left = 1;
@@ -9113,7 +9548,7 @@ not_a_real_action = ["x"]
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 1));
 
         assert_eq!(app.selected_left, 0);
-        assert!(matches!(app.center_mode, CenterMode::Agent));
+        assert!(matches!(app.center_mode, CenterMode::Diff { .. }));
     }
 
     #[test]

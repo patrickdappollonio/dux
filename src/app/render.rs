@@ -50,6 +50,12 @@ const TIP_GAP: u16 = 2;
 /// Maximum number of wrapped lines a tip may occupy.
 const TIP_MAX_LINES: u16 = 3;
 
+struct DecoratedDiffLine {
+    line: Line<'static>,
+    source_row: usize,
+    inline_editor: bool,
+}
+
 /// Welcome-screen tips shown beneath the ASCII logo. Wrap text in backticks
 /// to highlight it in an accent color (the backticks themselves are not
 /// rendered). Each function receives `&RuntimeBindings` so keybinding labels
@@ -925,8 +931,16 @@ impl App {
         }
 
         match &self.center_mode {
+            CenterMode::Diff { .. }
+                if !matches!(self.fullscreen_overlay, FullscreenOverlay::Diff) =>
+            {
+                let title = "Diff";
+                self.themed_block(title, focused)
+                    .render(pane_area, frame.buffer_mut());
+            }
             CenterMode::Diff { .. } => {
-                self.render_diff(frame, pane_area, focused);
+                self.themed_block("Diff", focused)
+                    .render(pane_area, frame.buffer_mut());
             }
             CenterMode::Agent if !matches!(self.fullscreen_overlay, FullscreenOverlay::None) => {
                 // Skip agent rendering here — fullscreen overlay handles it.
@@ -948,13 +962,21 @@ impl App {
     }
 
     fn render_diff(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
-        let (lines, scroll, gutter_width) = match &self.center_mode {
+        let (lines, rows, selected_row, scroll, gutter_width) = match &self.center_mode {
             CenterMode::Diff {
                 lines,
+                rows,
+                selected_row,
                 scroll,
                 gutter_width,
                 ..
-            } => (Arc::clone(lines), *scroll, *gutter_width),
+            } => (
+                Arc::clone(lines),
+                Arc::clone(rows),
+                *selected_row,
+                *scroll,
+                *gutter_width,
+            ),
             _ => return,
         };
 
@@ -977,11 +999,31 @@ impl App {
 
         let w = content_area.width.max(1) as usize;
 
-        if gutter_width > 0 {
+        let decorated = self.decorated_diff_lines(&lines, &rows, selected_row);
+        let decorated_lines: Vec<Line<'static>> =
+            decorated.iter().map(|row| row.line.clone()).collect();
+        let effective_gutter_width = gutter_width + 2;
+
+        {
             // Gutter-aware wrapping: continuation lines are indented to align
             // with the content column past the gutter.
-            let wrapped = crate::diff::wrap_diff_lines(&lines, w, gutter_width);
+            let wrapped_with_rows = crate::diff::wrap_diff_lines_with_indices(
+                &decorated_lines,
+                w,
+                effective_gutter_width,
+            );
+            let wrapped: Vec<Line<'static>> = wrapped_with_rows
+                .iter()
+                .map(|(line, _)| line.clone())
+                .collect();
+            self.last_diff_visual_rows = wrapped_with_rows
+                .iter()
+                .map(|(_, decorated_row)| decorated[*decorated_row].source_row)
+                .collect();
             self.last_diff_visual_lines = wrapped.len() as u16;
+            let editor_visual_row = wrapped_with_rows
+                .iter()
+                .position(|(_, decorated_row)| decorated[*decorated_row].inline_editor);
 
             let max_scroll = self
                 .last_diff_visual_lines
@@ -991,57 +1033,77 @@ impl App {
             Paragraph::new(wrapped)
                 .scroll((scroll, 0))
                 .render(content_area, frame.buffer_mut());
-        } else {
-            // No gutter — fall back to ratatui's built-in wrapping.
-            self.last_diff_visual_lines = lines
-                .iter()
-                .map(|l| {
-                    let lw = l.width();
-                    if lw <= w { 1u16 } else { lw.div_ceil(w) as u16 }
-                })
-                .sum();
-
-            let max_scroll = self
-                .last_diff_visual_lines
-                .saturating_sub(content_area.height);
-            let scroll = scroll.min(max_scroll);
-
-            Paragraph::new((*lines).clone())
-                .wrap(Wrap { trim: false })
-                .scroll((scroll, 0))
-                .render(content_area, frame.buffer_mut());
+            self.render_inline_diff_comment_editor(frame, content_area, scroll, editor_visual_row);
         }
 
         // Hint bar with top border (same style as agent terminal).
         if hint_area.height > 0 {
             let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
-            let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
-            let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
-            let scroll_line = self.bindings.label_for(Action::ScrollLineDown);
+            let page_down = self.bindings.labels_for(Action::ScrollPageDown);
+            let page_up = self.bindings.labels_for(Action::ScrollPageUp);
+            let line_nav = self
+                .bindings
+                .combined_label(Action::ScrollLineDown, Action::ScrollLineUp);
+            let add_comment = self.bindings.label_for(Action::FocusAgent);
+            let delete_comment = self.bindings.label_for(Action::DeleteDiffComment);
+            let send_comments = self.bindings.label_for(Action::SendDiffComments);
+            let exit = self.bindings.label_for(Action::ExitInteractive);
             let close = self.bindings.label_for(Action::CloseOverlay);
+            let pending = self.pending_diff_comment_count_for_selected_session();
+            let orphaned = self.current_diff_orphaned_comment_count();
             let mut spans: Vec<Span> = Vec::new();
 
+            spans.push(Span::styled("Navigate ", desc_style));
+            if !line_nav.is_empty() {
+                spans.extend(self.theme.dim_key_badge_default(&line_nav));
+                spans.push(Span::styled(" lines ", desc_style));
+            }
+            if !page_up.is_empty() || !page_down.is_empty() {
+                spans.extend(self.theme.dim_key_badge_default(&page_up));
+                spans.push(Span::styled(" ", desc_style));
+                spans.extend(self.theme.dim_key_badge_default(&page_down));
+                spans.push(Span::styled(" pages. ", desc_style));
+            }
             if scroll > 0 {
                 spans.push(Span::styled(
-                    format!("Scrolled back {scroll} lines. "),
+                    format!("{scroll} from top. "),
                     Style::default().fg(self.theme.hint_key_fg),
                 ));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_down));
-                spans.push(Span::styled(" down, ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_up));
-                spans.push(Span::styled(" up, ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_line));
-                spans.push(Span::styled(" one line. ", desc_style));
-            } else {
-                spans.extend(self.theme.dim_key_badge_default(&scroll_up));
-                spans.push(Span::styled(" ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_down));
-                spans.push(Span::styled(" to scroll. ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_line));
-                spans.push(Span::styled(" one line. ", desc_style));
             }
-            spans.extend(self.theme.dim_key_badge_default(&close));
-            spans.push(Span::styled(" close diff.", desc_style));
+            if !add_comment.is_empty() {
+                spans.extend(self.theme.dim_key_badge_default(&add_comment));
+                spans.push(Span::styled(" comment. ", desc_style));
+            }
+            if !delete_comment.is_empty() {
+                spans.extend(self.theme.dim_key_badge_default(&delete_comment));
+                if self.current_diff_selected_comment_key().is_some() {
+                    spans.push(Span::styled(" delete comment. ", desc_style));
+                } else if orphaned > 0 {
+                    spans.push(Span::styled(" dismiss orphaned. ", desc_style));
+                }
+            }
+            if pending > 0 && !send_comments.is_empty() {
+                spans.push(Span::styled(
+                    format!("{pending} queued. "),
+                    Style::default().fg(self.theme.hint_key_fg),
+                ));
+                if orphaned > 0 {
+                    spans.push(Span::styled(
+                        format!("{orphaned} orphaned in this diff. "),
+                        Style::default().fg(self.theme.warning_fg),
+                    ));
+                }
+                spans.extend(self.theme.dim_key_badge_default(&send_comments));
+                spans.push(Span::styled(" send. ", desc_style));
+            }
+            if !exit.is_empty() {
+                spans.extend(self.theme.dim_key_badge_default(&exit));
+                spans.push(Span::styled(" return. ", desc_style));
+            }
+            if !close.is_empty() {
+                spans.extend(self.theme.dim_key_badge_default(&close));
+                spans.push(Span::styled(" close diff.", desc_style));
+            }
 
             Paragraph::new(Line::from(spans))
                 .block(
@@ -1050,6 +1112,188 @@ impl App {
                         .border_style(Style::default().fg(self.theme.border_normal)),
                 )
                 .render(hint_area, frame.buffer_mut());
+        }
+    }
+
+    fn decorated_diff_lines(
+        &self,
+        lines: &[Line<'static>],
+        rows: &[crate::diff::DiffRow],
+        selected_row: Option<usize>,
+    ) -> Vec<DecoratedDiffLine> {
+        let mut decorated: Vec<DecoratedDiffLine> = Vec::with_capacity(lines.len());
+        for (idx, line) in lines.iter().enumerate() {
+            let anchor = rows.get(idx).and_then(|row| row.anchor.as_ref());
+            let has_comment = anchor
+                .and_then(|anchor| self.diff_comment_for_anchor(anchor))
+                .is_some();
+            let selected = selected_row == Some(idx);
+            let marker = if has_comment {
+                "● "
+            } else if selected && anchor.is_some() {
+                "› "
+            } else {
+                "  "
+            };
+            let marker_style = if has_comment {
+                Style::default().fg(self.theme.warning_fg)
+            } else if selected {
+                Style::default().fg(self.theme.hint_key_fg)
+            } else {
+                Style::default().fg(self.theme.hint_dim_desc_fg)
+            };
+            let mut spans = Vec::with_capacity(line.spans.len() + 1);
+            spans.push(Span::styled(marker, marker_style));
+            if selected {
+                let selection = self.theme.selection_style();
+                spans.extend(line.spans.iter().map(|span| {
+                    Span::styled(span.content.to_string(), span.style.patch(selection))
+                }));
+            } else {
+                spans.extend(line.spans.iter().cloned());
+            }
+            decorated.push(DecoratedDiffLine {
+                line: Line::from(spans),
+                source_row: idx,
+                inline_editor: false,
+            });
+
+            if anchor
+                .and_then(|anchor| self.diff_comment_editor_for_anchor(anchor))
+                .is_some()
+            {
+                for _ in 0..3 {
+                    decorated.push(DecoratedDiffLine {
+                        line: Line::from(""),
+                        source_row: idx,
+                        inline_editor: true,
+                    });
+                }
+            }
+        }
+
+        let orphaned = self.current_diff_orphaned_comments();
+        if !orphaned.is_empty() {
+            decorated.push(DecoratedDiffLine {
+                line: Line::from(""),
+                source_row: usize::MAX,
+                inline_editor: false,
+            });
+            decorated.push(DecoratedDiffLine {
+                line: Line::from(vec![Span::styled(
+                    "  Queued comments no longer matching visible diff lines",
+                    Style::default().fg(self.theme.warning_fg),
+                )]),
+                source_row: usize::MAX,
+                inline_editor: false,
+            });
+            for comment in orphaned {
+                let key = &comment.key;
+                decorated.push(DecoratedDiffLine {
+                    line: Line::from(vec![
+                        Span::styled("! ", Style::default().fg(self.theme.warning_fg)),
+                        Span::styled(
+                            format!(
+                                "{}:{} ({}) ",
+                                key.rel_path,
+                                key.line_number,
+                                side_label(key.side)
+                            ),
+                            Style::default().fg(self.theme.hint_key_fg),
+                        ),
+                        Span::styled(
+                            key.line_content.clone(),
+                            Style::default().fg(self.theme.hint_dim_desc_fg),
+                        ),
+                    ]),
+                    source_row: usize::MAX,
+                    inline_editor: false,
+                });
+                decorated.push(DecoratedDiffLine {
+                    line: Line::from(vec![
+                        Span::styled("  Comment: ", Style::default().fg(self.theme.hint_key_fg)),
+                        Span::styled(comment.text, Style::default().fg(self.theme.text_fg)),
+                    ]),
+                    source_row: usize::MAX,
+                    inline_editor: false,
+                });
+            }
+        }
+
+        decorated
+    }
+
+    fn render_inline_diff_comment_editor(
+        &self,
+        frame: &mut Frame,
+        content_area: Rect,
+        scroll: u16,
+        visual_row: Option<usize>,
+    ) {
+        let Some(editor) = &self.diff_comment_editor else {
+            return;
+        };
+        let Some(visual_row) = visual_row else {
+            return;
+        };
+        let visual_row = visual_row as u16;
+        if visual_row < scroll || visual_row >= scroll.saturating_add(content_area.height) {
+            return;
+        }
+        let y = content_area.y + visual_row.saturating_sub(scroll);
+        let remaining = content_area
+            .y
+            .saturating_add(content_area.height)
+            .saturating_sub(y);
+        if remaining < 3 || content_area.width < 12 {
+            return;
+        }
+        let width = content_area.width.saturating_sub(4).max(8);
+        let area = Rect::new(content_area.x.saturating_add(2), y, width, 3);
+        self.clear_overlay_area(frame, area);
+
+        let mut bottom_spans = vec![Span::raw(" ")];
+        for (key, desc) in [
+            ("Enter".to_string(), "save"),
+            (self.bindings.label_for(Action::CloseOverlay), "cancel"),
+            (self.bindings.label_for(Action::DeleteDiffComment), "delete"),
+        ] {
+            if key.is_empty() {
+                continue;
+            }
+            bottom_spans.extend(
+                self.theme
+                    .key_badge_default(&key)
+                    .into_iter()
+                    .map(|span| Span::styled(span.content.to_string(), span.style)),
+            );
+            bottom_spans.push(Span::styled(
+                format!(" {desc}  "),
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+        }
+
+        let block = self
+            .themed_overlay_block("Comment")
+            .title_bottom(Line::from(bottom_spans));
+        let inner = block.inner(area);
+        Paragraph::new(render_single_line_cursor_input(
+            "",
+            &editor.input.text,
+            editor.input.cursor,
+            self.theme.input_cursor_fg,
+            self.theme.input_cursor_bg,
+        ))
+        .block(block)
+        .render(area, frame.buffer_mut());
+
+        let cursor_col = editor.input.text[..editor.input.cursor].chars().count() as u16;
+        let cx = inner
+            .x
+            .saturating_add(cursor_col)
+            .min(inner.x.saturating_add(inner.width.saturating_sub(1)));
+        if inner.height > 0 {
+            frame.set_cursor_position((cx, inner.y));
         }
     }
 
@@ -6163,6 +6407,10 @@ impl App {
                 self.render_fullscreen_startup_log(frame);
                 return;
             }
+            FullscreenOverlay::Diff => {
+                self.render_fullscreen_diff(frame);
+                return;
+            }
             FullscreenOverlay::None => {}
         }
         if !matches!(self.prompt, PromptState::None) {
@@ -6384,6 +6632,16 @@ impl App {
         if cx < input_inner.x + input_inner.width && cy < input_inner.y + input_inner.height {
             frame.set_cursor_position((cx, cy));
         }
+    }
+
+    fn render_fullscreen_diff(&mut self, frame: &mut Frame) {
+        self.render_dim_overlay(frame);
+        let area = centered_rect(96, 94, frame.area());
+        Clear.render(area, frame.buffer_mut());
+        frame
+            .buffer_mut()
+            .set_style(area, Style::default().bg(self.theme.app_bg));
+        self.render_diff(frame, area, true);
     }
 
     fn render_macro_bar(&mut self, frame: &mut Frame, area: Rect) {

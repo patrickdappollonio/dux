@@ -39,6 +39,8 @@ pub enum Action {
     ScrollLineDown,
     ScrollToBottom,
     ScrollToTop,
+    DeleteDiffComment,
+    SendDiffComments,
     // Files pane (git staging)
     OpenDiff,
     StageUnstage,
@@ -110,6 +112,7 @@ pub enum BindingScope {
     Global,
     Left,
     Center,
+    Diff,
     Files,
     Interactive,
     Resize,
@@ -128,6 +131,7 @@ impl BindingScope {
         Self::Global,
         Self::Left,
         Self::Center,
+        Self::Diff,
         Self::Files,
         Self::Interactive,
         Self::Resize,
@@ -146,6 +150,7 @@ impl BindingScope {
             Self::Global => "Global",
             Self::Left => "Projects pane",
             Self::Center => "Agent pane",
+            Self::Diff => "Diff view",
             Self::Files => "Files pane",
             Self::Interactive => "Interactive mode",
             Self::Resize => "Resize mode",
@@ -230,6 +235,8 @@ impl Action {
             Action::ScrollLineDown => "scroll_line_down",
             Action::ScrollToBottom => "scroll_to_bottom",
             Action::ScrollToTop => "scroll_to_top",
+            Action::DeleteDiffComment => "delete_diff_comment",
+            Action::SendDiffComments => "send_diff_comments",
             Action::OpenDiff => "open_diff",
             Action::StageUnstage => "stage_unstage",
             Action::CommitChanges => "commit_changes",
@@ -342,6 +349,8 @@ impl Action {
             Action::ScrollLineDown => "Scroll down one line in any scrollable view.",
             Action::ScrollToBottom => "Exit scroll mode and jump to the latest output.",
             Action::ScrollToTop => "Jump to the top of the scrollback buffer.",
+            Action::DeleteDiffComment => "Delete the selected diff line comment.",
+            Action::SendDiffComments => "Send queued diff comments to the selected agent.",
             Action::OpenDiff => "Open the selected file's diff.",
             Action::StageUnstage => "Stage or unstage the selected file.",
             Action::CommitChanges => "Commit staged changes.",
@@ -443,7 +452,9 @@ impl Action {
             | Action::ToggleFullscreen
             | Action::ScrollPageUp
             | Action::ScrollPageDown
+            | Action::SendDiffComments
             | Action::ShowTerminal => Some("Agent pane"),
+            Action::DeleteDiffComment => Some("Diff view"),
             Action::ScrollLineUp
             | Action::ScrollLineDown
             | Action::ScrollToBottom
@@ -1060,6 +1071,28 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         help: Some(HelpEntry {
             section: "Scrolling",
             description: "Jump to top of scrollback",
+        }),
+        hint_contexts: &[],
+        palette: None,
+    },
+    BindingDef {
+        action: Action::DeleteDiffComment,
+        default_keys: &[key!(ctrl - d)],
+        scopes: &[BindingScope::Diff],
+        help: Some(HelpEntry {
+            section: "Diff view",
+            description: "Delete the selected diff line comment",
+        }),
+        hint_contexts: &[],
+        palette: None,
+    },
+    BindingDef {
+        action: Action::SendDiffComments,
+        default_keys: &[key!(ctrl - y)],
+        scopes: &[BindingScope::Center, BindingScope::Interactive],
+        help: Some(HelpEntry {
+            section: "Agent pane",
+            description: "Send queued diff comments to the selected agent",
         }),
         hint_contexts: &[],
         palette: None,

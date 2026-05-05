@@ -31,6 +31,7 @@ use crate::config::{
     save_config, validate_keys,
 };
 use crate::diff::SyntaxCache;
+use crate::diff::{DiffAnchor, DiffRow, DiffSide};
 use crate::editor::DetectedEditor;
 use crate::git;
 use crate::keybindings::{
@@ -46,7 +47,7 @@ use crate::provider;
 use crate::pty::PtyClient;
 use crate::pty::TerminalSnapshot;
 use crate::statusline::{StatusLine, StatusTone};
-use crate::storage::SessionStore;
+use crate::storage::{SessionStore, StoredDiffComment};
 use crate::theme::Theme;
 
 use text_input::TextInput;
@@ -113,6 +114,9 @@ pub struct App {
     pub(crate) show_diff_line_numbers: bool,
     pub(crate) last_diff_height: u16,
     pub(crate) last_diff_visual_lines: u16,
+    pub(crate) last_diff_visual_rows: Vec<usize>,
+    pub(crate) diff_comments: HashMap<DiffCommentKey, DiffComment>,
+    pub(crate) diff_comment_editor: Option<InlineDiffCommentEditor>,
     pub(crate) theme: Theme,
     pub(crate) tick_count: u64,
     /// Wall-clock reference for time-based animations (spinners). Using
@@ -301,6 +305,7 @@ pub(crate) enum FullscreenOverlay {
     Agent,
     Terminal,
     StartupLog,
+    Diff,
 }
 
 #[derive(Clone, Debug)]
@@ -308,13 +313,83 @@ pub(crate) enum CenterMode {
     Agent,
     Diff {
         lines: Arc<Vec<Line<'static>>>,
+        rows: Arc<Vec<DiffRow>>,
         scroll: u16,
+        selected_row: Option<usize>,
         /// Display-column width of the gutter (0 when line numbers are off).
         gutter_width: usize,
         /// Source paths for re-generating the diff on setting changes.
         worktree_path: String,
         rel_path: String,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct DiffCommentKey {
+    pub(crate) session_id: String,
+    pub(crate) rel_path: String,
+    pub(crate) side: DiffSide,
+    pub(crate) line_number: usize,
+    pub(crate) line_content: String,
+}
+
+impl DiffCommentKey {
+    pub(crate) fn new(session_id: impl Into<String>, anchor: &DiffAnchor) -> Self {
+        Self {
+            session_id: session_id.into(),
+            rel_path: anchor.rel_path.clone(),
+            side: anchor.side,
+            line_number: anchor.line_number,
+            line_content: anchor.line_content.clone(),
+        }
+    }
+}
+
+pub(crate) fn side_label(side: DiffSide) -> &'static str {
+    match side {
+        DiffSide::Old => "old",
+        DiffSide::New => "new",
+    }
+}
+
+pub(crate) fn load_app_diff_comments(store: &SessionStore) -> HashMap<DiffCommentKey, DiffComment> {
+    match store.load_diff_comments() {
+        Ok(comments) => comments
+            .into_iter()
+            .map(diff_comment_from_storage)
+            .map(|comment| (comment.key.clone(), comment))
+            .collect(),
+        Err(err) => {
+            logger::error(&format!("failed to load persisted diff comments: {err:#}"));
+            HashMap::new()
+        }
+    }
+}
+
+fn diff_comment_from_storage(stored: StoredDiffComment) -> DiffComment {
+    let key = DiffCommentKey {
+        session_id: stored.session_id,
+        rel_path: stored.rel_path,
+        side: stored.side,
+        line_number: stored.line_number,
+        line_content: stored.line_content,
+    };
+    DiffComment {
+        key,
+        text: stored.comment_text,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DiffComment {
+    pub(crate) key: DiffCommentKey,
+    pub(crate) text: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct InlineDiffCommentEditor {
+    pub(crate) key: DiffCommentKey,
+    pub(crate) input: TextInput,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1645,6 +1720,7 @@ impl App {
             &session_store,
         )?;
         let sessions = session_store.load_sessions()?;
+        let diff_comments = load_app_diff_comments(&session_store);
         let (worker_tx, worker_rx) = mpsc::channel();
         let watched_worktree: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
         let initial_status = format!(
@@ -1718,6 +1794,9 @@ impl App {
             prev_scrollback_offset: 0,
             last_diff_height: 0,
             last_diff_visual_lines: 0,
+            last_diff_visual_rows: Vec::new(),
+            diff_comments,
+            diff_comment_editor: None,
             theme,
             tick_count: 0,
             start_time: Instant::now(),
@@ -2010,6 +2089,14 @@ impl App {
     }
 
     pub(crate) fn close_top_overlay(&mut self) -> bool {
+        if matches!(self.fullscreen_overlay, FullscreenOverlay::Diff) {
+            self.fullscreen_overlay = FullscreenOverlay::None;
+            self.center_mode = CenterMode::Agent;
+            self.diff_comment_editor = None;
+            self.focus = FocusPane::Files;
+            self.set_info("Closed diff view, returned to agent output.");
+            return true;
+        }
         if matches!(self.fullscreen_overlay, FullscreenOverlay::Terminal) {
             let return_to_list = self.terminal_return_to_list;
             self.fullscreen_overlay = FullscreenOverlay::None;
@@ -2047,6 +2134,7 @@ impl App {
         }
         if matches!(self.center_mode, CenterMode::Diff { .. }) {
             self.center_mode = CenterMode::Agent;
+            self.diff_comment_editor = None;
             self.focus = FocusPane::Files;
             self.set_info("Closed diff view, returned to agent output.");
             return true;
@@ -2060,8 +2148,325 @@ impl App {
     /// to the newly-selected agent's terminal. Silent by design: the user
     /// moved a cursor, they did not dismiss a dialog.
     pub(crate) fn close_diff_view(&mut self) {
-        if matches!(self.center_mode, CenterMode::Diff { .. }) {
-            self.center_mode = CenterMode::Agent;
+        // Diffs render as fullscreen overlays now. Changing the selected agent
+        // should not implicitly dismiss that overlay; only explicit overlay
+        // close actions do.
+    }
+
+    pub(crate) fn pending_diff_comment_count_for_selected_session(&self) -> usize {
+        let Some(session_id) = self.selected_session().map(|s| s.id.as_str()) else {
+            return 0;
+        };
+        self.diff_comments
+            .keys()
+            .filter(|key| key.session_id == session_id)
+            .count()
+    }
+
+    fn current_diff_file(&self) -> Option<&str> {
+        let CenterMode::Diff { rel_path, .. } = &self.center_mode else {
+            return None;
+        };
+        Some(rel_path.as_str())
+    }
+
+    pub(crate) fn diff_comment_for_anchor(&self, anchor: &DiffAnchor) -> Option<&DiffComment> {
+        let session_id = self.selected_session()?.id.as_str();
+        let key = DiffCommentKey::new(session_id, anchor);
+        self.diff_comments.get(&key)
+    }
+
+    pub(crate) fn diff_comment_editor_for_anchor(
+        &self,
+        anchor: &DiffAnchor,
+    ) -> Option<&InlineDiffCommentEditor> {
+        let session_id = self.selected_session()?.id.as_str();
+        let key = DiffCommentKey::new(session_id, anchor);
+        self.diff_comment_editor
+            .as_ref()
+            .filter(|editor| editor.key == key)
+    }
+
+    pub(crate) fn current_diff_selected_comment_key(&self) -> Option<DiffCommentKey> {
+        let session_id = self.selected_session()?.id.clone();
+        let anchor = self.current_diff_selected_anchor()?;
+        let key = DiffCommentKey::new(session_id, &anchor);
+        self.diff_comments.contains_key(&key).then_some(key)
+    }
+
+    pub(crate) fn current_diff_orphaned_comments(&self) -> Vec<DiffComment> {
+        let Some(session_id) = self.selected_session().map(|s| s.id.as_str()) else {
+            return Vec::new();
+        };
+        let Some(rel_path) = self.current_diff_file() else {
+            return Vec::new();
+        };
+        let CenterMode::Diff { rows, .. } = &self.center_mode else {
+            return Vec::new();
+        };
+        let visible_keys: HashSet<DiffCommentKey> = rows
+            .iter()
+            .filter_map(|row| row.anchor.as_ref())
+            .map(|anchor| DiffCommentKey::new(session_id, anchor))
+            .collect();
+        let mut comments: Vec<DiffComment> = self
+            .diff_comments
+            .values()
+            .filter(|comment| {
+                comment.key.session_id == session_id
+                    && comment.key.rel_path == rel_path
+                    && !visible_keys.contains(&comment.key)
+            })
+            .cloned()
+            .collect();
+        comments.sort_by(|a, b| {
+            a.key
+                .line_number
+                .cmp(&b.key.line_number)
+                .then_with(|| side_label(a.key.side).cmp(side_label(b.key.side)))
+                .then_with(|| a.key.line_content.cmp(&b.key.line_content))
+        });
+        comments
+    }
+
+    pub(crate) fn current_diff_orphaned_comment_count(&self) -> usize {
+        self.current_diff_orphaned_comments().len()
+    }
+
+    pub(crate) fn current_diff_selected_anchor(&self) -> Option<DiffAnchor> {
+        let CenterMode::Diff {
+            rows, selected_row, ..
+        } = &self.center_mode
+        else {
+            return None;
+        };
+        rows.get((*selected_row)?)
+            .and_then(|row| row.anchor.clone())
+    }
+
+    pub(crate) fn open_diff_comment_editor_for_anchor(&mut self, anchor: DiffAnchor) {
+        let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
+            self.set_error("Select an agent session before commenting on a diff line.");
+            return;
+        };
+        let key = DiffCommentKey::new(session_id, &anchor);
+        let existing = self
+            .diff_comments
+            .get(&key)
+            .map(|comment| comment.text.clone())
+            .unwrap_or_default();
+        self.diff_comment_editor = Some(InlineDiffCommentEditor {
+            key,
+            input: TextInput::with_text(existing),
+        });
+    }
+
+    pub(crate) fn open_diff_comment_editor_for_selected_row(&mut self) {
+        let Some(anchor) = self.current_diff_selected_anchor() else {
+            self.set_warning(
+                "Select a changed or context line in the diff before adding a comment.",
+            );
+            return;
+        };
+        self.open_diff_comment_editor_for_anchor(anchor);
+    }
+
+    pub(crate) fn save_diff_comment(&mut self, key: DiffCommentKey, text: String) {
+        let trimmed = text.trim().to_string();
+        let file = key.rel_path.clone();
+        let line = key.line_number;
+        if trimmed.is_empty() {
+            if let Err(err) = self.delete_diff_comment_key(key) {
+                self.set_error(format!(
+                    "Couldn't remove diff comment for {file}:{line}: {err:#}"
+                ));
+            } else {
+                self.set_info(format!("Removed diff comment for {file}:{line}."));
+            }
+            return;
+        }
+        if let Err(err) = self.session_store.upsert_diff_comment(
+            &key.session_id,
+            &key.rel_path,
+            key.side,
+            key.line_number,
+            &key.line_content,
+            &trimmed,
+        ) {
+            self.diff_comments
+                .insert(key.clone(), DiffComment { key, text: trimmed });
+            self.set_error(format!(
+                "Queued diff comment for {file}:{line}, but couldn't persist it: {err:#}"
+            ));
+        } else {
+            self.diff_comments
+                .insert(key.clone(), DiffComment { key, text: trimmed });
+            self.set_info(format!("Queued diff comment for {file}:{line}."));
+        }
+    }
+
+    pub(crate) fn save_active_diff_comment_editor(&mut self) {
+        let Some(editor) = self.diff_comment_editor.take() else {
+            return;
+        };
+        self.save_diff_comment(editor.key, editor.input.text);
+    }
+
+    pub(crate) fn cancel_active_diff_comment_editor(&mut self) {
+        self.diff_comment_editor = None;
+    }
+
+    pub(crate) fn delete_diff_comment_key(&mut self, key: DiffCommentKey) -> Result<()> {
+        self.session_store.delete_diff_comment(
+            &key.session_id,
+            &key.rel_path,
+            key.side,
+            key.line_number,
+            &key.line_content,
+        )?;
+        self.diff_comments.remove(&key);
+        if self
+            .diff_comment_editor
+            .as_ref()
+            .is_some_and(|editor| editor.key == key)
+        {
+            self.diff_comment_editor = None;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn delete_selected_diff_comment(&mut self) {
+        if let Some(key) = self.current_diff_selected_comment_key() {
+            let file = key.rel_path.clone();
+            let line = key.line_number;
+            if let Err(err) = self.delete_diff_comment_key(key) {
+                self.set_error(format!(
+                    "Couldn't delete diff comment for {file}:{line}: {err:#}"
+                ));
+            } else {
+                self.set_info(format!("Deleted diff comment for {file}:{line}."));
+            }
+            return;
+        }
+
+        let Some(comment) = self.current_diff_orphaned_comments().into_iter().next() else {
+            self.set_warning("No comment is queued for the selected diff line.");
+            return;
+        };
+        let key = comment.key;
+        let file = key.rel_path.clone();
+        let line = key.line_number;
+        if let Err(err) = self.delete_diff_comment_key(key) {
+            self.set_error(format!(
+                "Couldn't delete orphaned diff comment for {file}:{line}: {err:#}"
+            ));
+        } else {
+            self.set_info(format!("Deleted orphaned diff comment for {file}:{line}."));
+        }
+    }
+
+    pub(crate) fn selected_session_diff_comments(&self) -> Vec<&DiffComment> {
+        let Some(session_id) = self.selected_session().map(|s| s.id.as_str()) else {
+            return Vec::new();
+        };
+        let mut comments: Vec<&DiffComment> = self
+            .diff_comments
+            .values()
+            .filter(|comment| comment.key.session_id == session_id)
+            .collect();
+        comments.sort_by(|a, b| {
+            a.key
+                .rel_path
+                .cmp(&b.key.rel_path)
+                .then_with(|| a.key.line_number.cmp(&b.key.line_number))
+                .then_with(|| side_label(a.key.side).cmp(side_label(b.key.side)))
+                .then_with(|| a.key.line_content.cmp(&b.key.line_content))
+        });
+        comments
+    }
+
+    pub(crate) fn build_diff_comments_prompt(&self) -> Option<String> {
+        let comments = self.selected_session_diff_comments();
+        if comments.is_empty() {
+            return None;
+        }
+        let mut prompt = String::new();
+        for (idx, comment) in comments.iter().enumerate() {
+            let key = &comment.key;
+            if idx > 0 {
+                prompt.push('\n');
+            }
+            prompt.push_str(&format!(
+                "On {} line {}:\n\t{}\nFeedback:\n\t{}\n",
+                key.rel_path, key.line_number, key.line_content, comment.text
+            ));
+        }
+        Some(prompt)
+    }
+
+    pub(crate) fn clear_selected_session_diff_comments(&mut self) -> Result<()> {
+        let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
+            return Ok(());
+        };
+        self.session_store
+            .delete_diff_comments_for_session(&session_id)?;
+        self.diff_comments
+            .retain(|key, _| key.session_id != session_id);
+        if self
+            .diff_comment_editor
+            .as_ref()
+            .is_some_and(|editor| editor.key.session_id == session_id)
+        {
+            self.diff_comment_editor = None;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn send_diff_comments_to_agent(&mut self) {
+        match self.session_store.load_diff_comments() {
+            Ok(comments) => {
+                self.diff_comments = comments
+                    .into_iter()
+                    .map(diff_comment_from_storage)
+                    .map(|comment| (comment.key.clone(), comment))
+                    .collect();
+            }
+            Err(err) => {
+                self.set_error(format!("Failed to load queued diff comments: {err:#}"));
+                return;
+            }
+        }
+        let Some(prompt) = self.build_diff_comments_prompt() else {
+            self.set_info("No diff comments queued for the selected agent.");
+            return;
+        };
+        let count = self.pending_diff_comment_count_for_selected_session();
+        let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
+            self.set_error("Select an agent session before sending diff comments.");
+            return;
+        };
+        let Some(provider) = self.providers.get(&session_id) else {
+            self.set_error(
+                "Selected agent is not running. Reconnect it before sending diff comments.",
+            );
+            return;
+        };
+        let payload = crate::app::input::macro_payload_bytes(&prompt);
+        match provider.write_bytes(&payload) {
+            Ok(()) => {
+                if let Err(err) = self.clear_selected_session_diff_comments() {
+                    self.set_error(format!(
+                        "Sent diff comments, but failed to clear persisted queue: {err:#}"
+                    ));
+                } else {
+                    self.set_info(format!(
+                        "Sent {count} queued diff comment(s) to the selected agent."
+                    ));
+                }
+            }
+            Err(err) => {
+                self.set_error(format!("Failed to send diff comments to agent: {err}"));
+            }
         }
     }
 
