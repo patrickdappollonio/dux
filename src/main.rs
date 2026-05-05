@@ -1,4 +1,5 @@
 mod app;
+mod browser;
 mod cli;
 mod clipboard;
 mod config;

@@ -34,7 +34,7 @@ use crate::diff::SyntaxCache;
 use crate::editor::DetectedEditor;
 use crate::git;
 use crate::keybindings::{
-    Action, BindingScope, HintContext, InteractiveBytePatterns, RuntimeBindings,
+    Action, BindingScope, HintContext, InteractiveBytePatterns, RuntimeBinding, RuntimeBindings,
 };
 use crate::lockfile::SingleInstanceLock;
 use crate::logger;
@@ -1475,6 +1475,7 @@ impl App {
                     state,
                     title: pr.title,
                     owner_repo: pr.owner_repo,
+                    url: pr.url,
                 },
             );
         }
@@ -1624,6 +1625,21 @@ impl App {
         self.spawn_resource_stats_worker();
     }
 
+    pub(crate) fn filtered_palette(&self, input: &str) -> Vec<&RuntimeBinding> {
+        self.bindings
+            .filtered_palette(input)
+            .into_iter()
+            .filter(|binding| self.is_palette_action_available(binding.action))
+            .collect()
+    }
+
+    fn is_palette_action_available(&self, action: Action) -> bool {
+        match action {
+            Action::OpenCurrentPullRequest => self.current_pr_info().is_some(),
+            _ => true,
+        }
+    }
+
     /// Gather the labeled PIDs that the resource monitor should report on.
     /// Each entry is `(label, root_pid)` — the worker will aggregate the
     /// full process tree under each root.
@@ -1687,6 +1703,7 @@ impl App {
             "copy-path" => self.copy_selected_path(),
             "open-worktree" => self.open_selected_worktree_in_default_editor(),
             "open-worktree-with" => self.open_worktree_editor_picker(),
+            "open-current-pr" => self.open_current_pr_in_browser(),
             "toggle-project" => {
                 self.toggle_collapse_selected_project();
                 Ok(())

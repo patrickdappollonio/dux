@@ -29,6 +29,7 @@ pub struct PrInfo {
     pub state: PrState,
     pub title: String,
     pub owner_repo: String,
+    pub url: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

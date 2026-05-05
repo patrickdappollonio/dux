@@ -29,6 +29,7 @@ pub enum Action {
     ShowTerminal,
     ExitInteractive,
     OpenMacroBar,
+    OpenCurrentPullRequest,
     ToggleFullscreen,
     ScrollPageUp,
     ScrollPageDown,
@@ -205,6 +206,7 @@ impl Action {
             Action::ShowTerminal => "show_terminal",
             Action::ExitInteractive => "exit_interactive",
             Action::OpenMacroBar => "open_macro_bar",
+            Action::OpenCurrentPullRequest => "open_current_pull_request",
             Action::ToggleFullscreen => "toggle_fullscreen",
             Action::ScrollPageUp => "scroll_page_up",
             Action::ScrollPageDown => "scroll_page_down",
@@ -303,6 +305,9 @@ impl Action {
             Action::NewTerminal => "Spawn a new companion terminal for the selected agent.",
             Action::ExitInteractive => "Exit interactive mode (stop forwarding keys to agent).",
             Action::OpenMacroBar => "Open the macro command bar to send text macros.",
+            Action::OpenCurrentPullRequest => {
+                "Open the selected agent's current pull request in the default browser."
+            }
             Action::ToggleFullscreen => "Toggle fullscreen overlay for the agent terminal.",
             Action::ScrollPageUp => "Scroll up one page in the agent output.",
             Action::ScrollPageDown => "Scroll down one page in the agent output.",
@@ -388,6 +393,7 @@ impl Action {
             | Action::DeleteTerminal => Some("Projects pane"),
             Action::ExitInteractive
             | Action::OpenMacroBar
+            | Action::OpenCurrentPullRequest
             | Action::ToggleFullscreen
             | Action::ScrollPageUp
             | Action::ScrollPageDown
@@ -808,6 +814,20 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         }),
         hint_contexts: &[],
         palette: None,
+    },
+    BindingDef {
+        action: Action::OpenCurrentPullRequest,
+        default_keys: &[key!(p)],
+        scopes: &[BindingScope::Center],
+        help: Some(HelpEntry {
+            section: "Agent pane",
+            description: "Open current pull request in the default browser",
+        }),
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "open-current-pr",
+            description: "Open the selected agent's current pull request in the default browser",
+        }),
     },
     BindingDef {
         action: Action::ToggleFullscreen,
@@ -2140,6 +2160,29 @@ mod tests {
         let move_hint = hints.iter().find(|(_, desc)| *desc == "Move");
         assert!(move_hint.is_some());
         assert_eq!(move_hint.unwrap().0, "j/k");
+    }
+
+    #[test]
+    fn open_current_pr_key_is_center_pane_only() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Center),
+            Some(Action::OpenCurrentPullRequest)
+        );
+        assert_ne!(
+            bindings.lookup(&key, BindingScope::Left),
+            Some(Action::OpenCurrentPullRequest)
+        );
+        assert_ne!(
+            bindings.lookup(&key, BindingScope::Files),
+            Some(Action::OpenCurrentPullRequest)
+        );
+        assert_ne!(
+            bindings.lookup(&key, BindingScope::Interactive),
+            Some(Action::OpenCurrentPullRequest)
+        );
     }
 
     #[test]

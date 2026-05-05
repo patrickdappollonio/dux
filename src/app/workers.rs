@@ -222,6 +222,7 @@ impl App {
                                     &pr.owner_repo,
                                     state_str,
                                     &pr.title,
+                                    &pr.url,
                                 );
                                 self.pr_statuses.insert(session_id, pr);
                                 changed = true;
@@ -1504,6 +1505,7 @@ fn reconstruct_from_stored(stored: &crate::storage::StoredPr) -> Option<crate::m
         state,
         title: stored.title.clone(),
         owner_repo: stored.owner_repo.clone(),
+        url: stored.url.clone(),
     })
 }
 
@@ -1521,7 +1523,7 @@ fn view_pr_by_number(
             "--repo",
             owner_repo,
             "--json",
-            "number,state,title",
+            "number,state,title,url",
         ])
         .output()
         .ok()?;
@@ -1555,7 +1557,7 @@ fn discover_pr_by_branch(
             "--state",
             "all",
             "--json",
-            "number,state,title",
+            "number,state,title,url",
             "--limit",
             "1",
         ])
@@ -1593,6 +1595,12 @@ fn parse_pr_json_value(obj: &serde_json::Value, owner_repo: &str) -> Option<crat
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let url = obj
+        .get("url")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::storage::fallback_pr_url(owner_repo, number));
     let state = match state_str {
         "OPEN" => PrState::Open,
         "MERGED" => PrState::Merged,
@@ -1605,5 +1613,37 @@ fn parse_pr_json_value(obj: &serde_json::Value, owner_repo: &str) -> Option<crat
         state,
         title,
         owner_repo: owner_repo.to_string(),
+        url,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::PrState;
+
+    #[test]
+    fn parse_pr_json_object_uses_gh_url_when_present() {
+        let pr = parse_pr_json_object(
+            r#"{"number":42,"state":"OPEN","title":"Demo","url":"https://github.com/owner/repo/pull/42"}"#,
+            "owner/repo",
+        )
+        .expect("pr");
+
+        assert_eq!(pr.number, 42);
+        assert_eq!(pr.state, PrState::Open);
+        assert_eq!(pr.url, "https://github.com/owner/repo/pull/42");
+    }
+
+    #[test]
+    fn parse_pr_json_object_falls_back_to_github_url() {
+        let pr = parse_pr_json_object(
+            r#"{"number":42,"state":"MERGED","title":"Demo"}"#,
+            "owner/repo",
+        )
+        .expect("pr");
+
+        assert_eq!(pr.state, PrState::Merged);
+        assert_eq!(pr.url, "https://github.com/owner/repo/pull/42");
+    }
 }

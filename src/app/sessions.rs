@@ -1,4 +1,5 @@
 use super::*;
+use crate::browser;
 use crate::editor;
 
 impl App {
@@ -1721,6 +1722,30 @@ impl App {
         self.set_info(format!(
             "Opened agent \"{session_label}\" in {} via {}.",
             editor_choice.label, editor_choice.command
+        ));
+        Ok(())
+    }
+
+    pub(crate) fn current_pr_info(&self) -> Option<&crate::model::PrInfo> {
+        self.selected_session()
+            .and_then(|session| self.pr_statuses.get(&session.id))
+    }
+
+    pub(crate) fn current_pr_url(&self) -> Option<&str> {
+        self.current_pr_info().map(|pr| pr.url.as_str())
+    }
+
+    pub(crate) fn open_current_pr_in_browser(&mut self) -> Result<()> {
+        let Some(pr) = self.current_pr_info().cloned() else {
+            self.set_error("No pull request is known for the selected agent yet.");
+            return Ok(());
+        };
+
+        let url = self.current_pr_url().unwrap_or(pr.url.as_str()).to_string();
+        browser::open_url(&url)?;
+        self.set_info(format!(
+            "Opened PR {}#{} in the default browser.",
+            pr.owner_repo, pr.number
         ));
         Ok(())
     }
