@@ -124,6 +124,8 @@ enum PromptMouseTarget {
     ConfirmNonDefaultBranchAdd,
     ConfirmUseExistingBranchCancel,
     ConfirmUseExistingBranchUse,
+    ConfigReloadFailedClose,
+    ConfigReloadFailedApply,
     Checkbox(OverlayCheckboxId),
     RenameInput,
     NameNewAgentInput,
@@ -199,6 +201,12 @@ impl ButtonPressedTarget {
             }
             PromptMouseTarget::ConfirmUseExistingBranchUse => {
                 Some(ButtonPressedTarget::ConfirmUseExistingBranchUse)
+            }
+            PromptMouseTarget::ConfigReloadFailedClose => {
+                Some(ButtonPressedTarget::ConfigReloadFailedClose)
+            }
+            PromptMouseTarget::ConfigReloadFailedApply => {
+                Some(ButtonPressedTarget::ConfigReloadFailedApply)
             }
             PromptMouseTarget::CommandInput
             | PromptMouseTarget::CommandItem(_)
@@ -2361,6 +2369,56 @@ impl App {
             return Ok(false);
         }
 
+        if let PromptState::ConfigReloadFailed {
+            recover_old_config,
+            focus,
+            ..
+        } = &mut self.prompt
+        {
+            if is_reverse_tab(key) {
+                *focus = match *focus {
+                    ConfigReloadFailedFocus::Close => ConfigReloadFailedFocus::Checkbox,
+                    ConfigReloadFailedFocus::Apply => ConfigReloadFailedFocus::Close,
+                    ConfigReloadFailedFocus::Checkbox => ConfigReloadFailedFocus::Apply,
+                };
+                return Ok(false);
+            }
+            match self.bindings.lookup(&key, BindingScope::Dialog) {
+                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+                Some(Action::ToggleSelection) => {
+                    *focus = match *focus {
+                        ConfigReloadFailedFocus::Close => ConfigReloadFailedFocus::Apply,
+                        ConfigReloadFailedFocus::Apply => ConfigReloadFailedFocus::Checkbox,
+                        ConfigReloadFailedFocus::Checkbox => ConfigReloadFailedFocus::Close,
+                    };
+                }
+                Some(Action::Confirm) => match *focus {
+                    ConfigReloadFailedFocus::Checkbox => {
+                        *recover_old_config = !*recover_old_config;
+                    }
+                    ConfigReloadFailedFocus::Close => {
+                        return Ok(self.resolve_config_reload_failed(false));
+                    }
+                    ConfigReloadFailedFocus::Apply => {
+                        return Ok(self.resolve_config_reload_failed(true));
+                    }
+                },
+                _ if key.code == KeyCode::Char(' ') => match *focus {
+                    ConfigReloadFailedFocus::Checkbox => {
+                        *recover_old_config = !*recover_old_config;
+                    }
+                    ConfigReloadFailedFocus::Close => {
+                        return Ok(self.resolve_config_reload_failed(false));
+                    }
+                    ConfigReloadFailedFocus::Apply => {
+                        return Ok(self.resolve_config_reload_failed(true));
+                    }
+                },
+                _ => {}
+            }
+            return Ok(false);
+        }
+
         if let PromptState::ConfirmKillRunning(confirm_prompt) = &mut self.prompt {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => {
@@ -3281,6 +3339,21 @@ impl App {
                     None
                 }
             }
+            OverlayMouseLayout::ConfigReloadFailed {
+                close_button,
+                apply_button,
+                checkbox,
+            } => {
+                if contains_point(checkbox.rect, column, row) {
+                    Some(PromptMouseTarget::Checkbox(checkbox.id))
+                } else if contains_point(close_button, column, row) {
+                    Some(PromptMouseTarget::ConfigReloadFailedClose)
+                } else if contains_point(apply_button, column, row) {
+                    Some(PromptMouseTarget::ConfigReloadFailedApply)
+                } else {
+                    None
+                }
+            }
             OverlayMouseLayout::RenameSession { input, checkbox } => {
                 if checkbox.is_some_and(|checkbox| contains_point(checkbox.rect, column, row)) {
                     checkbox.map(|checkbox| PromptMouseTarget::Checkbox(checkbox.id))
@@ -4180,6 +4253,17 @@ impl App {
             OverlayCheckboxId::NameNewAgentRandomizedPetName => {
                 self.toggle_name_new_agent_randomized_name();
             }
+            OverlayCheckboxId::ConfigReloadRecoverOldConfig => {
+                if let PromptState::ConfigReloadFailed {
+                    recover_old_config,
+                    focus,
+                    ..
+                } = &mut self.prompt
+                {
+                    *recover_old_config = !*recover_old_config;
+                    *focus = ConfigReloadFailedFocus::Checkbox;
+                }
+            }
         }
     }
 
@@ -4464,7 +4548,9 @@ impl App {
             | PromptMouseTarget::ConfirmNonDefaultBranchCancel
             | PromptMouseTarget::ConfirmNonDefaultBranchAdd
             | PromptMouseTarget::ConfirmUseExistingBranchCancel
-            | PromptMouseTarget::ConfirmUseExistingBranchUse => {
+            | PromptMouseTarget::ConfirmUseExistingBranchUse
+            | PromptMouseTarget::ConfigReloadFailedClose
+            | PromptMouseTarget::ConfigReloadFailedApply => {
                 debug_assert!(
                     false,
                     "button target {:?} should be dispatched via activate_button, not \
@@ -4580,7 +4666,31 @@ impl App {
             ButtonPressedTarget::ConfirmUseExistingBranchUse => {
                 self.resolve_confirm_use_existing_branch(true)
             }
+            ButtonPressedTarget::ConfigReloadFailedClose => {
+                self.resolve_config_reload_failed(false)
+            }
+            ButtonPressedTarget::ConfigReloadFailedApply => self.resolve_config_reload_failed(true),
         }
+    }
+
+    fn resolve_config_reload_failed(&mut self, apply: bool) -> bool {
+        let recover = matches!(
+            &self.prompt,
+            PromptState::ConfigReloadFailed {
+                recover_old_config: true,
+                ..
+            }
+        );
+        if apply && !recover {
+            self.set_info("Check \"Recover last working config\" before restoring config.toml.");
+            return false;
+        }
+        self.prompt = PromptState::None;
+        if apply && recover {
+            self.spawn_config_recover_worker();
+            self.set_busy("Restoring the last working config.toml.");
+        }
+        false
     }
 
     fn activate_selected_left_item(&mut self) -> Result<()> {
@@ -5243,14 +5353,14 @@ mod tests {
     use super::components::{ButtonPressedTarget, PressedButton};
     use super::{DOUBLE_CLICK_THRESHOLD, NON_DEFAULT_BRANCH_HOVER_STATUS};
     use crate::app::{
-        App, BranchWarningKind, CenterMode, ConfirmKillRunningPrompt, ConfirmNonDefaultBranchFocus,
-        CreateAgentRequest, DeleteAgentFocus, FocusPane, FullscreenOverlay, InputTarget,
-        KillRunningAction, KillRunningFocus, KillRunningFooterAction, KillRunningPrompt,
-        KillableRuntime, KillableRuntimeKind, LeftItem, LeftSection, MacroBarState,
-        MouseClickTarget, MouseLayoutState, NameNewAgentFocus, NonDefaultBranchAction,
-        OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout, OverlayMouseLayoutState,
-        ProcessInfo, PromptState, PullTarget, ResourceStats, RightSection, RuntimeTargetId,
-        TextInput, WorkerEvent,
+        App, BranchWarningKind, CenterMode, ConfigReloadFailedFocus, ConfirmKillRunningPrompt,
+        ConfirmNonDefaultBranchFocus, CreateAgentRequest, DeleteAgentFocus, FocusPane,
+        FullscreenOverlay, InputTarget, KillRunningAction, KillRunningFocus,
+        KillRunningFooterAction, KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftItem,
+        LeftSection, MacroBarState, MouseClickTarget, MouseLayoutState, NameNewAgentFocus,
+        NonDefaultBranchAction, OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout,
+        OverlayMouseLayoutState, ProcessInfo, PromptState, PullTarget, ResourceStats, RightSection,
+        RuntimeTargetId, TextInput, WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
@@ -5568,6 +5678,116 @@ mod tests {
             items,
             offset: 0,
         };
+    }
+
+    fn drain_until(app: &mut App, mut done: impl FnMut(&App) -> bool) {
+        for _ in 0..50 {
+            app.drain_events();
+            if done(app) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        app.drain_events();
+    }
+
+    #[test]
+    fn reload_config_command_applies_valid_config_immediately_after_worker_completes() {
+        let mut app = test_app(default_bindings());
+        let mut config = Config::default();
+        config.ui.right_width_pct = 37;
+        config.ui.show_diff_line_numbers = true;
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        std::fs::write(
+            &app.paths.config_path,
+            crate::config::render_config_with(&config, &bindings),
+        )
+        .expect("write valid config");
+
+        app.execute_command("reload-config".to_string())
+            .expect("start reload config");
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+        assert_eq!(app.status.message(), "Reloading config.toml.");
+
+        drain_until(&mut app, |app| app.config.ui.right_width_pct == 37);
+
+        assert_eq!(app.right_width_pct, 37);
+        assert!(app.show_diff_line_numbers);
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(
+            app.status.message(),
+            "Configuration reloaded. New settings are active now."
+        );
+    }
+
+    #[test]
+    fn reload_config_command_keeps_current_config_and_opens_modal_on_validation_error() {
+        let mut app = test_app(default_bindings());
+        app.config.ui.right_width_pct = 41;
+        std::fs::write(
+            &app.paths.config_path,
+            r#"
+[keys]
+show_terminal_keys = true
+not_a_real_action = ["x"]
+"#,
+        )
+        .expect("write invalid config");
+
+        app.execute_command("reload-config".to_string())
+            .expect("start reload config");
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+
+        drain_until(&mut app, |app| {
+            matches!(app.prompt, PromptState::ConfigReloadFailed { .. })
+        });
+
+        assert_eq!(app.config.ui.right_width_pct, 41);
+        assert_eq!(
+            app.status.message(),
+            "Config reload failed. Review the modal before retrying."
+        );
+        match &app.prompt {
+            PromptState::ConfigReloadFailed {
+                error,
+                recover_old_config,
+                focus,
+            } => {
+                assert!(error.contains("unknown action"));
+                assert!(!recover_old_config);
+                assert_eq!(*focus, ConfigReloadFailedFocus::Close);
+            }
+            other => panic!("expected config reload failure prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reload_config_failure_can_recover_last_working_config_file_async() {
+        let mut app = test_app(default_bindings());
+        app.config.ui.right_width_pct = 42;
+        std::fs::write(&app.paths.config_path, "this is not valid toml")
+            .expect("write broken config");
+        app.prompt = PromptState::ConfigReloadFailed {
+            error: "broken".to_string(),
+            recover_old_config: true,
+            focus: ConfigReloadFailedFocus::Apply,
+        };
+
+        app.resolve_config_reload_failed(true);
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+        assert_eq!(
+            app.status.message(),
+            "Restoring the last working config.toml."
+        );
+
+        drain_until(&mut app, |app| {
+            app.status.message() == "Restored the last working configuration to config.toml."
+        });
+
+        assert!(matches!(app.prompt, PromptState::None));
+        let recovered = std::fs::read_to_string(&app.paths.config_path).expect("read recovered");
+        let parsed: Config = toml::from_str(&recovered).expect("parse recovered config");
+        assert_eq!(parsed.ui.right_width_pct, 42);
     }
 
     fn install_kill_running_overlay(app: &mut App, items: usize) {

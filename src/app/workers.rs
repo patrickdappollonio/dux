@@ -509,6 +509,37 @@ impl App {
                         )),
                     }
                 }
+                WorkerEvent::ConfigReloadReady(result) => match *result {
+                    Ok(config) => {
+                        if let Err(err) = self.apply_reloaded_config(config) {
+                            self.set_error(format!(
+                                "Config validation passed, but applying it failed: {err:#}"
+                            ));
+                        } else {
+                            self.set_info(
+                                "Configuration reloaded. New settings are active now.",
+                            );
+                        }
+                    }
+                    Err(message) => {
+                        self.open_config_reload_failed_modal(message);
+                        self.set_error(
+                            "Config reload failed. Review the modal before retrying.",
+                        );
+                    }
+                },
+                WorkerEvent::ConfigRecoverCompleted(result) => match result {
+                    Ok(()) => {
+                        self.set_info(
+                            "Restored the last working configuration to config.toml.",
+                        );
+                    }
+                    Err(message) => {
+                        self.set_error(format!(
+                            "Couldn't restore the last working configuration: {message}"
+                        ));
+                    }
+                },
             }
         }
         self.retry_hung_resume_sessions();
@@ -976,6 +1007,33 @@ impl App {
                     break; // receiver dropped, app is shutting down
                 }
             }
+        });
+    }
+
+    pub(crate) fn spawn_config_reload_worker(&self) {
+        let tx = self.worker_tx.clone();
+        let paths = self.paths.clone();
+        thread::spawn(move || {
+            let result = crate::config::ensure_config(&paths)
+                .map_err(|err| format!("{err:#}"))
+                .and_then(|config| match crate::config::validate_keys(&config.keys) {
+                    Ok(()) => Ok(config),
+                    Err(message) => Err(message),
+                });
+            let _ = tx.send(WorkerEvent::ConfigReloadReady(Box::new(result)));
+        });
+    }
+
+    pub(crate) fn spawn_config_recover_worker(&self) {
+        let tx = self.worker_tx.clone();
+        let config_path = self.paths.config_path.clone();
+        let config = self.config.clone();
+        thread::spawn(move || {
+            let bindings = RuntimeBindings::from_keys_config(&config.keys);
+            let rendered = crate::config::render_config_with(&config, &bindings);
+            let result = std::fs::write(&config_path, rendered)
+                .map_err(|err| format!("failed to write {}: {err}", config_path.display()));
+            let _ = tx.send(WorkerEvent::ConfigRecoverCompleted(result));
         });
     }
 
