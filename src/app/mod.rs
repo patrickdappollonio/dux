@@ -493,6 +493,13 @@ pub(crate) struct ConfirmKillRunningPrompt {
     pub(crate) confirm_selected: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConfigReloadFailedFocus {
+    Close,
+    Apply,
+    Checkbox,
+}
+
 /// Which selectable element has focus in the Delete Agent confirmation modal.
 /// Focus cycles through all three via Tab / arrow keys / h / l.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -543,6 +550,11 @@ pub(crate) enum PromptState {
     ChangeTheme(ChangeThemePrompt),
     KillRunning(KillRunningPrompt),
     ConfirmKillRunning(ConfirmKillRunningPrompt),
+    ConfigReloadFailed {
+        error: String,
+        recover_old_config: bool,
+        focus: ConfigReloadFailedFocus,
+    },
     ConfirmDeleteAgent {
         session_id: String,
         branch_name: String,
@@ -860,6 +872,7 @@ pub(crate) enum OverlayCheckboxId {
     RenameSessionBranch,
     NonDefaultBranchCheckoutDefault,
     NameNewAgentRandomizedPetName,
+    ConfigReloadRecoverOldConfig,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -964,6 +977,11 @@ pub(crate) enum OverlayMouseLayout {
     ConfirmUseExistingBranch {
         cancel_button: Rect,
         use_button: Rect,
+    },
+    ConfigReloadFailed {
+        close_button: Rect,
+        apply_button: Rect,
+        checkbox: OverlayCheckbox,
     },
     RenameSession {
         input: Rect,
@@ -1109,6 +1127,8 @@ pub(crate) enum WorkerEvent {
         project: Project,
         result: Result<(String, Option<BranchWarningKind>), String>,
     },
+    ConfigReloadReady(Box<Result<Config, String>>),
+    ConfigRecoverCompleted(Result<(), String>),
 }
 
 #[derive(Clone, Debug)]
@@ -1672,6 +1692,7 @@ impl App {
             "change-default-provider" => self.open_change_default_provider_prompt(),
             "change-project-default-provider" => self.open_change_project_default_provider_prompt(),
             "change-theme" => self.open_change_theme_prompt(),
+            "reload-config" => self.reload_config_from_disk(),
             "pull-project" => self.refresh_selected_project(),
             "delete-project" => self.delete_selected_project(),
             "remove-project" => self.remove_selected_project(),
@@ -1844,6 +1865,64 @@ impl App {
                 Ok(())
             }
         }
+    }
+
+    pub(crate) fn reload_config_from_disk(&mut self) -> Result<()> {
+        self.spawn_config_reload_worker();
+        self.set_busy("Reloading config.toml.");
+        Ok(())
+    }
+
+    fn open_config_reload_failed_modal(&mut self, error: String) {
+        self.prompt = PromptState::ConfigReloadFailed {
+            error,
+            recover_old_config: false,
+            focus: ConfigReloadFailedFocus::Close,
+        };
+    }
+
+    fn apply_reloaded_config(&mut self, config: Config) -> Result<()> {
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        self.interactive_patterns = bindings.interactive_byte_patterns();
+        self.bindings = bindings;
+
+        let (theme, theme_warning) = crate::theme::load_or_fallback(&config.ui.theme, &self.paths);
+        self.theme = theme;
+        self.show_diff_line_numbers = config.ui.show_diff_line_numbers;
+        self.left_width_pct = config.ui.left_width_pct;
+        self.right_width_pct = config.ui.right_width_pct;
+        self.terminal_pane_height_pct = config.ui.terminal_pane_height_pct;
+        self.staged_pane_height_pct = config.ui.staged_pane_height_pct;
+        self.commit_pane_height_pct = config.ui.commit_pane_height_pct;
+        self.github_integration_enabled = config.ui.github_integration;
+        self.pr_banner_at_bottom = config.ui.pr_banner_position == "bottom";
+        self.config = config;
+
+        self.projects = load_projects(&self.config);
+        self.selected_left = self
+            .selected_left
+            .min(self.projects.len().saturating_sub(1));
+        self.rebuild_left_items();
+        if self.selected_left >= self.left_items_cache.len() {
+            self.selected_left = self.left_items_cache.len().saturating_sub(1);
+        }
+        self.update_branch_sync_sessions();
+        if self.github_integration_enabled
+            && matches!(self.gh_status, crate::model::GhStatus::Available)
+        {
+            self.update_pr_sync_sessions();
+            self.spawn_initial_pr_refresh();
+            self.pr_sync_enabled.store(true, Ordering::Relaxed);
+        } else {
+            self.pr_statuses.clear();
+            self.pr_sync_enabled.store(false, Ordering::Relaxed);
+        }
+        self.reload_changed_files();
+        self.refresh_current_diff()?;
+        if let Some(message) = theme_warning {
+            self.set_warning(message);
+        }
+        Ok(())
     }
 
     pub(crate) fn open_edit_macros(&mut self) {
