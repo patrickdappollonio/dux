@@ -28,6 +28,7 @@ pub struct PrInfo {
     pub number: u64,
     pub state: PrState,
     pub title: String,
+    pub host: String,
     pub owner_repo: String,
     pub url: String,
 }

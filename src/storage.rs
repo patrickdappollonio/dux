@@ -9,6 +9,7 @@ use crate::model::{AgentSession, SessionStatus};
 pub struct StoredPr {
     pub session_id: String,
     pub pr_number: u64,
+    pub host: String,
     pub owner_repo: String,
     pub state: String,
     pub title: String,
@@ -59,12 +60,19 @@ impl SessionStore {
             create table if not exists session_prs (
                 session_id text not null,
                 pr_number integer not null,
+                host text not null default 'github.com',
                 owner_repo text not null,
                 state text not null default 'OPEN',
                 primary key (session_id, pr_number),
                 foreign key (session_id) references agent_sessions(id) on delete cascade
             );
             "#,
+        )?;
+        ensure_column(
+            &self.conn,
+            "session_prs",
+            "host",
+            "text not null default 'github.com'",
         )?;
         ensure_column(
             &self.conn,
@@ -87,6 +95,7 @@ impl SessionStore {
         &self,
         session_id: &str,
         pr_number: u64,
+        host: &str,
         owner_repo: &str,
         state: &str,
         title: &str,
@@ -94,14 +103,24 @@ impl SessionStore {
     ) -> Result<()> {
         self.conn.execute(
             r#"
-            insert into session_prs (session_id, pr_number, owner_repo, state, title, url)
-            values (?1, ?2, ?3, ?4, ?5, ?6)
+            insert into session_prs (session_id, pr_number, host, owner_repo, state, title, url)
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             on conflict(session_id, pr_number) do update set
+                host=excluded.host,
+                owner_repo=excluded.owner_repo,
                 state=excluded.state,
                 title=excluded.title,
                 url=excluded.url
             "#,
-            params![session_id, pr_number as i64, owner_repo, state, title, url],
+            params![
+                session_id,
+                pr_number as i64,
+                host,
+                owner_repo,
+                state,
+                title,
+                url
+            ],
         )?;
         Ok(())
     }
@@ -110,7 +129,7 @@ impl SessionStore {
     pub fn load_prs(&self, session_id: &str) -> Result<Vec<StoredPr>> {
         let mut stmt = self.conn.prepare(
             r#"
-            select pr_number, owner_repo, state, title, url
+            select pr_number, host, owner_repo, state, title, url
             from session_prs
             where session_id = ?1
             order by pr_number desc
@@ -118,13 +137,17 @@ impl SessionStore {
         )?;
         let sid = session_id.to_string();
         let rows = stmt.query_map(params![session_id], |row| {
+            let pr_number = row.get::<_, i64>(0)? as u64;
+            let host: String = row.get(1)?;
+            let owner_repo: String = row.get(2)?;
             Ok(StoredPr {
                 session_id: sid.clone(),
-                pr_number: row.get::<_, i64>(0)? as u64,
-                owner_repo: row.get(1)?,
-                state: row.get(2)?,
-                title: row.get(3)?,
-                url: normalize_pr_url(row.get(4)?, row.get(1)?, row.get::<_, i64>(0)? as u64),
+                pr_number,
+                host: host.clone(),
+                owner_repo: owner_repo.clone(),
+                state: row.get(3)?,
+                title: row.get(4)?,
+                url: normalize_pr_url(row.get(5)?, &host, &owner_repo, pr_number),
             })
         })?;
         let mut prs = Vec::new();
@@ -138,7 +161,7 @@ impl SessionStore {
     pub fn load_all_latest_prs(&self) -> Result<Vec<StoredPr>> {
         let mut stmt = self.conn.prepare(
             r#"
-            select session_id, pr_number, owner_repo, state, title, url
+            select session_id, pr_number, host, owner_repo, state, title, url
             from session_prs
             where (session_id, pr_number) in (
                 select session_id, max(pr_number) from session_prs group by session_id
@@ -146,13 +169,17 @@ impl SessionStore {
             "#,
         )?;
         let rows = stmt.query_map([], |row| {
+            let pr_number = row.get::<_, i64>(1)? as u64;
+            let host: String = row.get(2)?;
+            let owner_repo: String = row.get(3)?;
             Ok(StoredPr {
                 session_id: row.get(0)?,
-                pr_number: row.get::<_, i64>(1)? as u64,
-                owner_repo: row.get(2)?,
-                state: row.get(3)?,
-                title: row.get(4)?,
-                url: normalize_pr_url(row.get(5)?, row.get(2)?, row.get::<_, i64>(1)? as u64),
+                pr_number,
+                host: host.clone(),
+                owner_repo: owner_repo.clone(),
+                state: row.get(4)?,
+                title: row.get(5)?,
+                url: normalize_pr_url(row.get(6)?, &host, &owner_repo, pr_number),
             })
         })?;
         let mut result = Vec::new();
@@ -254,13 +281,18 @@ fn parse_started_providers(value: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(value).unwrap_or_default()
 }
 
-pub fn fallback_pr_url(owner_repo: &str, pr_number: u64) -> String {
-    format!("https://github.com/{owner_repo}/pull/{pr_number}")
+pub fn fallback_pr_url(host: &str, owner_repo: &str, pr_number: u64) -> String {
+    let host = if host.trim().is_empty() {
+        "github.com"
+    } else {
+        host
+    };
+    format!("https://{host}/{owner_repo}/pull/{pr_number}")
 }
 
-fn normalize_pr_url(url: String, owner_repo: String, pr_number: u64) -> String {
+fn normalize_pr_url(url: String, host: &str, owner_repo: &str, pr_number: u64) -> String {
     if url.trim().is_empty() {
-        fallback_pr_url(&owner_repo, pr_number)
+        fallback_pr_url(host, owner_repo, pr_number)
     } else {
         url
     }
@@ -370,10 +402,11 @@ mod pr_tests {
         StoredPr {
             session_id: sid.to_string(),
             pr_number: num,
+            host: "github.com".to_string(),
             owner_repo: repo.to_string(),
             state: state.to_string(),
             title: title.to_string(),
-            url: fallback_pr_url(repo, num),
+            url: fallback_pr_url("github.com", repo, num),
         }
     }
 
@@ -385,13 +418,29 @@ mod pr_tests {
         store.upsert_session(&s).unwrap();
 
         store
-            .upsert_pr("s1", 10, "owner/repo", "OPEN", "First PR", "")
+            .upsert_pr("s1", 10, "github.com", "owner/repo", "OPEN", "First PR", "")
             .unwrap();
         store
-            .upsert_pr("s1", 20, "owner/repo", "OPEN", "Second PR", "")
+            .upsert_pr(
+                "s1",
+                20,
+                "github.com",
+                "owner/repo",
+                "OPEN",
+                "Second PR",
+                "",
+            )
             .unwrap();
         store
-            .upsert_pr("s1", 15, "owner/repo", "MERGED", "Middle PR", "")
+            .upsert_pr(
+                "s1",
+                15,
+                "github.com",
+                "owner/repo",
+                "MERGED",
+                "Middle PR",
+                "",
+            )
             .unwrap();
 
         let prs = store.load_prs("s1").unwrap();
@@ -409,12 +458,13 @@ mod pr_tests {
         store.upsert_session(&s).unwrap();
 
         store
-            .upsert_pr("s1", 42, "owner/repo", "OPEN", "My PR", "")
+            .upsert_pr("s1", 42, "github.com", "owner/repo", "OPEN", "My PR", "")
             .unwrap();
         store
             .upsert_pr(
                 "s1",
                 42,
+                "github.example.com",
                 "owner/repo",
                 "MERGED",
                 "My PR (updated)",
@@ -424,6 +474,7 @@ mod pr_tests {
 
         let prs = store.load_prs("s1").unwrap();
         assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].host, "github.example.com");
         assert_eq!(prs[0].state, "MERGED");
         assert_eq!(prs[0].title, "My PR (updated)");
         assert_eq!(prs[0].url, "https://github.com/owner/repo/pull/42");
@@ -439,13 +490,21 @@ mod pr_tests {
         store.upsert_session(&s2).unwrap();
 
         store
-            .upsert_pr("s1", 10, "owner/repo", "CLOSED", "Old PR", "")
+            .upsert_pr("s1", 10, "github.com", "owner/repo", "CLOSED", "Old PR", "")
             .unwrap();
         store
-            .upsert_pr("s1", 20, "owner/repo", "MERGED", "Latest PR", "")
+            .upsert_pr(
+                "s1",
+                20,
+                "github.com",
+                "owner/repo",
+                "MERGED",
+                "Latest PR",
+                "",
+            )
             .unwrap();
         store
-            .upsert_pr("s2", 5, "other/repo", "OPEN", "Other PR", "")
+            .upsert_pr("s2", 5, "github.com", "other/repo", "OPEN", "Other PR", "")
             .unwrap();
 
         let latest = store.load_all_latest_prs().unwrap();

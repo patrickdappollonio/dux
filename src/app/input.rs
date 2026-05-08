@@ -9,6 +9,7 @@ const MAX_RIGHT_WIDTH_PCT: u16 = 50;
 const MIN_CENTER_WIDTH_PCT: u16 = 20;
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 const ESC_AMBIGUITY_TIMEOUT: Duration = Duration::from_millis(25);
+const NON_DEFAULT_BRANCH_HOVER_STATUS: &str = "Repo isn't on the default branch. Press Ctrl+P and run checkout-project-default-branch to check out main.";
 
 /// Maximum size of `loading_input_buf`. During the loading phase we
 /// accumulate bytes only to detect a (possibly multi-byte) ExitInteractive
@@ -1757,7 +1758,7 @@ impl App {
                 Some(Action::MoveDown) => {
                     let count = match &self.prompt {
                         PromptState::Command { input, .. } => {
-                            self.filtered_palette(&input.text).len()
+                            self.filtered_palette_commands(&input.text).len()
                         }
                         _ => 0,
                     };
@@ -1784,7 +1785,7 @@ impl App {
                             PromptState::Command {
                                 input, selected, ..
                             } => self
-                                .filtered_palette(&input.text)
+                                .filtered_palette_commands(&input.text)
                                 .get(*selected)
                                 .and_then(|binding| binding.palette_name)
                                 .map(str::to_string),
@@ -2685,6 +2686,37 @@ impl App {
             return Ok(false);
         }
 
+        if matches!(self.prompt, PromptState::PullRequestInput { .. }) {
+            let is_plain_char = matches!(key.code, KeyCode::Char(_))
+                && !key.modifiers.contains(KeyModifiers::CONTROL);
+            let action = if is_plain_char {
+                None
+            } else {
+                self.bindings.lookup(&key, BindingScope::Dialog)
+            };
+
+            match action {
+                Some(Action::CloseOverlay) => {
+                    self.prompt = PromptState::None;
+                }
+                Some(Action::Confirm) => {
+                    let (project, raw_input) = match &self.prompt {
+                        PromptState::PullRequestInput { project, input } => {
+                            (project.clone(), input.text.trim().to_string())
+                        }
+                        _ => unreachable!(),
+                    };
+                    self.dispatch_pull_request_lookup(project, raw_input)?;
+                }
+                _ => {
+                    if let PromptState::PullRequestInput { input, .. } = &mut self.prompt {
+                        input.handle_key(key);
+                    }
+                }
+            }
+            return Ok(false);
+        }
+
         if matches!(self.prompt, PromptState::NameNewAgent { .. }) {
             let is_plain_char = matches!(key.code, KeyCode::Char(_))
                 && !key.modifiers.contains(KeyModifiers::CONTROL);
@@ -2729,16 +2761,10 @@ impl App {
 
                     // For NewProject requests, check whether the branch already
                     // exists locally or on the remote before creating a new one.
-                    if let CreateAgentRequest::NewProject { ref project, .. } = request {
+                    if let Some(project) = create_agent_request_project(&request) {
                         let repo_path = std::path::PathBuf::from(&project.path);
                         if let Some(location) = git::branch_exists(&repo_path, &name) {
-                            if let CreateAgentRequest::NewProject {
-                                ref mut custom_name,
-                                ..
-                            } = request
-                            {
-                                *custom_name = Some(name.clone());
-                            }
+                            set_create_agent_request_custom_name(&mut request, name.clone());
                             self.prompt = PromptState::ConfirmUseExistingBranch {
                                 request,
                                 branch_name: name,
@@ -2756,18 +2782,21 @@ impl App {
                                 project.name
                             )
                         }
+                        CreateAgentRequest::PullRequest {
+                            project, number, ..
+                        } => {
+                            format!(
+                                "Creating a new agent worktree \"{name}\" from PR #{number} for project \"{}\" and launching a fresh session...",
+                                project.name
+                            )
+                        }
                         CreateAgentRequest::ForkSession { source_label, .. } => {
                             format!(
                                 "Forking agent \"{source_label}\" as \"{name}\" by cloning its current worktree contents into a fresh session...",
                             )
                         }
                     };
-                    match &mut request {
-                        CreateAgentRequest::NewProject { custom_name, .. }
-                        | CreateAgentRequest::ForkSession { custom_name, .. } => {
-                            *custom_name = Some(name);
-                        }
-                    }
+                    set_create_agent_request_custom_name(&mut request, name);
                     self.dispatch_create_agent_request(request, msg)?;
                 }
                 _ => {
@@ -3556,6 +3585,31 @@ impl App {
         }
     }
 
+    fn update_non_default_branch_hover_status(&mut self, column: u16, row: u16) {
+        let hovering_not_leading_project = match self.mouse_target(column, row) {
+            Some(MouseTarget::LeftRow(index)) => self
+                .left_items()
+                .get(index)
+                .and_then(|item| match item {
+                    LeftItem::Project(project_index) => self.projects.get(*project_index),
+                    LeftItem::Session(_) => None,
+                })
+                .is_some_and(|project| {
+                    !project.path_missing
+                        && project.branch_status == ProjectBranchStatus::NotLeading
+                }),
+            _ => false,
+        };
+
+        if hovering_not_leading_project {
+            self.set_warning(NON_DEFAULT_BRANCH_HOVER_STATUS);
+        } else if self.status.tone() == crate::statusline::StatusTone::Warning
+            && self.status.text() == NON_DEFAULT_BRANCH_HOVER_STATUS
+        {
+            self.set_info("");
+        }
+    }
+
     fn register_mouse_click(
         &mut self,
         target: MouseClickTarget,
@@ -3581,7 +3635,7 @@ impl App {
 
     fn set_command_palette_selection(&mut self, index: usize) {
         let count = match &self.prompt {
-            PromptState::Command { input, .. } => self.filtered_palette(&input.text).len(),
+            PromptState::Command { input, .. } => self.filtered_palette_commands(&input.text).len(),
             _ => 0,
         };
         if count == 0 {
@@ -3609,7 +3663,7 @@ impl App {
             input, selected, ..
         } = &self.prompt
         {
-            if let Some(binding) = self.filtered_palette(&input.text).get(*selected) {
+            if let Some(binding) = self.filtered_palette_commands(&input.text).get(*selected) {
                 binding.palette_name.unwrap().to_string()
             } else {
                 input.text.trim().to_string()
@@ -4143,17 +4197,23 @@ impl App {
         if let CreateAgentRequest::NewProject {
             use_existing_branch,
             ..
+        }
+        | CreateAgentRequest::PullRequest {
+            use_existing_branch,
+            ..
         } = &mut request
         {
             *use_existing_branch = true;
         }
-        let msg = if let CreateAgentRequest::NewProject { ref project, .. } = request {
-            format!(
-                "Attaching to existing branch \"{branch_name}\" for project \"{}\" and launching a fresh session...",
-                project.name
-            )
-        } else {
-            unreachable!()
+        let msg = match &request {
+            CreateAgentRequest::NewProject { project, .. }
+            | CreateAgentRequest::PullRequest { project, .. } => {
+                format!(
+                    "Attaching to existing branch \"{branch_name}\" for project \"{}\" and launching a fresh session...",
+                    project.name
+                )
+            }
+            CreateAgentRequest::ForkSession { .. } => unreachable!(),
         };
         if let Err(e) = self.dispatch_create_agent_request(request, msg) {
             self.set_error(format!("{e:#}"));
@@ -5100,6 +5160,9 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) if self.mouse_drag.take().is_some() => {
                 self.persist_pane_widths();
             }
+            MouseEventKind::Moved => {
+                self.update_non_default_branch_hover_status(mouse.column, mouse.row);
+            }
             MouseEventKind::ScrollDown => match self.mouse_target(mouse.column, mouse.row) {
                 Some(MouseTarget::LeftRow(_)) => {
                     self.handle_left_mouse_wheel(true, mouse.column, mouse.row)
@@ -5332,14 +5395,32 @@ impl App {
     }
 }
 
+fn create_agent_request_project(request: &CreateAgentRequest) -> Option<&Project> {
+    match request {
+        CreateAgentRequest::NewProject { project, .. }
+        | CreateAgentRequest::PullRequest { project, .. } => Some(project),
+        CreateAgentRequest::ForkSession { .. } => None,
+    }
+}
+
+fn set_create_agent_request_custom_name(request: &mut CreateAgentRequest, name: String) {
+    match request {
+        CreateAgentRequest::NewProject { custom_name, .. }
+        | CreateAgentRequest::ForkSession { custom_name, .. }
+        | CreateAgentRequest::PullRequest { custom_name, .. } => {
+            *custom_name = Some(name);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex, mpsc};
 
-    use super::DOUBLE_CLICK_THRESHOLD;
     use super::components::{ButtonPressedTarget, PressedButton};
+    use super::{DOUBLE_CLICK_THRESHOLD, NON_DEFAULT_BRANCH_HOVER_STATUS};
     use crate::app::{
         App, BranchWarningKind, CenterMode, ConfigReloadFailedFocus, ConfirmKillRunningPrompt,
         ConfirmNonDefaultBranchFocus, CreateAgentRequest, DeleteAgentFocus, FocusPane,
@@ -5347,8 +5428,8 @@ mod tests {
         KillRunningFooterAction, KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftItem,
         LeftSection, MacroBarState, MouseClickTarget, MouseLayoutState, NameNewAgentFocus,
         NonDefaultBranchAction, OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout,
-        OverlayMouseLayoutState, ProcessInfo, PromptState, PullTarget, ResourceStats, RightSection,
-        RuntimeTargetId, TextInput, WorkerEvent,
+        OverlayMouseLayoutState, ProcessInfo, PromptState, PullTarget, ResolvedPullRequest,
+        ResourceStats, RightSection, RuntimeTargetId, TextInput, WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
@@ -7135,6 +7216,28 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn mouse_hover_non_default_project_shows_status_reason() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.projects[0].branch_status = ProjectBranchStatus::NotLeading;
+
+        app.handle_mouse(mouse(MouseEventKind::Moved, 2, 1));
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
+        assert_eq!(app.status.text(), NON_DEFAULT_BRANCH_HOVER_STATUS);
+    }
+
+    #[test]
+    fn mouse_hover_ordinary_project_does_not_show_non_default_status() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Moved, 2, 1));
+
+        assert_eq!(app.status.text(), "ready");
+    }
+
+    #[test]
     fn mouse_click_right_row_focuses_and_selects_unstaged_file() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
@@ -7832,7 +7935,7 @@ not_a_real_action = ["x"]
     #[test]
     fn command_palette_hides_current_pr_command_without_known_pr() {
         let app = test_app(default_bindings());
-        let commands = app.filtered_palette("open-current-pr");
+        let commands = app.filtered_palette_commands("open-current-pr");
 
         assert!(commands.is_empty());
     }
@@ -7846,12 +7949,13 @@ not_a_real_action = ["x"]
                 number: 42,
                 state: PrState::Merged,
                 title: "Demo PR".to_string(),
+                host: "github.com".to_string(),
                 owner_repo: "owner/repo".to_string(),
                 url: "https://github.com/owner/repo/pull/42".to_string(),
             },
         );
 
-        let commands = app.filtered_palette("open-current-pr");
+        let commands = app.filtered_palette_commands("open-current-pr");
 
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].palette_name, Some("open-current-pr"));
@@ -7870,6 +7974,7 @@ not_a_real_action = ["x"]
                 number: 42,
                 state: PrState::Closed,
                 title: "Demo PR".to_string(),
+                host: "github.com".to_string(),
                 owner_repo: "owner/repo".to_string(),
                 url: "https://github.com/owner/repo/pull/42".to_string(),
             },
@@ -7889,6 +7994,77 @@ not_a_real_action = ["x"]
         let center_hints = app.footer_hints_for(crate::keybindings::HintContext::Center);
 
         assert!(!center_hints.iter().any(|(_, desc)| *desc == "PR"));
+    }
+
+    #[test]
+    fn command_palette_gates_new_agent_from_pr_on_github_availability() {
+        let mut app = test_app(default_bindings());
+
+        app.github_integration_enabled = true;
+        app.gh_status = crate::model::GhStatus::NotInstalled;
+        let unavailable_names = app
+            .filtered_palette_commands("pr")
+            .into_iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect::<Vec<_>>();
+        assert!(!unavailable_names.contains(&"new-agent-from-pr"));
+
+        app.gh_status = crate::model::GhStatus::Available;
+        let available_names = app
+            .filtered_palette_commands("pr")
+            .into_iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect::<Vec<_>>();
+        assert!(available_names.contains(&"new-agent-from-pr"));
+
+        app.github_integration_enabled = false;
+        let disabled_names = app
+            .filtered_palette_commands("pr")
+            .into_iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect::<Vec<_>>();
+        assert!(!disabled_names.contains(&"new-agent-from-pr"));
+    }
+
+    #[test]
+    fn resolved_pull_request_prefills_name_prompt_with_head_branch() {
+        let mut app = test_app(default_bindings());
+        let project = app.projects[0].clone();
+
+        app.worker_tx
+            .send(WorkerEvent::PullRequestResolved {
+                result: Ok(ResolvedPullRequest {
+                    project,
+                    host: "github.com".to_string(),
+                    owner_repo: "octocat/Hello-World".to_string(),
+                    number: 42,
+                    title: "Fix issue".to_string(),
+                    state: "OPEN".to_string(),
+                    head_ref_name: "feature/pr-42".to_string(),
+                }),
+            })
+            .expect("send PR resolution");
+        app.drain_events();
+
+        match &app.prompt {
+            PromptState::NameNewAgent { input, request, .. } => {
+                assert_eq!(input.text, "feature/pr-42");
+                match request {
+                    CreateAgentRequest::PullRequest {
+                        number,
+                        head_branch,
+                        custom_name,
+                        ..
+                    } => {
+                        assert_eq!(*number, 42);
+                        assert_eq!(head_branch, "feature/pr-42");
+                        assert_eq!(custom_name.as_deref(), Some("feature/pr-42"));
+                    }
+                    other => panic!("expected PullRequest request, got {other:?}"),
+                }
+            }
+            other => panic!("expected name-new-agent prompt, got {other:?}"),
+        }
     }
 
     #[test]
@@ -11423,6 +11599,38 @@ cyan = "#00ffff"
         assert!(
             rendered.contains("dux development"),
             "expected local build version label, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn non_default_project_uses_double_exclamation_marker() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.projects[0].branch_status = ProjectBranchStatus::NotLeading;
+        app.rebuild_left_items();
+
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(
+            rendered.contains("demo (1) ‼"),
+            "expected non-default project marker, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("demo (1) !"),
+            "old non-default project marker should not render"
         );
     }
 

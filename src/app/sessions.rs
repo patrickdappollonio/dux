@@ -202,11 +202,65 @@ impl App {
         })
     }
 
+    pub(crate) fn open_new_agent_from_pr_prompt(&mut self) -> Result<()> {
+        if !self.github_pr_agent_command_available() {
+            self.set_error(
+                "GitHub PR agent creation requires GitHub integration and an authenticated gh CLI.",
+            );
+            return Ok(());
+        }
+        let Some(project) = self.selected_project().cloned() else {
+            self.set_error("Select a project first to create an agent from a PR.");
+            return Ok(());
+        };
+        if project.path_missing {
+            self.set_warning(format!(
+                "Cannot create an agent from a PR: path not found for \"{}\"",
+                project.name
+            ));
+            return Ok(());
+        }
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.prompt = PromptState::PullRequestInput {
+            project,
+            input: TextInput::new(),
+        };
+        self.set_info("Paste a GitHub PR URL or enter a PR number for the selected project.");
+        Ok(())
+    }
+
+    pub(crate) fn dispatch_pull_request_lookup(
+        &mut self,
+        project: Project,
+        raw_input: String,
+    ) -> Result<()> {
+        self.prompt = PromptState::None;
+        self.set_busy(format!("Resolving PR for project \"{}\"...", project.name));
+        let worker_tx = self.worker_tx.clone();
+        thread::spawn(move || {
+            super::workers::run_pull_request_lookup_job(project, raw_input, worker_tx);
+        });
+        Ok(())
+    }
+
     pub(crate) fn open_name_new_agent_prompt(&mut self, request: CreateAgentRequest) -> Result<()> {
-        let randomize_name = self.config.defaults.enable_randomized_pet_name_by_default;
+        let explicit_name = match &request {
+            CreateAgentRequest::NewProject { custom_name, .. }
+            | CreateAgentRequest::ForkSession { custom_name, .. } => custom_name.clone(),
+            CreateAgentRequest::PullRequest {
+                custom_name,
+                head_branch,
+                ..
+            } => custom_name.clone().or_else(|| Some(head_branch.clone())),
+        };
+        let randomize_name =
+            explicit_name.is_none() && self.config.defaults.enable_randomized_pet_name_by_default;
         let mut input = TextInput::new().with_char_map(crate::git::agent_name_char_map);
         let mut randomized_name = None;
-        if randomize_name {
+        if let Some(name) = explicit_name {
+            input.set_text(name);
+        } else if randomize_name {
             let name = crate::git::docker_style_name();
             input.set_text(name.clone());
             randomized_name = Some(name);
@@ -2048,6 +2102,68 @@ impl App {
     }
 }
 
+pub(crate) fn parse_pull_request_lookup(
+    raw_input: &str,
+    selected_host: &str,
+    selected_owner_repo: &str,
+) -> Result<PullRequestLookup, String> {
+    let input = raw_input.trim();
+    if input.is_empty() {
+        return Err("Enter a GitHub PR URL or PR number.".to_string());
+    }
+
+    if let Ok(number) = input.strip_prefix('#').unwrap_or(input).parse::<u64>() {
+        return Ok(PullRequestLookup {
+            host: selected_host.to_string(),
+            owner_repo: selected_owner_repo.to_string(),
+            number,
+        });
+    }
+
+    let Some((host, rest)) = parse_github_pull_url_parts(input) else {
+        return Err("Enter a PR number, #number, or a GitHub PR URL.".to_string());
+    };
+    let parts: Vec<&str> = rest.split('/').collect();
+    if parts.len() < 4 || parts[2] != "pull" {
+        return Err(
+            "GitHub PR URLs must look like https://github.com/owner/repo/pull/123.".to_string(),
+        );
+    }
+    let owner_repo = format!("{}/{}", parts[0], parts[1]);
+    if !host.eq_ignore_ascii_case(selected_host)
+        || !owner_repo.eq_ignore_ascii_case(selected_owner_repo)
+    {
+        return Err(format!(
+            "PR belongs to {host}/{owner_repo}, but the selected project uses {selected_host}/{selected_owner_repo}."
+        ));
+    }
+    let number = parts[3]
+        .parse::<u64>()
+        .map_err(|_| "GitHub PR URL does not contain a valid PR number.".to_string())?;
+    Ok(PullRequestLookup {
+        host,
+        owner_repo,
+        number,
+    })
+}
+
+fn parse_github_pull_url_parts(input: &str) -> Option<(String, String)> {
+    let without_scheme = input
+        .strip_prefix("https://")
+        .or_else(|| input.strip_prefix("http://"))?;
+    let (host, rest) = without_scheme.split_once('/')?;
+    if host != "github.com" && !host.starts_with("github.") {
+        return None;
+    }
+    let rest = rest
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(rest)
+        .trim_end_matches('/')
+        .to_string();
+    Some((host.to_string(), rest))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2820,5 +2936,58 @@ mod tests {
             msg.contains("not a git repository"),
             "error should include the git error, got: {msg}",
         );
+    }
+
+    #[test]
+    fn parse_pull_request_lookup_accepts_number_and_hash_number() {
+        let plain = super::parse_pull_request_lookup("123", "github.com", "octocat/Hello-World")
+            .expect("plain number");
+        assert_eq!(plain.host, "github.com");
+        assert_eq!(plain.owner_repo, "octocat/Hello-World");
+        assert_eq!(plain.number, 123);
+
+        let hashed =
+            super::parse_pull_request_lookup("#456", "github.example.com", "octocat/Hello-World")
+                .expect("hash number");
+        assert_eq!(hashed.host, "github.example.com");
+        assert_eq!(hashed.owner_repo, "octocat/Hello-World");
+        assert_eq!(hashed.number, 456);
+    }
+
+    #[test]
+    fn parse_pull_request_lookup_accepts_matching_github_url() {
+        let lookup = super::parse_pull_request_lookup(
+            "https://github.com/octocat/Hello-World/pull/789?foo=bar",
+            "github.com",
+            "octocat/Hello-World",
+        )
+        .expect("matching URL");
+        assert_eq!(lookup.host, "github.com");
+        assert_eq!(lookup.owner_repo, "octocat/Hello-World");
+        assert_eq!(lookup.number, 789);
+    }
+
+    #[test]
+    fn parse_pull_request_lookup_accepts_matching_enterprise_url() {
+        let lookup = super::parse_pull_request_lookup(
+            "https://github.example.com/octocat/Hello-World/pull/789",
+            "github.example.com",
+            "octocat/Hello-World",
+        )
+        .expect("matching enterprise URL");
+        assert_eq!(lookup.host, "github.example.com");
+        assert_eq!(lookup.owner_repo, "octocat/Hello-World");
+        assert_eq!(lookup.number, 789);
+    }
+
+    #[test]
+    fn parse_pull_request_lookup_rejects_mismatched_github_url() {
+        let err = super::parse_pull_request_lookup(
+            "https://github.com/other/repo/pull/12",
+            "github.com",
+            "octocat/Hello-World",
+        )
+        .expect_err("mismatched repo");
+        assert!(err.contains("selected project uses github.com/octocat/Hello-World"));
     }
 }
