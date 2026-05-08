@@ -3600,6 +3600,7 @@ impl App {
                 .and_then(|item| match item {
                     LeftItem::Project(project_index) => self.projects.get(*project_index),
                     LeftItem::Session(_) => None,
+                    LeftItem::EmptyProjectsSeparator => None,
                 })
                 .is_some_and(|project| {
                     !project.path_missing
