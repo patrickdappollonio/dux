@@ -558,7 +558,7 @@ impl App {
                                     "▾"
                                 };
                             let icon = if project.branch_status == ProjectBranchStatus::NotLeading {
-                                "!"
+                                "‼"
                             } else {
                                 icon
                             };
@@ -674,7 +674,7 @@ impl App {
                         }
                         if project.branch_status == ProjectBranchStatus::NotLeading {
                             spans.push(Span::styled(
-                                " !",
+                                " ‼",
                                 Style::default().fg(self.theme.warning_fg),
                             ));
                         }
