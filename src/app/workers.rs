@@ -216,15 +216,15 @@ impl App {
                                     crate::model::PrState::Merged => "MERGED",
                                     crate::model::PrState::Closed => "CLOSED",
                                 };
-                                let _ = self.session_store.upsert_pr(
-                                    &session_id,
-                                    pr.number,
-                                    &pr.host,
-                                    &pr.owner_repo,
-                                    state_str,
-                                    &pr.title,
-                                    &pr.url,
-                                );
+                                let _ = self.session_store.upsert_pr(&crate::storage::StoredPr {
+                                    session_id: session_id.clone(),
+                                    pr_number: pr.number,
+                                    host: pr.host.clone(),
+                                    owner_repo: pr.owner_repo.clone(),
+                                    state: state_str.to_string(),
+                                    title: pr.title.clone(),
+                                    url: pr.url.clone(),
+                                });
                                 self.pr_statuses.insert(session_id, pr);
                                 changed = true;
                             }

@@ -91,16 +91,7 @@ impl SessionStore {
     }
 
     /// Insert a PR association or update its state and title if it already exists.
-    pub fn upsert_pr(
-        &self,
-        session_id: &str,
-        pr_number: u64,
-        host: &str,
-        owner_repo: &str,
-        state: &str,
-        title: &str,
-        url: &str,
-    ) -> Result<()> {
+    pub fn upsert_pr(&self, pr: &StoredPr) -> Result<()> {
         self.conn.execute(
             r#"
             insert into session_prs (session_id, pr_number, host, owner_repo, state, title, url)
@@ -113,13 +104,13 @@ impl SessionStore {
                 url=excluded.url
             "#,
             params![
-                session_id,
-                pr_number as i64,
-                host,
-                owner_repo,
-                state,
-                title,
-                url
+                pr.session_id,
+                pr.pr_number as i64,
+                pr.host,
+                pr.owner_repo,
+                pr.state,
+                pr.title,
+                pr.url
             ],
         )?;
         Ok(())
@@ -398,15 +389,15 @@ mod pr_tests {
     use super::*;
     use chrono::Duration;
 
-    fn spr(sid: &str, num: u64, repo: &str, state: &str, title: &str) -> StoredPr {
+    fn spr(sid: &str, num: u64, host: &str, repo: &str, state: &str, title: &str) -> StoredPr {
         StoredPr {
             session_id: sid.to_string(),
             pr_number: num,
-            host: "github.com".to_string(),
+            host: host.to_string(),
             owner_repo: repo.to_string(),
             state: state.to_string(),
             title: title.to_string(),
-            url: fallback_pr_url("github.com", repo, num),
+            url: fallback_pr_url(host, repo, num),
         }
     }
 
@@ -418,36 +409,50 @@ mod pr_tests {
         store.upsert_session(&s).unwrap();
 
         store
-            .upsert_pr("s1", 10, "github.com", "owner/repo", "OPEN", "First PR", "")
+            .upsert_pr(&spr(
+                "s1",
+                10,
+                "github.com",
+                "owner/repo",
+                "OPEN",
+                "First PR",
+            ))
             .unwrap();
         store
-            .upsert_pr(
+            .upsert_pr(&spr(
                 "s1",
                 20,
                 "github.com",
                 "owner/repo",
                 "OPEN",
                 "Second PR",
-                "",
-            )
+            ))
             .unwrap();
         store
-            .upsert_pr(
+            .upsert_pr(&spr(
                 "s1",
                 15,
                 "github.com",
                 "owner/repo",
                 "MERGED",
                 "Middle PR",
-                "",
-            )
+            ))
             .unwrap();
 
         let prs = store.load_prs("s1").unwrap();
         assert_eq!(prs.len(), 3);
-        assert_eq!(prs[0], spr("s1", 20, "owner/repo", "OPEN", "Second PR"));
-        assert_eq!(prs[1], spr("s1", 15, "owner/repo", "MERGED", "Middle PR"));
-        assert_eq!(prs[2], spr("s1", 10, "owner/repo", "OPEN", "First PR"));
+        assert_eq!(
+            prs[0],
+            spr("s1", 20, "github.com", "owner/repo", "OPEN", "Second PR")
+        );
+        assert_eq!(
+            prs[1],
+            spr("s1", 15, "github.com", "owner/repo", "MERGED", "Middle PR")
+        );
+        assert_eq!(
+            prs[2],
+            spr("s1", 10, "github.com", "owner/repo", "OPEN", "First PR")
+        );
     }
 
     #[test]
@@ -458,18 +463,20 @@ mod pr_tests {
         store.upsert_session(&s).unwrap();
 
         store
-            .upsert_pr("s1", 42, "github.com", "owner/repo", "OPEN", "My PR", "")
+            .upsert_pr(&spr("s1", 42, "github.com", "owner/repo", "OPEN", "My PR"))
             .unwrap();
         store
-            .upsert_pr(
-                "s1",
-                42,
-                "github.example.com",
-                "owner/repo",
-                "MERGED",
-                "My PR (updated)",
-                "https://github.com/owner/repo/pull/42",
-            )
+            .upsert_pr(&StoredPr {
+                url: "https://github.com/owner/repo/pull/42".to_string(),
+                ..spr(
+                    "s1",
+                    42,
+                    "github.example.com",
+                    "owner/repo",
+                    "MERGED",
+                    "My PR (updated)",
+                )
+            })
             .unwrap();
 
         let prs = store.load_prs("s1").unwrap();
@@ -490,27 +497,54 @@ mod pr_tests {
         store.upsert_session(&s2).unwrap();
 
         store
-            .upsert_pr("s1", 10, "github.com", "owner/repo", "CLOSED", "Old PR", "")
+            .upsert_pr(&spr(
+                "s1",
+                10,
+                "github.com",
+                "owner/repo",
+                "CLOSED",
+                "Old PR",
+            ))
             .unwrap();
         store
-            .upsert_pr(
+            .upsert_pr(&spr(
                 "s1",
                 20,
                 "github.com",
                 "owner/repo",
                 "MERGED",
                 "Latest PR",
-                "",
-            )
+            ))
             .unwrap();
         store
-            .upsert_pr("s2", 5, "github.com", "other/repo", "OPEN", "Other PR", "")
+            .upsert_pr(&spr(
+                "s2",
+                5,
+                "github.com",
+                "other/repo",
+                "OPEN",
+                "Other PR",
+            ))
             .unwrap();
 
         let latest = store.load_all_latest_prs().unwrap();
         assert_eq!(latest.len(), 2);
-        assert!(latest.contains(&spr("s1", 20, "owner/repo", "MERGED", "Latest PR")));
-        assert!(latest.contains(&spr("s2", 5, "other/repo", "OPEN", "Other PR")));
+        assert!(latest.contains(&spr(
+            "s1",
+            20,
+            "github.com",
+            "owner/repo",
+            "MERGED",
+            "Latest PR"
+        )));
+        assert!(latest.contains(&spr(
+            "s2",
+            5,
+            "github.com",
+            "other/repo",
+            "OPEN",
+            "Other PR"
+        )));
     }
 }
 
