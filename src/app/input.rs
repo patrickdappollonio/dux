@@ -9132,6 +9132,53 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn delete_agent_dialog_separates_checkbox_from_buttons() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmDeleteAgent {
+            session_id: app.sessions[0].id.clone(),
+            branch_name: app.sessions[0].branch_name.clone(),
+            focus: DeleteAgentFocus::Cancel,
+            delete_worktree: false,
+            worktree_shared: false,
+        };
+
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let (checkbox, cancel_button) = match app.overlay_layout.active {
+            OverlayMouseLayout::ConfirmDeleteAgent {
+                checkbox: Some(checkbox),
+                cancel_button,
+                ..
+            } => (checkbox.rect, cancel_button),
+            other => panic!("expected delete-agent overlay layout, got {other:?}"),
+        };
+        let separator_y = checkbox.y + checkbox.height;
+
+        assert_eq!(
+            cancel_button.y,
+            separator_y + 1,
+            "buttons should start one row below the checkbox separator"
+        );
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((cancel_button.x, separator_y))
+                .expect("separator cell")
+                .symbol(),
+            "─",
+            "expected a separator line between checkbox and buttons"
+        );
+    }
+
+    #[test]
     fn shift_tab_moves_delete_agent_focus_backwards() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
