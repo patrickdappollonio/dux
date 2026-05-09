@@ -5,46 +5,15 @@ impl App {
         while let Ok(event) = self.worker_rx.try_recv() {
             match event {
                 WorkerEvent::CreateAgentProgress(message) => self.set_busy(message),
-                WorkerEvent::CreateAgentReady(boxed) => {
-                    let AgentReadyData {
-                        session,
-                        client,
-                        pty_size,
-                        status_message,
-                    } = *boxed;
-                    self.create_agent_in_flight = false;
-                    self.last_pty_size = pty_size;
-                    if let Err(err) = self.session_store.upsert_session(&session) {
-                        logger::error(&format!(
-                            "session store upsert failed for {}: {err}",
-                            session.id
-                        ));
-                        self.set_error(format!("Failed to persist session: {err}"));
-                        continue;
-                    }
-                    self.detach_conflicting_worktree_session(
-                        &session.worktree_path,
-                        &session.id,
-                    );
-                    self.providers.insert(session.id.clone(), client);
-                    self.sessions.insert(0, session.clone());
-                    self.mark_session_provider_started(&session.id);
-                    self.update_branch_sync_sessions();
-                    self.rebuild_left_items();
-                    self.selected_left = self
-                        .left_items()
-                        .iter()
-                        .position(|item| matches!(item, LeftItem::Session(index) if self.sessions.get(*index).map(|candidate| candidate.id.as_str()) == Some(session.id.as_str())))
-                        .unwrap_or(0);
-                    self.reload_changed_files();
-                    self.show_agent_surface();
-                    self.input_target = InputTarget::Agent;
-                    self.fullscreen_overlay = FullscreenOverlay::Agent;
-                    self.set_info(status_message);
-                }
                 WorkerEvent::CreateAgentFailed(message) => {
                     self.create_agent_in_flight = false;
                     self.set_error(message);
+                }
+                WorkerEvent::AgentLaunchReady(boxed) => {
+                    self.handle_agent_launch_ready(*boxed);
+                }
+                WorkerEvent::AgentLaunchFailed(boxed) => {
+                    self.handle_agent_launch_failed(*boxed);
                 }
                 WorkerEvent::ChangedFilesReady { staged, unstaged } => {
                     self.staged_files = staged;
@@ -559,8 +528,9 @@ impl App {
         // Detect PTY exits.
         let mut exited = Vec::new();
         for (session_id, provider) in &mut self.providers {
-            if provider.is_exited() || provider.try_wait().is_some() {
-                exited.push(session_id.clone());
+            let exit_success = provider.try_wait().map(|status| status.success());
+            if exit_success.is_some() || provider.is_exited() {
+                exited.push((session_id.clone(), exit_success));
             }
         }
 
@@ -568,7 +538,7 @@ impl App {
         // producing any output, retry with regular args (fresh session).
         // This handles `claude --continue || claude` style fallback.
         let mut retried = HashSet::new();
-        for session_id in &exited {
+        for (session_id, _) in &exited {
             if self.resume_fallback_candidates.remove(session_id).is_none() {
                 continue;
             }
@@ -594,44 +564,42 @@ impl App {
                 "resume args exited without output for agent \"{}\", retrying with regular args",
                 session.branch_name
             ));
-            match self.spawn_pty_for_session(&session, false) {
-                Ok(client) => {
-                    self.providers.insert(session_id.clone(), client);
-                    self.mark_session_status(session_id, SessionStatus::Active);
-                    self.mark_session_provider_started(session_id);
-                    let proj_name = self.project_name_for_session(&session);
-                    self.set_info(format!(
-                            "No prior session to resume for agent \"{}\". Started a fresh {} session in project \"{}\".",
-                            session.branch_name,
-                        session.provider.as_str(),
-                        proj_name,
-                    ));
-                    retried.insert(session_id.clone());
-                }
-                Err(err) => {
-                    logger::error(&format!(
-                        "fallback PTY spawn also failed for {}: {err}",
-                        session_id
-                    ));
-                    self.mark_session_status(session_id, SessionStatus::Detached);
-                }
+            let proj_name = self.project_name_for_session(&session);
+            let status_message = format!(
+                "No prior session to resume for agent \"{}\". Started a fresh {} session in project \"{}\".",
+                session.branch_name,
+                session.provider.as_str(),
+                proj_name,
+            );
+            let request = self.agent_launch_request(
+                session,
+                false,
+                AgentLaunchKind::ResumeFallback { status_message },
+            );
+            if self.dispatch_agent_launch(request) {
+                retried.insert(session_id.clone());
+            } else {
+                self.mark_session_status(session_id, SessionStatus::Detached);
             }
         }
 
-        for session_id in &exited {
+        for (session_id, exit_success) in &exited {
             if retried.contains(session_id) {
                 continue;
             }
             self.providers.remove(session_id);
             self.running_provider_pins.remove(session_id);
             self.last_pty_activity.remove(session_id);
+            if *exit_success == Some(true) {
+                self.mark_session_desired_running(session_id, false);
+            }
             self.mark_session_status(session_id, SessionStatus::Detached);
         }
         if !exited.is_empty() {
             // If the currently-viewed session just exited (and was not retried),
             // leave interactive mode.
             if let Some(current) = self.selected_session()
-                && exited.contains(&current.id)
+                && exited.iter().any(|(id, _)| id == &current.id)
                 && !retried.contains(&current.id)
             {
                 let key = self.bindings.label_for(Action::ReconnectAgent);
@@ -650,8 +618,8 @@ impl App {
             }
             // Trigger PR status check for exited agents.
             for sid in &exited {
-                if !retried.contains(sid) {
-                    self.spawn_pr_check_for_session(sid);
+                if !retried.contains(&sid.0) {
+                    self.spawn_pr_check_for_session(&sid.0);
                 }
             }
         }
@@ -731,6 +699,11 @@ impl App {
                         "Could not save the provider change for project \"{project_name}\": {err}"
                     ));
                 }
+                ProjectPersistenceAction::UpdateAutoReopen { project_name, .. } => {
+                    self.set_error(format!(
+                        "Could not save the auto-reopen change for project \"{project_name}\": {err}"
+                    ));
+                }
             }
             return;
         }
@@ -794,6 +767,25 @@ impl App {
                 };
                 self.set_info(message);
             }
+            ProjectPersistenceAction::UpdateAutoReopen {
+                project_id,
+                project_name,
+                auto_reopen_agents,
+            } => {
+                if let Some(project) = self
+                    .projects
+                    .iter_mut()
+                    .find(|project| project.id == project_id)
+                {
+                    project.auto_reopen_agents = auto_reopen_agents;
+                }
+                let enabled = auto_reopen_agents.unwrap_or(true);
+                self.set_info(format!(
+                    "Startup auto-reopen {} for project \"{}\".",
+                    if enabled { "enabled" } else { "disabled" },
+                    project_name
+                ));
+            }
         }
     }
 
@@ -814,6 +806,7 @@ impl App {
                                 .as_ref()
                                 .map(|provider| provider.as_str().to_string()),
                             leading_branch: project.leading_branch.clone(),
+                            auto_reopen_agents: project.auto_reopen_agents,
                         })?;
                     }
                     ProjectPersistenceAction::Remove { project_id, .. }
@@ -830,12 +823,133 @@ impl App {
                             provider.as_ref().map(|provider| provider.as_str()),
                         )?;
                     }
+                    ProjectPersistenceAction::UpdateAutoReopen {
+                        project_id,
+                        auto_reopen_agents,
+                        ..
+                    } => {
+                        store.update_project_auto_reopen(project_id, *auto_reopen_agents)?;
+                    }
                 }
                 Ok(())
             })()
             .map_err(|err| format!("{err:#}"));
             let _ = tx.send(WorkerEvent::ProjectPersistenceCompleted { action, result });
         });
+    }
+
+    fn handle_agent_launch_ready(&mut self, data: AgentLaunchReadyData) {
+        let AgentLaunchReadyData { request, client } = data;
+        let session = request.session.clone();
+        let session_id = session.id.clone();
+        self.agent_launches_in_flight.remove(&session_id);
+        self.last_pty_size = request.pty_size;
+
+        if matches!(request.kind, AgentLaunchKind::Create { .. }) {
+            self.create_agent_in_flight = false;
+            if let Err(err) = self.session_store.upsert_session(&session) {
+                logger::error(&format!(
+                    "session store upsert failed for {}: {err}",
+                    session.id
+                ));
+                self.set_error(format!("Failed to persist session: {err}"));
+                return;
+            }
+            self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
+            self.providers.insert(session.id.clone(), client);
+            self.sessions.insert(0, session.clone());
+            self.mark_session_provider_started(&session.id);
+            self.update_branch_sync_sessions();
+            self.rebuild_left_items();
+            self.selected_left = self
+                .left_items()
+                .iter()
+                .position(|item| matches!(item, LeftItem::Session(index) if self.sessions.get(*index).map(|candidate| candidate.id.as_str()) == Some(session.id.as_str())))
+                .unwrap_or(0);
+            self.reload_changed_files();
+            self.show_agent_surface();
+            self.input_target = InputTarget::Agent;
+            self.fullscreen_overlay = FullscreenOverlay::Agent;
+            if let AgentLaunchKind::Create { status_message, .. } = request.kind {
+                self.set_info(status_message);
+            }
+            return;
+        }
+
+        if !self.sessions.iter().any(|s| s.id == session.id) {
+            logger::info(&format!(
+                "dropping launched PTY for missing session {}",
+                session.id
+            ));
+            return;
+        }
+
+        self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
+        self.providers.insert(session.id.clone(), client);
+        if request.resume {
+            self.resume_fallback_candidates
+                .insert(session.id.clone(), Instant::now());
+        }
+        self.mark_session_desired_running(&session.id, true);
+        self.mark_session_status(&session.id, SessionStatus::Active);
+        self.mark_session_provider_started(&session.id);
+
+        match request.kind {
+            AgentLaunchKind::Reconnect { status_message }
+            | AgentLaunchKind::ForceReconnect { status_message } => {
+                self.show_agent_surface();
+                self.input_target = InputTarget::Agent;
+                self.fullscreen_overlay = FullscreenOverlay::Agent;
+                self.set_info(status_message);
+            }
+            AgentLaunchKind::ResumeFallback { status_message } => {
+                self.set_info(status_message);
+            }
+            AgentLaunchKind::StartupAutoReopen => {}
+            AgentLaunchKind::Create { .. } => unreachable!("create launch handled above"),
+        }
+    }
+
+    fn handle_agent_launch_failed(&mut self, data: AgentLaunchFailedData) {
+        let AgentLaunchFailedData { request, message } = data;
+        let session = request.session;
+        self.agent_launches_in_flight.remove(&session.id);
+
+        match request.kind {
+            AgentLaunchKind::Create { .. } => {
+                self.create_agent_in_flight = false;
+                self.set_error(message);
+            }
+            AgentLaunchKind::Reconnect { .. } => {
+                self.set_error(format!(
+                    "Reconnect failed for agent \"{}\": {}",
+                    session.branch_name, message
+                ));
+            }
+            AgentLaunchKind::ForceReconnect { .. } => {
+                self.set_error(format!(
+                    "Fresh restart failed for agent \"{}\": {}",
+                    session.branch_name, message
+                ));
+            }
+            AgentLaunchKind::ResumeFallback { .. } => {
+                logger::error(&format!(
+                    "fallback PTY spawn failed for {}: {}",
+                    session.id, message
+                ));
+                self.mark_session_status(&session.id, SessionStatus::Detached);
+            }
+            AgentLaunchKind::StartupAutoReopen => {
+                logger::error(&format!(
+                    "startup auto-reopen failed for agent \"{}\": {}",
+                    session.branch_name, message
+                ));
+                self.set_warning(format!(
+                    "Couldn't auto-reopen agent \"{}\": {}",
+                    session.branch_name, message
+                ));
+            }
+        }
     }
 
     pub(crate) fn spawn_browser_entries(&self, dir: &Path) {
@@ -1220,26 +1334,20 @@ impl App {
                 "resume args produced no visible output for agent \"{}\" within timeout, retrying with regular args",
                 session.branch_name
             ));
-            match self.spawn_pty_for_session(&session, false) {
-                Ok(client) => {
-                    self.providers.insert(session_id.clone(), client);
-                    self.mark_session_status(&session_id, SessionStatus::Active);
-                    self.mark_session_provider_started(&session_id);
-                    let proj_name = self.project_name_for_session(&session);
-                    self.set_info(format!(
-                        "Resume timed out for agent \"{}\" with no visible output. Started a fresh {} session in project \"{}\".",
-                        session.branch_name,
-                        session.provider.as_str(),
-                        proj_name,
-                    ));
-                }
-                Err(err) => {
-                    logger::error(&format!(
-                        "timeout fallback PTY spawn failed for {}: {err}",
-                        session_id
-                    ));
-                    self.mark_session_status(&session_id, SessionStatus::Detached);
-                }
+            let proj_name = self.project_name_for_session(&session);
+            let status_message = format!(
+                "Resume timed out for agent \"{}\" with no visible output. Started a fresh {} session in project \"{}\".",
+                session.branch_name,
+                session.provider.as_str(),
+                proj_name,
+            );
+            let request = self.agent_launch_request(
+                session,
+                false,
+                AgentLaunchKind::ResumeFallback { status_message },
+            );
+            if !self.dispatch_agent_launch(request) {
+                self.mark_session_status(&session_id, SessionStatus::Detached);
             }
         }
     }
@@ -1702,6 +1810,8 @@ pub(crate) fn run_create_agent_job(
         worktree_path: worktree_path.to_string_lossy().to_string(),
         title: None,
         started_providers: Vec::new(),
+        desired_running: true,
+        auto_reopen_enabled: true,
         status: SessionStatus::Active,
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -1725,38 +1835,76 @@ pub(crate) fn run_create_agent_job(
     )));
     // crossterm::terminal::size() returns (cols, rows).
     let (cols, rows) = term_size;
+    let request = AgentLaunchRequest {
+        session,
+        provider_config: provider_cfg,
+        resume: false,
+        pty_size: (rows, cols),
+        scrollback_lines: config.ui.agent_scrollback_lines,
+        kind: AgentLaunchKind::Create {
+            status_message,
+            repo_path: repo_path.to_string_lossy().to_string(),
+            owns_worktree,
+        },
+    };
+    run_agent_launch_job(request, worker_tx);
+}
+
+pub(crate) fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<WorkerEvent>) {
+    let launch_args = request.provider_config.interactive_args(request.resume);
+    let (rows, cols) = request.pty_size;
+    logger::debug(&format!(
+        "spawning PTY {:?} {:?} in {} ({}x{}, resume_supported={})",
+        request.provider_config.command,
+        launch_args,
+        request.session.worktree_path,
+        cols,
+        rows,
+        request.provider_config.supports_session_resume()
+    ));
+
     let client = match PtyClient::spawn(
-        &provider_cfg.command,
-        &provider_cfg.args,
-        &worktree_path,
+        &request.provider_config.command,
+        launch_args,
+        Path::new(&request.session.worktree_path),
         rows,
         cols,
-        config.ui.agent_scrollback_lines,
+        request.scrollback_lines,
     ) {
         Ok(client) => client,
         Err(err) => {
-            logger::error(&format!("PTY spawn failed for {}: {err}", session.id));
-            if owns_worktree {
+            logger::error(&format!(
+                "PTY spawn failed for {}: {err}",
+                request.session.id
+            ));
+            if let AgentLaunchKind::Create {
+                repo_path,
+                owns_worktree,
+                ..
+            } = &request.kind
+                && *owns_worktree
+            {
                 let _ = git::remove_worktree(
-                    &repo_path,
-                    Path::new(&session.worktree_path),
-                    &session.branch_name,
+                    Path::new(repo_path),
+                    Path::new(&request.session.worktree_path),
+                    &request.session.branch_name,
                 );
             }
-            let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
-                "Failed to start {}: {err}",
-                provider_cfg.command
+            let message = if matches!(request.kind, AgentLaunchKind::Create { .. }) {
+                format!("Failed to start {}: {err}", request.provider_config.command)
+            } else {
+                err.to_string()
+            };
+            let _ = worker_tx.send(WorkerEvent::AgentLaunchFailed(Box::new(
+                AgentLaunchFailedData { request, message },
             )));
             return;
         }
     };
-    logger::info(&format!("PTY session started for {}", session.id));
-    let _ = worker_tx.send(WorkerEvent::CreateAgentReady(Box::new(AgentReadyData {
-        session,
-        client,
-        pty_size: (rows, cols),
-        status_message,
-    })));
+    logger::info(&format!("PTY session started for {}", request.session.id));
+    let _ = worker_tx.send(WorkerEvent::AgentLaunchReady(Box::new(
+        AgentLaunchReadyData { request, client },
+    )));
 }
 
 pub(crate) fn browser_entries(dir: &Path) -> Vec<BrowserEntry> {
@@ -2114,6 +2262,7 @@ mod tests {
             explicit_default_provider: None,
             default_provider: ProviderKind::from_str("codex"),
             leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -2129,6 +2278,8 @@ mod tests {
             worktree_path: tmp.path().join("source").to_string_lossy().to_string(),
             title: None,
             started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
             status: SessionStatus::Active,
             created_at: now,
             updated_at: now,

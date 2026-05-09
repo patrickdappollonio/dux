@@ -5539,6 +5539,7 @@ mod tests {
             explicit_default_provider: None,
             default_provider: ProviderKind::from_str("codex"),
             leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -5550,6 +5551,7 @@ mod tests {
                 name: Some(project.name.clone()),
                 default_provider: None,
                 leading_branch: project.leading_branch.clone(),
+                auto_reopen_agents: project.auto_reopen_agents,
             })
             .expect("seed project");
         let session = AgentSession {
@@ -5562,6 +5564,8 @@ mod tests {
             worktree_path: paths.worktrees_root.to_string_lossy().to_string(),
             title: None,
             started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
             status: SessionStatus::Detached,
             created_at: now,
             updated_at: now,
@@ -5618,6 +5622,7 @@ mod tests {
             terminal_return_to_list: false,
             terminal_counter: 0,
             create_agent_in_flight: false,
+            agent_launches_in_flight: std::collections::HashSet::new(),
             pulls_in_flight: std::collections::HashSet::new(),
             resource_stats_in_flight: false,
             last_pty_size: (0, 0),
@@ -6482,6 +6487,8 @@ not_a_real_action = ["x"]
             worktree_path: app.paths.worktrees_root.join("other").display().to_string(),
             title: None,
             started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
             status: SessionStatus::Detached,
             created_at: now,
             updated_at: now,
@@ -7610,6 +7617,8 @@ not_a_real_action = ["x"]
             worktree_path: app.paths.worktrees_root.to_string_lossy().to_string(),
             title: None,
             started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
             status: SessionStatus::Detached,
             created_at: now,
             updated_at: now,
@@ -7650,6 +7659,7 @@ not_a_real_action = ["x"]
                 explicit_default_provider: None,
                 default_provider: ProviderKind::from_str("codex"),
                 leading_branch: Some("main".to_string()),
+                auto_reopen_agents: None,
                 current_branch: "main".to_string(),
                 branch_status: ProjectBranchStatus::Unknown,
                 path_missing: false,
@@ -9804,7 +9814,11 @@ cyan = "#00ffff"
 
         // Wait for the process to exit.
         std::thread::sleep(std::time::Duration::from_millis(200));
-        app.drain_events();
+        drain_until(&mut app, |app| {
+            app.providers.contains_key(&session_id)
+                && !app.agent_launches_in_flight.contains(&session_id)
+                && app.status.text().contains("No prior session to resume")
+        });
 
         // The fallback should have spawned a fresh session, so the provider
         // is still present and the session is active (not detached).
@@ -9886,7 +9900,11 @@ cyan = "#00ffff"
 
         // Wait for the process to produce its one line and exit.
         std::thread::sleep(std::time::Duration::from_millis(200));
-        app.drain_events();
+        drain_until(&mut app, |app| {
+            app.providers.contains_key(&session_id)
+                && !app.agent_launches_in_flight.contains(&session_id)
+                && app.status.text().contains("No prior session to resume")
+        });
 
         // Despite having output, the fallback should trigger because the
         // output is minimal (one line, no scrollback).
@@ -9929,6 +9947,101 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn zero_exit_clears_desired_running() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let args = vec!["-c".to_string(), "exit 0".to_string()];
+        let client =
+            PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn zero-exit");
+        app.providers.insert(session_id.clone(), client);
+        app.mark_session_desired_running(&session_id, true);
+        app.mark_session_status(&session_id, SessionStatus::Active);
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.drain_events();
+
+        assert!(!app.sessions[0].desired_running);
+        let loaded = app.session_store.load_sessions().expect("load sessions");
+        assert!(!loaded[0].desired_running);
+    }
+
+    #[test]
+    fn nonzero_exit_keeps_desired_running() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let args = vec!["-c".to_string(), "exit 1".to_string()];
+        let client = PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
+            .expect("spawn nonzero-exit");
+        app.providers.insert(session_id.clone(), client);
+        app.mark_session_desired_running(&session_id, true);
+        app.mark_session_status(&session_id, SessionStatus::Active);
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.drain_events();
+
+        assert!(app.sessions[0].desired_running);
+        let loaded = app.session_store.load_sessions().expect("load sessions");
+        assert!(loaded[0].desired_running);
+    }
+
+    #[test]
+    fn startup_auto_reopens_eligible_sessions() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.sessions[0].id.clone();
+        app.config.providers.commands.insert(
+            "codex".to_string(),
+            crate::config::ProviderCommandConfig {
+                command: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "exit 1".to_string()],
+                resume_args: Some(vec!["-c".to_string(), "sleep 5".to_string()]),
+                ..Default::default()
+            },
+        );
+        app.config.ui.auto_reopen_agents = true;
+        app.sessions[0].desired_running = true;
+
+        app.restore_sessions();
+        drain_until(&mut app, |app| {
+            app.providers.contains_key(&session_id)
+                && !app.agent_launches_in_flight.contains(&session_id)
+                && app.sessions[0].status == SessionStatus::Active
+        });
+
+        assert!(app.providers.contains_key(&session_id));
+        assert_eq!(app.sessions[0].status, SessionStatus::Active);
+    }
+
+    #[test]
+    fn startup_auto_reopen_respects_global_project_and_agent_opt_outs() {
+        let mut app = test_app(default_bindings());
+        app.config.providers.commands.insert(
+            "codex".to_string(),
+            crate::config::ProviderCommandConfig {
+                command: "/bin/sh".to_string(),
+                resume_args: Some(vec!["-c".to_string(), "sleep 5".to_string()]),
+                ..Default::default()
+            },
+        );
+        app.sessions[0].desired_running = true;
+
+        app.config.ui.auto_reopen_agents = false;
+        app.restore_sessions();
+        assert!(app.providers.is_empty());
+
+        app.config.ui.auto_reopen_agents = true;
+        app.projects[0].auto_reopen_agents = Some(false);
+        app.restore_sessions();
+        assert!(app.providers.is_empty());
+
+        app.projects[0].auto_reopen_agents = None;
+        app.sessions[0].auto_reopen_enabled = false;
+        app.restore_sessions();
+        assert!(app.providers.is_empty());
+    }
+
+    #[test]
     fn hung_resume_falls_back_to_fresh_session_once() {
         let mut app = test_app(default_bindings());
         app.config.providers.commands.insert(
@@ -9956,7 +10069,11 @@ cyan = "#00ffff"
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
 
-        app.drain_events();
+        drain_until(&mut app, |app| {
+            app.providers.contains_key(&session_id)
+                && !app.agent_launches_in_flight.contains(&session_id)
+                && app.status.text().contains("Resume timed out")
+        });
 
         assert!(
             app.providers.contains_key(&session_id),
@@ -11460,6 +11577,7 @@ cyan = "#00ffff"
             explicit_default_provider: Some(ProviderKind::from_str("gemini")),
             default_provider: ProviderKind::from_str("gemini"),
             leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -11471,6 +11589,7 @@ cyan = "#00ffff"
                 name: Some(pinned.name.clone()),
                 default_provider: Some("gemini".to_string()),
                 leading_branch: Some("main".to_string()),
+                auto_reopen_agents: None,
             })
             .expect("seed pinned project");
         app.projects.push(pinned);
@@ -11556,6 +11675,47 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn toggle_project_auto_reopen_persists_opt_out() {
+        let mut app = test_app(default_bindings());
+        app.selected_left = 0;
+
+        app.execute_command("toggle-project-auto-reopen-agents".to_string())
+            .expect("toggle project auto-reopen");
+        drain_until(&mut app, |app| {
+            app.status
+                .text()
+                .contains("Startup auto-reopen disabled for project")
+        });
+
+        assert_eq!(app.projects[0].auto_reopen_agents, Some(false));
+        let persisted = app.session_store.load_projects().expect("load projects");
+        assert_eq!(persisted[0].auto_reopen_agents, Some(false));
+        assert!(
+            app.status
+                .text()
+                .contains("Startup auto-reopen disabled for project")
+        );
+    }
+
+    #[test]
+    fn toggle_agent_auto_reopen_persists_session_opt_out() {
+        let mut app = test_app(default_bindings());
+
+        app.execute_command("toggle-agent-auto-reopen".to_string())
+            .expect("toggle agent auto-reopen");
+
+        assert!(!app.sessions[0].auto_reopen_enabled);
+        let loaded = app.session_store.load_sessions().expect("load sessions");
+        assert_eq!(loaded.len(), 1);
+        assert!(!loaded[0].auto_reopen_enabled);
+        assert!(
+            app.status
+                .text()
+                .contains("Startup auto-reopen disabled for agent")
+        );
+    }
+
+    #[test]
     fn change_project_default_provider_updates_selected_project_only() {
         let mut app = test_app(default_bindings());
         app.config.defaults.provider = "codex".to_string();
@@ -11567,6 +11727,7 @@ cyan = "#00ffff"
             explicit_default_provider: Some(ProviderKind::from_str("gemini")),
             default_provider: ProviderKind::from_str("gemini"),
             leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -11578,6 +11739,7 @@ cyan = "#00ffff"
                 name: Some(pinned.name.clone()),
                 default_provider: Some("gemini".to_string()),
                 leading_branch: Some("main".to_string()),
+                auto_reopen_agents: None,
             })
             .expect("seed pinned project");
         app.projects.push(pinned);

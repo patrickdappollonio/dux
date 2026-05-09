@@ -142,6 +142,7 @@ impl App {
             explicit_default_provider: None,
             default_provider: self.config.default_provider(),
             leading_branch: Some(leading_branch),
+            auto_reopen_agents: None,
             current_branch: branch,
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -361,35 +362,45 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn spawn_pty_for_session(
-        &self,
-        session: &AgentSession,
-        resume: bool,
-    ) -> Result<PtyClient> {
-        let cfg = provider_config(&self.config, &session.provider);
-        let launch_args = cfg.interactive_args(resume);
-        let (rows, cols) = if self.last_pty_size != (0, 0) {
+    fn pty_size_for_launch(&self) -> (u16, u16) {
+        if self.last_pty_size != (0, 0) {
             self.last_pty_size
         } else {
             (24, 80)
-        };
-        logger::debug(&format!(
-            "spawning PTY {:?} {:?} in {} ({}x{}, resume_supported={})",
-            cfg.command,
-            launch_args,
-            session.worktree_path,
-            cols,
-            rows,
-            cfg.supports_session_resume()
-        ));
-        PtyClient::spawn(
-            &cfg.command,
-            launch_args,
-            Path::new(&session.worktree_path),
-            rows,
-            cols,
-            self.config.ui.agent_scrollback_lines,
-        )
+        }
+    }
+
+    pub(crate) fn agent_launch_request(
+        &self,
+        session: AgentSession,
+        resume: bool,
+        kind: AgentLaunchKind,
+    ) -> AgentLaunchRequest {
+        let cfg = provider_config(&self.config, &session.provider);
+        AgentLaunchRequest {
+            session,
+            provider_config: cfg,
+            resume,
+            pty_size: self.pty_size_for_launch(),
+            scrollback_lines: self.config.ui.agent_scrollback_lines,
+            kind,
+        }
+    }
+
+    pub(crate) fn dispatch_agent_launch(&mut self, request: AgentLaunchRequest) -> bool {
+        let session_id = request.session.id.clone();
+        if !self.agent_launches_in_flight.insert(session_id.clone()) {
+            self.set_info(format!(
+                "Agent \"{}\" is already launching.",
+                request.session.branch_name
+            ));
+            return false;
+        }
+        let tx = self.worker_tx.clone();
+        thread::spawn(move || {
+            super::workers::run_agent_launch_job(request, tx);
+        });
+        true
     }
 
     pub(crate) fn should_resume_session(&self, session: &AgentSession) -> bool {
@@ -1258,6 +1269,50 @@ impl App {
         Ok(())
     }
 
+    pub(crate) fn toggle_project_auto_reopen_agents(&mut self) -> Result<()> {
+        let Some(project) = self.selected_project().cloned() else {
+            self.set_error("Select a project first.");
+            return Ok(());
+        };
+        let enabled = self.project_allows_auto_reopen(&project.id);
+        self.spawn_project_persistence(ProjectPersistenceAction::UpdateAutoReopen {
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
+            auto_reopen_agents: if enabled { Some(false) } else { None },
+        });
+        self.set_busy(format!(
+            "Saving auto-reopen preference for project \"{}\"...",
+            project.name
+        ));
+        Ok(())
+    }
+
+    pub(crate) fn toggle_agent_auto_reopen(&mut self) -> Result<()> {
+        let Some(session) = self.selected_session().cloned() else {
+            self.set_error("Select an agent first.");
+            return Ok(());
+        };
+        let enabled = !session.auto_reopen_enabled;
+        if let Some(current) = self
+            .sessions
+            .iter_mut()
+            .find(|candidate| candidate.id == session.id)
+        {
+            current.auto_reopen_enabled = enabled;
+            current.updated_at = Utc::now();
+            self.session_store.upsert_session(current)?;
+        } else {
+            self.session_store
+                .set_auto_reopen_enabled(&session.id, enabled)?;
+        }
+        self.set_info(format!(
+            "Startup auto-reopen {} for agent \"{}\".",
+            if enabled { "enabled" } else { "disabled" },
+            session.branch_name
+        ));
+        Ok(())
+    }
+
     pub(crate) fn open_change_theme_prompt(&mut self) -> Result<()> {
         let options = crate::theme::discover_available(&self.paths);
         if options.is_empty() {
@@ -1474,50 +1529,43 @@ impl App {
             "restarting agent \"{}\" with fresh session (no resume args)",
             session.branch_name
         ));
-        match self.spawn_pty_for_session(&session, false) {
-            Ok(client) => {
-                self.providers.insert(session.id.clone(), client);
-                self.mark_session_status(&session.id, SessionStatus::Active);
-                self.mark_session_provider_started(&session.id);
-                self.show_agent_surface();
-                self.input_target = InputTarget::Agent;
-                self.fullscreen_overlay = FullscreenOverlay::Agent;
-                let proj_name = self.project_name_for_session(&session);
-                let mut msg = format!(
-                    "Started fresh {} session for agent \"{}\" in project \"{}\". Use /sessions inside the agent to restore a prior conversation.",
-                    session.provider.as_str(),
-                    session.branch_name,
-                    proj_name,
-                );
-                if let Some(detached) = &detached_label {
-                    msg.push_str(&format!(
-                        " Agent \"{}\" was detached to avoid worktree conflicts.",
-                        detached,
-                    ));
-                }
-                if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
-                    && project.default_provider != session.provider
-                {
-                    let provider_label = if self.project_uses_explicit_default_provider(&project.id)
-                    {
-                        "current project provider"
-                    } else {
-                        "current global default provider"
-                    };
-                    msg.push_str(&format!(
-                        " Note: this agent uses {}. Your {provider_label} is {}.",
-                        session.provider.as_str(),
-                        project.default_provider.as_str(),
-                    ));
-                }
-                self.set_info(msg);
-            }
-            Err(err) => {
-                self.set_error(format!(
-                    "Fresh restart failed for agent \"{}\": {err}",
-                    session.branch_name
-                ));
-            }
+        let proj_name = self.project_name_for_session(&session);
+        let mut msg = format!(
+            "Started fresh {} session for agent \"{}\" in project \"{}\". Use /sessions inside the agent to restore a prior conversation.",
+            session.provider.as_str(),
+            session.branch_name,
+            proj_name,
+        );
+        if let Some(detached) = &detached_label {
+            msg.push_str(&format!(
+                " Agent \"{}\" was detached to avoid worktree conflicts.",
+                detached,
+            ));
+        }
+        if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
+            && project.default_provider != session.provider
+        {
+            let provider_label = if self.project_uses_explicit_default_provider(&project.id) {
+                "current project provider"
+            } else {
+                "current global default provider"
+            };
+            msg.push_str(&format!(
+                " Note: this agent uses {}. Your {provider_label} is {}.",
+                session.provider.as_str(),
+                project.default_provider.as_str(),
+            ));
+        }
+        let branch_name = session.branch_name.clone();
+        let request = self.agent_launch_request(
+            session,
+            false,
+            AgentLaunchKind::ForceReconnect {
+                status_message: msg,
+            },
+        );
+        if self.dispatch_agent_launch(request) {
+            self.set_busy(format!("Starting fresh agent \"{}\"...", branch_name));
         }
         Ok(())
     }
@@ -1546,63 +1594,52 @@ impl App {
             self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
 
         let use_resume = self.should_resume_session(&session);
-        match self.spawn_pty_for_session(&session, use_resume) {
-            Ok(client) => {
-                self.providers.insert(session.id.clone(), client);
-                if use_resume {
-                    self.resume_fallback_candidates
-                        .insert(session.id.clone(), Instant::now());
-                }
-                self.mark_session_status(&session.id, SessionStatus::Active);
-                self.mark_session_provider_started(&session.id);
-                self.show_agent_surface();
-                self.input_target = InputTarget::Agent;
-                self.fullscreen_overlay = FullscreenOverlay::Agent;
-                let proj_name = self.project_name_for_session(&session);
-                let mut msg = if use_resume {
-                    format!(
-                        "Resumed {} agent \"{}\" in project \"{}\".",
-                        session.provider.as_str(),
-                        session.branch_name,
-                        proj_name
-                    )
-                } else {
-                    format!(
-                        "Started fresh {} session for agent \"{}\" in project \"{}\". Use /sessions inside the agent to restore a prior conversation.",
-                        session.provider.as_str(),
-                        session.branch_name,
-                        proj_name
-                    )
-                };
-                if let Some(detached) = &detached_label {
-                    msg.push_str(&format!(
-                        " Agent \"{}\" was detached to avoid worktree conflicts.",
-                        detached,
-                    ));
-                }
-                if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
-                    && project.default_provider != session.provider
-                {
-                    let provider_label = if self.project_uses_explicit_default_provider(&project.id)
-                    {
-                        "current project provider"
-                    } else {
-                        "current global default provider"
-                    };
-                    msg.push_str(&format!(
-                        " Note: this agent uses {}. Your {provider_label} is {}.",
-                        session.provider.as_str(),
-                        project.default_provider.as_str(),
-                    ));
-                }
-                self.set_info(msg);
-            }
-            Err(err) => {
-                self.set_error(format!(
-                    "Reconnect failed for agent \"{}\": {err}",
-                    session.branch_name
-                ));
-            }
+        let proj_name = self.project_name_for_session(&session);
+        let mut msg = if use_resume {
+            format!(
+                "Resumed {} agent \"{}\" in project \"{}\".",
+                session.provider.as_str(),
+                session.branch_name,
+                proj_name
+            )
+        } else {
+            format!(
+                "Started fresh {} session for agent \"{}\" in project \"{}\". Use /sessions inside the agent to restore a prior conversation.",
+                session.provider.as_str(),
+                session.branch_name,
+                proj_name
+            )
+        };
+        if let Some(detached) = &detached_label {
+            msg.push_str(&format!(
+                " Agent \"{}\" was detached to avoid worktree conflicts.",
+                detached,
+            ));
+        }
+        if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
+            && project.default_provider != session.provider
+        {
+            let provider_label = if self.project_uses_explicit_default_provider(&project.id) {
+                "current project provider"
+            } else {
+                "current global default provider"
+            };
+            msg.push_str(&format!(
+                " Note: this agent uses {}. Your {provider_label} is {}.",
+                session.provider.as_str(),
+                project.default_provider.as_str(),
+            ));
+        }
+        let branch_name = session.branch_name.clone();
+        let request = self.agent_launch_request(
+            session,
+            use_resume,
+            AgentLaunchKind::Reconnect {
+                status_message: msg,
+            },
+        );
+        if self.dispatch_agent_launch(request) {
+            self.set_busy(format!("Launching agent \"{}\"...", branch_name));
         }
         Ok(())
     }
@@ -2245,6 +2282,7 @@ mod tests {
             terminal_return_to_list: false,
             terminal_counter: 0,
             create_agent_in_flight: false,
+            agent_launches_in_flight: std::collections::HashSet::new(),
             pulls_in_flight: std::collections::HashSet::new(),
             resource_stats_in_flight: false,
             last_pty_size: (0, 0),
@@ -2315,6 +2353,8 @@ mod tests {
             worktree_path: worktree.to_string(),
             title: None,
             started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
             status: SessionStatus::Detached,
             created_at: now,
             updated_at: now,
@@ -2329,6 +2369,7 @@ mod tests {
             explicit_default_provider: Some(ProviderKind::from_str(provider)),
             default_provider: ProviderKind::from_str(provider),
             leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -2481,6 +2522,7 @@ mod tests {
             explicit_default_provider: Some(ProviderKind::from_str(provider)),
             default_provider: ProviderKind::from_str(provider),
             leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,

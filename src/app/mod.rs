@@ -101,6 +101,7 @@ pub struct App {
     pub(crate) terminal_return_to_list: bool,
     pub(crate) terminal_counter: usize,
     pub(crate) create_agent_in_flight: bool,
+    pub(crate) agent_launches_in_flight: HashSet<String>,
     pub(crate) pulls_in_flight: HashSet<String>,
     pub(crate) resource_stats_in_flight: bool,
     pub(crate) last_pty_size: (u16, u16),
@@ -1158,11 +1159,44 @@ pub(crate) struct CompanionTerminal {
     pub(crate) client: PtyClient,
 }
 
-pub(crate) struct AgentReadyData {
-    pub session: AgentSession,
-    pub client: PtyClient,
-    pub pty_size: (u16, u16), // (rows, cols) the PTY was spawned with
-    pub status_message: String,
+#[derive(Clone, Debug)]
+pub(crate) enum AgentLaunchKind {
+    Create {
+        status_message: String,
+        repo_path: String,
+        owns_worktree: bool,
+    },
+    Reconnect {
+        status_message: String,
+    },
+    ForceReconnect {
+        status_message: String,
+    },
+    ResumeFallback {
+        status_message: String,
+    },
+    StartupAutoReopen,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AgentLaunchRequest {
+    pub(crate) session: AgentSession,
+    pub(crate) provider_config: ProviderCommandConfig,
+    pub(crate) resume: bool,
+    pub(crate) pty_size: (u16, u16),
+    pub(crate) scrollback_lines: usize,
+    pub(crate) kind: AgentLaunchKind,
+}
+
+pub(crate) struct AgentLaunchReadyData {
+    pub(crate) request: AgentLaunchRequest,
+    pub(crate) client: PtyClient,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AgentLaunchFailedData {
+    pub(crate) request: AgentLaunchRequest,
+    pub(crate) message: String,
 }
 
 #[derive(Clone, Debug)]
@@ -1193,8 +1227,9 @@ pub(crate) enum CreateAgentRequest {
 
 pub(crate) enum WorkerEvent {
     CreateAgentProgress(String),
-    CreateAgentReady(Box<AgentReadyData>),
     CreateAgentFailed(String),
+    AgentLaunchReady(Box<AgentLaunchReadyData>),
+    AgentLaunchFailed(Box<AgentLaunchFailedData>),
     ChangedFilesReady {
         staged: Vec<ChangedFile>,
         unstaged: Vec<ChangedFile>,
@@ -1297,6 +1332,11 @@ pub(crate) enum ProjectPersistenceAction {
         project_name: String,
         provider: Option<ProviderKind>,
         global_default: ProviderKind,
+    },
+    UpdateAutoReopen {
+        project_id: String,
+        project_name: String,
+        auto_reopen_agents: Option<bool>,
     },
 }
 
@@ -1405,6 +1445,7 @@ impl App {
             terminal_return_to_list: false,
             terminal_counter: 0,
             create_agent_in_flight: false,
+            agent_launches_in_flight: HashSet::new(),
             pulls_in_flight: HashSet::new(),
             resource_stats_in_flight: false,
             last_pty_size: (0, 0),
@@ -1631,6 +1672,33 @@ impl App {
             } else {
                 self.mark_session_status(&id, SessionStatus::Exited);
             }
+        }
+        self.auto_reopen_eligible_sessions();
+    }
+
+    fn auto_reopen_eligible_sessions(&mut self) {
+        if !self.config.ui.auto_reopen_agents {
+            return;
+        }
+
+        let sessions = self.sessions.clone();
+        for session in sessions {
+            if !session.desired_running
+                || !session.auto_reopen_enabled
+                || !Path::new(&session.worktree_path).exists()
+                || !self.project_allows_auto_reopen(&session.project_id)
+            {
+                continue;
+            }
+
+            let cfg = provider_config(&self.config, &session.provider);
+            if !cfg.supports_session_resume() {
+                continue;
+            }
+
+            let request =
+                self.agent_launch_request(session, true, AgentLaunchKind::StartupAutoReopen);
+            self.dispatch_agent_launch(request);
         }
     }
 
@@ -1884,6 +1952,8 @@ impl App {
             "change-project-default-provider" => self.open_change_project_default_provider_prompt(),
             "change-theme" => self.open_change_theme_prompt(),
             "reload-config" => self.reload_config_from_disk(),
+            "toggle-project-auto-reopen-agents" => self.toggle_project_auto_reopen_agents(),
+            "toggle-agent-auto-reopen" => self.toggle_agent_auto_reopen(),
             "pull-project" => self.refresh_selected_project(),
             "delete-project" => self.delete_selected_project(),
             "remove-project" => self.remove_selected_project(),
@@ -2296,6 +2366,14 @@ impl App {
         self.project_explicit_default_provider(project_id).is_some()
     }
 
+    pub(crate) fn project_allows_auto_reopen(&self, project_id: &str) -> bool {
+        self.projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .and_then(|project| project.auto_reopen_agents)
+            .unwrap_or(true)
+    }
+
     pub(crate) fn selected_session(&self) -> Option<&AgentSession> {
         match self.left_items().get(self.selected_left) {
             Some(LeftItem::Session(index)) => self.sessions.get(*index),
@@ -2546,6 +2624,23 @@ impl App {
         }
     }
 
+    pub(crate) fn mark_session_desired_running(&mut self, session_id: &str, desired: bool) {
+        if let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|candidate| candidate.id == session_id)
+        {
+            if session.desired_running == desired {
+                return;
+            }
+            session.desired_running = desired;
+            session.updated_at = Utc::now();
+            let _ = self.session_store.upsert_session(session);
+        } else {
+            let _ = self.session_store.set_desired_running(session_id, desired);
+        }
+    }
+
     pub(crate) fn mark_session_provider_started(&mut self, session_id: &str) {
         let Some(session) = self
             .sessions
@@ -2758,6 +2853,7 @@ pub(crate) fn load_projects(
                 .map(ProviderKind::from_str),
             default_provider: provider,
             leading_branch,
+            auto_reopen_agents: project.auto_reopen_agents,
             current_branch,
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: missing,
@@ -2918,6 +3014,7 @@ mod tests {
             explicit_default_provider: None,
             default_provider: ProviderKind::from_str("codex"),
             leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -2936,6 +3033,8 @@ mod tests {
             worktree_path: format!("/tmp/worktrees/{id}"),
             title: None,
             started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
             status: SessionStatus::Detached,
             created_at: now,
             updated_at: now,
