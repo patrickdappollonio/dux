@@ -1979,6 +1979,7 @@ mod tests {
             name: "demo".to_string(),
             path: tmp.path().to_string_lossy().to_string(),
             default_provider: ProviderKind::from_str("codex"),
+            leading_branch: Some("main".to_string()),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
