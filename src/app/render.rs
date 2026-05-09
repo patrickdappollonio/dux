@@ -3990,10 +3990,10 @@ impl App {
                 }
                 let body_height = wrapped_line_count(&body_lines, inner_width, false);
                 let checkbox_spacing = u16::from(!*worktree_shared);
-                let separator_height = u16::from(!*worktree_shared);
+                let button_spacing = u16::from(!*worktree_shared);
                 let area = centered_rect_exact(
                     dialog_width,
-                    2 + body_height + checkbox_spacing + checkbox_height + separator_height + 3,
+                    2 + body_height + checkbox_spacing + checkbox_height + button_spacing + 3,
                     frame.area(),
                 );
                 self.clear_overlay_area(frame, area);
@@ -4001,13 +4001,13 @@ impl App {
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
 
-                let [body_area, _, checkbox_area, separator_area, buttons_area] = Layout::default()
+                let [body_area, _, checkbox_area, _, buttons_area] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(body_height),
                         Constraint::Length(checkbox_spacing),
                         Constraint::Length(checkbox_height),
-                        Constraint::Length(separator_height),
+                        Constraint::Length(button_spacing),
                         Constraint::Length(3),
                     ])
                     .areas(inner);
@@ -4037,14 +4037,6 @@ impl App {
                 } else {
                     None
                 };
-
-                if !*worktree_shared {
-                    Paragraph::new(Line::from(Span::styled(
-                        "─".repeat(separator_area.width as usize),
-                        Style::default().fg(self.theme.border_normal),
-                    )))
-                    .render(separator_area, frame.buffer_mut());
-                }
 
                 // Button area: two bordered panels side by side.
                 let btn_width = 16u16;
