@@ -527,12 +527,11 @@ impl App {
             return self.handle_left_terminal_key(key);
         }
 
-        let item_count = self.left_items().len();
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
             match action {
                 Action::MoveDown => {
-                    if self.selected_left + 1 < item_count {
-                        self.selected_left += 1;
+                    if let Some(next) = self.next_selectable_left_item_after(self.selected_left) {
+                        self.selected_left = next;
                         self.close_diff_view();
                         self.reload_changed_files();
                         self.update_missing_project_warning();
@@ -543,11 +542,15 @@ impl App {
                         self.close_diff_view();
                     }
                 }
-                Action::MoveUp if self.selected_left > 0 => {
-                    self.selected_left -= 1;
-                    self.close_diff_view();
-                    self.reload_changed_files();
-                    self.update_missing_project_warning();
+                Action::MoveUp => {
+                    if let Some(prev) =
+                        self.previous_selectable_left_item_before(self.selected_left)
+                    {
+                        self.selected_left = prev;
+                        self.close_diff_view();
+                        self.reload_changed_files();
+                        self.update_missing_project_warning();
+                    }
                 }
                 Action::FocusAgent | Action::ExitInteractive => {
                     self.activate_selected_left_item()?
@@ -611,9 +614,14 @@ impl App {
                     } else {
                         // Jump back to projects section.
                         self.left_section = LeftSection::Projects;
-                        let item_count = self.left_items().len();
-                        if item_count > 0 {
-                            self.selected_left = item_count - 1;
+                        if let Some(last) = self
+                            .left_items()
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .find_map(|(idx, item)| item.is_selectable().then_some(idx))
+                        {
+                            self.selected_left = last;
                             self.close_diff_view();
                         }
                     }
@@ -641,6 +649,9 @@ impl App {
                 Action::ShowTerminal if !in_diff => self.show_or_open_first_terminal()?,
                 Action::DeleteSession if !in_diff => self.confirm_delete_selected_session()?,
                 Action::RenameSession if !in_diff => self.open_rename_session()?,
+                Action::OpenCurrentPullRequest if !in_diff && self.current_pr_info().is_some() => {
+                    self.open_current_pr_in_browser()?
+                }
                 Action::ReconnectAgent if !in_diff => {
                     // Allow relaunching an exited agent from the center pane,
                     // or entering interactive mode if the agent is active.
@@ -1753,14 +1764,16 @@ impl App {
                     self.prompt = PromptState::None;
                 }
                 Some(Action::MoveDown) => {
-                    if let PromptState::Command {
-                        input, selected, ..
-                    } = &mut self.prompt
-                    {
-                        let count = self.bindings.filtered_palette(&input.text).len();
-                        if *selected + 1 < count {
-                            *selected += 1;
+                    let count = match &self.prompt {
+                        PromptState::Command { input, .. } => {
+                            self.filtered_palette_commands(&input.text).len()
                         }
+                        _ => 0,
+                    };
+                    if let PromptState::Command { selected, .. } = &mut self.prompt
+                        && *selected + 1 < count
+                    {
+                        *selected += 1;
                     }
                 }
                 Some(Action::MoveUp) => {
@@ -1775,17 +1788,29 @@ impl App {
                 }
                 _ => {
                     // Text input fallback: Tab (autocomplete), then delegate to TextInput.
+                    let tab_completion = if key.code == KeyCode::Tab {
+                        match &self.prompt {
+                            PromptState::Command {
+                                input, selected, ..
+                            } => self
+                                .filtered_palette_commands(&input.text)
+                                .get(*selected)
+                                .and_then(|binding| binding.palette_name)
+                                .map(str::to_string),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
                     if let PromptState::Command {
                         input, selected, ..
                     } = &mut self.prompt
                     {
-                        if key.code == KeyCode::Tab {
-                            if let Some(binding) =
-                                self.bindings.filtered_palette(&input.text).get(*selected)
-                            {
-                                input.set_text(binding.palette_name.unwrap().to_string());
-                                *selected = 0;
-                            }
+                        if let Some(command) = tab_completion {
+                            input.set_text(command);
+                            *selected = 0;
+                        } else if key.code == KeyCode::Tab {
+                            // No completion matched; leave the command text unchanged.
                         } else if input.handle_key(key) {
                             *selected = 0;
                         }
@@ -2669,6 +2694,37 @@ impl App {
             return Ok(false);
         }
 
+        if matches!(self.prompt, PromptState::PullRequestInput { .. }) {
+            let is_plain_char = matches!(key.code, KeyCode::Char(_))
+                && !key.modifiers.contains(KeyModifiers::CONTROL);
+            let action = if is_plain_char {
+                None
+            } else {
+                self.bindings.lookup(&key, BindingScope::Dialog)
+            };
+
+            match action {
+                Some(Action::CloseOverlay) => {
+                    self.prompt = PromptState::None;
+                }
+                Some(Action::Confirm) => {
+                    let (project, raw_input) = match &self.prompt {
+                        PromptState::PullRequestInput { project, input } => {
+                            (project.clone(), input.text.trim().to_string())
+                        }
+                        _ => unreachable!(),
+                    };
+                    self.dispatch_pull_request_lookup(project, raw_input)?;
+                }
+                _ => {
+                    if let PromptState::PullRequestInput { input, .. } = &mut self.prompt {
+                        input.handle_key(key);
+                    }
+                }
+            }
+            return Ok(false);
+        }
+
         if matches!(self.prompt, PromptState::NameNewAgent { .. }) {
             let is_plain_char = matches!(key.code, KeyCode::Char(_))
                 && !key.modifiers.contains(KeyModifiers::CONTROL);
@@ -2713,16 +2769,10 @@ impl App {
 
                     // For NewProject requests, check whether the branch already
                     // exists locally or on the remote before creating a new one.
-                    if let CreateAgentRequest::NewProject { ref project, .. } = request {
+                    if let Some(project) = create_agent_request_project(&request) {
                         let repo_path = std::path::PathBuf::from(&project.path);
                         if let Some(location) = git::branch_exists(&repo_path, &name) {
-                            if let CreateAgentRequest::NewProject {
-                                ref mut custom_name,
-                                ..
-                            } = request
-                            {
-                                *custom_name = Some(name.clone());
-                            }
+                            set_create_agent_request_custom_name(&mut request, name.clone());
                             self.prompt = PromptState::ConfirmUseExistingBranch {
                                 request,
                                 branch_name: name,
@@ -2740,18 +2790,21 @@ impl App {
                                 project.name
                             )
                         }
+                        CreateAgentRequest::PullRequest {
+                            project, number, ..
+                        } => {
+                            format!(
+                                "Creating a new agent worktree \"{name}\" from PR #{number} for project \"{}\" and launching a fresh session...",
+                                project.name
+                            )
+                        }
                         CreateAgentRequest::ForkSession { source_label, .. } => {
                             format!(
                                 "Forking agent \"{source_label}\" as \"{name}\" by cloning its current worktree contents into a fresh session...",
                             )
                         }
                     };
-                    match &mut request {
-                        CreateAgentRequest::NewProject { custom_name, .. }
-                        | CreateAgentRequest::ForkSession { custom_name, .. } => {
-                            *custom_name = Some(name);
-                        }
-                    }
+                    set_create_agent_request_custom_name(&mut request, name);
                     self.dispatch_create_agent_request(request, msg)?;
                 }
                 _ => {
@@ -3387,6 +3440,9 @@ impl App {
             }
             let index = usize::from(row.saturating_sub(self.mouse_layout.left_list.y));
             if index < self.left_items().len() {
+                if !self.is_selectable_left_item(index) {
+                    return Some(MouseTarget::LeftPane);
+                }
                 return Some(MouseTarget::LeftRow(index));
             }
             return Some(MouseTarget::LeftPane);
@@ -3527,7 +3583,7 @@ impl App {
     }
 
     fn set_left_selection(&mut self, index: usize) {
-        if index >= self.left_items().len() {
+        if !self.is_selectable_left_item(index) {
             return;
         }
         self.focus = FocusPane::Left;
@@ -3548,6 +3604,7 @@ impl App {
                 .and_then(|item| match item {
                     LeftItem::Project(project_index) => self.projects.get(*project_index),
                     LeftItem::Session(_) => None,
+                    LeftItem::EmptyProjectsSeparator => None,
                 })
                 .is_some_and(|project| {
                     !project.path_missing
@@ -3590,7 +3647,7 @@ impl App {
 
     fn set_command_palette_selection(&mut self, index: usize) {
         let count = match &self.prompt {
-            PromptState::Command { input, .. } => self.bindings.filtered_palette(&input.text).len(),
+            PromptState::Command { input, .. } => self.filtered_palette_commands(&input.text).len(),
             _ => 0,
         };
         if count == 0 {
@@ -3618,7 +3675,7 @@ impl App {
             input, selected, ..
         } = &self.prompt
         {
-            if let Some(binding) = self.bindings.filtered_palette(&input.text).get(*selected) {
+            if let Some(binding) = self.filtered_palette_commands(&input.text).get(*selected) {
                 binding.palette_name.unwrap().to_string()
             } else {
                 input.text.trim().to_string()
@@ -4152,17 +4209,23 @@ impl App {
         if let CreateAgentRequest::NewProject {
             use_existing_branch,
             ..
+        }
+        | CreateAgentRequest::PullRequest {
+            use_existing_branch,
+            ..
         } = &mut request
         {
             *use_existing_branch = true;
         }
-        let msg = if let CreateAgentRequest::NewProject { ref project, .. } = request {
-            format!(
-                "Attaching to existing branch \"{branch_name}\" for project \"{}\" and launching a fresh session...",
-                project.name
-            )
-        } else {
-            unreachable!()
+        let msg = match &request {
+            CreateAgentRequest::NewProject { project, .. }
+            | CreateAgentRequest::PullRequest { project, .. } => {
+                format!(
+                    "Attaching to existing branch \"{branch_name}\" for project \"{}\" and launching a fresh session...",
+                    project.name
+                )
+            }
+            CreateAgentRequest::ForkSession { .. } => unreachable!(),
         };
         if let Err(e) = self.dispatch_create_agent_request(request, msg) {
             self.set_error(format!("{e:#}"));
@@ -4745,6 +4808,7 @@ impl App {
                     self.reconnect_selected_session()?;
                 }
             }
+            Some(LeftItem::EmptyProjectsSeparator) => {}
             None => {}
         }
         Ok(())
@@ -4862,12 +4926,12 @@ impl App {
         self.set_left_selection(target_index);
 
         if down {
-            if self.selected_left + 1 < self.left_items().len() {
-                self.selected_left += 1;
+            if let Some(next) = self.next_selectable_left_item_after(self.selected_left) {
+                self.selected_left = next;
                 self.reload_changed_files();
             }
-        } else if self.selected_left > 0 {
-            self.selected_left -= 1;
+        } else if let Some(prev) = self.previous_selectable_left_item_before(self.selected_left) {
+            self.selected_left = prev;
             self.reload_changed_files();
         }
     }
@@ -5344,6 +5408,24 @@ impl App {
     }
 }
 
+fn create_agent_request_project(request: &CreateAgentRequest) -> Option<&Project> {
+    match request {
+        CreateAgentRequest::NewProject { project, .. }
+        | CreateAgentRequest::PullRequest { project, .. } => Some(project),
+        CreateAgentRequest::ForkSession { .. } => None,
+    }
+}
+
+fn set_create_agent_request_custom_name(request: &mut CreateAgentRequest, name: String) {
+    match request {
+        CreateAgentRequest::NewProject { custom_name, .. }
+        | CreateAgentRequest::ForkSession { custom_name, .. }
+        | CreateAgentRequest::PullRequest { custom_name, .. } => {
+            *custom_name = Some(name);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -5359,16 +5441,16 @@ mod tests {
         KillRunningFooterAction, KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftItem,
         LeftSection, MacroBarState, MouseClickTarget, MouseLayoutState, NameNewAgentFocus,
         NonDefaultBranchAction, OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout,
-        OverlayMouseLayoutState, ProcessInfo, PromptState, PullTarget, ResourceStats, RightSection,
-        RuntimeTargetId, TextInput, WorkerEvent,
+        OverlayMouseLayoutState, ProcessInfo, PromptState, PullTarget, ResolvedPullRequest,
+        ResourceStats, RightSection, RuntimeTargetId, TextInput, WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
     use crate::editor::{DetectedEditor, EditorKind};
     use crate::keybindings::{Action, BINDING_DEFS, BindingScope, RuntimeBindings};
     use crate::model::{
-        AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProjectBranchStatus,
-        ProviderKind, SessionStatus, SessionSurface,
+        AgentSession, ChangedFile, CompanionTerminalStatus, PrInfo, PrState, Project,
+        ProjectBranchStatus, ProviderKind, SessionStatus, SessionSurface,
     };
     use crate::pty::PtyClient;
     use crate::statusline::StatusLine;
@@ -7558,6 +7640,58 @@ not_a_real_action = ["x"]
         assert!(matches!(app.center_mode, CenterMode::Agent));
     }
 
+    fn append_empty_projects(app: &mut App, count: usize) {
+        let path = app.projects[0].path.clone();
+        for idx in 0..count {
+            app.projects.push(Project {
+                id: format!("empty-project-{idx}"),
+                name: format!("empty {idx}"),
+                path: path.clone(),
+                default_provider: ProviderKind::from_str("codex"),
+                current_branch: "main".to_string(),
+                branch_status: ProjectBranchStatus::Unknown,
+                path_missing: false,
+            });
+        }
+    }
+
+    #[test]
+    fn left_navigation_skips_empty_projects_separator() {
+        let mut app = test_app(default_bindings());
+        append_empty_projects(&mut app, 4);
+        app.config.ui.empty_project_separator_min_projects = 5;
+        app.rebuild_left_items();
+        app.selected_left = 1;
+        app.focus = FocusPane::Left;
+
+        assert!(matches!(
+            app.left_items().get(2),
+            Some(LeftItem::EmptyProjectsSeparator)
+        ));
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.selected_left, 3);
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.selected_left, 1);
+    }
+
+    #[test]
+    fn mouse_click_empty_projects_separator_keeps_selection() {
+        let mut app = test_app(default_bindings());
+        append_empty_projects(&mut app, 4);
+        app.config.ui.empty_project_separator_min_projects = 5;
+        app.rebuild_left_items();
+        install_mouse_layout(&mut app);
+        app.selected_left = 1;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 3));
+
+        assert_eq!(app.selected_left, 1);
+    }
+
     #[test]
     fn mouse_click_different_left_row_closes_open_diff() {
         let mut app = test_app(default_bindings());
@@ -7860,6 +7994,141 @@ not_a_real_action = ["x"]
                 assert_eq!(input.text, "jk");
             }
             other => panic!("expected command prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn command_palette_hides_current_pr_command_without_known_pr() {
+        let app = test_app(default_bindings());
+        let commands = app.filtered_palette_commands("open-current-pr");
+
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn command_palette_shows_current_pr_command_with_known_pr() {
+        let mut app = test_app(default_bindings());
+        app.pr_statuses.insert(
+            "session-1".to_string(),
+            PrInfo {
+                number: 42,
+                state: PrState::Merged,
+                title: "Demo PR".to_string(),
+                host: "github.com".to_string(),
+                owner_repo: "owner/repo".to_string(),
+                url: "https://github.com/owner/repo/pull/42".to_string(),
+            },
+        );
+
+        let commands = app.filtered_palette_commands("open-current-pr");
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].palette_name, Some("open-current-pr"));
+        assert_eq!(
+            app.current_pr_url(),
+            Some("https://github.com/owner/repo/pull/42")
+        );
+    }
+
+    #[test]
+    fn footer_hints_show_pr_only_for_center_focus_with_known_pr() {
+        let mut app = test_app(default_bindings());
+        app.pr_statuses.insert(
+            "session-1".to_string(),
+            PrInfo {
+                number: 42,
+                state: PrState::Closed,
+                title: "Demo PR".to_string(),
+                host: "github.com".to_string(),
+                owner_repo: "owner/repo".to_string(),
+                url: "https://github.com/owner/repo/pull/42".to_string(),
+            },
+        );
+
+        let center_hints = app.footer_hints_for(crate::keybindings::HintContext::Center);
+        let left_hints = app.footer_hints_for(crate::keybindings::HintContext::LeftSession);
+
+        assert_eq!(center_hints.first().map(|hint| hint.1), Some("PR"));
+        assert_eq!(center_hints.first().map(|hint| hint.0.as_str()), Some("p"));
+        assert!(!left_hints.iter().any(|(_, desc)| *desc == "PR"));
+    }
+
+    #[test]
+    fn footer_hints_hide_pr_without_known_pr() {
+        let app = test_app(default_bindings());
+        let center_hints = app.footer_hints_for(crate::keybindings::HintContext::Center);
+
+        assert!(!center_hints.iter().any(|(_, desc)| *desc == "PR"));
+    }
+
+    #[test]
+    fn command_palette_gates_new_agent_from_pr_on_github_availability() {
+        let mut app = test_app(default_bindings());
+
+        app.github_integration_enabled = true;
+        app.gh_status = crate::model::GhStatus::NotInstalled;
+        let unavailable_names = app
+            .filtered_palette_commands("pr")
+            .into_iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect::<Vec<_>>();
+        assert!(!unavailable_names.contains(&"new-agent-from-pr"));
+
+        app.gh_status = crate::model::GhStatus::Available;
+        let available_names = app
+            .filtered_palette_commands("pr")
+            .into_iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect::<Vec<_>>();
+        assert!(available_names.contains(&"new-agent-from-pr"));
+
+        app.github_integration_enabled = false;
+        let disabled_names = app
+            .filtered_palette_commands("pr")
+            .into_iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect::<Vec<_>>();
+        assert!(!disabled_names.contains(&"new-agent-from-pr"));
+    }
+
+    #[test]
+    fn resolved_pull_request_prefills_name_prompt_with_head_branch() {
+        let mut app = test_app(default_bindings());
+        let project = app.projects[0].clone();
+
+        app.worker_tx
+            .send(WorkerEvent::PullRequestResolved {
+                result: Ok(ResolvedPullRequest {
+                    project,
+                    host: "github.com".to_string(),
+                    owner_repo: "octocat/Hello-World".to_string(),
+                    number: 42,
+                    title: "Fix issue".to_string(),
+                    state: "OPEN".to_string(),
+                    head_ref_name: "feature/pr-42".to_string(),
+                }),
+            })
+            .expect("send PR resolution");
+        app.drain_events();
+
+        match &app.prompt {
+            PromptState::NameNewAgent { input, request, .. } => {
+                assert_eq!(input.text, "feature/pr-42");
+                match request {
+                    CreateAgentRequest::PullRequest {
+                        number,
+                        head_branch,
+                        custom_name,
+                        ..
+                    } => {
+                        assert_eq!(*number, 42);
+                        assert_eq!(head_branch, "feature/pr-42");
+                        assert_eq!(custom_name.as_deref(), Some("feature/pr-42"));
+                    }
+                    other => panic!("expected PullRequest request, got {other:?}"),
+                }
+            }
+            other => panic!("expected name-new-agent prompt, got {other:?}"),
         }
     }
 

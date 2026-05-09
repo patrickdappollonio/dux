@@ -586,6 +586,10 @@ impl App {
                             Span::styled(dot.to_string(), Style::default().fg(dot_color)),
                         ]))
                     }
+                    LeftItem::EmptyProjectsSeparator => ListItem::new(Line::from(Span::styled(
+                        "─",
+                        Style::default().fg(self.theme.header_separator_fg),
+                    ))),
                 })
                 .collect::<Vec<_>>();
             let mut state = ListState::default().with_selected(Some(self.selected_left));
@@ -764,6 +768,13 @@ impl App {
                         .collect::<Vec<_>>(),
                     ))
                 }
+                LeftItem::EmptyProjectsSeparator => ListItem::new(Line::from(vec![
+                    Span::styled("── ", Style::default().fg(self.theme.header_separator_fg)),
+                    Span::styled(
+                        "Empty projects",
+                        Style::default().fg(self.theme.provider_label_fg),
+                    ),
+                ])),
             })
             .collect::<Vec<_>>();
         let title = format!("Projects ({})", self.projects.len());
@@ -1872,7 +1883,7 @@ impl App {
             FocusPane::Center => HintContext::Center,
             FocusPane::Files => HintContext::Files,
         };
-        let hints = self.bindings.hints_for(ctx);
+        let hints = self.footer_hints_for(ctx);
         let [hints_area, status_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(1)])
@@ -1940,6 +1951,17 @@ impl App {
             .style(Style::default().bg(status_bg))
             .wrap(Wrap { trim: false })
             .render(status_area, frame.buffer_mut());
+    }
+
+    pub(crate) fn footer_hints_for(&self, ctx: HintContext) -> Vec<(String, &'static str)> {
+        let mut hints = self.bindings.hints_for(ctx);
+        if matches!(ctx, HintContext::Center) && self.current_pr_info().is_some() {
+            let key = self.bindings.label_for(Action::OpenCurrentPullRequest);
+            if !key.is_empty() {
+                hints.insert(0, (key, "PR"));
+            }
+        }
+        hints
     }
 
     fn render_help(&mut self, frame: &mut Frame) {
@@ -2253,7 +2275,7 @@ impl App {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(72, 40, frame.area());
                 self.clear_overlay_area(frame, popup);
-                let commands = self.bindings.filtered_palette(&input.text);
+                let commands = self.filtered_palette_commands(&input.text);
                 let items = if commands.is_empty() {
                     vec![ListItem::new("No matching commands.")]
                 } else {
@@ -5023,6 +5045,84 @@ impl App {
                         rect: checkbox_rect,
                     }),
                 };
+            }
+            PromptState::PullRequestInput { project, input } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect_exact(64, 8, frame.area());
+                self.clear_overlay_area(frame, area);
+
+                let outer = self.themed_overlay_block("Create Agent From PR");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [label_area, input_area, hint_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(2),
+                        Constraint::Length(3),
+                        Constraint::Min(1),
+                    ])
+                    .areas(inner);
+
+                Paragraph::new(vec![
+                    Line::from(Span::styled(
+                        format!(" Project: {}", project.name),
+                        Style::default().fg(self.theme.input_label_fg),
+                    )),
+                    Line::from(Span::styled(
+                        " Paste a GitHub PR URL or enter a PR number:",
+                        Style::default().fg(self.theme.input_label_fg),
+                    )),
+                ])
+                .render(label_area, frame.buffer_mut());
+
+                let display = if input.cursor < input.text.len() {
+                    let (before, after) = input.text.split_at(input.cursor);
+                    let (cursor_char, rest) = after.split_at(1);
+                    Line::from(vec![
+                        Span::raw(format!(" {before}")),
+                        Span::styled(
+                            cursor_char.to_string(),
+                            Style::default()
+                                .fg(self.theme.input_cursor_fg)
+                                .bg(self.theme.input_cursor_bg),
+                        ),
+                        Span::raw(rest.to_string()),
+                    ])
+                } else {
+                    Line::from(vec![
+                        Span::raw(format!(" {}", &input.text)),
+                        Span::styled(
+                            " ",
+                            Style::default()
+                                .fg(self.theme.input_cursor_fg)
+                                .bg(self.theme.input_cursor_bg),
+                        ),
+                    ])
+                };
+                let input_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_set(border::ROUNDED)
+                    .border_style(Style::default().fg(self.theme.overlay_border));
+                Paragraph::new(display)
+                    .block(input_block)
+                    .render(input_area, frame.buffer_mut());
+
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let mut hints = vec![Span::raw(" ")];
+                hints.extend(self.theme.key_badge_default(&confirm_key));
+                hints.push(Span::styled(
+                    " resolve  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                hints.extend(self.theme.key_badge_default(&close_key));
+                hints.push(Span::styled(
+                    " cancel",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
+                self.overlay_layout.active = OverlayMouseLayout::None;
             }
             PromptState::None => {}
         }

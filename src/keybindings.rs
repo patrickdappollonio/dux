@@ -10,6 +10,7 @@ pub enum Action {
     // Projects pane
     ToggleProject,
     NewAgent,
+    NewAgentFromPr,
     ForkAgent,
     ChangeAgentProvider,
     ChangeDefaultProvider,
@@ -29,6 +30,7 @@ pub enum Action {
     ShowTerminal,
     ExitInteractive,
     OpenMacroBar,
+    OpenCurrentPullRequest,
     ToggleFullscreen,
     ScrollPageUp,
     ScrollPageDown,
@@ -188,6 +190,7 @@ impl Action {
             Action::MoveUp => "move_up",
             Action::ToggleProject => "toggle_project",
             Action::NewAgent => "new_agent",
+            Action::NewAgentFromPr => "new_agent_from_pr",
             Action::ForkAgent => "fork_agent",
             Action::ChangeAgentProvider => "change_agent_provider",
             Action::ChangeDefaultProvider => "change_default_provider",
@@ -206,6 +209,7 @@ impl Action {
             Action::ShowTerminal => "show_terminal",
             Action::ExitInteractive => "exit_interactive",
             Action::OpenMacroBar => "open_macro_bar",
+            Action::OpenCurrentPullRequest => "open_current_pull_request",
             Action::ToggleFullscreen => "toggle_fullscreen",
             Action::ScrollPageUp => "scroll_page_up",
             Action::ScrollPageDown => "scroll_page_down",
@@ -272,6 +276,7 @@ impl Action {
             Action::MoveUp => "Navigate up through projects, sessions, files, and lists.",
             Action::ToggleProject => "Collapse or expand the selected project.",
             Action::NewAgent => "Create a new agent session (worktree).",
+            Action::NewAgentFromPr => "Create a new agent session from a GitHub pull request.",
             Action::ForkAgent => "Fork the selected agent into a fresh worktree and session.",
             Action::ChangeAgentProvider => {
                 "Swap the selected agent worktree to a different provider."
@@ -305,6 +310,9 @@ impl Action {
             Action::NewTerminal => "Spawn a new companion terminal for the selected agent.",
             Action::ExitInteractive => "Exit interactive mode (stop forwarding keys to agent).",
             Action::OpenMacroBar => "Open the macro command bar to send text macros.",
+            Action::OpenCurrentPullRequest => {
+                "Open the selected agent's current pull request in the default browser."
+            }
             Action::ToggleFullscreen => "Toggle fullscreen overlay for the agent terminal.",
             Action::ScrollPageUp => "Scroll up one page in the agent output.",
             Action::ScrollPageDown => "Scroll down one page in the agent output.",
@@ -389,8 +397,10 @@ impl Action {
             | Action::ReconnectAgent
             | Action::DeleteSession
             | Action::DeleteTerminal => Some("Projects pane"),
+            Action::NewAgentFromPr => None,
             Action::ExitInteractive
             | Action::OpenMacroBar
+            | Action::OpenCurrentPullRequest
             | Action::ToggleFullscreen
             | Action::ScrollPageUp
             | Action::ScrollPageDown
@@ -550,6 +560,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "new-agent",
             description: "Create a new agent for the selected project",
+        }),
+    },
+    BindingDef {
+        action: Action::NewAgentFromPr,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "new-agent-from-pr",
+            description: "Create a new agent from a GitHub pull request",
         }),
     },
     BindingDef {
@@ -823,6 +844,20 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         }),
         hint_contexts: &[],
         palette: None,
+    },
+    BindingDef {
+        action: Action::OpenCurrentPullRequest,
+        default_keys: &[key!(p)],
+        scopes: &[BindingScope::Center],
+        help: Some(HelpEntry {
+            section: "Agent pane",
+            description: "Open current pull request in the default browser",
+        }),
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "open-current-pr",
+            description: "Open the selected agent's current pull request in the default browser",
+        }),
     },
     BindingDef {
         action: Action::ToggleFullscreen,
@@ -2158,6 +2193,29 @@ mod tests {
     }
 
     #[test]
+    fn open_current_pr_key_is_center_pane_only() {
+        let bindings = default_bindings();
+        let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+
+        assert_eq!(
+            bindings.lookup(&key, BindingScope::Center),
+            Some(Action::OpenCurrentPullRequest)
+        );
+        assert_ne!(
+            bindings.lookup(&key, BindingScope::Left),
+            Some(Action::OpenCurrentPullRequest)
+        );
+        assert_ne!(
+            bindings.lookup(&key, BindingScope::Files),
+            Some(Action::OpenCurrentPullRequest)
+        );
+        assert_ne!(
+            bindings.lookup(&key, BindingScope::Interactive),
+            Some(Action::OpenCurrentPullRequest)
+        );
+    }
+
+    #[test]
     fn help_sections_produces_valid_sections() {
         let bindings = default_bindings();
         let sections = bindings.help_sections();
@@ -2207,6 +2265,17 @@ mod tests {
             .filter_map(|binding| binding.palette_name)
             .collect::<Vec<_>>();
         assert!(names.contains(&"fork-agent"));
+    }
+
+    #[test]
+    fn filtered_palette_includes_new_agent_from_pr_command() {
+        let bindings = default_bindings();
+        let results = bindings.filtered_palette("pr");
+        let names = results
+            .iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"new-agent-from-pr"));
     }
 
     #[test]
