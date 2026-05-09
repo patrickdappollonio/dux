@@ -9335,7 +9335,7 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn delete_agent_dialog_separates_checkbox_from_buttons() {
+    fn delete_agent_dialog_spaces_checkbox_from_buttons() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -9362,22 +9362,22 @@ cyan = "#00ffff"
             } => (checkbox.rect, cancel_button),
             other => panic!("expected delete-agent overlay layout, got {other:?}"),
         };
-        let separator_y = checkbox.y + checkbox.height;
+        let spacer_y = checkbox.y + checkbox.height;
 
         assert_eq!(
             cancel_button.y,
-            separator_y + 1,
-            "buttons should start one row below the checkbox separator"
+            spacer_y + 1,
+            "buttons should start one blank row below the checkbox"
         );
         assert_eq!(
             terminal
                 .backend()
                 .buffer()
-                .cell((cancel_button.x, separator_y))
-                .expect("separator cell")
+                .cell((cancel_button.x, spacer_y))
+                .expect("spacer cell")
                 .symbol(),
-            "─",
-            "expected a separator line between checkbox and buttons"
+            " ",
+            "expected blank space between checkbox and buttons"
         );
     }
 
