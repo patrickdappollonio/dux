@@ -88,6 +88,8 @@ pub enum Action {
     ToggleDiffLineNumbers,
     ResourceMonitor,
     ToggleGithubIntegration,
+    ToggleProjectAutoReopenAgents,
+    ToggleAgentAutoReopen,
     ToggleRandomizedPetNameDefault,
     TogglePrBannerPosition,
     ForceReconnectAgent,
@@ -261,6 +263,8 @@ impl Action {
             Action::ToggleDiffLineNumbers => "toggle_diff_line_numbers",
             Action::ResourceMonitor => "resource_monitor",
             Action::ToggleGithubIntegration => "toggle_github_integration",
+            Action::ToggleProjectAutoReopenAgents => "toggle_project_auto_reopen_agents",
+            Action::ToggleAgentAutoReopen => "toggle_agent_auto_reopen",
             Action::ToggleRandomizedPetNameDefault => "toggle_randomized_pet_name_default",
             Action::TogglePrBannerPosition => "toggle_pr_banner_position",
             Action::ForceReconnectAgent => "force_reconnect_agent",
@@ -365,6 +369,10 @@ impl Action {
             Action::ToggleDiffLineNumbers => "Toggle line numbers in diff view.",
             Action::ResourceMonitor => "Show CPU and memory usage for dux and all running agents.",
             Action::ToggleGithubIntegration => "Toggle GitHub PR integration.",
+            Action::ToggleProjectAutoReopenAgents => {
+                "Toggle startup auto-reopen for agents in the selected project."
+            }
+            Action::ToggleAgentAutoReopen => "Toggle startup auto-reopen for the selected agent.",
             Action::ToggleRandomizedPetNameDefault => {
                 "Toggle whether the agent name prompt starts with a random pet name."
             }
@@ -452,6 +460,8 @@ impl Action {
             | Action::ToggleDiffLineNumbers
             | Action::ResourceMonitor
             | Action::ToggleGithubIntegration
+            | Action::ToggleProjectAutoReopenAgents
+            | Action::ToggleAgentAutoReopen
             | Action::ToggleRandomizedPetNameDefault
             | Action::TogglePrBannerPosition
             | Action::ForceReconnectAgent
@@ -640,6 +650,28 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "reload-config",
             description: "Reload config.toml after validating it",
+        }),
+    },
+    BindingDef {
+        action: Action::ToggleProjectAutoReopenAgents,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "toggle-project-auto-reopen-agents",
+            description: "Opt the selected project in or out of startup agent reopening",
+        }),
+    },
+    BindingDef {
+        action: Action::ToggleAgentAutoReopen,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "toggle-agent-auto-reopen",
+            description: "Opt the selected agent in or out of startup reopening",
         }),
     },
     BindingDef {

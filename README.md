@@ -93,6 +93,8 @@ resume_args = ["--continue"]
 
 Set `resume_args` and dux can reconnect to detached or crashed sessions. Omit it if your CLI doesn't support resuming; dux will just relaunch it.
 
+When a provider supports resume args, dux can auto-reopen agents that were still running when the app exited. A normal agent exit with status code 0 is treated as intentional and will not be reopened. The feature is off by default; enable it globally with `[ui].auto_reopen_agents = true`, opt out a project with `auto_reopen_agents = false` in its `[[projects]]` entry, or use the `toggle-project-auto-reopen-agents` and `toggle-agent-auto-reopen` palette commands for project and per-agent opt-outs.
+
 Switch providers from the command palette. dux sticks to one agent per worktree, so provider changes happen in place:
 
 - **`change-agent-provider`** swaps the *selected* worktree's provider on next launch. If the agent is still running, dux records your choice and warns you — the running agent keeps going until you exit and relaunch it, at which point it spawns with the new provider. If you've used that provider on this worktree before, dux passes its `resume_args` so you pick up the previous conversation instead of starting fresh.
@@ -138,7 +140,7 @@ Press the palette key and you get fuzzy-searchable access to every action in dux
 
 ### Configuration
 
-The config file at `~/.config/dux/config.toml` (Linux) or `~/.dux/config.toml` (macOS) is exhaustively commented. Every setting is explained inline, so you should never need to leave the file to understand an option. Every keybinding is rebindable. Every pane width, scrollback limit, and default provider is configurable.
+The config file at `~/.config/dux/config.toml` (Linux) or `~/.dux/config.toml` (macOS) is exhaustively commented. Every setting is explained inline, so you should never need to leave the file to understand an option. Every keybinding is rebindable. Every pane width, scrollback limit, default provider, and startup agent reopening behavior is configurable.
 
 ```bash
 dux config path          # Print the config file path

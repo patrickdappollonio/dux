@@ -176,6 +176,7 @@ pub struct ProjectConfig {
     pub name: Option<String>,
     pub default_provider: Option<String>,
     pub leading_branch: Option<String>,
+    pub auto_reopen_agents: Option<bool>,
 }
 
 fn new_project_id() -> String {
@@ -196,6 +197,7 @@ pub struct UiConfig {
     pub show_diff_line_numbers: bool,
     pub diff_tab_width: u16,
     pub github_integration: bool,
+    pub auto_reopen_agents: bool,
     pub pr_banner_position: String,
     pub theme: String,
 }
@@ -223,6 +225,7 @@ impl Default for Config {
                 show_diff_line_numbers: false,
                 diff_tab_width: 4,
                 github_integration: true,
+                auto_reopen_agents: false,
                 pr_banner_position: "bottom".to_string(),
                 theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
             },
@@ -349,6 +352,7 @@ impl Default for UiConfig {
             show_diff_line_numbers: false,
             diff_tab_width: 4,
             github_integration: true,
+            auto_reopen_agents: false,
             pr_banner_position: "bottom".to_string(),
             theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
         }
@@ -727,6 +731,13 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.ui.github_integration),
         },
         ConfigEntry::Field {
+            key: "auto_reopen_agents",
+            comment: Some(CommentSource::Static(
+                "# Reopen agent PTYs that were still running when dux last exited.\n# Disabled by default. Toggle project-level and agent-level opt-outs from the command palette.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.ui.auto_reopen_agents),
+        },
+        ConfigEntry::Field {
             key: "pr_banner_position",
             comment: Some(CommentSource::Static(
                 "# Position of the PR banner in the agent pane: \"top\" or \"bottom\".\n# Toggle at runtime from the command palette.",
@@ -938,6 +949,12 @@ pub fn save_config(
         "ui",
         "github_integration",
         config.ui.github_integration,
+    );
+    patch_table_bool(
+        &mut doc,
+        "ui",
+        "auto_reopen_agents",
+        config.ui.auto_reopen_agents,
     );
     patch_table_str(
         &mut doc,
@@ -1711,6 +1728,7 @@ mod tests {
         assert!(rendered.contains("[ui]"));
         assert!(rendered.contains("agent_scrollback_lines = 10000"));
         assert!(rendered.contains("empty_project_separator_min_projects = 5"));
+        assert!(rendered.contains("auto_reopen_agents = false"));
         assert!(rendered.contains("staged_pane_height_pct = "));
         assert!(rendered.contains("commit_pane_height_pct = "));
         assert!(rendered.contains("[editor]"));
@@ -1758,6 +1776,7 @@ mod tests {
             name: Some("test".to_string()),
             default_provider: None,
             leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
         });
         let rendered = render_config_default(&config);
         assert!(!rendered.contains("[[projects]]"));
@@ -1810,6 +1829,7 @@ name = "test"
             name: Some("name\twith\ttabs".to_string()),
             default_provider: None,
             leading_branch: None,
+            auto_reopen_agents: None,
         });
         let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
         save_config(&config_path, &config, &bindings).expect("save config");
@@ -1837,6 +1857,17 @@ name = "test"
         let rendered = render_config_default(&config);
         let parsed: Config = toml::from_str(&rendered).expect("config should parse");
         assert_eq!(parsed.ui.agent_scrollback_lines, 12_345);
+    }
+
+    #[test]
+    fn default_config_round_trips_auto_reopen_options() {
+        let mut config = Config::default();
+        config.ui.auto_reopen_agents = true;
+
+        let rendered = render_config_default(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("config should parse");
+
+        assert!(parsed.ui.auto_reopen_agents);
     }
 
     #[test]
@@ -2658,6 +2689,7 @@ args = [\"-l\"]
         // Modify and save.
         let mut config: Config = toml::from_str(&default_body).expect("parse");
         config.ui.right_width_pct = 30;
+        config.ui.auto_reopen_agents = true;
         config.editor.default = "zed".to_string();
         let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
         save_config(&config_path, &config, &bindings).expect("save");
@@ -2666,6 +2698,7 @@ args = [\"-l\"]
         let saved = fs::read_to_string(&config_path).expect("read");
         let reloaded: Config = toml::from_str(&saved).expect("parse saved");
         assert_eq!(reloaded.ui.right_width_pct, 30);
+        assert!(reloaded.ui.auto_reopen_agents);
         assert_eq!(reloaded.editor.default, "zed");
     }
 
