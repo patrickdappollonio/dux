@@ -55,6 +55,7 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub path: String,
+    pub explicit_default_provider: Option<ProviderKind>,
     pub default_provider: ProviderKind,
     pub leading_branch: Option<String>,
     pub current_branch: String,

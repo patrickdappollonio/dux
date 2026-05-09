@@ -91,7 +91,8 @@ impl App {
         self.finish_add_project(path_str, name, branch, leading_branch)
     }
 
-    /// Saves the project to config and adds it to the runtime project list.
+    /// Starts saving the project to SQLite and adds it to the runtime project
+    /// list only after the worker confirms the write.
     /// Called directly when no branch warning is needed, or after the user
     /// confirms "Add Anyway" in the non-default-branch dialog.
     pub(crate) fn finish_add_project(
@@ -111,29 +112,46 @@ impl App {
         } else {
             name.trim().to_string()
         };
+        let status_message = format!("Added project \"{display_name}\" to workspace");
+        self.finish_add_project_with_status(path, name, branch, leading_branch, status_message)
+    }
+
+    pub(crate) fn finish_add_project_with_status(
+        &mut self,
+        path: String,
+        name: String,
+        branch: String,
+        leading_branch: String,
+        status_message: String,
+    ) -> Result<()> {
+        let path_buf = PathBuf::from(&path);
+        let display_name = if name.trim().is_empty() {
+            path_buf
+                .file_name()
+                .and_then(|part| part.to_str())
+                .unwrap_or("project")
+                .to_string()
+        } else {
+            name.trim().to_string()
+        };
         let project_id = Uuid::new_v4().to_string();
-        self.config.projects.push(ProjectConfig {
-            id: project_id.clone(),
-            path: path.clone(),
-            name: Some(display_name.clone()),
-            default_provider: None,
-            leading_branch: Some(leading_branch.clone()),
-            commit_prompt: None,
-        });
-        save_config(&self.paths.config_path, &self.config, &self.bindings)?;
-        self.projects.push(Project {
+        let project = Project {
             id: project_id,
             name: display_name.clone(),
-            path,
+            path: path.clone(),
+            explicit_default_provider: None,
             default_provider: self.config.default_provider(),
             leading_branch: Some(leading_branch),
             current_branch: branch,
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
-        });
-        self.rebuild_left_items();
+        };
         logger::info(&format!("registered project {}", path_buf.display()));
-        self.set_info(format!("Added project \"{display_name}\" to workspace"));
+        self.spawn_project_persistence(ProjectPersistenceAction::Add {
+            project,
+            status_message,
+        });
+        self.set_busy(format!("Saving project \"{display_name}\" to workspace..."));
         Ok(())
     }
 
@@ -1198,9 +1216,6 @@ impl App {
             return Ok(());
         };
         self.prompt = PromptState::None;
-        let previous = self
-            .project_config(&prompt.project_id)
-            .and_then(|project| project.default_provider.clone());
         if selected.is_current {
             let message = match selected.provider {
                 Some(provider) => format!(
@@ -1218,40 +1233,28 @@ impl App {
             return Ok(());
         }
 
-        let Some(project_config) = self.project_config_mut(&prompt.project_id) else {
+        if !self
+            .projects
+            .iter()
+            .any(|project| project.id == prompt.project_id)
+        {
             self.set_error(format!(
-                "Could not find config for project \"{}\".",
+                "Could not find project \"{}\".",
                 prompt.project_name
-            ));
-            return Ok(());
-        };
-        project_config.default_provider =
-            selected.provider.as_ref().map(|p| p.as_str().to_string());
-        if let Err(err) = save_config(&self.paths.config_path, &self.config, &self.bindings) {
-            if let Some(project_config) = self.project_config_mut(&prompt.project_id) {
-                project_config.default_provider = previous;
-            }
-            self.set_error(format!(
-                "Couldn't persist the project provider change: {err:#}"
             ));
             return Ok(());
         }
 
-        refresh_project_defaults(&mut self.projects, &self.config);
-        self.rebuild_left_items();
-        let message = match selected.provider {
-            Some(provider) => format!(
-                "Project provider for \"{}\" changed to {}. Future agents in this project will use it; existing agents keep their current provider.",
-                prompt.project_name,
-                provider.as_str(),
-            ),
-            None => format!(
-                "\"{}\" now inherits the global default provider ({}). Future agents in this project will use it unless you add a project override again.",
-                prompt.project_name,
-                prompt.global_default.as_str(),
-            ),
-        };
-        self.set_info(message);
+        self.spawn_project_persistence(ProjectPersistenceAction::UpdateDefaultProvider {
+            project_id: prompt.project_id,
+            project_name: prompt.project_name.clone(),
+            provider: selected.provider,
+            global_default: prompt.global_default,
+        });
+        self.set_busy(format!(
+            "Saving provider preference for project \"{}\"...",
+            prompt.project_name
+        ));
         Ok(())
     }
 
@@ -1373,14 +1376,14 @@ impl App {
             self.set_error("Delete all agents in this project first.");
             return Ok(());
         }
-        self.projects.retain(|p| p.id != project.id);
-        self.config
-            .projects
-            .retain(|p| Path::new(&p.path) != Path::new(&project.path));
-        save_config(&self.paths.config_path, &self.config, &self.bindings)?;
-        self.rebuild_left_items();
-        self.selected_left = self.selected_left.saturating_sub(1);
-        self.set_info(format!("Removed project \"{}\" from app", project.name));
+        self.spawn_project_persistence(ProjectPersistenceAction::Remove {
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
+        });
+        self.set_busy(format!(
+            "Removing project \"{}\" from workspace...",
+            project.name
+        ));
         Ok(())
     }
 
@@ -1433,16 +1436,12 @@ impl App {
                 self.do_delete_session(&session_id, true)?;
             }
         }
-        self.projects.retain(|candidate| candidate.id != project.id);
-        self.config
-            .projects
-            .retain(|candidate| Path::new(&candidate.path) != Path::new(&project.path));
-        save_config(&self.paths.config_path, &self.config, &self.bindings)?;
-        self.rebuild_left_items();
-        self.selected_left = self.selected_left.saturating_sub(1);
-        self.reload_changed_files();
-        self.set_info(format!(
-            "Deleted project \"{}\" and all its agents",
+        self.spawn_project_persistence(ProjectPersistenceAction::Delete {
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
+        });
+        self.set_busy(format!(
+            "Finishing deletion for project \"{}\" after removing its agents...",
             project.name
         ));
         Ok(())
@@ -2327,6 +2326,7 @@ mod tests {
             id: id.to_string(),
             name: "demo".to_string(),
             path: "/tmp/project".to_string(),
+            explicit_default_provider: Some(ProviderKind::from_str(provider)),
             default_provider: ProviderKind::from_str(provider),
             leading_branch: Some("main".to_string()),
             current_branch: "main".to_string(),
@@ -2478,6 +2478,7 @@ mod tests {
             id: id.to_string(),
             name: "demo".to_string(),
             path: path.to_string(),
+            explicit_default_provider: Some(ProviderKind::from_str(provider)),
             default_provider: ProviderKind::from_str(provider),
             leading_branch: Some("main".to_string()),
             current_branch: "main".to_string(),

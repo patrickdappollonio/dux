@@ -168,7 +168,7 @@ pub struct ProviderCommandConfig {
     pub forward_scroll: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectConfig {
     #[serde(default = "new_project_id")]
     pub id: String,
@@ -176,7 +176,6 @@ pub struct ProjectConfig {
     pub name: Option<String>,
     pub default_provider: Option<String>,
     pub leading_branch: Option<String>,
-    pub commit_prompt: Option<String>,
 }
 
 fn new_project_id() -> String {
@@ -361,15 +360,7 @@ impl Config {
         ProviderKind::from_str(&self.defaults.provider)
     }
 
-    /// Returns the effective commit prompt for a project, checking project-level
-    /// override first, then system default, then the hardcoded fallback.
-    pub fn commit_prompt_for_project(&self, project_path: &str) -> String {
-        if let Some(project) = self.projects.iter().find(|p| p.path == project_path)
-            && let Some(ref prompt) = project.commit_prompt
-            && !prompt.is_empty()
-        {
-            return prompt.clone();
-        }
+    pub fn default_commit_prompt(&self) -> String {
         self.defaults
             .commit_prompt
             .as_ref()
@@ -588,8 +579,6 @@ enum ConfigEntry {
     Providers,
     /// Renders the `[terminal]` section.
     Terminal,
-    /// Renders the `[[projects]]` array.
-    Projects,
     /// Renders the `[keys]` section with all keybindings.
     Keys,
     /// Renders the `[macros]` section with text macros.
@@ -607,7 +596,8 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "provider",
             comment: Some(CommentSource::Static(
-                "# Which provider new sessions use unless a project overrides it.",
+                "# Global fallback provider for new sessions.\n\
+                 # Project-specific provider overrides are managed inside dux, not in this file.",
             )),
             value_fn: |c| FieldValue::Str(c.defaults.provider.clone()),
         },
@@ -624,7 +614,7 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             comment: Some(CommentSource::Dynamic(format!(
                 "# Prompt sent to the AI provider when generating commit messages ({generate_commit_key}).\n\
                  # The staged diff is appended automatically after the prompt text.\n\
-                 # Override per-project by adding commit_prompt in a [[projects]] entry.",
+                 # This is app-wide; projects do not carry their own commit prompts.",
             ))),
             value_fn: |c| FieldValue::MultilineStr(c.defaults.commit_prompt.clone()),
         },
@@ -763,8 +753,6 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
         ConfigEntry::Keys,
         ConfigEntry::Blank,
         ConfigEntry::Macros,
-        ConfigEntry::Blank,
-        ConfigEntry::Projects,
     ]
 }
 
@@ -823,7 +811,6 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
             }
             ConfigEntry::Providers => render_provider_configs(&mut out, &config.providers),
             ConfigEntry::Terminal => render_terminal_config(&mut out, &config.terminal),
-            ConfigEntry::Projects => render_projects(&mut out, &config.projects),
             ConfigEntry::Keys => render_keys_config(&mut out, &config.keys, bindings),
             ConfigEntry::Macros => render_macros_config(&mut out, &config.macros, bindings),
         }
@@ -992,8 +979,10 @@ pub fn save_config(
     // --- [providers.*] ---
     patch_providers(&mut doc, &config.providers);
 
-    // --- [[projects]] ---
-    patch_projects(&mut doc, &config.projects);
+    // --- legacy [[projects]] ---
+    // Projects now live in SQLite. Saving config always strips any legacy
+    // project declarations after they have been migrated by the app bootstrap.
+    let _ = doc.remove("projects");
 
     // --- [macros] ---
     patch_macros(&mut doc, &config.macros);
@@ -1132,41 +1121,6 @@ fn patch_providers(doc: &mut DocumentMut, providers: &ProvidersConfig) {
     }
 }
 
-fn patch_projects(doc: &mut DocumentMut, projects: &[ProjectConfig]) {
-    // Remove existing [[projects]] array-of-tables and rebuild it.
-    let _ = doc.remove("projects");
-
-    if projects.is_empty() {
-        return;
-    }
-
-    let mut arr = toml_edit::ArrayOfTables::new();
-    for project in projects {
-        let mut tbl = Table::new();
-        tbl["id"] = toml_edit::value(&project.id);
-        tbl["path"] = toml_edit::value(&project.path);
-        if let Some(name) = &project.name {
-            tbl["name"] = toml_edit::value(name.as_str());
-        }
-        if let Some(provider) = &project.default_provider {
-            tbl["default_provider"] = toml_edit::value(provider.as_str());
-        }
-        if let Some(prompt) = &project.commit_prompt {
-            let escaped = escape_toml_multiline(prompt);
-            let snippet = format!("v = \"\"\"\n{escaped}\"\"\"");
-            if let Ok(mini) = snippet.parse::<DocumentMut>() {
-                if let Some(item) = mini.get("v") {
-                    tbl["commit_prompt"] = item.clone();
-                }
-            } else {
-                tbl["commit_prompt"] = toml_edit::value(prompt.as_str());
-            }
-        }
-        arr.push(tbl);
-    }
-    doc["projects"] = Item::ArrayOfTables(arr);
-}
-
 fn patch_macros(doc: &mut DocumentMut, macros: &MacrosConfig) {
     let table = ensure_table(doc, "macros");
 
@@ -1300,44 +1254,6 @@ fn render_macros_config(
                 text,
                 surface
             );
-        }
-    }
-}
-
-fn render_projects(out: &mut String, projects: &[ProjectConfig]) {
-    out.push_str(
-        "# Projects are registered here by the UI. The folder name is used when name is omitted.\n",
-    );
-    out.push_str("# default_provider can override the global default for one project.\n");
-    out.push_str(
-        "# Paths support environment variables ($HOME, ${USER}) and tilde (~) expansion.\n",
-    );
-    if projects.is_empty() {
-        out.push_str("# [[projects]]\n");
-        out.push_str("# path = \"$HOME/projects/your-repo\"\n");
-    } else {
-        for project in projects {
-            out.push_str("[[projects]]\n");
-            let _ = writeln!(out, "id = \"{}\"", escape_toml_string(&project.id));
-            let _ = writeln!(out, "path = \"{}\"", escape_toml_string(&project.path));
-            if let Some(name) = &project.name {
-                let _ = writeln!(out, "name = \"{}\"", escape_toml_string(name));
-            }
-            if let Some(provider) = &project.default_provider {
-                let _ = writeln!(
-                    out,
-                    "default_provider = \"{}\"",
-                    escape_toml_string(provider)
-                );
-            }
-            if let Some(branch) = &project.leading_branch {
-                let _ = writeln!(out, "leading_branch = \"{}\"", escape_toml_string(branch));
-            }
-            if let Some(prompt) = &project.commit_prompt {
-                let escaped = escape_toml_multiline(prompt);
-                let _ = writeln!(out, "commit_prompt = \"\"\"\n{escaped}\"\"\"");
-            }
-            out.push('\n');
         }
     }
 }
@@ -1834,38 +1750,73 @@ mod tests {
     }
 
     #[test]
-    fn render_config_escapes_special_chars() {
+    fn render_config_omits_legacy_projects() {
         let mut config = Config::default();
         config.projects.push(ProjectConfig {
             id: new_project_id(),
-            path: r#"/home/user/"test"\project"#.to_string(),
-            name: Some(r#"te"st"#.to_string()),
+            path: "/home/user/project".to_string(),
+            name: Some("test".to_string()),
             default_provider: None,
             leading_branch: Some("main".to_string()),
-            commit_prompt: None,
         });
         let rendered = render_config_default(&config);
+        assert!(!rendered.contains("[[projects]]"));
         let parsed: Config = toml::from_str(&rendered).expect("should parse back");
-        assert_eq!(parsed.projects[0].path, config.projects[0].path);
-        assert_eq!(parsed.projects[0].name, config.projects[0].name);
-        assert_eq!(parsed.projects[0].leading_branch, Some("main".to_string()));
+        assert!(parsed.projects.is_empty());
     }
 
     #[test]
-    fn render_config_escapes_newlines_and_control_chars() {
+    fn legacy_projects_still_parse_for_migration() {
+        let parsed: Config = toml::from_str(
+            r#"
+[[projects]]
+id = "project-1"
+path = "/home/user/project"
+name = "test"
+default_provider = "codex"
+leading_branch = "main"
+"#,
+        )
+        .expect("legacy projects should parse");
+        assert_eq!(parsed.projects.len(), 1);
+        assert_eq!(parsed.projects[0].id, "project-1");
+        assert_eq!(parsed.projects[0].path, "/home/user/project");
+        assert_eq!(
+            parsed.projects[0].default_provider.as_deref(),
+            Some("codex")
+        );
+        assert_eq!(parsed.projects[0].leading_branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn save_config_strips_legacy_projects() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            r#"
+[[projects]]
+id = "project-1"
+path = "/home/user/project"
+name = "test"
+"#,
+        )
+        .expect("write config");
+
         let mut config = Config::default();
         config.projects.push(ProjectConfig {
-            id: new_project_id(),
+            id: "project-1".to_string(),
             path: "/home/user/path\nwith\nnewlines".to_string(),
             name: Some("name\twith\ttabs".to_string()),
             default_provider: None,
             leading_branch: None,
-            commit_prompt: None,
         });
-        let rendered = render_config_default(&config);
-        let parsed: Config = toml::from_str(&rendered).expect("should parse back");
-        assert_eq!(parsed.projects[0].path, config.projects[0].path);
-        assert_eq!(parsed.projects[0].name, config.projects[0].name);
+        let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
+        save_config(&config_path, &config, &bindings).expect("save config");
+
+        let saved = fs::read_to_string(config_path).expect("read config");
+        assert!(!saved.contains("[[projects]]"));
+        assert!(!saved.contains("project-1"));
     }
 
     #[test]
@@ -2291,59 +2242,18 @@ oneshot_output = "stdout"
     }
 
     #[test]
-    fn commit_prompt_resolution_uses_project_override() {
-        let mut config = Config::default();
-        config.projects.push(ProjectConfig {
-            id: new_project_id(),
-            path: "/my/project".to_string(),
-            name: Some("test".to_string()),
-            default_provider: None,
-            leading_branch: None,
-            commit_prompt: Some("custom project prompt".to_string()),
-        });
-
-        // Project override takes precedence.
-        assert_eq!(
-            config.commit_prompt_for_project("/my/project"),
-            "custom project prompt"
-        );
-
-        // Unknown project falls back to system default.
-        assert_eq!(
-            config.commit_prompt_for_project("/other/project"),
-            DEFAULT_COMMIT_PROMPT
-        );
-
-        // Empty project prompt falls back to system default.
-        config.projects[0].commit_prompt = Some(String::new());
-        assert_eq!(
-            config.commit_prompt_for_project("/my/project"),
-            DEFAULT_COMMIT_PROMPT
-        );
-    }
-
-    #[test]
-    fn commit_prompt_resolution_uses_system_default() {
+    fn default_commit_prompt_uses_system_default() {
         let mut config = Config::default();
         config.defaults.commit_prompt = Some("custom system prompt".to_string());
-        assert_eq!(
-            config.commit_prompt_for_project("/any/project"),
-            "custom system prompt"
-        );
+        assert_eq!(config.default_commit_prompt(), "custom system prompt");
 
         // Empty system prompt falls back to hardcoded constant.
         config.defaults.commit_prompt = Some(String::new());
-        assert_eq!(
-            config.commit_prompt_for_project("/any/project"),
-            DEFAULT_COMMIT_PROMPT
-        );
+        assert_eq!(config.default_commit_prompt(), DEFAULT_COMMIT_PROMPT);
 
         // None falls back to hardcoded constant.
         config.defaults.commit_prompt = None;
-        assert_eq!(
-            config.commit_prompt_for_project("/any/project"),
-            DEFAULT_COMMIT_PROMPT
-        );
+        assert_eq!(config.default_commit_prompt(), DEFAULT_COMMIT_PROMPT);
     }
 
     #[test]
