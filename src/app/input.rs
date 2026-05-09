@@ -6769,6 +6769,31 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn fork_agent_prefills_name_when_randomized_default_enabled() {
+        let mut app = test_app(default_bindings());
+        app.config.defaults.enable_randomized_pet_name_by_default = true;
+
+        app.fork_selected_session().unwrap();
+
+        match &app.prompt {
+            PromptState::NameNewAgent {
+                request,
+                input,
+                randomize_name,
+                randomized_name,
+                ..
+            } => {
+                assert!(matches!(request, CreateAgentRequest::ForkSession { .. }));
+                assert!(*randomize_name);
+                assert!(!input.text.is_empty());
+                assert_eq!(randomized_name.as_deref(), Some(input.text.as_str()));
+            }
+            other => panic!("expected name-new-agent prompt, got {other:?}"),
+        }
+        assert!(!app.create_agent_in_flight);
+    }
+
+    #[test]
     fn name_prompt_toggle_randomized_name_fills_and_clears_input() {
         let mut app = test_app(default_bindings());
         app.create_agent_for_selected_project().unwrap();
@@ -9297,6 +9322,53 @@ cyan = "#00ffff"
             }
             other => panic!("expected delete prompt, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn delete_agent_dialog_separates_checkbox_from_buttons() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmDeleteAgent {
+            session_id: app.sessions[0].id.clone(),
+            branch_name: app.sessions[0].branch_name.clone(),
+            focus: DeleteAgentFocus::Cancel,
+            delete_worktree: false,
+            worktree_shared: false,
+        };
+
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let (checkbox, cancel_button) = match app.overlay_layout.active {
+            OverlayMouseLayout::ConfirmDeleteAgent {
+                checkbox: Some(checkbox),
+                cancel_button,
+                ..
+            } => (checkbox.rect, cancel_button),
+            other => panic!("expected delete-agent overlay layout, got {other:?}"),
+        };
+        let separator_y = checkbox.y + checkbox.height;
+
+        assert_eq!(
+            cancel_button.y,
+            separator_y + 1,
+            "buttons should start one row below the checkbox separator"
+        );
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((cancel_button.x, separator_y))
+                .expect("separator cell")
+                .symbol(),
+            "─",
+            "expected a separator line between checkbox and buttons"
+        );
     }
 
     #[test]
