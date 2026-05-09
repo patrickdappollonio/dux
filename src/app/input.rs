@@ -2765,9 +2765,11 @@ impl App {
                         unreachable!()
                     };
 
-                    // For NewProject requests, check whether the branch already
+                    // For fresh project agents, check whether the branch already
                     // exists locally or on the remote before creating a new one.
-                    if let Some(project) = create_agent_request_project(&request) {
+                    // PR-based agents intentionally skip this prompt because the
+                    // PR head branch is expected to exist upstream.
+                    if let CreateAgentRequest::NewProject { project, .. } = &request {
                         let repo_path = std::path::PathBuf::from(&project.path);
                         if let Some(location) = git::branch_exists(&repo_path, &name) {
                             set_create_agent_request_custom_name(&mut request, name.clone());
@@ -5377,14 +5379,6 @@ impl App {
     }
 }
 
-fn create_agent_request_project(request: &CreateAgentRequest) -> Option<&Project> {
-    match request {
-        CreateAgentRequest::NewProject { project, .. }
-        | CreateAgentRequest::PullRequest { project, .. } => Some(project),
-        CreateAgentRequest::ForkSession { .. } => None,
-    }
-}
-
 fn set_create_agent_request_custom_name(request: &mut CreateAgentRequest, name: String) {
     match request {
         CreateAgentRequest::NewProject { custom_name, .. }
@@ -6688,6 +6682,80 @@ not_a_real_action = ["x"]
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         assert!(matches!(app.prompt, PromptState::NameNewAgent { .. }));
+    }
+
+    #[test]
+    fn new_project_agent_existing_branch_opens_use_existing_prompt() {
+        let mut app = test_app(default_bindings());
+        let repo_path = PathBuf::from(&app.projects[0].path);
+        run_git(&repo_path, &["branch", "reuse-me"]);
+
+        app.prompt = PromptState::NameNewAgent {
+            request: CreateAgentRequest::NewProject {
+                project: app.projects[0].clone(),
+                custom_name: None,
+                use_existing_branch: false,
+            },
+            input: TextInput::with_text("reuse-me".to_string()),
+            randomize_name: false,
+            randomized_name: None,
+            focus: NameNewAgentFocus::Input,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::ConfirmUseExistingBranch {
+                request,
+                branch_name,
+                location,
+                confirm_selected,
+            } => {
+                assert!(matches!(request, CreateAgentRequest::NewProject { .. }));
+                assert_eq!(branch_name, "reuse-me");
+                assert_eq!(*location, crate::git::BranchLocation::Local);
+                assert!(!*confirm_selected);
+            }
+            other => panic!("expected use-existing-branch prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pull_request_agent_existing_branch_skips_use_existing_prompt() {
+        let mut app = test_app(default_bindings());
+        let repo_path = PathBuf::from(&app.projects[0].path);
+        run_git(&repo_path, &["branch", "feature/pr-42"]);
+        app.create_agent_in_flight = true;
+
+        app.prompt = PromptState::NameNewAgent {
+            request: CreateAgentRequest::PullRequest {
+                project: app.projects[0].clone(),
+                host: "github.com".to_string(),
+                owner_repo: "octocat/Hello-World".to_string(),
+                number: 42,
+                title: "Fix issue".to_string(),
+                state: "OPEN".to_string(),
+                head_branch: "feature/pr-42".to_string(),
+                custom_name: Some("feature/pr-42".to_string()),
+                use_existing_branch: false,
+            },
+            input: TextInput::with_text("feature/pr-42".to_string()),
+            randomize_name: false,
+            randomized_name: None,
+            focus: NameNewAgentFocus::Input,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            app.status
+                .text()
+                .contains("An agent is already being created or forked.")
+        );
     }
 
     #[test]
