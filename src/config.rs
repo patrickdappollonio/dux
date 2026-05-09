@@ -175,6 +175,7 @@ pub struct ProjectConfig {
     pub path: String,
     pub name: Option<String>,
     pub default_provider: Option<String>,
+    pub leading_branch: Option<String>,
     pub commit_prompt: Option<String>,
 }
 
@@ -1329,6 +1330,9 @@ fn render_projects(out: &mut String, projects: &[ProjectConfig]) {
                     escape_toml_string(provider)
                 );
             }
+            if let Some(branch) = &project.leading_branch {
+                let _ = writeln!(out, "leading_branch = \"{}\"", escape_toml_string(branch));
+            }
             if let Some(prompt) = &project.commit_prompt {
                 let escaped = escape_toml_multiline(prompt);
                 let _ = writeln!(out, "commit_prompt = \"\"\"\n{escaped}\"\"\"");
@@ -1837,12 +1841,14 @@ mod tests {
             path: r#"/home/user/"test"\project"#.to_string(),
             name: Some(r#"te"st"#.to_string()),
             default_provider: None,
+            leading_branch: Some("main".to_string()),
             commit_prompt: None,
         });
         let rendered = render_config_default(&config);
         let parsed: Config = toml::from_str(&rendered).expect("should parse back");
         assert_eq!(parsed.projects[0].path, config.projects[0].path);
         assert_eq!(parsed.projects[0].name, config.projects[0].name);
+        assert_eq!(parsed.projects[0].leading_branch, Some("main".to_string()));
     }
 
     #[test]
@@ -1853,6 +1859,7 @@ mod tests {
             path: "/home/user/path\nwith\nnewlines".to_string(),
             name: Some("name\twith\ttabs".to_string()),
             default_provider: None,
+            leading_branch: None,
             commit_prompt: None,
         });
         let rendered = render_config_default(&config);
@@ -2291,6 +2298,7 @@ oneshot_output = "stdout"
             path: "/my/project".to_string(),
             name: Some("test".to_string()),
             default_provider: None,
+            leading_branch: None,
             commit_prompt: Some("custom project prompt".to_string()),
         });
 

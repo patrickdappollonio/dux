@@ -390,7 +390,11 @@ impl App {
                     result,
                 } => match result {
                     Ok(()) => match action {
-                        NonDefaultBranchAction::AddProject { path, name } => {
+                        NonDefaultBranchAction::AddProject {
+                            path,
+                            name,
+                            leading_branch,
+                        } => {
                             let display_name = if name.trim().is_empty() {
                                 std::path::Path::new(&path)
                                     .file_name()
@@ -401,7 +405,12 @@ impl App {
                                 name.trim().to_string()
                             };
                             if let Err(e) =
-                                self.finish_add_project(path, name, target_branch.clone())
+                                self.finish_add_project(
+                                    path,
+                                    name,
+                                    target_branch.clone(),
+                                    leading_branch,
+                                )
                             {
                                 self.set_error(format!("{e:#}"));
                             } else {
@@ -410,29 +419,6 @@ impl App {
                                 // two-step message.
                                 self.set_info(format!(
                                     "Checked out \"{target_branch}\" and added project \"{display_name}\" to workspace."
-                                ));
-                            }
-                        }
-                        NonDefaultBranchAction::CreateAgent { mut project } => {
-                            if let Some(existing) =
-                                self.projects.iter_mut().find(|p| p.id == project.id)
-                            {
-                                existing.current_branch = target_branch.clone();
-                                existing.branch_status = ProjectBranchStatus::Leading;
-                            }
-                            project.current_branch = target_branch.clone();
-                            project.branch_status = ProjectBranchStatus::Leading;
-                            if let Err(e) =
-                                self.open_name_new_agent_prompt(CreateAgentRequest::NewProject {
-                                    project,
-                                    custom_name: None,
-                                    use_existing_branch: false,
-                                })
-                            {
-                                self.set_error(format!("{e:#}"));
-                            } else {
-                                self.set_info(format!(
-                                    "Checked out \"{target_branch}\". Enter a name for the new agent."
                                 ));
                             }
                         }
@@ -463,26 +449,27 @@ impl App {
                     }
                 },
                 WorkerEvent::CreateAgentBranchInspected { project, result } => match result {
-                    Ok((current_branch, warning_kind)) => {
+                    Ok(inspection) => {
                         if let Some(existing) =
                             self.projects.iter_mut().find(|p| p.id == project.id)
                         {
-                            existing.current_branch = current_branch.clone();
-                            existing.branch_status = branch_status_from_warning(warning_kind.as_ref());
+                            existing.current_branch = inspection.current_branch.clone();
+                            existing.leading_branch = Some(inspection.leading_branch.clone());
+                            existing.branch_status =
+                                if existing.current_branch == inspection.leading_branch {
+                                    ProjectBranchStatus::Leading
+                                } else {
+                                    ProjectBranchStatus::NotLeading
+                                };
                         }
-                        if let Err(err) = self.continue_create_agent_after_branch_inspection(
-                            project,
-                            current_branch,
-                            warning_kind,
-                        ) {
+                        if let Err(err) =
+                            self.continue_create_agent_after_branch_inspection(project, inspection)
+                        {
                             self.set_error(format!("{err:#}"));
                         }
                     }
                     Err(err) => {
-                        self.set_error(format!(
-                            "Couldn't inspect the current branch for project \"{}\": {err}",
-                            project.name
-                        ));
+                        self.set_error(err);
                     }
                 },
                 WorkerEvent::ProjectBranchStatusReady { project_id, result } => match result {
@@ -1150,11 +1137,28 @@ pub(crate) fn run_create_agent_branch_inspection_job(
 ) {
     let repo_path = PathBuf::from(&project.path);
     let result = git::current_branch(&repo_path)
-        .map(|branch| {
-            let warning_kind = branch_warning_kind(&repo_path, &branch);
-            (branch, warning_kind)
+        .map_err(|err| {
+            format!(
+                "Couldn't inspect the current branch for project \"{}\": {err:#}",
+                project.name
+            )
         })
-        .map_err(|err| format!("{err:#}"));
+        .and_then(|current_branch| {
+            let leading_branch = project
+                .leading_branch
+                .clone()
+                .unwrap_or_else(|| leading_branch_for_project(&repo_path, &current_branch));
+            if !git::local_branch_exists(&repo_path, &leading_branch) {
+                return Err(format!(
+                    "Cannot create agent for \"{}\": leading branch \"{}\" no longer exists locally. Restore that branch or re-add the project.",
+                    project.name, leading_branch
+                ));
+            }
+            Ok(CreateAgentBranchInspection {
+                current_branch,
+                leading_branch,
+            })
+        });
     let _ = worker_tx.send(WorkerEvent::CreateAgentBranchInspected { project, result });
 }
 
@@ -1162,8 +1166,17 @@ pub(crate) fn run_project_branch_status_job(project: Project, worker_tx: Sender<
     let repo_path = PathBuf::from(&project.path);
     let result = git::current_branch(&repo_path)
         .map(|branch| {
-            let warning_kind = branch_warning_kind(&repo_path, &branch);
-            (branch, branch_status_from_warning(warning_kind.as_ref()))
+            let branch_status = if let Some(leading_branch) = project.leading_branch.as_deref() {
+                if branch == leading_branch {
+                    ProjectBranchStatus::Leading
+                } else {
+                    ProjectBranchStatus::NotLeading
+                }
+            } else {
+                let warning_kind = branch_warning_kind(&repo_path, &branch);
+                branch_status_from_warning(warning_kind.as_ref())
+            };
+            (branch, branch_status)
         })
         .map_err(|err| format!("{err:#}"));
     let _ = worker_tx.send(WorkerEvent::ProjectBranchStatusReady {
@@ -1274,6 +1287,17 @@ pub(crate) fn run_create_agent_job(
             // coincidentally match an existing branch.
             let attach_existing =
                 use_existing_branch || git::branch_exists(&repo_path, &resolved_name).is_some();
+            let leading_branch = project
+                .leading_branch
+                .clone()
+                .unwrap_or_else(|| project.current_branch.clone());
+            if !attach_existing && !git::local_branch_exists(&repo_path, &leading_branch) {
+                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
+                    "Cannot create agent for \"{}\": leading branch \"{}\" no longer exists locally. Restore that branch or re-add the project.",
+                    project.name, leading_branch
+                )));
+                return;
+            }
 
             let progress = if attach_existing {
                 format!(
@@ -1309,10 +1333,11 @@ pub(crate) fn run_create_agent_job(
                     }
                 }
             } else {
-                match git::create_worktree(
+                match git::create_worktree_from_start_point(
                     &repo_path,
                     &paths.worktrees_root,
                     &project.name,
+                    Some(&leading_branch),
                     Some(&resolved_name),
                 ) {
                     Ok(result) => result,
@@ -1345,7 +1370,11 @@ pub(crate) fn run_create_agent_job(
             (
                 project.clone(),
                 project.default_provider.clone(),
-                project.current_branch.clone(),
+                if attach_existing {
+                    project.current_branch.clone()
+                } else {
+                    leading_branch
+                },
                 status_message,
                 branch_name,
                 worktree_path,

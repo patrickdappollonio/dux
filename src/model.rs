@@ -56,6 +56,7 @@ pub struct Project {
     pub name: String,
     pub path: String,
     pub default_provider: ProviderKind,
+    pub leading_branch: Option<String>,
     pub current_branch: String,
     pub branch_status: ProjectBranchStatus,
     pub path_missing: bool,

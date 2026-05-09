@@ -9,7 +9,6 @@ const MAX_RIGHT_WIDTH_PCT: u16 = 50;
 const MIN_CENTER_WIDTH_PCT: u16 = 20;
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 const ESC_AMBIGUITY_TIMEOUT: Duration = Duration::from_millis(25);
-const NON_DEFAULT_BRANCH_HOVER_STATUS: &str = "Repo isn't on the default branch. Press Ctrl+P and run checkout-project-default-branch to check out main.";
 
 /// Maximum size of `loading_input_buf`. During the loading phase we
 /// accumulate bytes only to detect a (possibly multi-byte) ExitInteractive
@@ -3596,32 +3595,6 @@ impl App {
         }
     }
 
-    fn update_non_default_branch_hover_status(&mut self, column: u16, row: u16) {
-        let hovering_not_leading_project = match self.mouse_target(column, row) {
-            Some(MouseTarget::LeftRow(index)) => self
-                .left_items()
-                .get(index)
-                .and_then(|item| match item {
-                    LeftItem::Project(project_index) => self.projects.get(*project_index),
-                    LeftItem::Session(_) => None,
-                    LeftItem::EmptyProjectsSeparator => None,
-                })
-                .is_some_and(|project| {
-                    !project.path_missing
-                        && project.branch_status == ProjectBranchStatus::NotLeading
-                }),
-            _ => false,
-        };
-
-        if hovering_not_leading_project {
-            self.set_warning(NON_DEFAULT_BRANCH_HOVER_STATUS);
-        } else if self.status.tone() == crate::statusline::StatusTone::Warning
-            && self.status.text() == NON_DEFAULT_BRANCH_HOVER_STATUS
-        {
-            self.set_info("");
-        }
-    }
-
     fn register_mouse_click(
         &mut self,
         target: MouseClickTarget,
@@ -4171,19 +4144,19 @@ impl App {
             let target = default_branch.expect("checkout_default implies known default branch");
             let reason = match action {
                 NonDefaultBranchAction::AddProject { .. } => "before adding the project",
-                NonDefaultBranchAction::CreateAgent { .. } => "before creating the agent",
                 NonDefaultBranchAction::CheckoutProjectDefault { .. } => "for the selected project",
             };
             self.dispatch_non_default_branch_checkout(action, target, reason.to_string());
         } else {
             match action {
-                NonDefaultBranchAction::AddProject { path, name } => {
-                    if let Err(e) = self.finish_add_project(path, name, branch) {
+                NonDefaultBranchAction::AddProject {
+                    path,
+                    name,
+                    leading_branch,
+                } => {
+                    if let Err(e) = self.finish_add_project(path, name, branch, leading_branch) {
                         self.set_error(format!("{e:#}"));
                     }
-                }
-                NonDefaultBranchAction::CreateAgent { .. } => {
-                    self.set_error("Check out the default branch before creating an agent.");
                 }
                 NonDefaultBranchAction::CheckoutProjectDefault { .. } => {
                     self.set_error("Check out the default branch before retrying.");
@@ -5173,9 +5146,6 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) if self.mouse_drag.take().is_some() => {
                 self.persist_pane_widths();
             }
-            MouseEventKind::Moved => {
-                self.update_non_default_branch_hover_status(mouse.column, mouse.row);
-            }
             MouseEventKind::ScrollDown => match self.mouse_target(mouse.column, mouse.row) {
                 Some(MouseTarget::LeftRow(_)) => {
                     self.handle_left_mouse_wheel(true, mouse.column, mouse.row)
@@ -5432,17 +5402,18 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex, mpsc};
 
+    use super::DOUBLE_CLICK_THRESHOLD;
     use super::components::{ButtonPressedTarget, PressedButton};
-    use super::{DOUBLE_CLICK_THRESHOLD, NON_DEFAULT_BRANCH_HOVER_STATUS};
     use crate::app::{
         App, BranchWarningKind, CenterMode, ConfigReloadFailedFocus, ConfirmKillRunningPrompt,
-        ConfirmNonDefaultBranchFocus, CreateAgentRequest, DeleteAgentFocus, FocusPane,
-        FullscreenOverlay, InputTarget, KillRunningAction, KillRunningFocus,
-        KillRunningFooterAction, KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftItem,
-        LeftSection, MacroBarState, MouseClickTarget, MouseLayoutState, NameNewAgentFocus,
-        NonDefaultBranchAction, OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout,
-        OverlayMouseLayoutState, ProcessInfo, PromptState, PullTarget, ResolvedPullRequest,
-        ResourceStats, RightSection, RuntimeTargetId, TextInput, WorkerEvent,
+        ConfirmNonDefaultBranchFocus, CreateAgentBranchInspection, CreateAgentRequest,
+        DeleteAgentFocus, FocusPane, FullscreenOverlay, InputTarget, KillRunningAction,
+        KillRunningFocus, KillRunningFooterAction, KillRunningPrompt, KillableRuntime,
+        KillableRuntimeKind, LeftItem, LeftSection, MacroBarState, MouseClickTarget,
+        MouseLayoutState, NameNewAgentFocus, NonDefaultBranchAction, OverlayCheckbox,
+        OverlayCheckboxId, OverlayMouseLayout, OverlayMouseLayoutState, ProcessInfo, PromptState,
+        PullTarget, ResolvedPullRequest, ResourceStats, RightSection, RuntimeTargetId, TextInput,
+        WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
@@ -5538,16 +5509,15 @@ mod tests {
         );
     }
 
-    fn complete_create_agent_branch_inspection(
-        app: &mut App,
-        branch: &str,
-        warning_kind: Option<BranchWarningKind>,
-    ) {
+    fn complete_create_agent_branch_inspection(app: &mut App, branch: &str, leading_branch: &str) {
         let project = app.projects[0].clone();
         app.worker_tx
             .send(WorkerEvent::CreateAgentBranchInspected {
                 project,
-                result: Ok((branch.to_string(), warning_kind)),
+                result: Ok(CreateAgentBranchInspection {
+                    current_branch: branch.to_string(),
+                    leading_branch: leading_branch.to_string(),
+                }),
             })
             .unwrap();
         app.drain_events();
@@ -5574,6 +5544,7 @@ mod tests {
             name: "demo".to_string(),
             path: root.to_string_lossy().to_string(),
             default_provider: ProviderKind::from_str("codex"),
+            leading_branch: Some("main".to_string()),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -6647,7 +6618,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
 
         app.create_agent_for_selected_project().unwrap();
-        complete_create_agent_branch_inspection(&mut app, "main", None);
+        complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         match &app.prompt {
             PromptState::NameNewAgent {
@@ -6667,94 +6638,20 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn create_agent_known_non_default_branch_opens_checkout_modal() {
+    fn create_agent_known_non_default_branch_opens_name_prompt_with_leading_branch() {
         let mut app = test_app(default_bindings());
         let repo_path = PathBuf::from(&app.projects[0].path);
         set_remote_default(&repo_path, "main");
         run_git(&repo_path, &["switch", "-c", "feature"]);
 
         app.create_agent_for_selected_project().unwrap();
-        complete_create_agent_branch_inspection(
-            &mut app,
-            "feature",
-            Some(BranchWarningKind::Known {
-                default_branch: "main".to_string(),
-            }),
-        );
+        complete_create_agent_branch_inspection(&mut app, "feature", "main");
 
-        match &app.prompt {
-            PromptState::ConfirmNonDefaultBranch {
-                action,
-                current_branch,
-                kind,
-                checkout_default,
-                ..
-            } => {
-                assert!(matches!(action, NonDefaultBranchAction::CreateAgent { .. }));
-                assert_eq!(current_branch, "feature");
-                assert!(matches!(
-                    kind,
-                    BranchWarningKind::Known { default_branch } if default_branch == "main"
-                ));
-                assert!(*checkout_default);
-            }
-            other => panic!("expected non-default branch prompt, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn create_agent_unknown_default_on_feature_sets_error() {
-        let mut app = test_app(default_bindings());
-        let repo_path = PathBuf::from(&app.projects[0].path);
-        run_git(&repo_path, &["switch", "-c", "feature"]);
-
-        app.create_agent_for_selected_project().unwrap();
-        complete_create_agent_branch_inspection(
-            &mut app,
-            "feature",
-            Some(BranchWarningKind::Heuristic),
-        );
-
-        assert!(matches!(app.prompt, PromptState::None));
-        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
-        assert!(
-            app.status
-                .text()
-                .contains("Can't determine the default branch")
-        );
-    }
-
-    #[test]
-    fn create_agent_unknown_default_on_main_opens_name_prompt() {
-        let mut app = test_app(default_bindings());
-
-        app.create_agent_for_selected_project().unwrap();
-        complete_create_agent_branch_inspection(&mut app, "main", None);
-
-        assert!(matches!(app.prompt, PromptState::NameNewAgent { .. }));
-    }
-
-    #[test]
-    fn create_agent_checkout_success_opens_name_prompt_and_updates_branch() {
-        let mut app = test_app(default_bindings());
-        let mut project = app.projects[0].clone();
-        project.current_branch = "feature".to_string();
-
-        app.worker_tx
-            .send(WorkerEvent::NonDefaultBranchCheckoutCompleted {
-                action: NonDefaultBranchAction::CreateAgent { project },
-                target_branch: "main".to_string(),
-                result: Ok(()),
-            })
-            .unwrap();
-
-        app.drain_events();
-
-        assert_eq!(app.projects[0].current_branch, "main");
         match &app.prompt {
             PromptState::NameNewAgent { request, .. } => match request {
                 CreateAgentRequest::NewProject { project, .. } => {
-                    assert_eq!(project.current_branch, "main");
+                    assert_eq!(project.current_branch, "feature");
+                    assert_eq!(project.leading_branch.as_deref(), Some("main"));
                 }
                 other => panic!("expected new project request, got {other:?}"),
             },
@@ -6763,23 +6660,46 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn create_agent_checkout_failure_sets_error_without_name_prompt() {
+    fn create_agent_heuristic_feature_opens_name_prompt_with_stored_branch() {
         let mut app = test_app(default_bindings());
-        let project = app.projects[0].clone();
+        let repo_path = PathBuf::from(&app.projects[0].path);
+        run_git(&repo_path, &["switch", "-c", "feature"]);
 
-        app.worker_tx
-            .send(WorkerEvent::NonDefaultBranchCheckoutCompleted {
-                action: NonDefaultBranchAction::CreateAgent { project },
-                target_branch: "main".to_string(),
-                result: Err("switch failed".to_string()),
-            })
-            .unwrap();
+        app.create_agent_for_selected_project().unwrap();
+        complete_create_agent_branch_inspection(&mut app, "feature", "main");
 
-        app.drain_events();
+        assert!(matches!(app.prompt, PromptState::NameNewAgent { .. }));
+    }
+
+    #[test]
+    fn create_agent_unknown_default_on_main_opens_name_prompt() {
+        let mut app = test_app(default_bindings());
+
+        app.create_agent_for_selected_project().unwrap();
+        complete_create_agent_branch_inspection(&mut app, "main", "main");
+
+        assert!(matches!(app.prompt, PromptState::NameNewAgent { .. }));
+    }
+
+    #[test]
+    fn create_agent_missing_leading_branch_sets_error_without_name_prompt() {
+        let mut app = test_app(default_bindings());
+        app.projects[0].leading_branch = Some("missing-main".to_string());
+
+        app.create_agent_for_selected_project().unwrap();
+        drain_until(&mut app, |app| {
+            app.status
+                .text()
+                .contains("leading branch \"missing-main\"")
+        });
 
         assert!(matches!(app.prompt, PromptState::None));
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
-        assert!(app.status.text().contains("Couldn't check out \"main\""));
+        assert!(
+            app.status
+                .text()
+                .contains("Restore that branch or re-add the project")
+        );
     }
 
     #[test]
@@ -6831,7 +6751,7 @@ not_a_real_action = ["x"]
         app.config.defaults.enable_randomized_pet_name_by_default = true;
 
         app.create_agent_for_selected_project().unwrap();
-        complete_create_agent_branch_inspection(&mut app, "main", None);
+        complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         match &app.prompt {
             PromptState::NameNewAgent {
@@ -6852,7 +6772,7 @@ not_a_real_action = ["x"]
     fn name_prompt_toggle_randomized_name_fills_and_clears_input() {
         let mut app = test_app(default_bindings());
         app.create_agent_for_selected_project().unwrap();
-        complete_create_agent_branch_inspection(&mut app, "main", None);
+        complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
@@ -7226,28 +7146,6 @@ not_a_real_action = ["x"]
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 1));
 
         assert_eq!(app.focus, FocusPane::Left);
-    }
-
-    #[test]
-    fn mouse_hover_non_default_project_shows_status_reason() {
-        let mut app = test_app(default_bindings());
-        install_mouse_layout(&mut app);
-        app.projects[0].branch_status = ProjectBranchStatus::NotLeading;
-
-        app.handle_mouse(mouse(MouseEventKind::Moved, 2, 1));
-
-        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
-        assert_eq!(app.status.text(), NON_DEFAULT_BRANCH_HOVER_STATUS);
-    }
-
-    #[test]
-    fn mouse_hover_ordinary_project_does_not_show_non_default_status() {
-        let mut app = test_app(default_bindings());
-        install_mouse_layout(&mut app);
-
-        app.handle_mouse(mouse(MouseEventKind::Moved, 2, 1));
-
-        assert_eq!(app.status.text(), "ready");
     }
 
     #[test]
@@ -7648,6 +7546,7 @@ not_a_real_action = ["x"]
                 name: format!("empty {idx}"),
                 path: path.clone(),
                 default_provider: ProviderKind::from_str("codex"),
+                leading_branch: Some("main".to_string()),
                 current_branch: "main".to_string(),
                 branch_status: ProjectBranchStatus::Unknown,
                 path_missing: false,
@@ -9487,6 +9386,7 @@ cyan = "#00ffff"
             action: NonDefaultBranchAction::AddProject {
                 path: "/tmp/project".to_string(),
                 name: "project".to_string(),
+                leading_branch: "main".to_string(),
             },
             current_branch: "feature".to_string(),
             kind: BranchWarningKind::Known {
@@ -9532,6 +9432,7 @@ cyan = "#00ffff"
             action: NonDefaultBranchAction::AddProject {
                 path: "/tmp/project".to_string(),
                 name: "project".to_string(),
+                leading_branch: "feature".to_string(),
             },
             current_branch: "feature".to_string(),
             kind: BranchWarningKind::Heuristic,
@@ -9610,7 +9511,7 @@ cyan = "#00ffff"
     fn mouse_click_name_prompt_checkbox_toggles_randomized_name() {
         let mut app = test_app(default_bindings());
         app.create_agent_for_selected_project().unwrap();
-        complete_create_agent_branch_inspection(&mut app, "main", None);
+        complete_create_agent_branch_inspection(&mut app, "main", "main");
         install_name_new_agent_overlay(&mut app);
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 12));
@@ -11407,6 +11308,7 @@ cyan = "#00ffff"
             path: app.projects[0].path.clone(),
             name: Some(app.projects[0].name.clone()),
             default_provider: None,
+            leading_branch: Some("main".to_string()),
             commit_prompt: None,
         });
 
@@ -11416,6 +11318,7 @@ cyan = "#00ffff"
             name: "pinned".to_string(),
             path: app.paths.root.join("pinned").display().to_string(),
             default_provider: ProviderKind::from_str("gemini"),
+            leading_branch: Some("main".to_string()),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -11425,6 +11328,7 @@ cyan = "#00ffff"
             path: pinned.path.clone(),
             name: Some(pinned.name.clone()),
             default_provider: Some("gemini".to_string()),
+            leading_branch: Some("main".to_string()),
             commit_prompt: None,
         });
         app.projects.push(pinned);
@@ -11488,6 +11392,7 @@ cyan = "#00ffff"
             path: app.projects[0].path.clone(),
             name: Some(app.projects[0].name.clone()),
             default_provider: None,
+            leading_branch: Some("main".to_string()),
             commit_prompt: None,
         });
 
@@ -11525,6 +11430,7 @@ cyan = "#00ffff"
             path: app.projects[0].path.clone(),
             name: Some(app.projects[0].name.clone()),
             default_provider: None,
+            leading_branch: Some("main".to_string()),
             commit_prompt: None,
         });
 
@@ -11533,6 +11439,7 @@ cyan = "#00ffff"
             name: "pinned".to_string(),
             path: app.paths.root.join("pinned").display().to_string(),
             default_provider: ProviderKind::from_str("gemini"),
+            leading_branch: Some("main".to_string()),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -11542,6 +11449,7 @@ cyan = "#00ffff"
             path: pinned.path.clone(),
             name: Some(pinned.name.clone()),
             default_provider: Some("gemini".to_string()),
+            leading_branch: Some("main".to_string()),
             commit_prompt: None,
         });
         app.projects.push(pinned);
@@ -11607,6 +11515,7 @@ cyan = "#00ffff"
             path: app.projects[0].path.clone(),
             name: Some(app.projects[0].name.clone()),
             default_provider: Some("gemini".to_string()),
+            leading_branch: Some("main".to_string()),
             commit_prompt: None,
         });
         app.projects[0].default_provider = ProviderKind::from_str("gemini");
@@ -11668,38 +11577,6 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn non_default_project_uses_double_exclamation_marker() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let mut app = test_app(default_bindings());
-        app.projects[0].branch_status = ProjectBranchStatus::NotLeading;
-        app.rebuild_left_items();
-
-        let backend = TestBackend::new(120, 24);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| app.render(frame))
-            .expect("render frame");
-        let rendered: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-
-        assert!(
-            rendered.contains("demo (1) ‼"),
-            "expected non-default project marker, got: {rendered}"
-        );
-        assert!(
-            !rendered.contains("demo (1) !"),
-            "old non-default project marker should not render"
-        );
-    }
-
-    #[test]
     fn header_shows_project_and_global_provider_when_project_is_overridden() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -11711,6 +11588,7 @@ cyan = "#00ffff"
             path: app.projects[0].path.clone(),
             name: Some(app.projects[0].name.clone()),
             default_provider: Some("codex".to_string()),
+            leading_branch: Some("main".to_string()),
             commit_prompt: None,
         });
         app.projects[0].default_provider = ProviderKind::from_str("codex");
@@ -11761,6 +11639,7 @@ cyan = "#00ffff"
             path: app.projects[0].path.clone(),
             name: Some(app.projects[0].name.clone()),
             default_provider: None,
+            leading_branch: Some("main".to_string()),
             commit_prompt: None,
         });
         app.projects[0].default_provider = ProviderKind::from_str("codex");

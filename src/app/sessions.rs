@@ -65,6 +65,7 @@ impl App {
             return Ok(());
         }
         let branch = git::current_branch(&path)?;
+        let leading_branch = leading_branch_for_project(&path, &branch);
 
         if let Some(kind) = branch_warning_kind(&path, &branch) {
             // Default the checkbox to on for the confident path so hitting
@@ -76,6 +77,7 @@ impl App {
                 action: NonDefaultBranchAction::AddProject {
                     path: path.to_string_lossy().to_string(),
                     name,
+                    leading_branch,
                 },
                 current_branch: branch,
                 kind,
@@ -86,7 +88,7 @@ impl App {
         }
 
         let path_str = path.to_string_lossy().to_string();
-        self.finish_add_project(path_str, name, branch)
+        self.finish_add_project(path_str, name, branch, leading_branch)
     }
 
     /// Saves the project to config and adds it to the runtime project list.
@@ -97,6 +99,7 @@ impl App {
         path: String,
         name: String,
         branch: String,
+        leading_branch: String,
     ) -> Result<()> {
         let path_buf = PathBuf::from(&path);
         let display_name = if name.trim().is_empty() {
@@ -114,6 +117,7 @@ impl App {
             path: path.clone(),
             name: Some(display_name.clone()),
             default_provider: None,
+            leading_branch: Some(leading_branch.clone()),
             commit_prompt: None,
         });
         save_config(&self.paths.config_path, &self.config, &self.bindings)?;
@@ -122,6 +126,7 @@ impl App {
             name: display_name.clone(),
             path,
             default_provider: self.config.default_provider(),
+            leading_branch: Some(leading_branch),
             current_branch: branch,
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -149,33 +154,16 @@ impl App {
     pub(crate) fn continue_create_agent_after_branch_inspection(
         &mut self,
         mut project: Project,
-        current_branch: String,
-        warning_kind: Option<BranchWarningKind>,
+        inspection: CreateAgentBranchInspection,
     ) -> Result<()> {
-        if let Some(kind) = warning_kind {
-            match kind {
-                BranchWarningKind::Known { .. } => {
-                    project.current_branch = current_branch.clone();
-                    self.prompt = PromptState::ConfirmNonDefaultBranch {
-                        action: NonDefaultBranchAction::CreateAgent { project },
-                        current_branch,
-                        kind,
-                        focus: ConfirmNonDefaultBranchFocus::Cancel,
-                        checkout_default: true,
-                    };
-                }
-                BranchWarningKind::Heuristic => {
-                    self.set_error(format!(
-                        "Can't determine the default branch for project \"{}\" while it is on \"{}\". Check out the leading branch in your terminal, then create the agent.",
-                        project.name, current_branch
-                    ));
-                }
-            }
-            return Ok(());
-        }
-
-        project.current_branch = current_branch;
-        project.branch_status = ProjectBranchStatus::Leading;
+        project.current_branch = inspection.current_branch;
+        project.leading_branch = Some(inspection.leading_branch);
+        project.branch_status =
+            if project.leading_branch.as_deref() == Some(&project.current_branch) {
+                ProjectBranchStatus::Leading
+            } else {
+                ProjectBranchStatus::NotLeading
+            };
         self.open_name_new_agent_prompt(CreateAgentRequest::NewProject {
             project,
             custom_name: None,
@@ -2340,6 +2328,7 @@ mod tests {
             name: "demo".to_string(),
             path: "/tmp/project".to_string(),
             default_provider: ProviderKind::from_str(provider),
+            leading_branch: Some("main".to_string()),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -2490,6 +2479,7 @@ mod tests {
             name: "demo".to_string(),
             path: path.to_string(),
             default_provider: ProviderKind::from_str(provider),
+            leading_branch: Some("main".to_string()),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,

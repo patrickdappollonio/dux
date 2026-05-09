@@ -685,18 +685,29 @@ pub(crate) fn branch_status_from_warning(
     }
 }
 
+pub(crate) fn leading_branch_for_project(path: &Path, current_branch: &str) -> String {
+    match git::remote_default_branch(path) {
+        Some(default) => default,
+        None => current_branch.to_string(),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum NonDefaultBranchAction {
-    AddProject { path: String, name: String },
-    CreateAgent { project: Project },
-    CheckoutProjectDefault { project: Project },
+    AddProject {
+        path: String,
+        name: String,
+        leading_branch: String,
+    },
+    CheckoutProjectDefault {
+        project: Project,
+    },
 }
 
 impl NonDefaultBranchAction {
     pub(crate) fn repo_path(&self) -> &str {
         match self {
             Self::AddProject { path, .. } => path,
-            Self::CreateAgent { project } => &project.path,
             Self::CheckoutProjectDefault { project } => &project.path,
         }
     }
@@ -704,6 +715,12 @@ impl NonDefaultBranchAction {
     pub(crate) fn allows_add_anyway(&self) -> bool {
         matches!(self, Self::AddProject { .. })
     }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CreateAgentBranchInspection {
+    pub(crate) current_branch: String,
+    pub(crate) leading_branch: String,
 }
 
 #[derive(Clone, Debug)]
@@ -1234,7 +1251,7 @@ pub(crate) enum WorkerEvent {
     /// the New Agent prompt.
     CreateAgentBranchInspected {
         project: Project,
-        result: Result<(String, Option<BranchWarningKind>), String>,
+        result: Result<CreateAgentBranchInspection, String>,
     },
     ProjectBranchStatusReady {
         project_id: String,
@@ -2703,6 +2720,15 @@ pub(crate) fn load_projects(config: &Config) -> Vec<Project> {
             .as_deref()
             .map(ProviderKind::from_str)
             .unwrap_or_else(|| config.default_provider());
+        let current_branch = if missing {
+            String::new()
+        } else {
+            git::current_branch(&path).unwrap_or_else(|_| "main".to_string())
+        };
+        let leading_branch = project
+            .leading_branch
+            .clone()
+            .or_else(|| (!missing).then(|| leading_branch_for_project(&path, &current_branch)));
         projects.push(Project {
             id: project.id.clone(),
             name: project.name.clone().unwrap_or_else(|| {
@@ -2713,11 +2739,8 @@ pub(crate) fn load_projects(config: &Config) -> Vec<Project> {
             }),
             path: path.to_string_lossy().to_string(),
             default_provider: provider,
-            current_branch: if missing {
-                String::new()
-            } else {
-                git::current_branch(&path).unwrap_or_else(|_| "main".to_string())
-            },
+            leading_branch,
+            current_branch,
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: missing,
         });
@@ -2858,6 +2881,7 @@ mod tests {
             name: id.to_string(),
             path: format!("/tmp/{id}"),
             default_provider: ProviderKind::from_str("codex"),
+            leading_branch: Some("main".to_string()),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
