@@ -1440,6 +1440,12 @@ pub(crate) fn run_create_agent_job(
             source_label,
             custom_name,
         } => {
+            let Some(custom_name) = custom_name else {
+                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(
+                    "Forking an agent requires choosing a name first.".to_string(),
+                ));
+                return;
+            };
             let source_worktree = PathBuf::from(&source_session.worktree_path);
             let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
                 "Creating a forked worktree from agent \"{source_label}\"...",
@@ -1463,7 +1469,7 @@ pub(crate) fn run_create_agent_job(
                 &paths.worktrees_root,
                 &project.name,
                 Some(&source_head),
-                custom_name.as_deref(),
+                Some(&custom_name),
             ) {
                 Ok(result) => result,
                 Err(err) => {
@@ -1921,8 +1927,71 @@ fn normalize_github_host(host: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
+    use chrono::Utc;
+    use tempfile::tempdir;
+
     use super::*;
     use crate::model::PrState;
+
+    #[test]
+    fn fork_worker_requires_name_from_prompt() {
+        let tmp = tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+            root: tmp.path().to_path_buf(),
+        };
+        let project = Project {
+            id: "project-1".to_string(),
+            name: "demo".to_string(),
+            path: tmp.path().to_string_lossy().to_string(),
+            default_provider: ProviderKind::from_str("codex"),
+            current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Unknown,
+            path_missing: false,
+        };
+        let now = Utc::now();
+        let source_session = AgentSession {
+            id: "session-1".to_string(),
+            project_id: project.id.clone(),
+            project_path: Some(project.path.clone()),
+            provider: ProviderKind::from_str("codex"),
+            source_branch: "main".to_string(),
+            branch_name: "agent-branch".to_string(),
+            worktree_path: tmp.path().join("source").to_string_lossy().to_string(),
+            title: None,
+            started_providers: Vec::new(),
+            status: SessionStatus::Active,
+            created_at: now,
+            updated_at: now,
+        };
+        let (worker_tx, worker_rx) = mpsc::channel();
+
+        run_create_agent_job(
+            CreateAgentRequest::ForkSession {
+                project,
+                source_session: Box::new(source_session),
+                source_label: "agent-branch".to_string(),
+                custom_name: None,
+            },
+            paths,
+            Config::default(),
+            worker_tx,
+            (80, 24),
+        );
+
+        match worker_rx.recv().expect("worker event") {
+            WorkerEvent::CreateAgentFailed(message) => {
+                assert_eq!(message, "Forking an agent requires choosing a name first.");
+            }
+            _ => panic!("expected missing-name failure"),
+        }
+        assert!(worker_rx.try_recv().is_err());
+    }
 
     #[test]
     fn gh_repo_arg_uses_owner_repo_for_github_dot_com() {
