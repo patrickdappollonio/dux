@@ -44,26 +44,14 @@ impl App {
     }
 
     pub(crate) fn add_project(&mut self, raw_path: String, name: String) -> Result<()> {
-        let path = PathBuf::from(raw_path.trim())
-            .canonicalize()
-            .unwrap_or_else(|_| PathBuf::from(raw_path.trim()));
+        let path = match self.validate_project_add_path(&raw_path) {
+            Ok(path) => path,
+            Err(message) => {
+                self.set_error(message);
+                return Ok(());
+            }
+        };
         logger::info(&format!("attempting to add project {}", path.display()));
-        if !path.exists() || !git::is_git_repo(&path) {
-            logger::error(&format!("add project rejected for {}", path.display()));
-            self.set_error(format!("\"{}\" is not a git repository.", path.display()));
-            return Ok(());
-        }
-        if self
-            .projects
-            .iter()
-            .any(|project| Path::new(&project.path) == path.as_path())
-        {
-            self.set_error(format!(
-                "\"{}\" is already registered as a project.",
-                path.display()
-            ));
-            return Ok(());
-        }
         let branch = git::current_branch(&path)?;
         let leading_branch = leading_branch_for_project(&path, &branch);
 
@@ -89,6 +77,32 @@ impl App {
 
         let path_str = path.to_string_lossy().to_string();
         self.finish_add_project(path_str, name, branch, leading_branch)
+    }
+
+    pub(crate) fn validate_project_add_path(
+        &self,
+        raw_path: &str,
+    ) -> std::result::Result<PathBuf, String> {
+        let trimmed = raw_path.trim();
+        let path = PathBuf::from(trimmed)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(trimmed));
+        if !path.exists() || !git::is_git_repo(&path) {
+            logger::error(&format!("add project rejected for {}", path.display()));
+            return Err(format!("\"{}\" is not a git repository.", path.display()));
+        }
+        if self.projects.iter().any(|project| {
+            PathBuf::from(&project.path)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(&project.path))
+                == path
+        }) {
+            return Err(format!(
+                "\"{}\" is already registered as a project.",
+                path.display()
+            ));
+        }
+        Ok(path)
     }
 
     /// Starts saving the project to SQLite and adds it to the runtime project

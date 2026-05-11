@@ -563,6 +563,10 @@ pub(crate) enum PromptState {
         tab_completions: Vec<String>,
         tab_index: usize,
     },
+    AddProjectFailed {
+        message: String,
+        return_prompt: Box<PromptState>,
+    },
     ChangeAgentProvider(ChangeAgentProviderPrompt),
     ChangeDefaultProvider(ChangeDefaultProviderPrompt),
     ChangeProjectDefaultProvider(ChangeProjectDefaultProviderPrompt),
@@ -937,6 +941,9 @@ pub(crate) enum OverlayMouseLayout {
         list: Rect,
         items: usize,
         offset: usize,
+    },
+    AddProjectFailed {
+        ok_button: Rect,
     },
     ChangeAgentProvider {
         list: Rect,

@@ -68,6 +68,7 @@ pub enum Action {
     // Overlays and dialogs
     SearchToggle,
     GoToPath,
+    ExitPathEditorOnProjectAdd,
     OpenEntry,
     AddCurrentDir,
     Confirm,
@@ -243,6 +244,7 @@ impl Action {
             Action::ResizeShrink => "resize_shrink",
             Action::SearchToggle => "search_toggle",
             Action::GoToPath => "go_to_path",
+            Action::ExitPathEditorOnProjectAdd => "exit_path_editor_on_project_add",
             Action::OpenEntry => "open_entry",
             Action::AddCurrentDir => "add_current_dir",
             Action::Confirm => "confirm",
@@ -348,6 +350,7 @@ impl Action {
             Action::ResizeShrink => "Shrink the left pane width.",
             Action::SearchToggle => "Toggle search mode in search-capable lists and overlays.",
             Action::GoToPath => "Open path editor in the project browser.",
+            Action::ExitPathEditorOnProjectAdd => "Exit typed-path mode in the project browser.",
             Action::OpenEntry => "Open or navigate into the selected entry in the project browser.",
             Action::AddCurrentDir => "Add the current directory as a project.",
             Action::Confirm => "Confirm the selected action in a dialog.",
@@ -442,6 +445,7 @@ impl Action {
             Action::ResizeGrow | Action::ResizeShrink => Some("Resize mode"),
             Action::SearchToggle
             | Action::GoToPath
+            | Action::ExitPathEditorOnProjectAdd
             | Action::OpenEntry
             | Action::AddCurrentDir
             | Action::Confirm
@@ -1303,6 +1307,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         help: Some(HelpEntry {
             section: "Overlays",
             description: "Open path editor in the project browser",
+        }),
+        hint_contexts: &[],
+        palette: None,
+    },
+    BindingDef {
+        action: Action::ExitPathEditorOnProjectAdd,
+        default_keys: &[key!(ctrl - g)],
+        scopes: &[BindingScope::Browser],
+        help: Some(HelpEntry {
+            section: "Overlays",
+            description: "Exit typed-path mode in the project browser",
         }),
         hint_contexts: &[],
         palette: None,
@@ -2469,6 +2484,7 @@ mod tests {
         assert!(actions_in_defs.contains(&Action::ExitCommitInput));
         assert!(actions_in_defs.contains(&Action::PushToRemote));
         assert!(actions_in_defs.contains(&Action::AddCurrentDir));
+        assert!(actions_in_defs.contains(&Action::ExitPathEditorOnProjectAdd));
         assert!(actions_in_defs.contains(&Action::SearchFiles));
         assert!(actions_in_defs.contains(&Action::SearchNext));
         assert!(actions_in_defs.contains(&Action::ForceRedraw));

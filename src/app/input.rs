@@ -125,6 +125,7 @@ enum PromptMouseTarget {
     ConfirmUseExistingBranchUse,
     ConfigReloadFailedClose,
     ConfigReloadFailedApply,
+    AddProjectFailedOk,
     Checkbox(OverlayCheckboxId),
     RenameInput,
     NameNewAgentInput,
@@ -207,6 +208,7 @@ impl ButtonPressedTarget {
             PromptMouseTarget::ConfigReloadFailedApply => {
                 Some(ButtonPressedTarget::ConfigReloadFailedApply)
             }
+            PromptMouseTarget::AddProjectFailedOk => Some(ButtonPressedTarget::AddProjectFailedOk),
             PromptMouseTarget::CommandInput
             | PromptMouseTarget::CommandItem(_)
             | PromptMouseTarget::BrowseProjectInput
@@ -1953,14 +1955,17 @@ impl App {
             let is_plain_char = matches!(key.code, KeyCode::Char(_))
                 && !key.modifiers.contains(KeyModifiers::CONTROL);
 
-            // Path editor is pure text input — keep hardcoded KeyCode matches.
+            // Path editor keeps text editing local, with one browser-scoped
+            // escape hatch back to directory browsing.
             if is_editing_path {
+                let path_editor_action = if is_plain_char {
+                    None
+                } else {
+                    self.bindings.lookup(&key, BindingScope::Browser)
+                };
+                let mut add_path: Option<String> = None;
+                let mut refresh_completions = false;
                 if let PromptState::BrowseProjects {
-                    current_dir,
-                    entries,
-                    loading,
-                    selected,
-                    filter,
                     editing_path,
                     path_input,
                     tab_completions,
@@ -1968,105 +1973,58 @@ impl App {
                     ..
                 } = &mut self.prompt
                 {
-                    let mut browse_to: Option<PathBuf> = None;
-                    let mut error_msg = None;
-                    match key.code {
-                        KeyCode::Esc => {
+                    match path_editor_action {
+                        Some(Action::ExitPathEditorOnProjectAdd) => {
                             *editing_path = false;
                             path_input.clear();
                             tab_completions.clear();
                             *tab_index = 0;
                         }
-                        KeyCode::Tab | KeyCode::BackTab => {
-                            if tab_completions.is_empty() {
-                                let input_path = PathBuf::from(path_input.text.as_str());
-                                let (search_dir, prefix) =
-                                    if input_path.is_dir() && path_input.text.ends_with('/') {
-                                        (input_path.clone(), String::new())
-                                    } else {
-                                        let parent = input_path
-                                            .parent()
-                                            .unwrap_or_else(|| std::path::Path::new("/"));
-                                        let file_name = input_path
-                                            .file_name()
-                                            .map(|f| f.to_string_lossy().to_string())
-                                            .unwrap_or_default();
-                                        (parent.to_path_buf(), file_name)
-                                    };
-                                if let Ok(read) = std::fs::read_dir(&search_dir) {
-                                    let prefix_lower = prefix.to_lowercase();
-                                    let mut candidates: Vec<String> = read
-                                        .filter_map(|e| e.ok())
-                                        .filter(|e| {
-                                            e.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
-                                        })
-                                        .filter(|e| {
-                                            let name =
-                                                e.file_name().to_string_lossy().to_lowercase();
-                                            !name.starts_with('.')
-                                                && name.starts_with(&prefix_lower)
-                                        })
-                                        .map(|e| {
-                                            let mut full = search_dir
-                                                .join(e.file_name())
-                                                .to_string_lossy()
-                                                .to_string();
-                                            full.push('/');
-                                            full
-                                        })
-                                        .collect();
-                                    candidates.sort();
-                                    *tab_completions = candidates;
-                                    *tab_index = 0;
-                                }
-                            } else if is_reverse_tab(key) {
-                                if *tab_index == 0 {
-                                    *tab_index = tab_completions.len().saturating_sub(1);
-                                } else {
-                                    *tab_index -= 1;
-                                }
-                            } else {
-                                *tab_index = (*tab_index + 1) % tab_completions.len();
-                            }
-                            if let Some(completion) = tab_completions.get(*tab_index) {
-                                path_input.set_text(completion.clone());
-                            }
-                        }
-                        KeyCode::Enter => {
-                            let new_dir = PathBuf::from(path_input.text.trim());
-                            if new_dir.is_dir() {
-                                *current_dir = new_dir.clone();
-                                entries.clear();
-                                *loading = true;
-                                *selected = 0;
-                                filter.clear();
-                                browse_to = Some(new_dir);
-                            } else {
-                                error_msg =
-                                    Some(format!("{} is not a directory.", path_input.text.trim()));
-                            }
-                            *editing_path = false;
-                            path_input.clear();
-                            tab_completions.clear();
-                            *tab_index = 0;
-                        }
-                        KeyCode::Up | KeyCode::Down => {
-                            tab_completions.clear();
-                            *tab_index = 0;
-                        }
-                        _ => {
-                            if path_input.handle_key(key) {
+                        _ => match key.code {
+                            KeyCode::Esc => {
+                                *editing_path = false;
+                                path_input.clear();
                                 tab_completions.clear();
                                 *tab_index = 0;
                             }
-                        }
+                            KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {
+                                if tab_completions.is_empty() {
+                                    *tab_completions =
+                                        Self::path_editor_completion_candidates(&path_input.text);
+                                    *tab_index = 0;
+                                } else if key.code == KeyCode::Up || is_reverse_tab(key) {
+                                    if *tab_index == 0 {
+                                        *tab_index = tab_completions.len().saturating_sub(1);
+                                    } else {
+                                        *tab_index -= 1;
+                                    }
+                                } else if key.code == KeyCode::Down {
+                                    *tab_index = (*tab_index + 1) % tab_completions.len();
+                                }
+                                if key.code == KeyCode::Tab
+                                    && !is_reverse_tab(key)
+                                    && let Some(completion) = tab_completions.get(*tab_index)
+                                {
+                                    path_input.set_text(completion.clone());
+                                    refresh_completions = true;
+                                }
+                            }
+                            KeyCode::Enter => {
+                                add_path = Some(path_input.text.trim().to_string());
+                            }
+                            _ => {
+                                if path_input.handle_key(key) {
+                                    refresh_completions = true;
+                                }
+                            }
+                        },
                     }
-                    if let Some(msg) = error_msg {
-                        self.set_error(msg);
-                    }
-                    if let Some(dir) = browse_to {
-                        self.spawn_browser_entries(&dir);
-                    }
+                }
+                if refresh_completions {
+                    self.refresh_path_editor_completions();
+                }
+                if let Some(path) = add_path {
+                    self.add_project_from_browser_path(path);
                 }
                 return Ok(false);
             }
@@ -2150,6 +2108,7 @@ impl App {
                         }
                         path_input.set_text(p);
                     }
+                    self.refresh_path_editor_completions();
                 }
                 Some(Action::Confirm) if is_searching => {
                     if let PromptState::BrowseProjects { searching, .. } = &mut self.prompt {
@@ -2162,10 +2121,7 @@ impl App {
                 Some(Action::AddCurrentDir) if !is_searching => {
                     if let PromptState::BrowseProjects { current_dir, .. } = &self.prompt {
                         let path = current_dir.to_string_lossy().to_string();
-                        self.prompt = PromptState::None;
-                        if let Err(e) = self.add_project(path, String::new()) {
-                            self.set_error(format!("{e:#}"));
-                        }
+                        self.add_project_from_browser_path(path);
                     }
                 }
                 _ => {
@@ -2438,6 +2394,15 @@ impl App {
                     }
                 },
                 _ => {}
+            }
+            return Ok(false);
+        }
+
+        if matches!(self.prompt, PromptState::AddProjectFailed { .. }) {
+            let action = self.bindings.lookup(&key, BindingScope::Dialog);
+            let is_space = key.code == KeyCode::Char(' ');
+            if matches!(action, Some(Action::Confirm | Action::CloseOverlay)) || is_space {
+                self.resolve_add_project_failed();
             }
             return Ok(false);
         }
@@ -3407,6 +3372,13 @@ impl App {
                     None
                 }
             }
+            OverlayMouseLayout::AddProjectFailed { ok_button } => {
+                if contains_point(ok_button, column, row) {
+                    Some(PromptMouseTarget::AddProjectFailedOk)
+                } else {
+                    None
+                }
+            }
             OverlayMouseLayout::RenameSession { input, checkbox } => {
                 if checkbox.is_some_and(|checkbox| contains_point(checkbox.rect, column, row)) {
                     checkbox.map(|checkbox| PromptMouseTarget::Checkbox(checkbox.id))
@@ -3891,6 +3863,97 @@ impl App {
         if let Some(dir) = browse_to {
             self.spawn_browser_entries(&dir);
         }
+    }
+
+    fn path_editor_completion_candidates(input: &str) -> Vec<String> {
+        let input_path = PathBuf::from(input);
+        let (search_dir, prefix) = if input_path.is_dir() && input.ends_with('/') {
+            (input_path, String::new())
+        } else {
+            let parent = input_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("/"));
+            let file_name = input_path
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_default();
+            (parent.to_path_buf(), file_name)
+        };
+
+        let Ok(read) = std::fs::read_dir(search_dir.clone()) else {
+            return Vec::new();
+        };
+        let prefix_lower = prefix.to_lowercase();
+        let mut candidates: Vec<String> = read
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+            .filter(|entry| {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                !name.starts_with('.') && name.starts_with(&prefix_lower)
+            })
+            .map(|entry| {
+                let mut full = search_dir
+                    .join(entry.file_name())
+                    .to_string_lossy()
+                    .to_string();
+                full.push('/');
+                full
+            })
+            .collect();
+        candidates.sort();
+        candidates
+    }
+
+    fn refresh_path_editor_completions(&mut self) {
+        let input = match &self.prompt {
+            PromptState::BrowseProjects {
+                editing_path: true,
+                path_input,
+                ..
+            } => path_input.text.clone(),
+            _ => return,
+        };
+        let candidates = Self::path_editor_completion_candidates(&input);
+        if let PromptState::BrowseProjects {
+            tab_completions,
+            tab_index,
+            ..
+        } = &mut self.prompt
+        {
+            *tab_completions = candidates;
+            *tab_index = 0;
+        }
+    }
+
+    fn add_project_from_browser_path(&mut self, path: String) {
+        let return_prompt = self.prompt.clone();
+        if let Err(message) = self.validate_project_add_path(&path) {
+            self.open_add_project_failed_modal(message, return_prompt);
+            return;
+        }
+        self.prompt = PromptState::None;
+        if let Err(error) = self.add_project(path, String::new()) {
+            self.open_add_project_failed_modal(format!("{error:#}"), return_prompt);
+        }
+    }
+
+    fn open_add_project_failed_modal(&mut self, message: String, return_prompt: PromptState) {
+        self.prompt = PromptState::AddProjectFailed {
+            message,
+            return_prompt: Box::new(return_prompt),
+        };
+    }
+
+    fn resolve_add_project_failed(&mut self) -> bool {
+        let return_prompt = match std::mem::replace(&mut self.prompt, PromptState::None) {
+            PromptState::AddProjectFailed { return_prompt, .. } => *return_prompt,
+            other => {
+                self.prompt = other;
+                return false;
+            }
+        };
+        self.prompt = return_prompt;
+        false
     }
 
     fn set_pick_editor_selection(&mut self, index: usize) {
@@ -4587,7 +4650,8 @@ impl App {
             | PromptMouseTarget::ConfirmUseExistingBranchCancel
             | PromptMouseTarget::ConfirmUseExistingBranchUse
             | PromptMouseTarget::ConfigReloadFailedClose
-            | PromptMouseTarget::ConfigReloadFailedApply => {
+            | PromptMouseTarget::ConfigReloadFailedApply
+            | PromptMouseTarget::AddProjectFailedOk => {
                 debug_assert!(
                     false,
                     "button target {:?} should be dispatched via activate_button, not \
@@ -4707,6 +4771,7 @@ impl App {
                 self.resolve_config_reload_failed(false)
             }
             ButtonPressedTarget::ConfigReloadFailedApply => self.resolve_config_reload_failed(true),
+            ButtonPressedTarget::AddProjectFailedOk => self.resolve_add_project_failed(),
         }
     }
 
@@ -8427,6 +8492,262 @@ cyan = "#00ffff"
                 assert_eq!(path_input.cursor, 2);
             }
             other => panic!("expected browse projects prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_browser_typed_enter_failure_opens_modal_and_restores_path() {
+        let mut app = test_app(default_bindings());
+        let root = PathBuf::from(&app.projects[0].path);
+        let outside = tempdir().expect("outside tempdir");
+        let typed = outside.path().join("not-a-repo");
+        std::fs::create_dir_all(&typed).expect("typed dir");
+        app.prompt = PromptState::BrowseProjects {
+            current_dir: root,
+            entries: Vec::new(),
+            loading: false,
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            editing_path: true,
+            path_input: TextInput::with_text(typed.to_string_lossy().to_string()),
+            tab_completions: Vec::new(),
+            tab_index: 0,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::AddProjectFailed { message, .. } => {
+                assert!(message.contains("not a git repository"));
+            }
+            other => panic!("expected add-project failure modal, got {other:?}"),
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                editing_path,
+                path_input,
+                ..
+            } => {
+                assert!(*editing_path);
+                assert_eq!(path_input.text, typed.to_string_lossy());
+            }
+            other => panic!("expected browser prompt restored, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_browser_typed_enter_duplicate_failure_restores_path() {
+        let mut app = test_app(default_bindings());
+        let root = PathBuf::from(&app.projects[0].path);
+        app.prompt = PromptState::BrowseProjects {
+            current_dir: root.clone(),
+            entries: Vec::new(),
+            loading: false,
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            editing_path: true,
+            path_input: TextInput::with_text(root.to_string_lossy().to_string()),
+            tab_completions: Vec::new(),
+            tab_index: 0,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::AddProjectFailed { message, .. } => {
+                assert!(message.contains("already registered"));
+            }
+            other => panic!("expected add-project failure modal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn added_project_is_selected_after_save_completes() {
+        let mut app = test_app(default_bindings());
+        let project_dir = app.paths.root.join("second-project");
+        std::fs::create_dir_all(&project_dir).expect("project dir");
+        init_test_repo(&project_dir);
+
+        app.add_project(project_dir.to_string_lossy().to_string(), String::new())
+            .expect("add project");
+        drain_until(&mut app, |app| {
+            app.status
+                .text()
+                .contains("Added project \"second-project\" to workspace")
+        });
+
+        let selected = app.selected_project().expect("selected project");
+        assert_eq!(selected.name, "second-project");
+        assert_eq!(
+            PathBuf::from(&selected.path).canonicalize().unwrap(),
+            project_dir.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn project_browser_typed_arrows_select_and_tab_applies_completion() {
+        let mut app = test_app(default_bindings());
+        let root = PathBuf::from(&app.projects[0].path);
+        let alpha = root.join("alpha");
+        let alpine = root.join("alpine");
+        std::fs::create_dir_all(&alpha).expect("alpha dir");
+        std::fs::create_dir_all(&alpine).expect("alpine dir");
+        std::fs::create_dir_all(alpha.join("child")).expect("child dir");
+        let typed = root.join("al").to_string_lossy().to_string();
+        app.prompt = PromptState::BrowseProjects {
+            current_dir: root.clone(),
+            entries: Vec::new(),
+            loading: false,
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            editing_path: true,
+            path_input: TextInput::with_text(typed.clone()),
+            tab_completions: Vec::new(),
+            tab_index: 0,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                path_input,
+                tab_completions,
+                tab_index,
+                ..
+            } => {
+                assert_eq!(tab_completions.len(), 2);
+                assert_eq!(*tab_index, 0);
+                assert_eq!(path_input.text, typed);
+            }
+            other => panic!("expected browser prompt, got {other:?}"),
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                path_input,
+                tab_index,
+                ..
+            } => {
+                assert_eq!(*tab_index, 1);
+                assert_eq!(path_input.text, typed);
+            }
+            other => panic!("expected browser prompt, got {other:?}"),
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                path_input,
+                tab_completions,
+                tab_index,
+                ..
+            } => {
+                assert!(
+                    path_input.text.ends_with("alpha/") || path_input.text.ends_with("alpine/")
+                );
+                assert_eq!(*tab_index, 0);
+                if path_input.text.ends_with("alpha/") {
+                    assert_eq!(tab_completions.len(), 1);
+                    assert!(tab_completions[0].ends_with("child/"));
+                }
+            }
+            other => panic!("expected browser prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_browser_typed_up_down_select_completions_without_applying() {
+        let mut app = test_app(default_bindings());
+        let root = PathBuf::from(&app.projects[0].path);
+        app.prompt = PromptState::BrowseProjects {
+            current_dir: root,
+            entries: Vec::new(),
+            loading: false,
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            editing_path: true,
+            path_input: TextInput::with_text("/tmp/demo".to_string()),
+            tab_completions: vec!["/tmp/demo/".to_string(), "/tmp/demo-two/".to_string()],
+            tab_index: 1,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                path_input,
+                tab_index,
+                ..
+            } => {
+                assert_eq!(*tab_index, 0);
+                assert_eq!(path_input.text, "/tmp/demo");
+            }
+            other => panic!("expected browser prompt, got {other:?}"),
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                path_input,
+                tab_completions,
+                tab_index,
+                ..
+            } => {
+                assert_eq!(tab_completions.len(), 2);
+                assert_eq!(*tab_index, 1);
+                assert_eq!(path_input.text, "/tmp/demo");
+            }
+            other => panic!("expected browser prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_browser_exit_path_editor_binding_returns_to_browse_mode() {
+        let mut app = test_app(default_bindings());
+        let root = PathBuf::from(&app.projects[0].path);
+        app.prompt = PromptState::BrowseProjects {
+            current_dir: root,
+            entries: Vec::new(),
+            loading: false,
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            editing_path: true,
+            path_input: TextInput::with_text("/tmp/demo".to_string()),
+            tab_completions: vec!["/tmp/demo/".to_string()],
+            tab_index: 0,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                editing_path,
+                path_input,
+                tab_completions,
+                ..
+            } => {
+                assert!(!*editing_path);
+                assert!(path_input.is_empty());
+                assert!(tab_completions.is_empty());
+            }
+            other => panic!("expected browser prompt, got {other:?}"),
         }
     }
 

@@ -3,6 +3,7 @@ use super::components::{
     shared_button_width,
 };
 use super::*;
+use std::path::Path;
 
 /// ASCII art logo displayed in the agent pane when no content is active.
 const ASCII_LOGO: &[&str] = &[
@@ -2367,7 +2368,8 @@ impl App {
                 searching,
                 editing_path,
                 path_input,
-                ..
+                tab_completions,
+                tab_index,
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(72, 70, frame.area());
@@ -2381,7 +2383,22 @@ impl App {
                         .filter(|e| e.label.to_lowercase().contains(&needle))
                         .collect()
                 };
-                let items = if *loading {
+                let completion_items = tab_completions
+                    .iter()
+                    .map(|completion| {
+                        ListItem::new(Line::from(vec![Span::styled(
+                            path_completion_display_label(completion),
+                            Style::default().fg(self.theme.text_fg),
+                        )]))
+                    })
+                    .collect::<Vec<_>>();
+                let items = if *editing_path {
+                    if completion_items.is_empty() {
+                        vec![ListItem::new("No matching directories.")]
+                    } else {
+                        completion_items
+                    }
+                } else if *loading {
                     let idx = self.spinner_frame_index();
                     let spinner = crate::theme::SPINNER_FRAMES[idx];
                     vec![ListItem::new(Line::from(vec![
@@ -2423,8 +2440,14 @@ impl App {
                         })
                         .collect::<Vec<_>>()
                 };
+                let item_count = if *editing_path {
+                    tab_completions.len()
+                } else {
+                    visible.len()
+                };
+                let selected_index = if *editing_path { *tab_index } else { *selected };
                 let mut state = ListState::default()
-                    .with_selected(Some((*selected).min(visible.len().saturating_sub(1))));
+                    .with_selected(Some(selected_index.min(item_count.saturating_sub(1))));
                 let has_filter = !filter.is_empty();
                 let show_top_input = *searching || has_filter || *editing_path;
                 let (top_areas, list_render_area) = if show_top_input {
@@ -2459,9 +2482,10 @@ impl App {
                     let search_key = self.bindings.label_for(Action::SearchToggle);
                     let open_key = self.bindings.label_for(Action::OpenEntry);
                     let goto_key = self.bindings.label_for(Action::GoToPath);
+                    let exit_path_key = self.bindings.label_for(Action::ExitPathEditorOnProjectAdd);
                     let mut bottom_spans = vec![Span::raw(" ")];
                     if *editing_path {
-                        // Path editor: Tab/Enter/Esc are text-input controls, not rebindable.
+                        // Path editor: Tab/Enter are text-input controls, not rebindable.
                         bottom_spans.extend(self.theme.key_badge_default("Tab"));
                         bottom_spans.push(Span::styled(
                             " complete  ",
@@ -2469,12 +2493,12 @@ impl App {
                         ));
                         bottom_spans.extend(self.theme.key_badge_default("Enter"));
                         bottom_spans.push(Span::styled(
-                            " go  ",
+                            " add  ",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
-                        bottom_spans.extend(self.theme.key_badge_default("Esc"));
+                        bottom_spans.extend(self.theme.key_badge_default(&exit_path_key));
                         bottom_spans.push(Span::styled(
-                            " cancel",
+                            " browse",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
                     } else if *searching {
@@ -2527,7 +2551,7 @@ impl App {
                     self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
                         input: Some(input_inner),
                         list: list_inner,
-                        items: visible.len(),
+                        items: item_count,
                         offset: state.offset(),
                     };
                 } else {
@@ -2578,7 +2602,7 @@ impl App {
                     self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
                         input: None,
                         list: list_inner,
-                        items: visible.len(),
+                        items: item_count,
                         offset: state.offset(),
                     };
                 }
@@ -3922,6 +3946,58 @@ impl App {
                     apply_button: apply_area,
                     checkbox,
                 };
+            }
+            PromptState::AddProjectFailed { message, .. } => {
+                self.render_dim_overlay(frame);
+                let dialog_width = 68.min(frame.area().width.max(1));
+                let inner_width = dialog_width.saturating_sub(2);
+                let mut body_lines = vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " The project could not be added.",
+                        Style::default().fg(self.theme.warning_fg),
+                    )),
+                    Line::from(""),
+                ];
+                for line in message.lines().take(6) {
+                    body_lines.push(Line::from(format!(" {line}")));
+                }
+                let body_height = wrapped_line_count(&body_lines, inner_width, false);
+                let area = centered_rect_exact(dialog_width, 2 + body_height + 3, frame.area());
+                self.clear_overlay_area(frame, area);
+                let outer = self.themed_overlay_block("Add Project Failed");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(body_height), Constraint::Length(3)])
+                    .areas(inner);
+
+                Paragraph::new(body_lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let btn_width = shared_button_width(&["OK"]);
+                let ok_area = Rect {
+                    x: buttons_area.x + buttons_area.width.saturating_sub(btn_width) / 2,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                Button::new("OK")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::AddProjectFailedOk,
+                        self.pressed_button,
+                        true,
+                        true,
+                    ))
+                    .render(frame, ok_area, &self.theme);
+
+                self.overlay_layout.active =
+                    OverlayMouseLayout::AddProjectFailed { ok_button: ok_area };
             }
             PromptState::ConfirmDeleteAgent {
                 branch_name,
@@ -6191,6 +6267,15 @@ fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {
     Some(format!(" {scrolled}/{total} {noun} "))
 }
 
+fn path_completion_display_label(completion: &str) -> String {
+    let trimmed = completion.trim_end_matches('/');
+    let folder = Path::new(trimmed)
+        .file_name()
+        .and_then(|part| part.to_str())
+        .unwrap_or(trimmed);
+    format!(".../{folder}/")
+}
+
 impl App {
     /// Render the GitHub PR pill as a single-line pill using Unicode
     /// half-block characters for the caps and a solid background:
@@ -6665,6 +6750,14 @@ mod tests {
     fn format_bytes_gib_range() {
         assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GiB");
         assert_eq!(format_bytes(1024 * 1024 * 1024 * 3), "3.0 GiB");
+    }
+
+    #[test]
+    fn path_completion_display_label_shows_folder_only() {
+        assert_eq!(
+            path_completion_display_label("/Users/patrick/project/"),
+            ".../project/"
+        );
     }
 
     #[test]
