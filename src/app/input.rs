@@ -4113,7 +4113,7 @@ impl App {
                 source_worktree_path: entry.path.clone(),
                 source_label: entry.display_name(),
                 source_branch: entry.branch_name.clone(),
-                custom_name: None,
+                custom_name: Some(entry.display_name()),
             }
         } else {
             let managed_root = self.paths.worktrees_root.join(&project.name);
@@ -7301,7 +7301,7 @@ not_a_real_action = ["x"]
         app.open_selected_project_worktree_agent_prompt().unwrap();
 
         match &app.prompt {
-            PromptState::NameNewAgent { request, .. } => match request {
+            PromptState::NameNewAgent { request, input, .. } => match request {
                 CreateAgentRequest::ForkExternalWorktree {
                     source_worktree_path,
                     source_branch,
@@ -7309,9 +7309,49 @@ not_a_real_action = ["x"]
                 } => {
                     assert_eq!(source_worktree_path, &worktree_path);
                     assert_eq!(source_branch, "feature");
+                    assert_eq!(input.text, "external-checkout");
                 }
                 other => panic!("expected ForkExternalWorktree request, got {other:?}"),
             },
+            other => panic!("expected NameNewAgent prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn external_worktree_default_name_overrides_randomized_default() {
+        let mut app = test_app(default_bindings());
+        app.config.defaults.enable_randomized_pet_name_by_default = true;
+        let project = app.projects[0].clone();
+        let worktree_path = PathBuf::from("/tmp/external-checkout");
+        app.prompt = PromptState::PickProjectWorktree(PickProjectWorktreePrompt {
+            project,
+            entries: vec![ProjectWorktreeEntry {
+                path: worktree_path,
+                branch_name: "feature".to_string(),
+                is_managed_by_dux: false,
+                existing_session_id: None,
+                is_external: true,
+                is_project_checkout: false,
+                is_selectable: true,
+            }],
+            loading: false,
+            selected: Some(0),
+            error: None,
+        });
+
+        app.open_selected_project_worktree_agent_prompt().unwrap();
+
+        match &app.prompt {
+            PromptState::NameNewAgent {
+                input,
+                randomize_name,
+                randomized_name,
+                ..
+            } => {
+                assert_eq!(input.text, "external-checkout");
+                assert!(!*randomize_name);
+                assert!(randomized_name.is_none());
+            }
             other => panic!("expected NameNewAgent prompt, got {other:?}"),
         }
     }
