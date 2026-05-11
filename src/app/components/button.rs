@@ -98,6 +98,7 @@ pub(crate) enum ButtonPressedTarget {
     ConfirmUseExistingBranchUse,
     ConfigReloadFailedClose,
     ConfigReloadFailedApply,
+    AddProjectFailedOk,
 }
 
 /// In-flight state for a button the user is currently pressing. `target`
