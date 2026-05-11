@@ -3,6 +3,7 @@ use super::components::{
     shared_button_width,
 };
 use super::*;
+use std::path::Path;
 
 /// ASCII art logo displayed in the agent pane when no content is active.
 const ASCII_LOGO: &[&str] = &[
@@ -2386,7 +2387,7 @@ impl App {
                     .iter()
                     .map(|completion| {
                         ListItem::new(Line::from(vec![Span::styled(
-                            completion.clone(),
+                            path_completion_display_label(completion),
                             Style::default().fg(self.theme.text_fg),
                         )]))
                     })
@@ -6266,6 +6267,15 @@ fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {
     Some(format!(" {scrolled}/{total} {noun} "))
 }
 
+fn path_completion_display_label(completion: &str) -> String {
+    let trimmed = completion.trim_end_matches('/');
+    let folder = Path::new(trimmed)
+        .file_name()
+        .and_then(|part| part.to_str())
+        .unwrap_or(trimmed);
+    format!(".../{folder}/")
+}
+
 impl App {
     /// Render the GitHub PR pill as a single-line pill using Unicode
     /// half-block characters for the caps and a solid background:
@@ -6740,6 +6750,14 @@ mod tests {
     fn format_bytes_gib_range() {
         assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GiB");
         assert_eq!(format_bytes(1024 * 1024 * 1024 * 3), "3.0 GiB");
+    }
+
+    #[test]
+    fn path_completion_display_label_shows_folder_only() {
+        assert_eq!(
+            path_completion_display_label("/Users/patrick/project/"),
+            ".../project/"
+        );
     }
 
     #[test]

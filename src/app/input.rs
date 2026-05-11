@@ -2008,10 +2008,7 @@ impl App {
                             KeyCode::Enter => {
                                 add_path = Some(path_input.text.trim().to_string());
                             }
-                            KeyCode::Up | KeyCode::Down => {
-                                tab_completions.clear();
-                                *tab_index = 0;
-                            }
+                            KeyCode::Up | KeyCode::Down => {}
                             _ => {
                                 if path_input.handle_key(key) {
                                     refresh_completions = true;
@@ -8570,6 +8567,29 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn added_project_is_selected_after_save_completes() {
+        let mut app = test_app(default_bindings());
+        let project_dir = app.paths.root.join("second-project");
+        std::fs::create_dir_all(&project_dir).expect("project dir");
+        init_test_repo(&project_dir);
+
+        app.add_project(project_dir.to_string_lossy().to_string(), String::new())
+            .expect("add project");
+        drain_until(&mut app, |app| {
+            app.status
+                .text()
+                .contains("Added project \"second-project\" to workspace")
+        });
+
+        let selected = app.selected_project().expect("selected project");
+        assert_eq!(selected.name, "second-project");
+        assert_eq!(
+            PathBuf::from(&selected.path).canonicalize().unwrap(),
+            project_dir.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
     fn project_browser_typed_tab_cycles_displayed_completions() {
         let mut app = test_app(default_bindings());
         let root = PathBuf::from(&app.projects[0].path);
@@ -8616,6 +8636,41 @@ cyan = "#00ffff"
             other => panic!("expected browser prompt, got {other:?}"),
         };
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn project_browser_typed_up_down_preserves_completions() {
+        let mut app = test_app(default_bindings());
+        let root = PathBuf::from(&app.projects[0].path);
+        app.prompt = PromptState::BrowseProjects {
+            current_dir: root,
+            entries: Vec::new(),
+            loading: false,
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            editing_path: true,
+            path_input: TextInput::with_text("/tmp/demo".to_string()),
+            tab_completions: vec!["/tmp/demo/".to_string(), "/tmp/demo-two/".to_string()],
+            tab_index: 1,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                tab_completions,
+                tab_index,
+                ..
+            } => {
+                assert_eq!(tab_completions.len(), 2);
+                assert_eq!(*tab_index, 1);
+            }
+            other => panic!("expected browser prompt, got {other:?}"),
+        }
     }
 
     #[test]

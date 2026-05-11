@@ -713,8 +713,14 @@ impl App {
                 project,
                 status_message,
             } => {
+                let project_id = project.id.clone();
                 self.projects.push(project);
                 self.rebuild_left_items();
+                if let Some(index) = self.left_items().iter().position(|item| {
+                    matches!(item, LeftItem::Project(project_index) if self.projects[*project_index].id == project_id)
+                }) {
+                    self.selected_left = index;
+                }
                 self.set_info(status_message);
             }
             ProjectPersistenceAction::Remove {
