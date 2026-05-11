@@ -380,6 +380,7 @@ impl TextInput {
     /// - `Backspace` → delete char backward; `Alt+Backspace` / `Ctrl+W` → delete word backward
     /// - `Delete` → delete char forward; `Alt+Delete` / `Ctrl+Delete` → delete word forward
     /// - `Left` / `Right` → move char; `Alt+Left/Right` / `Ctrl+Left/Right` → move word
+    /// - `Alt+B` / `Alt+F` → terminal Meta aliases for word-left / word-right
     /// - `Home` / `End` → jump to start/end of line (multiline) or text (single-line)
     ///
     /// In multiline mode, additionally:
@@ -460,6 +461,14 @@ impl TextInput {
             }
             KeyCode::Char('w') if has_ctrl => {
                 self.backspace_word();
+                true
+            }
+            KeyCode::Char('b') if has_alt && !has_ctrl => {
+                self.move_left_word();
+                true
+            }
+            KeyCode::Char('f') if has_alt && !has_ctrl => {
+                self.move_right_word();
                 true
             }
             KeyCode::Char(c) if !has_ctrl => {
@@ -947,6 +956,17 @@ mod tests {
         assert!(ti.handle_key(key_alt(KeyCode::Left)));
         assert_eq!(ti.cursor, 6);
         assert!(ti.handle_key(key_alt(KeyCode::Right)));
+        assert_eq!(ti.cursor, 11);
+    }
+
+    #[test]
+    fn handle_key_alt_b_f() {
+        let mut ti = TextInput::with_text("hello world".into());
+        assert!(ti.handle_key(key_alt(KeyCode::Char('b'))));
+        assert_eq!(ti.text, "hello world");
+        assert_eq!(ti.cursor, 6);
+        assert!(ti.handle_key(key_alt(KeyCode::Char('f'))));
+        assert_eq!(ti.text, "hello world");
         assert_eq!(ti.cursor, 11);
     }
 
