@@ -6477,10 +6477,13 @@ fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {
 
 fn path_completion_display_label(completion: &str) -> String {
     let trimmed = completion.trim_end_matches('/');
-    let folder = Path::new(trimmed)
+    let Some(folder) = Path::new(trimmed)
         .file_name()
         .and_then(|part| part.to_str())
-        .unwrap_or(trimmed);
+    else {
+        return completion.to_string();
+    };
+
     format!(".../{folder}/")
 }
 
@@ -6717,6 +6720,16 @@ mod tests {
         assert_eq!(spans[0].style, prose);
         assert_eq!(spans[1].style, quoted);
         assert_eq!(spans[3].style, quoted);
+    }
+
+    #[test]
+    fn path_completion_display_label_handles_unicode_leaf() {
+        assert_eq!(path_completion_display_label("/tmp/项目/"), ".../项目/");
+    }
+
+    #[test]
+    fn path_completion_display_label_keeps_root_without_leaf() {
+        assert_eq!(path_completion_display_label("/"), "/");
     }
 
     #[test]
