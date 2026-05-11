@@ -1987,28 +1987,31 @@ impl App {
                                 tab_completions.clear();
                                 *tab_index = 0;
                             }
-                            KeyCode::Tab | KeyCode::BackTab => {
+                            KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {
                                 if tab_completions.is_empty() {
                                     *tab_completions =
                                         Self::path_editor_completion_candidates(&path_input.text);
                                     *tab_index = 0;
-                                } else if is_reverse_tab(key) {
+                                } else if key.code == KeyCode::Up || is_reverse_tab(key) {
                                     if *tab_index == 0 {
                                         *tab_index = tab_completions.len().saturating_sub(1);
                                     } else {
                                         *tab_index -= 1;
                                     }
-                                } else {
+                                } else if key.code == KeyCode::Down {
                                     *tab_index = (*tab_index + 1) % tab_completions.len();
                                 }
-                                if let Some(completion) = tab_completions.get(*tab_index) {
+                                if key.code == KeyCode::Tab
+                                    && !is_reverse_tab(key)
+                                    && let Some(completion) = tab_completions.get(*tab_index)
+                                {
                                     path_input.set_text(completion.clone());
+                                    refresh_completions = true;
                                 }
                             }
                             KeyCode::Enter => {
                                 add_path = Some(path_input.text.trim().to_string());
                             }
-                            KeyCode::Up | KeyCode::Down => {}
                             _ => {
                                 if path_input.handle_key(key) {
                                     refresh_completions = true;
@@ -8590,13 +8593,15 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn project_browser_typed_tab_cycles_displayed_completions() {
+    fn project_browser_typed_arrows_select_and_tab_applies_completion() {
         let mut app = test_app(default_bindings());
         let root = PathBuf::from(&app.projects[0].path);
         let alpha = root.join("alpha");
         let alpine = root.join("alpine");
         std::fs::create_dir_all(&alpha).expect("alpha dir");
         std::fs::create_dir_all(&alpine).expect("alpine dir");
+        std::fs::create_dir_all(alpha.join("child")).expect("child dir");
+        let typed = root.join("al").to_string_lossy().to_string();
         app.prompt = PromptState::BrowseProjects {
             current_dir: root.clone(),
             entries: Vec::new(),
@@ -8605,41 +8610,65 @@ cyan = "#00ffff"
             filter: TextInput::new(),
             searching: false,
             editing_path: true,
-            path_input: TextInput::with_text(root.join("al").to_string_lossy().to_string()),
+            path_input: TextInput::with_text(typed.clone()),
             tab_completions: Vec::new(),
             tab_index: 0,
         };
 
-        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .unwrap();
         match &app.prompt {
             PromptState::BrowseProjects {
-                tab_completions, ..
+                path_input,
+                tab_completions,
+                tab_index,
+                ..
             } => {
                 assert_eq!(tab_completions.len(), 2);
+                assert_eq!(*tab_index, 0);
+                assert_eq!(path_input.text, typed);
+            }
+            other => panic!("expected browser prompt, got {other:?}"),
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                path_input,
+                tab_index,
+                ..
+            } => {
+                assert_eq!(*tab_index, 1);
+                assert_eq!(path_input.text, typed);
             }
             other => panic!("expected browser prompt, got {other:?}"),
         }
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
-        let first = match &app.prompt {
-            PromptState::BrowseProjects { path_input, .. } => path_input.text.clone(),
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                path_input,
+                tab_completions,
+                tab_index,
+                ..
+            } => {
+                assert!(
+                    path_input.text.ends_with("alpha/") || path_input.text.ends_with("alpine/")
+                );
+                assert_eq!(*tab_index, 0);
+                if path_input.text.ends_with("alpha/") {
+                    assert_eq!(tab_completions.len(), 1);
+                    assert!(tab_completions[0].ends_with("child/"));
+                }
+            }
             other => panic!("expected browser prompt, got {other:?}"),
-        };
-        assert!(first.ends_with("alpha/") || first.ends_with("alpine/"));
-
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-            .unwrap();
-        let second = match &app.prompt {
-            PromptState::BrowseProjects { path_input, .. } => path_input.text.clone(),
-            other => panic!("expected browser prompt, got {other:?}"),
-        };
-        assert_ne!(first, second);
+        }
     }
 
     #[test]
-    fn project_browser_typed_up_down_preserves_completions() {
+    fn project_browser_typed_up_down_select_completions_without_applying() {
         let mut app = test_app(default_bindings());
         let root = PathBuf::from(&app.projects[0].path);
         app.prompt = PromptState::BrowseProjects {
@@ -8657,17 +8686,31 @@ cyan = "#00ffff"
 
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .unwrap();
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                path_input,
+                tab_index,
+                ..
+            } => {
+                assert_eq!(*tab_index, 0);
+                assert_eq!(path_input.text, "/tmp/demo");
+            }
+            other => panic!("expected browser prompt, got {other:?}"),
+        }
+
         app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
             .unwrap();
 
         match &app.prompt {
             PromptState::BrowseProjects {
+                path_input,
                 tab_completions,
                 tab_index,
                 ..
             } => {
                 assert_eq!(tab_completions.len(), 2);
                 assert_eq!(*tab_index, 1);
+                assert_eq!(path_input.text, "/tmp/demo");
             }
             other => panic!("expected browser prompt, got {other:?}"),
         }
