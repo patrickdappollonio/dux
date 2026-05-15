@@ -906,8 +906,19 @@ impl App {
         self.clear_companion_terminals_for_session(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
         self.update_branch_sync_sessions();
+        let project_still_has_sessions = self
+            .sessions
+            .iter()
+            .any(|candidate| candidate.project_id == session.project_id);
         self.rebuild_left_items();
-        self.selected_left = self.selected_left.saturating_sub(1);
+        if project_still_has_sessions {
+            self.selected_left = self.selected_left.saturating_sub(1);
+            self.ensure_selectable_left_item();
+        } else if let Some(project_index) = self.left_items().iter().position(|item| {
+            matches!(item, LeftItem::Project(index) if self.projects[*index].id == session.project_id)
+        }) {
+            self.selected_left = project_index;
+        }
         self.reload_changed_files();
 
         // Detect contract violation unconditionally, regardless of
@@ -2732,6 +2743,63 @@ mod tests {
         assert!(
             worktree_dir.path().exists(),
             "worktree directory must be preserved when the flag is off",
+        );
+    }
+
+    #[test]
+    fn deleting_last_agent_selects_project_after_it_moves_to_empty_list() {
+        let mut project_with_deleted_agent = make_project("project-1", "claude");
+        project_with_deleted_agent.name = "deleted-agent-project".to_string();
+        let mut active_project = make_project("project-2", "codex");
+        active_project.name = "active-project".to_string();
+        let mut already_empty_project = make_project("project-3", "codex");
+        already_empty_project.name = "already-empty-project".to_string();
+
+        let mut deleted_session = make_session("s1", "claude", "/tmp/wt/a");
+        deleted_session.project_id = "project-1".to_string();
+        let mut remaining_session = make_session("s2", "codex", "/tmp/wt/b");
+        remaining_session.project_id = "project-2".to_string();
+
+        let mut app = test_app_with_sessions(
+            vec![deleted_session, remaining_session],
+            vec![
+                project_with_deleted_agent,
+                active_project,
+                already_empty_project,
+            ],
+        );
+        app.config.ui.empty_project_separator_min_projects = 3;
+        app.rebuild_left_items();
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(
+                |item| matches!(item, LeftItem::Session(index) if app.sessions[*index].id == "s1"),
+            )
+            .expect("deleted session row");
+
+        app.finish_delete_session("s1", false, None, true)
+            .expect("finish delete");
+
+        let separator_index = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::EmptyProjectsSeparator))
+            .expect("empty-project separator should remain");
+        let selected_project = app.selected_project().expect("selected project");
+        assert_eq!(selected_project.id, "project-1");
+        assert!(
+            app.selected_left > separator_index,
+            "project should be selected in the empty-project section"
+        );
+
+        app.create_agent_for_selected_project()
+            .expect("selected empty project should accept new-agent action");
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+        assert!(
+            app.status.text().contains("deleted-agent-project"),
+            "new-agent action should target the project that just moved to the empty list, got: {}",
+            app.status.text()
         );
     }
 
