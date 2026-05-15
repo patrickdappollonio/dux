@@ -1915,22 +1915,32 @@ impl App {
     }
 
     fn handle_inline_diff_comment_key(&mut self, key: KeyEvent) {
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && (key.code == KeyCode::Char('j') || key.code == KeyCode::Enter)
+        {
+            if let Some(editor) = &mut self.diff_comment_editor {
+                editor.input.insert_char('\n');
+                editor.input.ensure_cursor_visible();
+            }
+            self.autosave_active_diff_comment_editor();
+            return;
+        }
         if key.code == KeyCode::Esc
             || self.bindings.lookup(&key, BindingScope::Global) == Some(Action::CloseOverlay)
         {
             self.cancel_active_diff_comment_editor();
             return;
         }
-        if key.code == KeyCode::Enter {
-            self.save_active_diff_comment_editor();
+        let consumed = self
+            .diff_comment_editor
+            .as_mut()
+            .is_some_and(|editor| editor.input.handle_key(key));
+        if consumed {
+            self.autosave_active_diff_comment_editor();
             return;
         }
         if self.bindings.lookup(&key, BindingScope::Diff) == Some(Action::DeleteDiffComment) {
             self.delete_selected_diff_comment();
-            return;
-        }
-        if let Some(editor) = &mut self.diff_comment_editor {
-            editor.input.handle_key(key);
         }
     }
 
@@ -5762,21 +5772,35 @@ impl App {
         if !contains_point(area, column, row) {
             return;
         }
-        let visual = usize::from(row.saturating_sub(area.y))
-            + match self.center_mode {
-                CenterMode::Diff { scroll, .. } => usize::from(scroll),
-                _ => return,
-            };
-        let Some(source_row) = self.last_diff_visual_rows.get(visual).copied() else {
+        let Some(source_row) = self.diff_source_row_from_mouse(row) else {
             return;
         };
-        let anchor = if let CenterMode::Diff {
-            rows, selected_row, ..
-        } = &mut self.center_mode
-        {
-            if rows.get(source_row).is_some_and(|row| row.anchor.is_some()) {
+        let selected_session_id = self.selected_session().map(|session| session.id.clone());
+        let clicked_anchor = match &self.center_mode {
+            CenterMode::Diff { rows, .. } => {
+                rows.get(source_row).and_then(|row| row.anchor.clone())
+            }
+            _ => None,
+        };
+        if self.diff_comment_editor.is_some() {
+            let clicked_key = clicked_anchor.as_ref().and_then(|anchor| {
+                selected_session_id
+                    .as_ref()
+                    .map(|session_id| DiffCommentKey::new(session_id.clone(), anchor))
+            });
+            let clicked_active_editor = self
+                .diff_comment_editor
+                .as_ref()
+                .is_some_and(|editor| Some(&editor.key) == clicked_key.as_ref());
+            if !clicked_active_editor {
+                self.autosave_active_diff_comment_editor();
+                self.cancel_active_diff_comment_editor();
+            }
+        }
+        let anchor = if let CenterMode::Diff { selected_row, .. } = &mut self.center_mode {
+            if clicked_anchor.is_some() {
                 *selected_row = Some(source_row);
-                rows[source_row].anchor.clone()
+                clicked_anchor
             } else {
                 None
             }
@@ -5786,6 +5810,15 @@ impl App {
         if open_editor && let Some(anchor) = anchor {
             self.open_diff_comment_editor_for_anchor(anchor);
         }
+    }
+
+    fn diff_source_row_from_mouse(&self, row: u16) -> Option<usize> {
+        let area = self.mouse_layout.agent_term?;
+        let CenterMode::Diff { scroll, .. } = &self.center_mode else {
+            return None;
+        };
+        let visual = usize::from(row.saturating_sub(area.y)) + usize::from(*scroll);
+        self.last_diff_visual_rows.get(visual).copied()
     }
 
     fn update_dragged_panes(&mut self, column: u16, row: u16) {
@@ -5986,21 +6019,35 @@ impl App {
                         self.fullscreen_overlay = FullscreenOverlay::None;
                     }
                     Some(MouseTarget::Center) => {
-                        let double_click =
-                            self.register_mouse_click(MouseClickTarget::CenterPane, None);
                         self.focus = FocusPane::Center;
                         if matches!(self.center_mode, CenterMode::Diff { .. }) {
                             let marker_click = self
                                 .mouse_layout
                                 .agent_term
                                 .is_some_and(|area| mouse.column < area.x.saturating_add(2));
+                            let double_click = self
+                                .mouse_layout
+                                .agent_term
+                                .filter(|area| contains_point(*area, mouse.column, mouse.row))
+                                .and_then(|_| self.diff_source_row_from_mouse(mouse.row))
+                                .map(|source_row| {
+                                    self.register_mouse_click(
+                                        MouseClickTarget::CenterPane,
+                                        Some(source_row),
+                                    )
+                                })
+                                .unwrap_or(false);
                             self.select_diff_row_from_mouse(
                                 mouse.column,
                                 mouse.row,
                                 double_click || marker_click,
                             );
-                        } else if double_click {
-                            self.activate_center_agent_from_mouse();
+                        } else {
+                            let double_click =
+                                self.register_mouse_click(MouseClickTarget::CenterPane, None);
+                            if double_click {
+                                self.activate_center_agent_from_mouse();
+                            }
                         }
                     }
                     Some(MouseTarget::FilesPane) => {
@@ -9224,7 +9271,7 @@ not_a_real_action = ["x"]
         app.save_diff_comment(key, "Use an h4 instead".to_string());
         let prompt = app.build_diff_comments_prompt().expect("prompt");
 
-        assert!(prompt.contains("On README.md line 45:"));
+        assert!(prompt.contains("On `README.md` line `45`:"));
         assert!(prompt.contains("\t## title"));
         assert!(prompt.contains("Feedback:"));
         assert!(prompt.contains("\tUse an h4 instead"));
@@ -9232,6 +9279,36 @@ not_a_real_action = ["x"]
         let stored = app.session_store.load_diff_comments().unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].comment_text, "Use an h4 instead");
+    }
+
+    #[test]
+    fn diff_comment_prompt_separates_multiple_comments_with_configured_separator() {
+        let mut app = test_app(default_bindings());
+        app.config.defaults.diff_comment_prompt_separator = "### next comment".to_string();
+        let first = crate::app::DiffCommentKey::new("session-1", &diff_anchor(45, "## title"));
+        let second = crate::app::DiffCommentKey::new("session-1", &diff_anchor(46, "**subtitle**"));
+
+        app.save_diff_comment(first, "Use an h4 instead".to_string());
+        app.save_diff_comment(second, "Avoid bold here".to_string());
+        let prompt = app.build_diff_comments_prompt().expect("prompt");
+
+        assert!(prompt.contains("\n### next comment\n\nOn `README.md` line `46`:"));
+    }
+
+    #[test]
+    fn diff_comment_prompt_uses_configured_template() {
+        let mut app = test_app(default_bindings());
+        app.config.defaults.diff_comment_prompt_template =
+            "Review {filename}:{line_number}\nCode: {line_content}\nNote: {message}\n".to_string();
+        let key = crate::app::DiffCommentKey::new("session-1", &diff_anchor(45, "## title"));
+
+        app.save_diff_comment(key, "Use an h4 instead".to_string());
+        let prompt = app.build_diff_comments_prompt().expect("prompt");
+
+        assert_eq!(
+            prompt,
+            "Review README.md:45\nCode: ## title\nNote: Use an h4 instead\n"
+        );
     }
 
     #[test]
@@ -9330,6 +9407,107 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn mouse_double_click_on_different_diff_rows_does_not_open_comment_editor() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.center_mode = CenterMode::Diff {
+            lines: Arc::new(vec![
+                Line::from("@@"),
+                Line::from("+## title"),
+                Line::from("+Different line"),
+            ]),
+            rows: Arc::new(vec![
+                DiffRow { anchor: None },
+                DiffRow {
+                    anchor: Some(diff_anchor(45, "## title")),
+                },
+                DiffRow {
+                    anchor: Some(diff_anchor(46, "Different line")),
+                },
+            ]),
+            scroll: 0,
+            selected_row: Some(1),
+            gutter_width: 0,
+            worktree_path: String::new(),
+            rel_path: "README.md".to_string(),
+        };
+        app.last_diff_height = 5;
+        app.last_diff_visual_lines = 3;
+        app.last_diff_visual_rows = vec![0, 1, 2];
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 2));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 3));
+
+        assert!(app.diff_comment_editor.is_none());
+    }
+
+    #[test]
+    fn mouse_click_on_another_diff_row_closes_inline_comment_editor() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        app.center_mode = CenterMode::Diff {
+            lines: Arc::new(vec![
+                Line::from("@@"),
+                Line::from("+## title"),
+                Line::from("+Different line"),
+            ]),
+            rows: Arc::new(vec![
+                DiffRow { anchor: None },
+                DiffRow {
+                    anchor: Some(diff_anchor(45, "## title")),
+                },
+                DiffRow {
+                    anchor: Some(diff_anchor(46, "Different line")),
+                },
+            ]),
+            scroll: 0,
+            selected_row: Some(1),
+            gutter_width: 0,
+            worktree_path: String::new(),
+            rel_path: "README.md".to_string(),
+        };
+        app.last_diff_height = 5;
+        app.last_diff_visual_lines = 3;
+        app.last_diff_visual_rows = vec![0, 1, 2];
+        app.open_diff_comment_editor_for_selected_row();
+        app.diff_comment_editor
+            .as_mut()
+            .expect("editor")
+            .input
+            .set_text("Use an h4 instead".to_string());
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 3));
+
+        assert!(app.diff_comment_editor.is_none());
+        assert!(matches!(
+            app.center_mode,
+            CenterMode::Diff {
+                selected_row: Some(2),
+                ..
+            }
+        ));
+        assert_eq!(app.pending_diff_comment_count_for_selected_session(), 1);
+    }
+
+    #[test]
+    fn inline_comment_editor_uses_wrapping_text_input() {
+        let mut app = test_app(default_bindings());
+        open_commentable_diff(&mut app);
+        let key = crate::app::DiffCommentKey::new("session-1", &diff_anchor(45, "## title"));
+        app.save_diff_comment(key, "wrap this long comment".to_string());
+
+        app.open_diff_comment_editor_for_selected_row();
+        let editor = app.diff_comment_editor.as_mut().expect("editor");
+        editor.input.set_text("wrap this long comment".to_string());
+        editor.input.set_display_width(Some(6));
+
+        assert!(
+            editor.input.total_lines() > 1,
+            "diff comments should use the wrapping TextInput component"
+        );
+    }
+
+    #[test]
     fn enter_opens_inline_comment_editor_for_selected_diff_row() {
         let mut app = test_app(default_bindings());
         open_commentable_diff(&mut app);
@@ -9342,7 +9520,7 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn inline_comment_editor_saves_on_enter() {
+    fn inline_comment_editor_autosaves_and_enter_inserts_newline() {
         let mut app = test_app(default_bindings());
         open_commentable_diff(&mut app);
         app.focus = FocusPane::Center;
@@ -9355,11 +9533,148 @@ not_a_real_action = ["x"]
         }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
+        for ch in "Second line".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap();
+        }
+
+        assert!(app.diff_comment_editor.is_some());
+        assert_eq!(app.pending_diff_comment_count_for_selected_session(), 1);
+        let prompt = app.build_diff_comments_prompt().expect("prompt");
+        assert!(prompt.contains("\tUse an h4 instead"));
+        assert!(prompt.contains("Second line"));
+    }
+
+    #[test]
+    fn closing_inline_comment_editor_keeps_autosaved_comment() {
+        let mut app = test_app(default_bindings());
+        open_commentable_diff(&mut app);
+        app.focus = FocusPane::Center;
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        for ch in "Keep this".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
 
         assert!(app.diff_comment_editor.is_none());
         assert_eq!(app.pending_diff_comment_count_for_selected_session(), 1);
         let prompt = app.build_diff_comments_prompt().expect("prompt");
-        assert!(prompt.contains("\tUse an h4 instead"));
+        assert!(prompt.contains("\tKeep this"));
+    }
+
+    #[test]
+    fn inline_comment_editor_delete_key_edits_text_without_closing() {
+        let mut app = test_app(default_bindings());
+        open_commentable_diff(&mut app);
+        app.focus = FocusPane::Center;
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        for ch in "ab".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(app.diff_comment_editor.is_some());
+        let prompt = app.build_diff_comments_prompt().expect("prompt");
+        assert!(prompt.contains("\ta"));
+        assert!(!prompt.contains("\tab"));
+    }
+
+    #[test]
+    fn inline_comment_editor_ctrl_d_edits_text_without_closing() {
+        let mut app = test_app(default_bindings());
+        open_commentable_diff(&mut app);
+        app.focus = FocusPane::Center;
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        for ch in "ab".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap();
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert!(app.diff_comment_editor.is_some());
+        assert_eq!(app.pending_diff_comment_count_for_selected_session(), 1);
+        let prompt = app.build_diff_comments_prompt().expect("prompt");
+        assert!(prompt.contains("\ta"));
+        assert!(!prompt.contains("\tab"));
+    }
+
+    #[test]
+    fn send_diff_comments_requires_running_agent_and_keeps_diff_open() {
+        let mut app = test_app(default_bindings());
+        open_commentable_diff(&mut app);
+        app.fullscreen_overlay = FullscreenOverlay::Diff;
+        let key = crate::app::DiffCommentKey::new("session-1", &diff_anchor(45, "## title"));
+        app.save_diff_comment(key, "Use h4".to_string());
+
+        app.send_diff_comments_to_agent();
+
+        assert_eq!(app.pending_diff_comment_count_for_selected_session(), 1);
+        assert!(matches!(app.center_mode, CenterMode::Diff { .. }));
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Diff);
+        assert!(app.status.message().contains("not running"));
+    }
+
+    #[test]
+    fn send_diff_comments_waits_for_streaming_agent_and_keeps_queue() {
+        let mut app = test_app(default_bindings());
+        open_commentable_diff(&mut app);
+        app.fullscreen_overlay = FullscreenOverlay::Diff;
+        let session_id = app.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let args = vec!["-c".to_string(), "cat".to_string()];
+        let provider =
+            PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn test agent");
+        app.providers.insert(session_id.clone(), provider);
+        app.last_pty_activity
+            .insert(session_id, std::time::Instant::now());
+        let key = crate::app::DiffCommentKey::new("session-1", &diff_anchor(45, "## title"));
+        app.save_diff_comment(key, "Use h4".to_string());
+
+        app.send_diff_comments_to_agent();
+
+        assert_eq!(app.pending_diff_comment_count_for_selected_session(), 1);
+        assert!(matches!(app.center_mode, CenterMode::Diff { .. }));
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Diff);
+        assert!(app.status.message().contains("still working"));
+    }
+
+    #[test]
+    fn send_diff_comments_success_clears_queue_and_opens_agent_fullscreen() {
+        let mut app = test_app(default_bindings());
+        open_commentable_diff(&mut app);
+        app.fullscreen_overlay = FullscreenOverlay::Diff;
+        let session_id = app.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let args = vec!["-c".to_string(), "cat".to_string()];
+        let provider =
+            PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn test agent");
+        app.providers.insert(session_id, provider);
+        let key = crate::app::DiffCommentKey::new("session-1", &diff_anchor(45, "## title"));
+        app.save_diff_comment(key, "Use h4".to_string());
+
+        app.send_diff_comments_to_agent();
+
+        assert_eq!(app.pending_diff_comment_count_for_selected_session(), 0);
+        assert!(matches!(app.center_mode, CenterMode::Agent));
+        assert_eq!(app.focus, FocusPane::Center);
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+        assert!(app.status.message().contains("Sent 1 comment"));
     }
 
     #[test]

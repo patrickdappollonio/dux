@@ -1033,43 +1033,26 @@ impl App {
             Paragraph::new(wrapped)
                 .scroll((scroll, 0))
                 .render(content_area, frame.buffer_mut());
+            if let Some(label) =
+                scrollback_indicator_label(scroll as usize, self.last_diff_visual_lines as usize)
+            {
+                render_scroll_indicator(&self.theme, frame, content_area, &label);
+            }
             self.render_inline_diff_comment_editor(frame, content_area, scroll, editor_visual_row);
         }
 
         // Hint bar with top border (same style as agent terminal).
         if hint_area.height > 0 {
             let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
-            let page_down = self.bindings.labels_for(Action::ScrollPageDown);
-            let page_up = self.bindings.labels_for(Action::ScrollPageUp);
-            let line_nav = self
-                .bindings
-                .combined_label(Action::ScrollLineDown, Action::ScrollLineUp);
             let add_comment = self.bindings.label_for(Action::FocusAgent);
             let delete_comment = self.bindings.label_for(Action::DeleteDiffComment);
             let send_comments = self.bindings.label_for(Action::SendDiffComments);
-            let exit = self.bindings.label_for(Action::ExitInteractive);
             let close = self.bindings.label_for(Action::CloseOverlay);
             let pending = self.pending_diff_comment_count_for_selected_session();
             let orphaned = self.current_diff_orphaned_comment_count();
             let mut spans: Vec<Span> = Vec::new();
+            let mut send_spans: Vec<Span> = Vec::new();
 
-            spans.push(Span::styled("Navigate ", desc_style));
-            if !line_nav.is_empty() {
-                spans.extend(self.theme.dim_key_badge_default(&line_nav));
-                spans.push(Span::styled(" lines ", desc_style));
-            }
-            if !page_up.is_empty() || !page_down.is_empty() {
-                spans.extend(self.theme.dim_key_badge_default(&page_up));
-                spans.push(Span::styled(" ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&page_down));
-                spans.push(Span::styled(" pages. ", desc_style));
-            }
-            if scroll > 0 {
-                spans.push(Span::styled(
-                    format!("{scroll} from top. "),
-                    Style::default().fg(self.theme.hint_key_fg),
-                ));
-            }
             if !add_comment.is_empty() {
                 spans.extend(self.theme.dim_key_badge_default(&add_comment));
                 spans.push(Span::styled(" comment. ", desc_style));
@@ -1083,35 +1066,49 @@ impl App {
                 }
             }
             if pending > 0 && !send_comments.is_empty() {
-                spans.push(Span::styled(
-                    format!("{pending} queued. "),
-                    Style::default().fg(self.theme.hint_key_fg),
-                ));
                 if orphaned > 0 {
                     spans.push(Span::styled(
                         format!("{orphaned} orphaned in this diff. "),
                         Style::default().fg(self.theme.warning_fg),
                     ));
                 }
-                spans.extend(self.theme.dim_key_badge_default(&send_comments));
-                spans.push(Span::styled(" send. ", desc_style));
-            }
-            if !exit.is_empty() {
-                spans.extend(self.theme.dim_key_badge_default(&exit));
-                spans.push(Span::styled(" return. ", desc_style));
+                send_spans.push(Span::styled(
+                    format!("{} to send  ", diff_comment_count_label(pending)),
+                    Style::default().fg(self.theme.hint_key_fg),
+                ));
+                send_spans.extend(self.theme.dim_key_badge_default(&send_comments));
+                send_spans.push(Span::styled(" send", desc_style));
             }
             if !close.is_empty() {
                 spans.extend(self.theme.dim_key_badge_default(&close));
                 spans.push(Span::styled(" close diff.", desc_style));
             }
 
-            Paragraph::new(Line::from(spans))
-                .block(
-                    Block::default()
-                        .borders(Borders::TOP)
-                        .border_style(Style::default().fg(self.theme.border_normal)),
-                )
-                .render(hint_area, frame.buffer_mut());
+            let block = Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(self.theme.border_normal));
+            let inner = block.inner(hint_area);
+            block.render(hint_area, frame.buffer_mut());
+            if send_spans.is_empty() || inner.width < 20 {
+                Paragraph::new(Line::from(spans)).render(inner, frame.buffer_mut());
+            } else {
+                let send_width = send_spans
+                    .iter()
+                    .map(|span| span.content.chars().count())
+                    .sum::<usize>()
+                    .saturating_add(1) as u16;
+                let [left_area, right_area] = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(send_width.min(inner.width.saturating_sub(1))),
+                    ])
+                    .areas(inner);
+                Paragraph::new(Line::from(spans)).render(left_area, frame.buffer_mut());
+                Paragraph::new(Line::from(send_spans))
+                    .alignment(ratatui::layout::Alignment::Right)
+                    .render(right_area, frame.buffer_mut());
+            }
         }
     }
 
@@ -1128,13 +1125,7 @@ impl App {
                 .and_then(|anchor| self.diff_comment_for_anchor(anchor))
                 .is_some();
             let selected = selected_row == Some(idx);
-            let marker = if has_comment {
-                "● "
-            } else if selected && anchor.is_some() {
-                "› "
-            } else {
-                "  "
-            };
+            let marker = if has_comment { "● " } else { "  " };
             let marker_style = if has_comment {
                 Style::default().fg(self.theme.warning_fg)
             } else if selected {
@@ -1224,15 +1215,15 @@ impl App {
     }
 
     fn render_inline_diff_comment_editor(
-        &self,
+        &mut self,
         frame: &mut Frame,
         content_area: Rect,
         scroll: u16,
         visual_row: Option<usize>,
     ) {
-        let Some(editor) = &self.diff_comment_editor else {
+        if self.diff_comment_editor.is_none() {
             return;
-        };
+        }
         let Some(visual_row) = visual_row else {
             return;
         };
@@ -1249,14 +1240,34 @@ impl App {
             return;
         }
         let width = content_area.width.saturating_sub(4).max(8);
-        let area = Rect::new(content_area.x.saturating_add(2), y, width, 3);
+        let text_width = width.saturating_sub(2).saturating_sub(1) as usize;
+        let configured_max_lines = self.config.ui.diff_comment_editor_max_lines.max(1);
+        let max_text_lines = remaining.saturating_sub(2).clamp(1, configured_max_lines);
+        let text_lines = if let Some(editor) = &mut self.diff_comment_editor {
+            editor
+                .input
+                .set_display_width((text_width > 0).then_some(text_width));
+            let lines = (editor.input.total_lines() as u16)
+                .max(1)
+                .min(max_text_lines);
+            editor.input.set_visible_lines(lines as usize);
+            editor.input.ensure_cursor_visible();
+            lines
+        } else {
+            1
+        };
+        let area = Rect::new(
+            content_area.x.saturating_add(2),
+            y,
+            width,
+            text_lines.saturating_add(2),
+        );
         self.clear_overlay_area(frame, area);
 
         let mut bottom_spans = vec![Span::raw(" ")];
         for (key, desc) in [
-            ("Enter".to_string(), "save"),
-            (self.bindings.label_for(Action::CloseOverlay), "cancel"),
-            (self.bindings.label_for(Action::DeleteDiffComment), "delete"),
+            ("Enter".to_string(), "newline"),
+            (self.bindings.label_for(Action::CloseOverlay), "close"),
         ] {
             if key.is_empty() {
                 continue;
@@ -1277,23 +1288,9 @@ impl App {
             .themed_overlay_block("Comment")
             .title_bottom(Line::from(bottom_spans));
         let inner = block.inner(area);
-        Paragraph::new(render_single_line_cursor_input(
-            "",
-            &editor.input.text,
-            editor.input.cursor,
-            self.theme.input_cursor_fg,
-            self.theme.input_cursor_bg,
-        ))
-        .block(block)
-        .render(area, frame.buffer_mut());
-
-        let cursor_col = editor.input.text[..editor.input.cursor].chars().count() as u16;
-        let cx = inner
-            .x
-            .saturating_add(cursor_col)
-            .min(inner.x.saturating_add(inner.width.saturating_sub(1)));
-        if inner.height > 0 {
-            frame.set_cursor_position((cx, inner.y));
+        block.render(area, frame.buffer_mut());
+        if let Some(editor) = &self.diff_comment_editor {
+            self.render_multiline_input(&editor.input, inner, frame);
         }
     }
 
@@ -1659,24 +1656,7 @@ impl App {
                         self.snapshot_buf.scrollback_total,
                     )
                 {
-                    let badge_width = label.len() as u16;
-                    if term_area.height > 0 && badge_width <= term_area.width {
-                        Paragraph::new(label)
-                            .style(
-                                Style::default()
-                                    .fg(self.theme.scroll_indicator_fg)
-                                    .bg(self.theme.scroll_indicator_bg),
-                            )
-                            .render(
-                                Rect::new(
-                                    term_area.x + term_area.width - badge_width,
-                                    term_area.y,
-                                    badge_width,
-                                    1,
-                                ),
-                                frame.buffer_mut(),
-                            );
-                    }
+                    render_scroll_indicator(&self.theme, frame, term_area, &label);
                 }
             }
         }
@@ -7312,6 +7292,23 @@ fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {
     let total = total.max(scrolled);
     let noun = if total == 1 { "line" } else { "lines" };
     Some(format!(" {scrolled}/{total} {noun} "))
+}
+
+fn render_scroll_indicator(theme: &Theme, frame: &mut Frame, area: Rect, label: &str) {
+    let badge_width = label.len() as u16;
+    if area.height == 0 || badge_width > area.width {
+        return;
+    }
+    Paragraph::new(label.to_string())
+        .style(
+            Style::default()
+                .fg(theme.scroll_indicator_fg)
+                .bg(theme.scroll_indicator_bg),
+        )
+        .render(
+            Rect::new(area.x + area.width - badge_width, area.y, badge_width, 1),
+            frame.buffer_mut(),
+        );
 }
 
 fn path_completion_display_label(completion: &str) -> String {

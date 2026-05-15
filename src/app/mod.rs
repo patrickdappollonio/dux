@@ -27,8 +27,8 @@ use uuid::Uuid;
 
 use crate::clipboard::Clipboard;
 use crate::config::{
-    Config, DuxPaths, MacroSurface, ProviderCommandConfig, check_provider_available, ensure_config,
-    save_config, validate_keys,
+    Config, DEFAULT_DIFF_COMMENT_PROMPT_TEMPLATE, DuxPaths, MacroSurface, ProviderCommandConfig,
+    check_provider_available, ensure_config, save_config, validate_keys,
 };
 use crate::diff::SyntaxCache;
 use crate::diff::{DiffAnchor, DiffRow, DiffSide};
@@ -377,6 +377,14 @@ fn diff_comment_from_storage(stored: StoredDiffComment) -> DiffComment {
     DiffComment {
         key,
         text: stored.comment_text,
+    }
+}
+
+pub(crate) fn diff_comment_count_label(count: usize) -> String {
+    if count == 1 {
+        "1 comment".to_string()
+    } else {
+        format!("{count} comments")
     }
 }
 
@@ -2257,7 +2265,7 @@ impl App {
             .unwrap_or_default();
         self.diff_comment_editor = Some(InlineDiffCommentEditor {
             key,
-            input: TextInput::with_text(existing),
+            input: TextInput::with_text(existing).with_multiline(1),
         });
     }
 
@@ -2271,49 +2279,70 @@ impl App {
         self.open_diff_comment_editor_for_anchor(anchor);
     }
 
+    #[cfg(test)]
     pub(crate) fn save_diff_comment(&mut self, key: DiffCommentKey, text: String) {
-        let trimmed = text.trim().to_string();
         let file = key.rel_path.clone();
         let line = key.line_number;
-        if trimmed.is_empty() {
-            if let Err(err) = self.delete_diff_comment_key(key) {
+        match self.persist_diff_comment_text(key, &text) {
+            Ok(false) => {
+                self.set_info(format!("Removed diff comment for {file}:{line}."));
+            }
+            Ok(true) => {
+                self.set_info(format!("Queued diff comment for {file}:{line}."));
+            }
+            Err(err) if text.trim().is_empty() => {
                 self.set_error(format!(
                     "Couldn't remove diff comment for {file}:{line}: {err:#}"
                 ));
-            } else {
-                self.set_info(format!("Removed diff comment for {file}:{line}."));
             }
-            return;
+            Err(err) => {
+                self.set_error(format!(
+                    "Queued diff comment for {file}:{line}, but couldn't persist it: {err:#}"
+                ));
+            }
         }
-        if let Err(err) = self.session_store.upsert_diff_comment(
+    }
+
+    pub(crate) fn autosave_active_diff_comment_editor(&mut self) {
+        let Some(editor) = &self.diff_comment_editor else {
+            return;
+        };
+        let key = editor.key.clone();
+        let text = editor.input.text.clone();
+        if let Err(err) = self.persist_diff_comment_text(key, &text) {
+            self.set_error(format!("Couldn't persist diff comment draft: {err:#}"));
+        }
+    }
+
+    pub(crate) fn cancel_active_diff_comment_editor(&mut self) {
+        self.diff_comment_editor = None;
+    }
+
+    fn persist_diff_comment_text(&mut self, key: DiffCommentKey, text: &str) -> Result<bool> {
+        let trimmed = text.trim().to_string();
+        if trimmed.is_empty() {
+            self.session_store.delete_diff_comment(
+                &key.session_id,
+                &key.rel_path,
+                key.side,
+                key.line_number,
+                &key.line_content,
+            )?;
+            self.diff_comments.remove(&key);
+            return Ok(false);
+        }
+
+        let persist_result = self.session_store.upsert_diff_comment(
             &key.session_id,
             &key.rel_path,
             key.side,
             key.line_number,
             &key.line_content,
             &trimmed,
-        ) {
-            self.diff_comments
-                .insert(key.clone(), DiffComment { key, text: trimmed });
-            self.set_error(format!(
-                "Queued diff comment for {file}:{line}, but couldn't persist it: {err:#}"
-            ));
-        } else {
-            self.diff_comments
-                .insert(key.clone(), DiffComment { key, text: trimmed });
-            self.set_info(format!("Queued diff comment for {file}:{line}."));
-        }
-    }
-
-    pub(crate) fn save_active_diff_comment_editor(&mut self) {
-        let Some(editor) = self.diff_comment_editor.take() else {
-            return;
-        };
-        self.save_diff_comment(editor.key, editor.input.text);
-    }
-
-    pub(crate) fn cancel_active_diff_comment_editor(&mut self) {
-        self.diff_comment_editor = None;
+        );
+        self.diff_comments
+            .insert(key.clone(), DiffComment { key, text: trimmed });
+        persist_result.map(|_| true)
     }
 
     pub(crate) fn delete_diff_comment_key(&mut self, key: DiffCommentKey) -> Result<()> {
@@ -2391,17 +2420,35 @@ impl App {
             return None;
         }
         let mut prompt = String::new();
+        let separator = self.config.defaults.diff_comment_prompt_separator.as_str();
         for (idx, comment) in comments.iter().enumerate() {
-            let key = &comment.key;
             if idx > 0 {
-                prompt.push('\n');
+                if separator.is_empty() {
+                    prompt.push('\n');
+                } else {
+                    prompt.push('\n');
+                    prompt.push_str(separator);
+                    prompt.push_str("\n\n");
+                }
             }
-            prompt.push_str(&format!(
-                "On {} line {}:\n\t{}\nFeedback:\n\t{}\n",
-                key.rel_path, key.line_number, key.line_content, comment.text
-            ));
+            prompt.push_str(&self.render_diff_comment_prompt_block(comment));
         }
         Some(prompt)
+    }
+
+    fn render_diff_comment_prompt_block(&self, comment: &DiffComment) -> String {
+        let template = if self.config.defaults.diff_comment_prompt_template.is_empty() {
+            DEFAULT_DIFF_COMMENT_PROMPT_TEMPLATE
+        } else {
+            self.config.defaults.diff_comment_prompt_template.as_str()
+        };
+        let key = &comment.key;
+        let line_number = key.line_number.to_string();
+        template
+            .replace("{filename}", &key.rel_path)
+            .replace("{line_number}", &line_number)
+            .replace("{line_content}", &key.line_content)
+            .replace("{message}", &comment.text)
     }
 
     pub(crate) fn clear_selected_session_diff_comments(&mut self) -> Result<()> {
@@ -2445,22 +2492,40 @@ impl App {
             self.set_error("Select an agent session before sending diff comments.");
             return;
         };
-        let Some(provider) = self.providers.get(&session_id) else {
+        if !self.providers.contains_key(&session_id) {
             self.set_error(
                 "Selected agent is not running. Reconnect it before sending diff comments.",
             );
             return;
-        };
+        }
+        if self.is_agent_streaming(&session_id) {
+            self.set_error(
+                "Selected agent is still working. Wait for it to stop streaming before sending diff comments.",
+            );
+            return;
+        }
         let payload = crate::app::input::macro_payload_bytes(&prompt);
-        match provider.write_bytes(&payload) {
+        let send_result = self
+            .providers
+            .get(&session_id)
+            .expect("provider checked above")
+            .write_bytes(&payload);
+        match send_result {
             Ok(()) => {
                 if let Err(err) = self.clear_selected_session_diff_comments() {
                     self.set_error(format!(
                         "Sent diff comments, but failed to clear persisted queue: {err:#}"
                     ));
                 } else {
+                    self.center_mode = CenterMode::Agent;
+                    self.diff_comment_editor = None;
+                    self.focus = FocusPane::Center;
+                    self.session_surface = SessionSurface::Agent;
+                    self.input_target = InputTarget::Agent;
+                    self.fullscreen_overlay = FullscreenOverlay::Agent;
                     self.set_info(format!(
-                        "Sent {count} queued diff comment(s) to the selected agent."
+                        "Sent {} to the selected agent.",
+                        diff_comment_count_label(count)
                     ));
                 }
             }
