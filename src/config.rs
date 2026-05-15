@@ -119,6 +119,8 @@ pub struct Defaults {
     pub start_directory: Option<String>,
     pub commit_prompt: Option<String>,
     pub enable_randomized_pet_name_by_default: bool,
+    #[serde(default = "default_true")]
+    pub pull_before_creating_agent_by_default: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -181,6 +183,10 @@ pub struct ProjectConfig {
 
 fn new_project_id() -> String {
     Uuid::new_v4().to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -265,6 +271,7 @@ impl Default for Defaults {
             start_directory,
             commit_prompt: Some(DEFAULT_COMMIT_PROMPT.to_string()),
             enable_randomized_pet_name_by_default: false,
+            pull_before_creating_agent_by_default: true,
         }
     }
 }
@@ -632,6 +639,16 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             )),
             value_fn: |c| FieldValue::Bool(c.defaults.enable_randomized_pet_name_by_default),
         },
+        ConfigEntry::Field {
+            key: "pull_before_creating_agent_by_default",
+            comment: Some(CommentSource::Static(
+                "# When true, dux safely fast-forward pulls the project source checkout\n\
+                 # before creating a fresh project agent worktree.\n\
+                 # This uses `git pull --ff-only`; it will not create merge commits or rebase.\n\
+                 # Set to false to keep fresh agent creation from contacting the remote.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.defaults.pull_before_creating_agent_by_default),
+        },
         ConfigEntry::Blank,
         ConfigEntry::Providers,
         ConfigEntry::Terminal,
@@ -891,6 +908,12 @@ pub fn save_config(
         "defaults",
         "enable_randomized_pet_name_by_default",
         config.defaults.enable_randomized_pet_name_by_default,
+    );
+    patch_table_bool(
+        &mut doc,
+        "defaults",
+        "pull_before_creating_agent_by_default",
+        config.defaults.pull_before_creating_agent_by_default,
     );
     remove_table_key(&mut doc, "defaults", "prompt_for_name");
 
@@ -1715,6 +1738,7 @@ mod tests {
         assert!(rendered.contains("[defaults]"));
         assert!(rendered.contains("provider = \"claude\""));
         assert!(rendered.contains("enable_randomized_pet_name_by_default = false"));
+        assert!(rendered.contains("pull_before_creating_agent_by_default = true"));
         assert!(!rendered.contains("prompt_for_name"));
         assert!(rendered.contains("[providers.claude]"));
         assert!(rendered.contains("[providers.codex]"));
@@ -1805,6 +1829,22 @@ leading_branch = "main"
             Some("codex")
         );
         assert_eq!(parsed.projects[0].leading_branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn old_config_missing_pull_before_create_defaults_to_true() {
+        let parsed: Config = toml::from_str(
+            r#"
+[defaults]
+provider = "claude"
+start_directory = "/tmp"
+commit_prompt = ""
+enable_randomized_pet_name_by_default = false
+"#,
+        )
+        .expect("config should parse");
+
+        assert!(parsed.defaults.pull_before_creating_agent_by_default);
     }
 
     #[test]
@@ -2690,6 +2730,7 @@ args = [\"-l\"]
         let mut config: Config = toml::from_str(&default_body).expect("parse");
         config.ui.right_width_pct = 30;
         config.ui.auto_reopen_agents = true;
+        config.defaults.pull_before_creating_agent_by_default = false;
         config.editor.default = "zed".to_string();
         let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
         save_config(&config_path, &config, &bindings).expect("save");
@@ -2699,6 +2740,7 @@ args = [\"-l\"]
         let reloaded: Config = toml::from_str(&saved).expect("parse saved");
         assert_eq!(reloaded.ui.right_width_pct, 30);
         assert!(reloaded.ui.auto_reopen_agents);
+        assert!(!reloaded.defaults.pull_before_creating_agent_by_default);
         assert_eq!(reloaded.editor.default, "zed");
     }
 
