@@ -5106,20 +5106,20 @@ impl App {
                 ..
             } => {
                 self.render_dim_overlay(frame);
-                let checkbox = Checkbox::new("Use randomized pet name")
+                let randomize_checkbox = Checkbox::new("Use randomized pet name")
                     .checked(*randomize_name)
-                    .state(if *focus == NameNewAgentFocus::Checkbox {
+                    .state(if *focus == NameNewAgentFocus::RandomizedNameCheckbox {
                         CheckboxState::Focused
                     } else {
                         CheckboxState::Normal
                     });
                 let dialog_width = 60.min(frame.area().width.max(1));
                 let inner_width = dialog_width.saturating_sub(2);
-                let checkbox_height = checkbox
+                let randomize_checkbox_height = randomize_checkbox
                     .layout(
                         inner_width,
-                        checkbox.marker_style(Style::default()),
-                        checkbox.label_style(Style::default()),
+                        randomize_checkbox.marker_style(Style::default()),
+                        randomize_checkbox.label_style(Style::default()),
                     )
                     .height
                     .saturating_add(1);
@@ -5144,7 +5144,10 @@ impl App {
                 let context_height = u16::from(context_line.is_some());
                 let area = centered_rect_exact(
                     dialog_width,
-                    8 + context_height + checkbox_spacing + checkbox_height + footer_spacing,
+                    8 + context_height
+                        + checkbox_spacing
+                        + randomize_checkbox_height
+                        + footer_spacing,
                     frame.area(),
                 );
                 self.clear_overlay_area(frame, area);
@@ -5158,7 +5161,7 @@ impl App {
                     context_area,
                     input_area,
                     _,
-                    checkbox_area,
+                    randomize_checkbox_area,
                     _,
                     hint_area,
                 ] = Layout::default()
@@ -5168,7 +5171,7 @@ impl App {
                         Constraint::Length(context_height),
                         Constraint::Length(3),
                         Constraint::Length(checkbox_spacing),
-                        Constraint::Length(checkbox_height),
+                        Constraint::Length(randomize_checkbox_height),
                         Constraint::Length(footer_spacing),
                         Constraint::Min(1),
                     ])
@@ -5227,12 +5230,12 @@ impl App {
                     .block(input_block)
                     .render(input_area, frame.buffer_mut());
 
-                let (checkbox_rect, _) = self.render_overlay_checkbox(
+                let (randomized_name_checkbox_rect, _) = self.render_overlay_checkbox(
                     frame,
-                    checkbox_area,
+                    randomize_checkbox_area,
                     "Use randomized pet name",
                     *randomize_name,
-                    if *focus == NameNewAgentFocus::Checkbox {
+                    if *focus == NameNewAgentFocus::RandomizedNameCheckbox {
                         CheckboxState::Focused
                     } else {
                         CheckboxState::Normal
@@ -5257,7 +5260,11 @@ impl App {
                 ));
                 hints.extend(self.theme.key_badge_default(&toggle_key));
                 hints.push(Span::styled(
-                    " randomize  ",
+                    " focus  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                hints.push(Span::styled(
+                    "Space toggle  ",
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
                 hints.extend(self.theme.key_badge_default(&close_key));
@@ -5270,7 +5277,7 @@ impl App {
                     input: input_inner,
                     checkbox: Some(OverlayCheckbox {
                         id: OverlayCheckboxId::NameNewAgentRandomizedPetName,
-                        rect: checkbox_rect,
+                        rect: randomized_name_checkbox_rect,
                     }),
                 };
             }
