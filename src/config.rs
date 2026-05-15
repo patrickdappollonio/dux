@@ -31,6 +31,7 @@ pub struct Config {
     pub defaults: Defaults,
     pub providers: ProvidersConfig,
     pub terminal: TerminalConfig,
+    pub startup_command_terminal: StartupCommandTerminalConfig,
     pub logging: LoggingConfig,
     pub projects: Vec<ProjectConfig>,
     pub ui: UiConfig,
@@ -139,6 +140,13 @@ pub struct TerminalConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
+pub struct StartupCommandTerminalConfig {
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LoggingConfig {
     pub level: String,
     pub path: String,
@@ -179,6 +187,7 @@ pub struct ProjectConfig {
     pub default_provider: Option<String>,
     pub leading_branch: Option<String>,
     pub auto_reopen_agents: Option<bool>,
+    pub startup_command: Option<String>,
 }
 
 fn new_project_id() -> String {
@@ -214,6 +223,7 @@ impl Default for Config {
             defaults: Defaults::default(),
             providers: ProvidersConfig::default(),
             terminal: TerminalConfig::default(),
+            startup_command_terminal: StartupCommandTerminalConfig::default(),
             logging: LoggingConfig {
                 level: "info".to_string(),
                 path: "dux.log".to_string(),
@@ -333,6 +343,15 @@ impl Default for TerminalConfig {
         Self {
             command: default_terminal_command(),
             args: default_terminal_args(),
+        }
+    }
+}
+
+impl Default for StartupCommandTerminalConfig {
+    fn default() -> Self {
+        Self {
+            command: "$SHELL".to_string(),
+            args: vec!["-l".to_string(), "-c".to_string()],
         }
     }
 }
@@ -588,8 +607,12 @@ enum ConfigEntry {
     },
     /// Renders all `[providers.*]` sub-tables dynamically.
     Providers,
+    /// Renders `[[projects]]` declarations.
+    Projects,
     /// Renders the `[terminal]` section.
     Terminal,
+    /// Renders the `[startup_command_terminal]` section.
+    StartupCommandTerminal,
     /// Renders the `[keys]` section with all keybindings.
     Keys,
     /// Renders the `[macros]` section with text macros.
@@ -650,8 +673,11 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.defaults.pull_before_creating_agent_by_default),
         },
         ConfigEntry::Blank,
+        ConfigEntry::Projects,
+        ConfigEntry::Blank,
         ConfigEntry::Providers,
         ConfigEntry::Terminal,
+        ConfigEntry::StartupCommandTerminal,
         ConfigEntry::Section("logging"),
         ConfigEntry::Field {
             key: "level",
@@ -838,7 +864,11 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
                 }
             }
             ConfigEntry::Providers => render_provider_configs(&mut out, &config.providers),
+            ConfigEntry::Projects => render_project_configs(&mut out, &config.projects),
             ConfigEntry::Terminal => render_terminal_config(&mut out, &config.terminal),
+            ConfigEntry::StartupCommandTerminal => {
+                render_startup_command_terminal_config(&mut out, &config.startup_command_terminal);
+            }
             ConfigEntry::Keys => render_keys_config(&mut out, &config.keys, bindings),
             ConfigEntry::Macros => render_macros_config(&mut out, &config.macros, bindings),
         }
@@ -994,6 +1024,20 @@ pub fn save_config(
     patch_table_str(&mut doc, "terminal", "command", &config.terminal.command);
     patch_table_string_array(&mut doc, "terminal", "args", &config.terminal.args);
 
+    // --- [startup_command_terminal] ---
+    patch_table_str(
+        &mut doc,
+        "startup_command_terminal",
+        "command",
+        &config.startup_command_terminal.command,
+    );
+    patch_table_string_array(
+        &mut doc,
+        "startup_command_terminal",
+        "args",
+        &config.startup_command_terminal.args,
+    );
+
     // --- [keys] ---
     patch_table_bool(
         &mut doc,
@@ -1019,10 +1063,8 @@ pub fn save_config(
     // --- [providers.*] ---
     patch_providers(&mut doc, &config.providers);
 
-    // --- legacy [[projects]] ---
-    // Projects now live in SQLite. Saving config always strips any legacy
-    // project declarations after they have been migrated by the app bootstrap.
-    let _ = doc.remove("projects");
+    // --- [[projects]] ---
+    patch_projects(&mut doc, &config.projects);
 
     // --- [macros] ---
     patch_macros(&mut doc, &config.macros);
@@ -1191,6 +1233,34 @@ fn patch_macros(doc: &mut DocumentMut, macros: &MacrosConfig) {
         );
         table[name] = toml_edit::value(Value::InlineTable(inline));
     }
+}
+
+fn patch_projects(doc: &mut DocumentMut, projects: &[ProjectConfig]) {
+    let _ = doc.remove("projects");
+    if projects.is_empty() {
+        return;
+    }
+
+    let mut array = toml_edit::ArrayOfTables::new();
+    for project in projects {
+        let mut table = Table::new();
+        table["id"] = toml_edit::value(project.id.as_str());
+        table["path"] = toml_edit::value(project.path.as_str());
+        if let Some(name) = project.name.as_deref() {
+            table["name"] = toml_edit::value(name);
+        }
+        if let Some(provider) = project.default_provider.as_deref() {
+            table["default_provider"] = toml_edit::value(provider);
+        }
+        if let Some(auto_reopen_agents) = project.auto_reopen_agents {
+            table["auto_reopen_agents"] = toml_edit::value(auto_reopen_agents);
+        }
+        if let Some(command) = project.startup_command.as_deref() {
+            table["startup_command"] = toml_edit::value(command);
+        }
+        array.push(table);
+    }
+    doc["projects"] = Item::ArrayOfTables(array);
 }
 
 fn render_keys_config(
@@ -1447,6 +1517,54 @@ fn render_provider_configs(out: &mut String, providers: &ProvidersConfig) {
     }
 }
 
+fn render_project_configs(out: &mut String, projects: &[ProjectConfig]) {
+    out.push_str(
+        "# Projects are mirrored with dux's runtime database.\n\
+         # Paths may use $HOME, ${HOME}, or ~ for portability across machines.\n\
+         # startup_command runs in each new agent worktree before the provider launches.\n",
+    );
+    if projects.is_empty() {
+        out.push_str(
+            "# [[projects]]\n\
+             # id = \"00000000-0000-0000-0000-000000000000\"\n\
+             # path = \"$HOME/projects/example\"\n\
+             # name = \"example\"\n\
+             # default_provider = \"codex\"\n\
+             # auto_reopen_agents = true\n\
+             # startup_command = \"npm install\"\n\n",
+        );
+        return;
+    }
+
+    for project in projects {
+        out.push_str("[[projects]]\n");
+        out.push_str(&format!("id = \"{}\"\n", escape_toml_string(&project.id)));
+        out.push_str(&format!(
+            "path = \"{}\"\n",
+            escape_toml_string(&project.path)
+        ));
+        if let Some(name) = &project.name {
+            out.push_str(&format!("name = \"{}\"\n", escape_toml_string(name)));
+        }
+        if let Some(provider) = &project.default_provider {
+            out.push_str(&format!(
+                "default_provider = \"{}\"\n",
+                escape_toml_string(provider)
+            ));
+        }
+        if let Some(auto_reopen_agents) = project.auto_reopen_agents {
+            out.push_str(&format!("auto_reopen_agents = {auto_reopen_agents}\n"));
+        }
+        if let Some(command) = &project.startup_command {
+            out.push_str(&format!(
+                "startup_command = \"{}\"\n",
+                escape_toml_string(command)
+            ));
+        }
+        out.push('\n');
+    }
+}
+
 fn render_terminal_config(out: &mut String, terminal: &TerminalConfig) {
     out.push_str("[terminal]\n");
     out.push_str(
@@ -1458,6 +1576,29 @@ fn render_terminal_config(out: &mut String, terminal: &TerminalConfig) {
     ));
     out.push_str(
         "# Arguments for the companion terminal command. The default [\"-l\"] launches a login\n# shell so your profile, aliases, and prompt are loaded.\n",
+    );
+    out.push_str(&format!(
+        "args = {}\n\n",
+        render_string_list(&terminal.args)
+    ));
+}
+
+fn render_startup_command_terminal_config(
+    out: &mut String,
+    terminal: &StartupCommandTerminalConfig,
+) {
+    out.push_str("[startup_command_terminal]\n");
+    out.push_str(
+        "# Shell used to run project startup commands before launching a new agent.\n\
+         # \"$SHELL\" is expanded when the command runs and falls back to /bin/sh if unset.\n",
+    );
+    out.push_str(&format!(
+        "command = \"{}\"\n",
+        escape_toml_string(&terminal.command)
+    ));
+    out.push_str(
+        "# Arguments passed before the configured project startup command.\n\
+         # The default [\"-l\", \"-c\"] runs a login shell without interactive job-control warnings.\n",
     );
     out.push_str(&format!(
         "args = {}\n\n",
@@ -1627,6 +1768,55 @@ fn discover_root(home: &Path, xdg_config_home: Option<std::ffi::OsString>) -> Pa
     }
 }
 
+/// Expand environment variables (`$VAR`, `${VAR}`) in a config string.
+/// Returns `None` when variable syntax is invalid.
+pub fn expand_env_vars(raw: &str) -> Option<String> {
+    let mut result = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '$' {
+            let braced = chars.peek() == Some(&'{');
+            if braced {
+                chars.next();
+            }
+            let mut var_name = String::new();
+            while let Some(&c) = chars.peek() {
+                if braced {
+                    if c == '}' {
+                        chars.next();
+                        break;
+                    }
+                } else if !c.is_ascii_alphanumeric() && c != '_' {
+                    break;
+                }
+                var_name.push(c);
+                chars.next();
+            }
+            if var_name.is_empty() || !is_valid_var_name(&var_name) {
+                return None;
+            }
+            match std::env::var(&var_name) {
+                Ok(value) => result.push_str(&value),
+                Err(_) => {
+                    result.push('$');
+                    if braced {
+                        result.push('{');
+                    }
+                    result.push_str(&var_name);
+                    if braced {
+                        result.push('}');
+                    }
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    Some(result)
+}
+
 /// Expand environment variables (`$VAR`, `${VAR}`) and tilde (`~`) in a path
 /// string.  Returns `None` when the result is unsafe (relative path, directory
 /// traversal via `..`, or invalid variable names).
@@ -1749,6 +1939,9 @@ mod tests {
         assert!(rendered.contains("[terminal]"));
         assert!(rendered.contains("command = "));
         assert!(rendered.contains("args = []"));
+        assert!(rendered.contains("[startup_command_terminal]"));
+        assert!(rendered.contains("command = \"$SHELL\""));
+        assert!(rendered.contains("args = [\"-l\", \"-c\"]"));
         assert!(rendered.contains("[ui]"));
         assert!(rendered.contains("agent_scrollback_lines = 10000"));
         assert!(rendered.contains("empty_project_separator_min_projects = 5"));
@@ -1801,11 +1994,14 @@ mod tests {
             default_provider: None,
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
+            startup_command: Some("npm install".to_string()),
         });
         let rendered = render_config_default(&config);
-        assert!(!rendered.contains("[[projects]]"));
+        assert!(rendered.contains("[[projects]]"));
+        assert!(rendered.contains("startup_command = \"npm install\""));
+        assert!(!rendered.contains("leading_branch"));
         let parsed: Config = toml::from_str(&rendered).expect("should parse back");
-        assert!(parsed.projects.is_empty());
+        assert_eq!(parsed.projects.len(), 1);
     }
 
     #[test]
@@ -1848,6 +2044,20 @@ enable_randomized_pet_name_by_default = false
     }
 
     #[test]
+    fn old_config_missing_startup_command_terminal_uses_portable_default() {
+        let parsed: Config = toml::from_str(
+            r#"
+[defaults]
+provider = "claude"
+"#,
+        )
+        .expect("config should parse");
+
+        assert_eq!(parsed.startup_command_terminal.command, "$SHELL");
+        assert_eq!(parsed.startup_command_terminal.args, ["-l", "-c"]);
+    }
+
+    #[test]
     fn save_config_strips_legacy_projects() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let config_path = dir.path().join("config.toml");
@@ -1870,13 +2080,15 @@ name = "test"
             default_provider: None,
             leading_branch: None,
             auto_reopen_agents: None,
+            startup_command: Some("echo ready".to_string()),
         });
         let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
         save_config(&config_path, &config, &bindings).expect("save config");
 
         let saved = fs::read_to_string(config_path).expect("read config");
-        assert!(!saved.contains("[[projects]]"));
-        assert!(!saved.contains("project-1"));
+        assert!(saved.contains("[[projects]]"));
+        assert!(saved.contains("project-1"));
+        assert!(saved.contains("startup_command = \"echo ready\""));
     }
 
     #[test]
@@ -1928,6 +2140,17 @@ name = "test"
         let parsed: Config = toml::from_str(&rendered).expect("config should parse");
         assert_eq!(parsed.terminal.command, "fish");
         assert_eq!(parsed.terminal.args, vec!["-l"]);
+    }
+
+    #[test]
+    fn default_config_round_trips_startup_command_terminal() {
+        let mut config = Config::default();
+        config.startup_command_terminal.command = "/bin/bash".to_string();
+        config.startup_command_terminal.args = vec!["-l".to_string(), "-c".to_string()];
+        let rendered = render_config_default(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("config should parse");
+        assert_eq!(parsed.startup_command_terminal.command, "/bin/bash");
+        assert_eq!(parsed.startup_command_terminal.args, vec!["-l", "-c"]);
     }
 
     #[test]

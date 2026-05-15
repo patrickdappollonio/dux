@@ -14,6 +14,7 @@ mod model;
 mod provider;
 mod pty;
 mod raw_input;
+mod startup;
 mod statusline;
 mod storage;
 mod theme;

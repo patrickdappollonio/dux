@@ -109,6 +109,32 @@ The header shows `default provider: …` when the selected project inherits the 
 
 Project-specific provider defaults are managed from inside dux with `change-project-default-provider`; `config.toml` only stores the global fallback.
 
+### Startup Commands
+
+Some projects need a little ceremony before an agent is useful. JavaScript projects want `npm install`, Rust projects may want a cache warmup, and some repos come with a setup script because apparently suffering builds character. Configure a project startup command and dux runs it in the new agent worktree before launching the provider.
+
+```toml
+[[projects]]
+id = "00000000-0000-0000-0000-000000000000"
+path = "$HOME/projects/web-app"
+name = "web-app"
+startup_command = """
+npm install
+npm run build:types
+ln -sfn "$DUX_WORKTREE_PATH/.env.local" .env
+"""
+
+[startup_command_terminal]
+command = "$SHELL"
+args = ["-l", "-c"]
+```
+
+You can edit the command from the palette with `configure-startup-command`, or keep it in `config.toml` with the rest of your project intent. The multiline editor is not pretending to be fancy: dux passes the whole block as one script string to your configured shell, and shells already know that newlines separate commands. Put `npm install`, symlink setup, cache priming, or whatever tiny ritual your repo demands in there.
+
+Project paths support `$HOME`, `${HOME}`, and `~` so the file can travel between machines without hardcoding your username like a tiny portability crime. The startup command itself runs through your configured shell, so shell environment expansion works inside the command (`$HOME`, `${VAR}`, `$PATH`, `$EDITOR`, and friends). It runs with the agent worktree as the current directory, so relative paths point at the new checkout and normal shells report that through `$PWD`. dux also sets `DUX_PROJECT_PATH`, `DUX_WORKTREE_PATH`, `DUX_AGENT_ID`, `DUX_AGENT_BRANCH`, `DUX_PROVIDER`, and `DUX_STARTUP_COMMAND_LOG` for scripts that want to know where they are and who invited them.
+
+If the command fails, dux still creates the agent. The failure shows in the status line, because setup scripts are allowed to be dramatic but not allowed to block the show. Use `read-startup-command-logs` to open the latest log, and `rerun-startup-command-on-agent` when the fix is obvious and you want the machine to try again.
+
 ### Macros
 
 Tired of typing the same prompt over and over? Turn it into a macro. Macros are reusable text snippets you trigger from a quick-select bar. Search by name, hit enter, and the text gets sent to the active pane.

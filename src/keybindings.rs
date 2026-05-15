@@ -72,6 +72,8 @@ pub enum Action {
     ExitPathEditorOnProjectAdd,
     OpenEntry,
     AddCurrentDir,
+    OpenStartupCommandLogFile,
+    OpenStartupCommandLogFolder,
     Confirm,
     ToggleSelection,
     ToggleMarked,
@@ -92,6 +94,9 @@ pub enum Action {
     ToggleGithubIntegration,
     ToggleProjectAutoReopenAgents,
     ToggleAgentAutoReopen,
+    ConfigureStartupCommand,
+    RerunStartupCommandOnAgent,
+    ReadStartupCommandLogs,
     ToggleRandomizedPetNameDefault,
     TogglePrBannerPosition,
     ForceReconnectAgent,
@@ -111,6 +116,7 @@ pub enum BindingScope {
     Palette,
     Browser,
     RuntimeKill,
+    StartupCommandLogs,
     Dialog,
     CommitInput,
     Help,
@@ -128,6 +134,7 @@ impl BindingScope {
         Self::Palette,
         Self::Browser,
         Self::RuntimeKill,
+        Self::StartupCommandLogs,
         Self::Dialog,
         Self::CommitInput,
         Self::Help,
@@ -145,6 +152,7 @@ impl BindingScope {
             Self::Palette => "Command palette",
             Self::Browser => "Project browser",
             Self::RuntimeKill => "Kill running modal",
+            Self::StartupCommandLogs => "Startup command logs modal",
             Self::Dialog => "Dialog",
             Self::CommitInput => "Commit input",
             Self::Help => "Help overlay",
@@ -249,6 +257,8 @@ impl Action {
             Action::ExitPathEditorOnProjectAdd => "exit_path_editor_on_project_add",
             Action::OpenEntry => "open_entry",
             Action::AddCurrentDir => "add_current_dir",
+            Action::OpenStartupCommandLogFile => "open_startup_command_log_file",
+            Action::OpenStartupCommandLogFolder => "open_startup_command_log_folder",
             Action::Confirm => "confirm",
             Action::ToggleSelection => "toggle_selection",
             Action::ToggleMarked => "toggle_marked",
@@ -269,6 +279,9 @@ impl Action {
             Action::ToggleGithubIntegration => "toggle_github_integration",
             Action::ToggleProjectAutoReopenAgents => "toggle_project_auto_reopen_agents",
             Action::ToggleAgentAutoReopen => "toggle_agent_auto_reopen",
+            Action::ConfigureStartupCommand => "configure_startup_command",
+            Action::RerunStartupCommandOnAgent => "rerun_startup_command_on_agent",
+            Action::ReadStartupCommandLogs => "read_startup_command_logs",
             Action::ToggleRandomizedPetNameDefault => "toggle_randomized_pet_name_default",
             Action::TogglePrBannerPosition => "toggle_pr_banner_position",
             Action::ForceReconnectAgent => "force_reconnect_agent",
@@ -356,6 +369,8 @@ impl Action {
             Action::ExitPathEditorOnProjectAdd => "Exit typed-path mode in the project browser.",
             Action::OpenEntry => "Open or navigate into the selected entry in the project browser.",
             Action::AddCurrentDir => "Add the current directory as a project.",
+            Action::OpenStartupCommandLogFile => "Open the selected startup command log file.",
+            Action::OpenStartupCommandLogFolder => "Open the selected startup command log folder.",
             Action::Confirm => "Confirm the selected action in a dialog.",
             Action::ToggleSelection => "Toggle between options in a confirmation dialog.",
             Action::ToggleMarked => "Toggle the hovered runtime in the kill-running modal.",
@@ -379,6 +394,15 @@ impl Action {
                 "Toggle startup auto-reopen for agents in the selected project."
             }
             Action::ToggleAgentAutoReopen => "Toggle startup auto-reopen for the selected agent.",
+            Action::ConfigureStartupCommand => {
+                "Configure the selected project's startup command for newly created agents."
+            }
+            Action::RerunStartupCommandOnAgent => {
+                "Rerun the selected agent's project startup command."
+            }
+            Action::ReadStartupCommandLogs => {
+                "Open startup command logs for the selected agent or project."
+            }
             Action::ToggleRandomizedPetNameDefault => {
                 "Toggle whether the agent name prompt starts with a random pet name."
             }
@@ -452,6 +476,8 @@ impl Action {
             | Action::ExitPathEditorOnProjectAdd
             | Action::OpenEntry
             | Action::AddCurrentDir
+            | Action::OpenStartupCommandLogFile
+            | Action::OpenStartupCommandLogFolder
             | Action::Confirm
             | Action::ToggleSelection
             | Action::ToggleMarked => Some("Overlays"),
@@ -470,6 +496,9 @@ impl Action {
             | Action::ToggleGithubIntegration
             | Action::ToggleProjectAutoReopenAgents
             | Action::ToggleAgentAutoReopen
+            | Action::ConfigureStartupCommand
+            | Action::RerunStartupCommandOnAgent
+            | Action::ReadStartupCommandLogs
             | Action::ToggleRandomizedPetNameDefault
             | Action::TogglePrBannerPosition
             | Action::ForceReconnectAgent
@@ -522,6 +551,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             BindingScope::Palette,
             BindingScope::Browser,
             BindingScope::RuntimeKill,
+            BindingScope::StartupCommandLogs,
             BindingScope::Help,
         ],
         help: Some(HelpEntry {
@@ -545,6 +575,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             BindingScope::Palette,
             BindingScope::Browser,
             BindingScope::RuntimeKill,
+            BindingScope::StartupCommandLogs,
             BindingScope::Help,
         ],
         help: None, // covered by MoveDown's combined label
@@ -691,6 +722,39 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "toggle-agent-auto-reopen",
             description: "Opt the selected agent in or out of startup reopening",
+        }),
+    },
+    BindingDef {
+        action: Action::ConfigureStartupCommand,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "configure-startup-command",
+            description: "Configure the selected project's startup command",
+        }),
+    },
+    BindingDef {
+        action: Action::RerunStartupCommandOnAgent,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "rerun-startup-command-on-agent",
+            description: "Rerun the selected agent's startup command",
+        }),
+    },
+    BindingDef {
+        action: Action::ReadStartupCommandLogs,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "read-startup-command-logs",
+            description: "Read startup command logs for the selected agent or project",
         }),
     },
     BindingDef {
@@ -1307,7 +1371,11 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             KeyCode::Char('/'),
             KeyModifiers::NONE,
         )],
-        scopes: &[BindingScope::Browser, BindingScope::RuntimeKill],
+        scopes: &[
+            BindingScope::Browser,
+            BindingScope::RuntimeKill,
+            BindingScope::StartupCommandLogs,
+        ],
         help: Some(HelpEntry {
             section: "Overlays",
             description: "Toggle search mode",
@@ -1355,6 +1423,31 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         help: Some(HelpEntry {
             section: "Overlays",
             description: "Add the current directory as a project",
+        }),
+        hint_contexts: &[],
+        palette: None,
+    },
+    BindingDef {
+        action: Action::OpenStartupCommandLogFile,
+        default_keys: &[key!(o)],
+        scopes: &[BindingScope::StartupCommandLogs],
+        help: Some(HelpEntry {
+            section: "Overlays",
+            description: "Open selected startup command log file",
+        }),
+        hint_contexts: &[],
+        palette: None,
+    },
+    BindingDef {
+        action: Action::OpenStartupCommandLogFolder,
+        default_keys: &[KeyCombination::one_key(
+            KeyCode::Char('O'),
+            KeyModifiers::SHIFT,
+        )],
+        scopes: &[BindingScope::StartupCommandLogs],
+        help: Some(HelpEntry {
+            section: "Overlays",
+            description: "Open selected startup command log folder",
         }),
         hint_contexts: &[],
         palette: None,

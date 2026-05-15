@@ -462,6 +462,11 @@ impl App {
                                     ProjectBranchStatus::NotLeading
                                 };
                         }
+                        if let Err(err) = self.persist_projects_to_config_and_store() {
+                            self.set_error(format!(
+                                "Project branch was detected, but config.toml could not be updated: {err:#}"
+                            ));
+                        }
                         if let Err(err) =
                             self.continue_create_agent_after_branch_inspection(project, inspection)
                         {
@@ -562,6 +567,46 @@ impl App {
                 WorkerEvent::ProjectPersistenceCompleted { action, result } => {
                     self.apply_project_persistence_result(action, result);
                 }
+                WorkerEvent::StartupCommandRerunCompleted(result) => match result.status {
+                    Ok(()) => {
+                        let palette_key = self.bindings.label_for(Action::OpenPalette);
+                        self.set_info(format!(
+                            "Startup command completed for project \"{}\". Press {palette_key} and run read-startup-command-logs to view the latest log.",
+                            result.project_name
+                        ));
+                    }
+                    Err(err) => self.set_error(format!(
+                        "Startup command failed for project \"{}\": {err}. Run read-startup-command-logs for details.",
+                        result.project_name
+                    )),
+                },
+                WorkerEvent::StartupCommandLogsLoaded {
+                    scope_label,
+                    result,
+                } => match result {
+                    Ok(log) => {
+                        self.input_target = InputTarget::None;
+                        self.terminal_selection = None;
+                        self.prompt = PromptState::None;
+                        self.fullscreen_overlay = FullscreenOverlay::StartupLog;
+                        self.startup_log_viewer = Some(StartupLogViewer {
+                            scope_label,
+                            path: log.path,
+                            display_name: log.display_name,
+                            content: log.content,
+                            scroll_offset: 0,
+                            search: TextInput::new(),
+                            searching: false,
+                        });
+                    }
+                    Err(err) => self.set_error(format!(
+                        "Could not read startup command logs for {scope_label}: {err}"
+                    )),
+                },
+                WorkerEvent::OpenPathCompleted { target, result } => match result {
+                    Ok(()) => self.set_info(format!("Opened {target}.")),
+                    Err(err) => self.set_error(format!("Could not open {target}: {err}")),
+                },
             }
         }
         self.retry_hung_resume_sessions();
@@ -744,6 +789,11 @@ impl App {
                         "Could not save the auto-reopen change for project \"{project_name}\": {err}"
                     ));
                 }
+                ProjectPersistenceAction::UpdateStartupCommand { project_name, .. } => {
+                    self.set_error(format!(
+                        "Could not save the startup command for project \"{project_name}\": {err}"
+                    ));
+                }
             }
             return;
         }
@@ -761,6 +811,12 @@ impl App {
                 }) {
                     self.selected_left = index;
                 }
+                if let Err(err) = self.persist_config_projects_from_runtime() {
+                    self.set_error(format!(
+                        "Project was saved to the database, but config.toml could not be updated: {err:#}"
+                    ));
+                    return;
+                }
                 self.set_info(status_message);
             }
             ProjectPersistenceAction::Remove {
@@ -770,6 +826,12 @@ impl App {
                 self.projects.retain(|project| project.id != project_id);
                 self.rebuild_left_items();
                 self.selected_left = self.selected_left.saturating_sub(1);
+                if let Err(err) = self.persist_config_projects_from_runtime() {
+                    self.set_error(format!(
+                        "Project was removed from the database, but config.toml could not be updated: {err:#}"
+                    ));
+                    return;
+                }
                 self.set_info(format!("Removed project \"{project_name}\" from app"));
             }
             ProjectPersistenceAction::Delete {
@@ -780,6 +842,12 @@ impl App {
                 self.rebuild_left_items();
                 self.selected_left = self.selected_left.saturating_sub(1);
                 self.reload_changed_files();
+                if let Err(err) = self.persist_config_projects_from_runtime() {
+                    self.set_error(format!(
+                        "Project was deleted from the database, but config.toml could not be updated: {err:#}"
+                    ));
+                    return;
+                }
                 self.set_info(format!(
                     "Deleted project \"{project_name}\" and all its agents"
                 ));
@@ -799,6 +867,12 @@ impl App {
                 }
                 refresh_project_defaults(&mut self.projects, &self.config);
                 self.rebuild_left_items();
+                if let Err(err) = self.persist_config_projects_from_runtime() {
+                    self.set_error(format!(
+                        "Provider preference saved to the database for \"{project_name}\", but config.toml could not be updated: {err:#}"
+                    ));
+                    return;
+                }
                 let message = match provider {
                     Some(provider) => format!(
                         "Project provider for \"{}\" changed to {}. Future agents in this project will use it; existing agents keep their current provider.",
@@ -825,12 +899,45 @@ impl App {
                 {
                     project.auto_reopen_agents = auto_reopen_agents;
                 }
+                if let Err(err) = self.persist_config_projects_from_runtime() {
+                    self.set_error(format!(
+                        "Auto-reopen preference saved to the database for \"{project_name}\", but config.toml could not be updated: {err:#}"
+                    ));
+                    return;
+                }
                 let enabled = auto_reopen_agents.unwrap_or(true);
                 self.set_info(format!(
                     "Startup auto-reopen {} for project \"{}\".",
                     if enabled { "enabled" } else { "disabled" },
                     project_name
                 ));
+            }
+            ProjectPersistenceAction::UpdateStartupCommand {
+                project_id,
+                project_name,
+                startup_command,
+            } => {
+                if let Some(project) = self
+                    .projects
+                    .iter_mut()
+                    .find(|project| project.id == project_id)
+                {
+                    project.startup_command = startup_command.clone();
+                }
+                if let Err(err) = self.persist_config_projects_from_runtime() {
+                    self.set_error(format!(
+                        "Startup command saved to the database for \"{project_name}\", but config.toml could not be updated: {err:#}"
+                    ));
+                    return;
+                }
+                match startup_command {
+                    Some(command) => self.set_info(format!(
+                        "Startup command for project \"{project_name}\" set to: {command}"
+                    )),
+                    None => self.set_info(format!(
+                        "Startup command cleared for project \"{project_name}\"."
+                    )),
+                }
             }
         }
     }
@@ -853,6 +960,7 @@ impl App {
                                 .map(|provider| provider.as_str().to_string()),
                             leading_branch: project.leading_branch.clone(),
                             auto_reopen_agents: project.auto_reopen_agents,
+                            startup_command: project.startup_command.clone(),
                         })?;
                     }
                     ProjectPersistenceAction::Remove { project_id, .. }
@@ -875,6 +983,16 @@ impl App {
                         ..
                     } => {
                         store.update_project_auto_reopen(project_id, *auto_reopen_agents)?;
+                    }
+                    ProjectPersistenceAction::UpdateStartupCommand {
+                        project_id,
+                        startup_command,
+                        ..
+                    } => {
+                        store.update_project_startup_command(
+                            project_id,
+                            startup_command.as_deref(),
+                        )?;
                     }
                 }
                 Ok(())
@@ -920,8 +1038,22 @@ impl App {
             self.show_agent_surface();
             self.input_target = InputTarget::Agent;
             self.fullscreen_overlay = FullscreenOverlay::Agent;
-            if let AgentLaunchKind::Create { status_message, .. } = request.kind {
-                self.set_info(status_message);
+            if let AgentLaunchKind::Create {
+                status_message,
+                startup_result,
+                ..
+            } = request.kind
+            {
+                if let Some(result) = startup_result
+                    && let Err(err) = result.status
+                {
+                    self.set_error(format!(
+                        "Startup command failed for agent \"{}\": {err}. Run read-startup-command-logs for details.",
+                        session.branch_name
+                    ));
+                } else {
+                    self.set_info(status_message);
+                }
             }
             return;
         }
@@ -1343,10 +1475,31 @@ impl App {
         thread::spawn(move || {
             let result = crate::config::ensure_config(&paths)
                 .map_err(|err| format!("{err:#}"))
-                .and_then(|config| match crate::config::validate_keys(&config.keys) {
-                    Ok(()) => Ok(config),
-                    Err(message) => Err(message),
-                });
+                .and_then(
+                    |mut config| match crate::config::validate_keys(&config.keys) {
+                        Ok(()) => {
+                            let bindings = RuntimeBindings::from_keys_config(&config.keys);
+                            let store = SessionStore::open(&paths.sessions_db_path)
+                                .map_err(|err| format!("{err:#}"))?;
+                            sync_config_projects_with_store(&mut config, &paths, &bindings, &store)
+                                .map_err(|err| format!("{err:#}"))?;
+                            let projects = load_projects(
+                                &store.load_projects().map_err(|err| format!("{err:#}"))?,
+                                &config,
+                            );
+                            persist_runtime_projects_to_config_and_store(
+                                &projects,
+                                &mut config,
+                                &paths,
+                                &bindings,
+                                &store,
+                            )
+                            .map_err(|err| format!("{err:#}"))?;
+                            Ok(config)
+                        }
+                        Err(message) => Err(message),
+                    },
+                );
             let _ = tx.send(WorkerEvent::ConfigReloadReady(Box::new(result)));
         });
     }
@@ -2033,6 +2186,40 @@ pub(crate) fn run_create_agent_job(
         let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(hint));
         return;
     }
+    let startup_result = project
+        .startup_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .map(|command| {
+            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
+                "Running startup command for agent \"{}\"...",
+                session.branch_name
+            )));
+            crate::startup::run_startup_command(
+                &paths,
+                crate::startup::StartupCommandRun {
+                    project: project.clone(),
+                    session: session.clone(),
+                    command: command.to_string(),
+                    terminal: config.startup_command_terminal.clone(),
+                },
+            )
+        });
+    if let Some(result) = &startup_result {
+        match &result.status {
+            Ok(()) => logger::info(&format!(
+                "startup command succeeded for {} (log: {})",
+                result.session_id,
+                result.log_path.display()
+            )),
+            Err(err) => logger::error(&format!(
+                "startup command failed for {}: {err} (log: {})",
+                result.session_id,
+                result.log_path.display()
+            )),
+        }
+    }
     let launch_message = if launch_with_resume {
         format!(
             "Continuing {} in the existing worktree...",
@@ -2057,6 +2244,7 @@ pub(crate) fn run_create_agent_job(
             status_message,
             repo_path: repo_path.to_string_lossy().to_string(),
             owns_worktree,
+            startup_result,
         },
     };
     run_agent_launch_job(request, worker_tx);
@@ -2475,6 +2663,7 @@ mod tests {
             default_provider: ProviderKind::from_str("codex"),
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
+            startup_command: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -2538,6 +2727,7 @@ mod tests {
             default_provider: ProviderKind::from_str("codex"),
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
+            startup_command: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,

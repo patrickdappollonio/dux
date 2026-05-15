@@ -59,6 +59,7 @@ pub struct Project {
     pub default_provider: ProviderKind,
     pub leading_branch: Option<String>,
     pub auto_reopen_agents: Option<bool>,
+    pub startup_command: Option<String>,
     pub current_branch: String,
     pub branch_status: ProjectBranchStatus,
     pub path_missing: bool,

@@ -57,6 +57,7 @@ impl SessionStore {
                 default_provider text,
                 leading_branch text,
                 auto_reopen_agents integer,
+                startup_command text,
                 sort_order integer not null default 0,
                 created_at text not null,
                 updated_at text not null
@@ -67,6 +68,7 @@ impl SessionStore {
         ensure_column(&self.conn, "projects", "default_provider", "text")?;
         ensure_column(&self.conn, "projects", "leading_branch", "text")?;
         ensure_column(&self.conn, "projects", "auto_reopen_agents", "integer")?;
+        ensure_column(&self.conn, "projects", "startup_command", "text")?;
         ensure_column(
             &self.conn,
             "projects",
@@ -158,8 +160,9 @@ impl SessionStore {
                 default_provider = ?4,
                 leading_branch = ?5,
                 auto_reopen_agents = ?6,
-                sort_order = ?7,
-                updated_at = ?8
+                startup_command = ?7,
+                sort_order = ?8,
+                updated_at = ?9
             where id = ?1
             "#,
             params![
@@ -169,6 +172,7 @@ impl SessionStore {
                 project.default_provider,
                 project.leading_branch,
                 project.auto_reopen_agents,
+                project.startup_command,
                 sort_order,
                 now,
             ],
@@ -180,14 +184,15 @@ impl SessionStore {
         self.conn.execute(
             r#"
             insert into projects
-                (id, path, name, default_provider, leading_branch, auto_reopen_agents, sort_order, created_at, updated_at)
+                (id, path, name, default_provider, leading_branch, auto_reopen_agents, startup_command, sort_order, created_at, updated_at)
             values
-                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
             on conflict(path) do update set
                 name=excluded.name,
                 default_provider=excluded.default_provider,
                 leading_branch=excluded.leading_branch,
                 auto_reopen_agents=excluded.auto_reopen_agents,
+                startup_command=excluded.startup_command,
                 sort_order=excluded.sort_order,
                 updated_at=excluded.updated_at
             "#,
@@ -198,6 +203,7 @@ impl SessionStore {
                 project.default_provider,
                 project.leading_branch,
                 project.auto_reopen_agents,
+                project.startup_command,
                 sort_order,
                 now,
             ],
@@ -218,7 +224,7 @@ impl SessionStore {
     pub fn load_projects(&self) -> Result<Vec<ProjectConfig>> {
         let mut stmt = self.conn.prepare(
             r#"
-            select id, path, name, default_provider, leading_branch, auto_reopen_agents
+            select id, path, name, default_provider, leading_branch, auto_reopen_agents, startup_command
             from projects
             order by sort_order, name collate nocase, path collate nocase
             "#,
@@ -231,6 +237,7 @@ impl SessionStore {
                 default_provider: row.get(3)?,
                 leading_branch: row.get(4)?,
                 auto_reopen_agents: row.get(5)?,
+                startup_command: row.get(6)?,
             })
         })?;
 
@@ -271,6 +278,23 @@ impl SessionStore {
             where id = ?1
             "#,
             params![project_id, auto_reopen_agents, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_project_startup_command(
+        &self,
+        project_id: &str,
+        startup_command: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            update projects
+            set startup_command = ?2,
+                updated_at = ?3
+            where id = ?1
+            "#,
+            params![project_id, startup_command, Utc::now().to_rfc3339()],
         )?;
         Ok(())
     }
@@ -607,6 +631,7 @@ mod tests {
             default_provider: Some("codex".to_string()),
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: Some(false),
+            startup_command: Some("npm install".to_string()),
         };
 
         store.upsert_project(&project).unwrap();
@@ -626,6 +651,7 @@ mod tests {
                 default_provider: None,
                 leading_branch: Some("main".to_string()),
                 auto_reopen_agents: None,
+                startup_command: None,
             })
             .unwrap();
 
@@ -637,6 +663,7 @@ mod tests {
                 default_provider: Some("claude".to_string()),
                 leading_branch: Some("trunk".to_string()),
                 auto_reopen_agents: Some(false),
+                startup_command: Some("echo setup".to_string()),
             })
             .unwrap();
 
@@ -647,6 +674,7 @@ mod tests {
         assert_eq!(loaded[0].default_provider.as_deref(), Some("claude"));
         assert_eq!(loaded[0].leading_branch.as_deref(), Some("trunk"));
         assert_eq!(loaded[0].auto_reopen_agents, Some(false));
+        assert_eq!(loaded[0].startup_command.as_deref(), Some("echo setup"));
     }
 
     #[test]

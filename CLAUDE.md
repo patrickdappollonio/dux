@@ -8,6 +8,10 @@ Principles that guide every decision in dux. If a change conflicts with a tenet,
 
 - **All settings are configurable.** Every single one. If a user can't change it, it shouldn't be hardcoded.
 - **The config file is the documentation.** It must clearly explain what each setting does through inline comments. A user should never need to leave the config file to understand an option.
+- **Project config is portable desired state, not runtime cache.** `[[projects]]` may store portable user intent such as `id`, env-expanded `path`, `name`, `default_provider`, `auto_reopen_agents`, and `startup_command`. Do not write runtime-derived git or agent state into config.
+- **Keep derived project state in SQLite.** Values such as `leading_branch`, `current_branch`, branch status, agent worktree paths, agent branch names, and provider process/session state belong in SQLite/runtime memory only. In particular, `leading_branch` may be parsed from older config files to repair SQLite, but saved/generated config must omit it so autodetection is not pinned into portable config.
+- **Startup command execution shell is global config, not project state.** Project config owns the command text; `[startup_command_terminal]` owns the system-wide shell and args used to run it. Keep this out of SQLite and UI-only state so shell behavior stays portable and reviewable in config.
+- **Config wins for explicit project preferences.** When a project exists in both config and SQLite, explicit config values for safe preference fields should update SQLite on startup/reload. SQLite may fill missing config fields, but should not override a value the user wrote in config. Reserve hard sync conflicts for project identity ambiguity: duplicate ids/paths, same id with different expanded paths, or same expanded path with different ids.
 
 ### UI and Navigation
 
@@ -32,6 +36,7 @@ Principles that guide every decision in dux. If a change conflicts with a tenet,
 
 - **Worktrees are user data.** Never removed or mutated casually. Deletion requires explicit user confirmation.
 - **Git operations are conservative.** Source checkout refresh uses `--ff-only`. Destructive operations require confirmation.
+- **Commit messages are plain sentences.** Do not use conventional commit prefixes such as `feat:`, `fix:`, or `chore:`. Do not add structured commit trailers such as `Constraint:`, `Confidence:`, `Scope-risk:`, or `Tested:` unless the user explicitly asks for them.
 - **Prefer explicit failure over silent waiting.** If something fails, say so immediately with context.
 
 ### Tone

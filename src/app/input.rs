@@ -127,6 +127,9 @@ enum PromptMouseTarget {
     ConfigReloadFailedClose,
     ConfigReloadFailedApply,
     AddProjectFailedOk,
+    StartupCommandLogItem(usize),
+    StartupCommandLogsClose,
+    StartupCommandInput,
     Checkbox(OverlayCheckboxId),
     RenameInput,
     NameNewAgentInput,
@@ -210,12 +213,17 @@ impl ButtonPressedTarget {
                 Some(ButtonPressedTarget::ConfigReloadFailedApply)
             }
             PromptMouseTarget::AddProjectFailedOk => Some(ButtonPressedTarget::AddProjectFailedOk),
+            PromptMouseTarget::StartupCommandLogsClose => {
+                Some(ButtonPressedTarget::StartupCommandLogsClose)
+            }
             PromptMouseTarget::CommandInput
             | PromptMouseTarget::CommandItem(_)
             | PromptMouseTarget::BrowseProjectInput
             | PromptMouseTarget::BrowseProjectItem(_)
             | PromptMouseTarget::PickEditorItem(_)
             | PromptMouseTarget::PickProjectWorktreeItem(_)
+            | PromptMouseTarget::StartupCommandLogItem(_)
+            | PromptMouseTarget::StartupCommandInput
             | PromptMouseTarget::ChangeThemeItem(_)
             | PromptMouseTarget::ChangeAgentProviderItem(_)
             | PromptMouseTarget::ChangeDefaultProviderItem(_)
@@ -233,9 +241,24 @@ fn contains_point(rect: Rect, column: u16, row: u16) -> bool {
     rect.width > 0
         && rect.height > 0
         && column >= rect.x
-        && column < rect.x + rect.width
+        && column < rect.x.saturating_add(rect.width)
         && row >= rect.y
-        && row < rect.y + rect.height
+        && row < rect.y.saturating_add(rect.height)
+}
+
+fn relative_point(rect: Rect, column: u16, row: u16) -> Option<(u16, u16)> {
+    contains_point(rect, column, row)
+        .then_some((column.saturating_sub(rect.x), row.saturating_sub(rect.y)))
+}
+
+fn relative_point_clamped(rect: Rect, column: u16, row: u16) -> (u16, u16) {
+    let column = column
+        .max(rect.x)
+        .min(rect.x.saturating_add(rect.width.saturating_sub(1)));
+    let row = row
+        .max(rect.y)
+        .min(rect.y.saturating_add(rect.height.saturating_sub(1)));
+    (column.saturating_sub(rect.x), row.saturating_sub(rect.y))
 }
 
 fn cursor_from_single_line_position(
@@ -279,6 +302,49 @@ fn pct_from_columns(columns: u16, total_width: u16) -> u16 {
     (((u32::from(columns) * 100) + (u32::from(total_width) / 2)) / u32::from(total_width)) as u16
 }
 
+pub(crate) fn startup_command_log_visual_lines(content: &str, width: u16) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let width = usize::from(width);
+    let mut lines = Vec::new();
+    for line in content.split('\n') {
+        let chars = line.chars().collect::<Vec<_>>();
+        if chars.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+        for chunk in chars.chunks(width) {
+            lines.push(chunk.iter().collect());
+        }
+    }
+    lines
+}
+
+fn startup_command_log_max_scroll(content: &str, body: Option<Rect>) -> u16 {
+    let Some(body) = body else {
+        return u16::MAX;
+    };
+    u16::try_from(startup_command_log_visual_lines(content, body.width).len())
+        .unwrap_or(u16::MAX)
+        .saturating_sub(body.height)
+}
+
+fn scroll_startup_command_log(
+    prompt: &mut StartupCommandLogPrompt,
+    body: Option<Rect>,
+    delta: i16,
+) {
+    if delta >= 0 {
+        prompt.scroll_offset = prompt
+            .scroll_offset
+            .saturating_add(delta as u16)
+            .min(startup_command_log_max_scroll(&prompt.content, body));
+    } else {
+        prompt.scroll_offset = prompt.scroll_offset.saturating_sub(delta.unsigned_abs());
+    }
+}
+
 impl App {
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
         // Prompts take precedence over every other input target so modal text
@@ -286,6 +352,10 @@ impl App {
         // previously active.
         if !matches!(self.prompt, PromptState::None) {
             return self.handle_prompt_key(key);
+        }
+        if matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog) {
+            self.handle_startup_log_viewer_key(key);
+            return Ok(false);
         }
         // Macro bar consumes all keys when open.
         if self.macro_bar.is_some() {
@@ -348,6 +418,10 @@ impl App {
         // global shortcuts.
         if self.input_target == InputTarget::CommitMessage {
             self.handle_commit_input_key(key)?;
+            return Ok(false);
+        }
+        if self.input_target == InputTarget::StartupCommand {
+            self.handle_startup_command_input_key(key)?;
             return Ok(false);
         }
         // Check if a Global binding should defer to a pane-scoped binding.
@@ -766,6 +840,141 @@ impl App {
         }
     }
 
+    fn startup_log_viewer_max_scroll(&self) -> u16 {
+        let Some(viewer) = &self.startup_log_viewer else {
+            return 0;
+        };
+        let Some(area) = self.mouse_layout.agent_term else {
+            return 0;
+        };
+        u16::try_from(startup_command_log_visual_lines(&viewer.content, area.width).len())
+            .unwrap_or(u16::MAX)
+            .saturating_sub(area.height)
+    }
+
+    fn scroll_startup_log_viewer(&mut self, delta: i16) {
+        let max_scroll = self.startup_log_viewer_max_scroll();
+        let Some(viewer) = &mut self.startup_log_viewer else {
+            return;
+        };
+        if delta >= 0 {
+            viewer.scroll_offset = viewer
+                .scroll_offset
+                .saturating_add(delta as u16)
+                .min(max_scroll);
+        } else {
+            viewer.scroll_offset = viewer.scroll_offset.saturating_sub(delta.unsigned_abs());
+        }
+    }
+
+    fn update_startup_log_search_scroll(&mut self) {
+        let Some(viewer) = &mut self.startup_log_viewer else {
+            return;
+        };
+        let query = viewer.search.text.trim().to_lowercase();
+        if query.is_empty() {
+            viewer.scroll_offset = 0;
+            return;
+        }
+        let Some(width) = self.mouse_layout.agent_term.map(|area| area.width) else {
+            return;
+        };
+        if let Some(index) = startup_command_log_visual_lines(&viewer.content, width)
+            .iter()
+            .position(|line| line.to_lowercase().contains(&query))
+        {
+            viewer.scroll_offset = u16::try_from(index).unwrap_or(u16::MAX);
+        } else {
+            self.set_info("No startup command log search matches.");
+        }
+    }
+
+    fn handle_startup_log_viewer_key(&mut self, key: KeyEvent) {
+        let startup_action = self.bindings.lookup(&key, BindingScope::StartupCommandLogs);
+        let center_action = self.bindings.lookup(&key, BindingScope::Center);
+        let global_action = self.bindings.lookup(&key, BindingScope::Global);
+        let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
+        let action = startup_action
+            .or(center_action)
+            .or(global_action)
+            .or(dialog_action);
+
+        if self
+            .startup_log_viewer
+            .as_ref()
+            .is_some_and(|viewer| viewer.searching)
+        {
+            match action {
+                Some(Action::CloseOverlay | Action::SearchToggle | Action::Confirm) => {
+                    if let Some(viewer) = &mut self.startup_log_viewer {
+                        viewer.searching = false;
+                    }
+                }
+                _ => {
+                    let changed = self
+                        .startup_log_viewer
+                        .as_mut()
+                        .is_some_and(|viewer| viewer.search.handle_key(key));
+                    if changed {
+                        self.update_startup_log_search_scroll();
+                    }
+                }
+            }
+            return;
+        }
+
+        match action {
+            Some(Action::CloseOverlay) => {
+                self.close_top_overlay();
+            }
+            Some(Action::SearchToggle) => {
+                if let Some(viewer) = &mut self.startup_log_viewer {
+                    viewer.searching = true;
+                }
+            }
+            Some(Action::ScrollPageDown) => {
+                let page = self
+                    .mouse_layout
+                    .agent_term
+                    .map(|area| area.height)
+                    .unwrap_or(10);
+                self.scroll_startup_log_viewer(page.max(1) as i16);
+            }
+            Some(Action::ScrollPageUp) => {
+                let page = self
+                    .mouse_layout
+                    .agent_term
+                    .map(|area| area.height)
+                    .unwrap_or(10);
+                self.scroll_startup_log_viewer(-(page.max(1) as i16));
+            }
+            Some(Action::ScrollLineDown | Action::MoveDown) => {
+                self.scroll_startup_log_viewer(1);
+            }
+            Some(Action::ScrollLineUp | Action::MoveUp) => {
+                self.scroll_startup_log_viewer(-1);
+            }
+            Some(Action::ScrollToBottom) => {
+                let max_scroll = self.startup_log_viewer_max_scroll();
+                if let Some(viewer) = &mut self.startup_log_viewer {
+                    viewer.scroll_offset = max_scroll;
+                }
+            }
+            Some(Action::ScrollToTop) => {
+                if let Some(viewer) = &mut self.startup_log_viewer {
+                    viewer.scroll_offset = 0;
+                }
+            }
+            Some(Action::OpenStartupCommandLogFile) => {
+                self.open_selected_startup_command_log();
+            }
+            Some(Action::OpenStartupCommandLogFolder) => {
+                self.open_selected_startup_command_log_folder();
+            }
+            _ => {}
+        }
+    }
+
     fn handle_files_search_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
@@ -860,6 +1069,24 @@ impl App {
         // TextInput handles Enter (newline), Up/Down (line nav), and all
         // editing keys in multiline mode.
         self.commit_input.handle_key(key);
+        Ok(())
+    }
+
+    fn handle_startup_command_input_key(&mut self, key: KeyEvent) -> Result<()> {
+        if let Some(Action::ExitCommitInput) = self.bindings.lookup(&key, BindingScope::CommitInput)
+        {
+            self.input_target = InputTarget::None;
+            return Ok(());
+        }
+        if let PromptState::ConfigureStartupCommand { input, .. } = &mut self.prompt {
+            if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                input.clear();
+            } else {
+                input.handle_key(key);
+            }
+        } else {
+            self.input_target = InputTarget::None;
+        }
         Ok(())
     }
 
@@ -2395,6 +2622,137 @@ impl App {
             return Ok(false);
         }
 
+        if matches!(self.prompt, PromptState::ConfigureStartupCommand { .. })
+            && self.input_target == InputTarget::StartupCommand
+        {
+            self.handle_startup_command_input_key(key)?;
+            return Ok(false);
+        }
+
+        if let PromptState::ConfigureStartupCommand { input, .. } = &mut self.prompt {
+            let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
+            let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
+            let files_action = self.bindings.lookup(&key, BindingScope::Files);
+            if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                input.clear();
+                return Ok(false);
+            }
+            match palette_action.or(dialog_action).or(files_action) {
+                Some(Action::CloseOverlay) => {
+                    self.prompt = PromptState::None;
+                    self.input_target = InputTarget::None;
+                }
+                Some(Action::Confirm) => {
+                    self.apply_configure_startup_command()?;
+                }
+                Some(Action::EngageCommitInput) => {
+                    self.input_target = InputTarget::StartupCommand;
+                    input.move_end();
+                }
+                _ => {
+                    if matches!(
+                        key.code,
+                        KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
+                    ) {
+                        self.input_target = InputTarget::StartupCommand;
+                        input.handle_key(key);
+                    }
+                }
+            }
+            return Ok(false);
+        }
+
+        if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
+            let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
+            let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
+            let center_action = self.bindings.lookup(&key, BindingScope::Center);
+            let help_action = self.bindings.lookup(&key, BindingScope::Help);
+            let startup_logs_action = self.bindings.lookup(&key, BindingScope::StartupCommandLogs);
+            let body = match self.overlay_layout.active {
+                OverlayMouseLayout::StartupCommandLogs { body, .. } if body.height > 0 => {
+                    Some(body)
+                }
+                _ => None,
+            };
+            let page = body.map(|body| body.height.max(1)).unwrap_or(10) as i16;
+            if prompt.searching {
+                let mut select_after_filter = None;
+                match startup_logs_action.or(dialog_action) {
+                    Some(Action::CloseOverlay | Action::SearchToggle | Action::Confirm) => {
+                        prompt.searching = false;
+                    }
+                    _ if matches!(
+                        key.code,
+                        KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
+                    ) =>
+                    {
+                        prompt.filter.handle_key(key);
+                        select_after_filter = Self::startup_command_log_filtered_indices(prompt)
+                            .first()
+                            .copied();
+                    }
+                    _ => {}
+                }
+                if let Some(index) = select_after_filter {
+                    self.select_startup_command_log(index);
+                }
+                return Ok(false);
+            }
+
+            match startup_logs_action
+                .or(palette_action)
+                .or(dialog_action)
+                .or(center_action)
+                .or(help_action)
+            {
+                Some(Action::CloseOverlay) => {
+                    self.prompt = PromptState::None;
+                    self.startup_log_selection = None;
+                }
+                Some(Action::SearchToggle) => {
+                    prompt.searching = true;
+                }
+                Some(Action::MoveDown) => {
+                    let visible = Self::startup_command_log_filtered_indices(prompt);
+                    let visual = Self::startup_command_log_selected_visual_index(prompt, &visible)
+                        .unwrap_or(0);
+                    if let Some(selected) = visible.get(visual + 1).copied() {
+                        self.select_startup_command_log(selected);
+                    }
+                }
+                Some(Action::MoveUp) => {
+                    let visible = Self::startup_command_log_filtered_indices(prompt);
+                    let visual = Self::startup_command_log_selected_visual_index(prompt, &visible)
+                        .unwrap_or(0);
+                    if visual > 0
+                        && let Some(selected) = visible.get(visual - 1).copied()
+                    {
+                        self.select_startup_command_log(selected);
+                    }
+                }
+                Some(Action::ScrollPageDown) => {
+                    scroll_startup_command_log(prompt, body, page);
+                }
+                Some(Action::ScrollPageUp) => {
+                    scroll_startup_command_log(prompt, body, -page);
+                }
+                Some(Action::ScrollLineDown) => {
+                    scroll_startup_command_log(prompt, body, 1);
+                }
+                Some(Action::ScrollLineUp) => {
+                    scroll_startup_command_log(prompt, body, -1);
+                }
+                Some(Action::OpenStartupCommandLogFile | Action::OpenEntry | Action::Confirm) => {
+                    self.open_selected_startup_command_log();
+                }
+                Some(Action::OpenStartupCommandLogFolder) => {
+                    self.open_selected_startup_command_log_folder();
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+
         if let PromptState::ConfigReloadFailed {
             recover_old_config,
             focus,
@@ -3244,6 +3602,23 @@ impl App {
             } => Self::overlay_row_at(list, offset, items, column, row)
                 .map(PromptMouseTarget::PickProjectWorktreeItem),
             OverlayMouseLayout::ResourceMonitor { .. } => None,
+            OverlayMouseLayout::StartupCommandLogs {
+                list,
+                items,
+                offset,
+                close_button,
+                ..
+            } => {
+                if contains_point(close_button, column, row) {
+                    Some(PromptMouseTarget::StartupCommandLogsClose)
+                } else {
+                    Self::overlay_row_at(list, offset, items, column, row)
+                        .map(PromptMouseTarget::StartupCommandLogItem)
+                }
+            }
+            OverlayMouseLayout::ConfigureStartupCommand { input } => {
+                contains_point(input, column, row).then_some(PromptMouseTarget::StartupCommandInput)
+            }
             OverlayMouseLayout::ChangeTheme {
                 list,
                 items,
@@ -4445,6 +4820,18 @@ impl App {
         }
     }
 
+    fn set_startup_command_cursor_from_mouse(&mut self, column: u16, row: u16) {
+        let input_area = match self.overlay_layout.active {
+            OverlayMouseLayout::ConfigureStartupCommand { input } => input,
+            _ => return,
+        };
+        if let PromptState::ConfigureStartupCommand { input, .. } = &mut self.prompt {
+            let display_row = usize::from(row.saturating_sub(input_area.y));
+            let display_col = usize::from(column.saturating_sub(input_area.x));
+            input.set_cursor_from_display_pos(display_row, display_col);
+        }
+    }
+
     fn focus_next_name_new_agent_control(&mut self, forward: bool) {
         if let PromptState::NameNewAgent { focus, .. } = &mut self.prompt {
             *focus = match (*focus, forward) {
@@ -4636,6 +5023,45 @@ impl App {
             return false;
         }
 
+        if matches!(self.prompt, PromptState::StartupCommandLogs(_))
+            && let OverlayMouseLayout::StartupCommandLogs { area, body, .. } =
+                self.overlay_layout.active
+        {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left)
+                    if !contains_point(area, mouse.column, mouse.row) =>
+                {
+                    self.prompt = PromptState::None;
+                    self.startup_log_selection = None;
+                    return false;
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::Up(MouseButton::Left)
+                    if contains_point(body, mouse.column, mouse.row)
+                        || self
+                            .startup_log_selection
+                            .as_ref()
+                            .is_some_and(|selection| selection.dragging) =>
+                {
+                    return self.handle_startup_log_selection_mouse(mouse);
+                }
+                MouseEventKind::ScrollUp if contains_point(body, mouse.column, mouse.row) => {
+                    if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
+                        scroll_startup_command_log(prompt, Some(body), -(MOUSE_WHEEL_LINES as i16));
+                    }
+                    return false;
+                }
+                MouseEventKind::ScrollDown if contains_point(body, mouse.column, mouse.row) => {
+                    if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
+                        scroll_startup_command_log(prompt, Some(body), MOUSE_WHEEL_LINES as i16);
+                    }
+                    return false;
+                }
+                _ => {}
+            }
+        }
+
         // Watchdog: a press cannot outlive the modal it was made in. If
         // the prompt closed between Down and a follow-up event (e.g. via
         // a key handler), drop any stale press before doing anything
@@ -4748,6 +5174,14 @@ impl App {
                     self.set_error(format!("{err:#}"));
                 }
             }
+            PromptMouseTarget::StartupCommandLogItem(index) => {
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                self.select_startup_command_log_visual_index(index);
+                if double_click {
+                    self.open_selected_startup_command_log();
+                }
+            }
             PromptMouseTarget::ChangeThemeItem(index) => {
                 let double_click =
                     self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
@@ -4806,6 +5240,14 @@ impl App {
             PromptMouseTarget::NameNewAgentInput => {
                 self.set_name_new_agent_cursor_from_mouse(mouse.column);
             }
+            PromptMouseTarget::StartupCommandInput => {
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::StartupCommandInput, None);
+                self.set_startup_command_cursor_from_mouse(mouse.column, mouse.row);
+                if double_click {
+                    self.input_target = InputTarget::StartupCommand;
+                }
+            }
             // Button targets are handled by `activate_button` and never
             // reach this path — `from_prompt_target` returns `Some(_)`
             // for all of them, sending mouse-down through the press
@@ -4838,7 +5280,8 @@ impl App {
             | PromptMouseTarget::ConfirmUseExistingBranchUse
             | PromptMouseTarget::ConfigReloadFailedClose
             | PromptMouseTarget::ConfigReloadFailedApply
-            | PromptMouseTarget::AddProjectFailedOk => {
+            | PromptMouseTarget::AddProjectFailedOk
+            | PromptMouseTarget::StartupCommandLogsClose => {
                 debug_assert!(
                     false,
                     "button target {:?} should be dispatched via activate_button, not \
@@ -4959,6 +5402,10 @@ impl App {
             }
             ButtonPressedTarget::ConfigReloadFailedApply => self.resolve_config_reload_failed(true),
             ButtonPressedTarget::AddProjectFailedOk => self.resolve_add_project_failed(),
+            ButtonPressedTarget::StartupCommandLogsClose => {
+                self.prompt = PromptState::None;
+                false
+            }
         }
     }
 
@@ -5303,6 +5750,39 @@ impl App {
             return false;
         }
 
+        if matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog) {
+            let inside_log = self
+                .mouse_layout
+                .agent_term
+                .is_some_and(|rect| contains_point(rect, mouse.column, mouse.row));
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::Up(MouseButton::Left)
+                    if inside_log
+                        || self
+                            .terminal_selection
+                            .as_ref()
+                            .is_some_and(|selection| selection.dragging) =>
+                {
+                    self.handle_terminal_selection_mouse(mouse);
+                }
+                MouseEventKind::Down(MouseButton::Left) if !inside_log => {
+                    self.close_top_overlay();
+                }
+                MouseEventKind::ScrollDown if inside_log => {
+                    self.terminal_selection = None;
+                    self.scroll_startup_log_viewer(MOUSE_WHEEL_LINES as i16);
+                }
+                MouseEventKind::ScrollUp if inside_log => {
+                    self.terminal_selection = None;
+                    self.scroll_startup_log_viewer(-(MOUSE_WHEEL_LINES as i16));
+                }
+                _ => {}
+            }
+            return false;
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row) {
@@ -5447,13 +5927,8 @@ impl App {
     /// Returns `None` if the point is outside the terminal area.
     fn screen_to_grid(&self, screen_col: u16, screen_row: u16) -> Option<TermGridPos> {
         let term_area = self.mouse_layout.agent_term?;
-        if !contains_point(term_area, screen_col, screen_row) {
-            return None;
-        }
-        Some(TermGridPos {
-            row: screen_row - term_area.y,
-            col: screen_col - term_area.x,
-        })
+        let (col, row) = relative_point(term_area, screen_col, screen_row)?;
+        Some(TermGridPos { row, col })
     }
 
     /// Map screen coordinates to terminal grid position, clamping to the
@@ -5461,14 +5936,7 @@ impl App {
     /// nearest boundary when the mouse leaves the terminal area.
     fn screen_to_grid_clamped(&self, screen_col: u16, screen_row: u16) -> Option<TermGridPos> {
         let term_area = self.mouse_layout.agent_term?;
-        let col = screen_col
-            .max(term_area.x)
-            .min(term_area.x + term_area.width.saturating_sub(1))
-            - term_area.x;
-        let row = screen_row
-            .max(term_area.y)
-            .min(term_area.y + term_area.height.saturating_sub(1))
-            - term_area.y;
+        let (col, row) = relative_point_clamped(term_area, screen_col, screen_row);
         Some(TermGridPos { row, col })
     }
 
@@ -5513,6 +5981,10 @@ impl App {
     /// Extract text from the terminal snapshot within the active selection
     /// and copy it to the system clipboard.
     fn copy_terminal_selection(&mut self) {
+        if matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog) {
+            self.copy_startup_log_selection();
+            return;
+        }
         let sel = match self.terminal_selection.clone() {
             Some(s) => s,
             None => return,
@@ -5573,6 +6045,142 @@ impl App {
             let _ = self.clipboard.copy_text(
                 &text,
                 "Terminal text copied to clipboard.",
+                &self.worker_tx,
+            );
+        }
+    }
+
+    fn screen_to_startup_log_grid(&self, screen_col: u16, screen_row: u16) -> Option<TermGridPos> {
+        let OverlayMouseLayout::StartupCommandLogs { body, .. } = self.overlay_layout.active else {
+            return None;
+        };
+        let (col, row) = relative_point(body, screen_col, screen_row)?;
+        let scroll_offset = match &self.prompt {
+            PromptState::StartupCommandLogs(prompt) => prompt.scroll_offset,
+            _ => 0,
+        };
+        Some(TermGridPos {
+            row: scroll_offset.saturating_add(row),
+            col,
+        })
+    }
+
+    fn screen_to_startup_log_grid_clamped(
+        &self,
+        screen_col: u16,
+        screen_row: u16,
+    ) -> Option<TermGridPos> {
+        let OverlayMouseLayout::StartupCommandLogs { body, .. } = self.overlay_layout.active else {
+            return None;
+        };
+        let scroll_offset = match &self.prompt {
+            PromptState::StartupCommandLogs(prompt) => prompt.scroll_offset,
+            _ => 0,
+        };
+        let (col, row) = relative_point_clamped(body, screen_col, screen_row);
+        Some(TermGridPos {
+            row: scroll_offset.saturating_add(row),
+            col,
+        })
+    }
+
+    fn handle_startup_log_selection_mouse(&mut self, mouse_ev: MouseEvent) -> bool {
+        match mouse_ev.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(pos) = self.screen_to_startup_log_grid(mouse_ev.column, mouse_ev.row) {
+                    self.startup_log_selection = Some(TerminalSelection {
+                        anchor: pos,
+                        end: pos,
+                        dragging: true,
+                    });
+                    return true;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let pos = self.screen_to_startup_log_grid_clamped(mouse_ev.column, mouse_ev.row);
+                if let Some(sel) = &mut self.startup_log_selection
+                    && sel.dragging
+                    && let Some(pos) = pos
+                {
+                    sel.end = pos;
+                    return true;
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(sel) = &mut self.startup_log_selection
+                    && sel.dragging
+                {
+                    sel.dragging = false;
+                    if sel.anchor == sel.end {
+                        self.startup_log_selection = None;
+                    } else {
+                        self.copy_startup_log_selection();
+                    }
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn copy_startup_log_selection(&mut self) {
+        let (sel, content, width) = match (
+            self.fullscreen_overlay,
+            &self.startup_log_viewer,
+            self.mouse_layout.agent_term,
+            &self.prompt,
+            self.overlay_layout.active,
+        ) {
+            (FullscreenOverlay::StartupLog, Some(viewer), Some(body), _, _) => {
+                let Some(sel) = self.terminal_selection.clone() else {
+                    return;
+                };
+                (sel, viewer.content.clone(), body.width)
+            }
+            (
+                _,
+                _,
+                _,
+                PromptState::StartupCommandLogs(prompt),
+                OverlayMouseLayout::StartupCommandLogs { body, .. },
+            ) => {
+                let Some(sel) = self.startup_log_selection.clone() else {
+                    return;
+                };
+                (sel, prompt.content.clone(), body.width)
+            }
+            _ => return,
+        };
+        let lines = startup_command_log_visual_lines(&content, width);
+        let (start, end) = sel.ordered();
+        let mut selected = Vec::new();
+        for row in start.row..=end.row {
+            let Some(line) = lines.get(row as usize) else {
+                continue;
+            };
+            let start_col = if row == start.row {
+                start.col as usize
+            } else {
+                0
+            };
+            let end_col = if row == end.row {
+                end.col as usize + 1
+            } else {
+                line.chars().count()
+            };
+            let text = line
+                .chars()
+                .skip(start_col)
+                .take(end_col.saturating_sub(start_col))
+                .collect::<String>();
+            selected.push(text.trim_end().to_string());
+        }
+        let text = selected.join("\n");
+        if !text.is_empty() {
+            let _ = self.clipboard.copy_text(
+                &text,
+                "Startup command log text copied to clipboard.",
                 &self.worker_tx,
             );
         }
@@ -5665,7 +6273,8 @@ mod tests {
         MouseClickTarget, MouseLayoutState, NameNewAgentFocus, NonDefaultBranchAction,
         OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout, OverlayMouseLayoutState,
         PickProjectWorktreePrompt, ProcessInfo, ProjectWorktreeEntry, PromptState, PullTarget,
-        ResolvedPullRequest, ResourceStats, RightSection, RuntimeTargetId, TextInput, WorkerEvent,
+        ResolvedPullRequest, ResourceStats, RightSection, RuntimeTargetId, StartupCommandLogPrompt,
+        TextInput, WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
@@ -5799,6 +6408,7 @@ mod tests {
             default_provider: ProviderKind::from_str("codex"),
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
+            startup_command: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -5811,6 +6421,7 @@ mod tests {
                 default_provider: None,
                 leading_branch: project.leading_branch.clone(),
                 auto_reopen_agents: project.auto_reopen_agents,
+                startup_command: project.startup_command.clone(),
             })
             .expect("seed project");
         let session = AgentSession {
@@ -5867,6 +6478,7 @@ mod tests {
             last_help_height: 0,
             last_help_lines: 0,
             fullscreen_overlay: FullscreenOverlay::None,
+            startup_log_viewer: None,
             status: StatusLine::new("ready"),
             prompt: PromptState::None,
             input_target: InputTarget::None,
@@ -5933,6 +6545,7 @@ mod tests {
             snapshot_buf: crate::pty::TerminalSnapshot::empty(),
             last_snapshot_id: None,
             terminal_selection: None,
+            startup_log_selection: None,
             _single_instance_lock: single_instance_lock,
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
@@ -5997,6 +6610,12 @@ mod tests {
             list: Rect::new(11, 9, 58, 10),
             items,
             offset: 0,
+        };
+    }
+
+    fn install_configure_startup_command_overlay(app: &mut App) {
+        app.overlay_layout.active = OverlayMouseLayout::ConfigureStartupCommand {
+            input: Rect::new(10, 6, 40, 4),
         };
     }
 
@@ -6129,6 +6748,43 @@ not_a_real_action = ["x"]
             items,
             offset: 0,
         };
+    }
+
+    fn install_startup_command_logs_overlay(app: &mut App, items: usize) {
+        app.overlay_layout.active = OverlayMouseLayout::StartupCommandLogs {
+            area: Rect::new(10, 3, 80, 18),
+            list: Rect::new(12, 5, 30, 12),
+            body: Rect::new(44, 5, 40, 12),
+            items,
+            offset: 0,
+            close_button: Rect::new(42, 18, 16, 3),
+        };
+    }
+
+    fn startup_command_logs_prompt() -> StartupCommandLogPrompt {
+        StartupCommandLogPrompt {
+            scope_label: "demo".to_string(),
+            entries: vec![
+                crate::startup::StartupCommandLogEntry {
+                    path: PathBuf::from("/tmp/startup-command.log"),
+                    display_name: "startup-command.log".to_string(),
+                    modified_at: None,
+                },
+                crate::startup::StartupCommandLogEntry {
+                    path: PathBuf::from("/tmp/install.log"),
+                    display_name: "install.log".to_string(),
+                    modified_at: None,
+                },
+            ],
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            content: (0..30)
+                .map(|line| format!("startup command output line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            scroll_offset: 0,
+        }
     }
 
     fn install_confirm_delete_overlay(app: &mut App) {
@@ -6401,6 +7057,137 @@ not_a_real_action = ["x"]
         assert!(matches!(app.prompt, PromptState::RenameSession { .. }));
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    #[test]
+    fn configure_startup_command_edit_mode_keeps_enter_in_input() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfigureStartupCommand {
+            project_id: "project-1".to_string(),
+            project_name: "demo".to_string(),
+            input: TextInput::with_text("npm install".to_string()).with_multiline(6),
+        };
+        app.input_target = InputTarget::StartupCommand;
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::ConfigureStartupCommand { input, .. } => {
+                assert_eq!(input.text, "npm install\nn");
+            }
+            other => panic!("expected configure startup command prompt, got {other:?}"),
+        }
+        assert_eq!(app.input_target, InputTarget::StartupCommand);
+    }
+
+    #[test]
+    fn configure_startup_command_escape_exits_edit_mode_only() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfigureStartupCommand {
+            project_id: "project-1".to_string(),
+            project_name: "demo".to_string(),
+            input: TextInput::with_text("npm install".to_string()).with_multiline(6),
+        };
+        app.input_target = InputTarget::StartupCommand;
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(matches!(
+            app.prompt,
+            PromptState::ConfigureStartupCommand { .. }
+        ));
+        assert_eq!(app.input_target, InputTarget::None);
+    }
+
+    #[test]
+    fn configure_startup_command_ctrl_d_clears_input() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfigureStartupCommand {
+            project_id: "project-1".to_string(),
+            project_name: "demo".to_string(),
+            input: TextInput::with_text("npm install".to_string()).with_multiline(6),
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::ConfigureStartupCommand { input, .. } => {
+                assert_eq!(input.text, "");
+                assert_eq!(input.cursor, 0);
+            }
+            other => panic!("expected configure startup command prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn configure_startup_command_double_click_enters_edit_mode() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfigureStartupCommand {
+            project_id: "project-1".to_string(),
+            project_name: "demo".to_string(),
+            input: TextInput::with_text("npm install\nnpm test".to_string()).with_multiline(6),
+        };
+        install_configure_startup_command_overlay(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 14, 7));
+        assert_eq!(app.input_target, InputTarget::None);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 14, 7));
+
+        assert_eq!(app.input_target, InputTarget::StartupCommand);
+        match &app.prompt {
+            PromptState::ConfigureStartupCommand { input, .. } => {
+                assert!(input.cursor > 0);
+            }
+            other => panic!("expected configure startup command prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn configure_startup_command_empty_non_editing_shows_themed_placeholder() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfigureStartupCommand {
+            project_id: "project-1".to_string(),
+            project_name: "demo".to_string(),
+            input: TextInput::new()
+                .with_multiline(6)
+                .with_placeholder("Enter startup command..."),
+        };
+        app.input_target = InputTarget::None;
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let buffer = terminal.backend().buffer();
+        let rendered: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(
+            rendered.contains("Enter startup command..."),
+            "expected placeholder in non-editing mode, got: {rendered}"
+        );
+
+        let OverlayMouseLayout::ConfigureStartupCommand { input } = app.overlay_layout.active
+        else {
+            panic!("expected configure startup command overlay layout");
+        };
+        let placeholder_cell = (input.y..input.y + input.height)
+            .flat_map(|y| (input.x..input.x + input.width).map(move |x| (x, y)))
+            .find_map(|pos| {
+                let cell = buffer.cell(pos)?;
+                (cell.symbol() == "E").then_some(cell)
+            })
+            .expect("placeholder first cell");
+        assert_eq!(placeholder_cell.fg, app.theme.hint_desc_fg);
     }
 
     #[test]
@@ -7305,6 +8092,7 @@ not_a_real_action = ["x"]
                 status_message: "imported".to_string(),
                 repo_path: app.projects[0].path.clone(),
                 owns_worktree: false,
+                startup_result: None,
             },
         );
         app.worker_tx
@@ -8266,6 +9054,7 @@ not_a_real_action = ["x"]
                 default_provider: ProviderKind::from_str("codex"),
                 leading_branch: Some("main".to_string()),
                 auto_reopen_agents: None,
+                startup_command: None,
                 current_branch: "main".to_string(),
                 branch_status: ProjectBranchStatus::Unknown,
                 path_missing: false,
@@ -10589,6 +11378,308 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn startup_command_logs_click_outside_closes_modal() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
+        install_startup_command_logs_overlay(&mut app, 1);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0, 0));
+
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    #[test]
+    fn startup_command_logs_click_inside_does_not_close_modal() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
+        install_startup_command_logs_overlay(&mut app, 1);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 45, 6));
+
+        assert!(matches!(app.prompt, PromptState::StartupCommandLogs(_)));
+    }
+
+    #[test]
+    fn startup_command_logs_scroll_wheel_moves_output() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
+        install_startup_command_logs_overlay(&mut app, 1);
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, 45, 6));
+
+        match &app.prompt {
+            PromptState::StartupCommandLogs(prompt) => assert_eq!(prompt.scroll_offset, 3),
+            other => panic!("expected startup logs prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn startup_command_logs_scroll_clamps_at_end() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
+        install_startup_command_logs_overlay(&mut app, 1);
+
+        for _ in 0..20 {
+            app.handle_mouse(mouse(MouseEventKind::ScrollDown, 45, 6));
+        }
+
+        match &app.prompt {
+            PromptState::StartupCommandLogs(prompt) => assert_eq!(prompt.scroll_offset, 18),
+            other => panic!("expected startup logs prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn startup_command_logs_page_scroll_uses_output_height() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
+        install_startup_command_logs_overlay(&mut app, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::StartupCommandLogs(prompt) => assert_eq!(prompt.scroll_offset, 12),
+            other => panic!("expected startup logs prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn startup_command_logs_close_button_closes_modal() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
+        install_startup_command_logs_overlay(&mut app, 1);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 45, 19));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 45, 19));
+
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    #[test]
+    fn startup_command_logs_drag_selection_copies_text() {
+        let mut app = test_app(default_bindings());
+        app.clipboard = Clipboard::from_fn(clipboard_ok);
+        app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
+        install_startup_command_logs_overlay(&mut app, 2);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 44, 5));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 52, 5));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 52, 5));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        app.drain_events();
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
+        assert_eq!(
+            app.status.text(),
+            "Startup command log text copied to clipboard."
+        );
+    }
+
+    #[test]
+    fn startup_command_logs_single_click_output_does_not_crash() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
+
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let body = match app.overlay_layout.active {
+            OverlayMouseLayout::StartupCommandLogs { body, .. } => body,
+            other => panic!("expected startup logs overlay, got {other:?}"),
+        };
+        let x = body.x;
+        let y = body.y;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame after down");
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), x, y));
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame after up");
+
+        assert!(matches!(app.prompt, PromptState::StartupCommandLogs(_)));
+        assert!(app.startup_log_selection.is_none());
+    }
+
+    #[test]
+    fn startup_command_logs_prompt_disables_raw_input_routing() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
+
+        assert!(!app.should_poll_raw_input());
+    }
+
+    #[test]
+    fn startup_command_logs_single_click_run_does_not_crash() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
+
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let list = match app.overlay_layout.active {
+            OverlayMouseLayout::StartupCommandLogs { list, .. } => list,
+            other => panic!("expected startup logs overlay, got {other:?}"),
+        };
+        let x = list.x;
+        let y = list.y;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame after row click");
+
+        assert!(matches!(app.prompt, PromptState::StartupCommandLogs(_)));
+    }
+
+    #[test]
+    fn startup_command_logs_slash_filters_runs() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
+        install_startup_command_logs_overlay(&mut app, 2);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        for ch in "install".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap();
+        }
+
+        match &app.prompt {
+            PromptState::StartupCommandLogs(prompt) => {
+                assert!(prompt.searching);
+                assert_eq!(prompt.filter.text, "install");
+                assert_eq!(prompt.selected, 1);
+            }
+            other => panic!("expected startup logs prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_startup_command_logs_opens_latest_log_fullscreen() {
+        let mut app = test_app(default_bindings());
+        let log_dir = crate::startup::agent_log_dir(&app.paths, "project-1", "session-1");
+        std::fs::create_dir_all(&log_dir).expect("log dir");
+        std::fs::write(log_dir.join("20260515T010000Z-old.log"), "old log").expect("old log");
+        std::fs::write(log_dir.join("20260515T020000Z-new.log"), "new log").expect("new log");
+
+        app.open_startup_command_logs().expect("open logs");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        app.drain_events();
+
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::StartupLog);
+        let viewer = app.startup_log_viewer.as_ref().expect("log viewer");
+        assert_eq!(viewer.display_name, "20260515T020000Z-new.log");
+        assert_eq!(viewer.content, "new log");
+    }
+
+    #[test]
+    fn startup_log_fullscreen_search_scrolls_to_match() {
+        let mut app = test_app(default_bindings());
+        app.startup_log_viewer = Some(crate::app::StartupLogViewer {
+            scope_label: "project \"demo\"".to_string(),
+            path: None,
+            display_name: "startup.log".to_string(),
+            content: (0..30)
+                .map(|line| {
+                    if line == 20 {
+                        "needle line".to_string()
+                    } else {
+                        format!("ordinary line {line}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            scroll_offset: 0,
+            search: TextInput::new(),
+            searching: false,
+        });
+        app.fullscreen_overlay = FullscreenOverlay::StartupLog;
+        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 10));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        for ch in "needle".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap();
+        }
+
+        let viewer = app.startup_log_viewer.as_ref().expect("log viewer");
+        assert!(viewer.searching);
+        assert_eq!(viewer.search.text, "needle");
+        assert_eq!(viewer.scroll_offset, 20);
+    }
+
+    #[test]
+    fn startup_log_fullscreen_drag_selection_copies_text() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.clipboard = Clipboard::from_fn(clipboard_ok);
+        app.startup_log_viewer = Some(crate::app::StartupLogViewer {
+            scope_label: "project \"demo\"".to_string(),
+            path: None,
+            display_name: "startup.log".to_string(),
+            content: "first line\nsecond line".to_string(),
+            scroll_offset: 0,
+            search: TextInput::new(),
+            searching: false,
+        });
+        app.fullscreen_overlay = FullscreenOverlay::StartupLog;
+
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let body = app.mouse_layout.agent_term.expect("log body");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x,
+            body.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            body.x + 4,
+            body.y,
+        ));
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame with selection");
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            body.x + 4,
+            body.y,
+        ));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        app.drain_events();
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
+        assert_eq!(
+            app.status.text(),
+            "Startup command log text copied to clipboard."
+        );
+    }
+
+    #[test]
     fn mouse_click_name_prompt_checkbox_toggles_randomized_name() {
         let mut app = test_app(default_bindings());
         app.create_agent_for_selected_project().unwrap();
@@ -12499,6 +13590,7 @@ cyan = "#00ffff"
             default_provider: ProviderKind::from_str("gemini"),
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
+            startup_command: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -12511,6 +13603,7 @@ cyan = "#00ffff"
                 default_provider: Some("gemini".to_string()),
                 leading_branch: Some("main".to_string()),
                 auto_reopen_agents: None,
+                startup_command: None,
             })
             .expect("seed pinned project");
         app.projects.push(pinned);
@@ -12649,6 +13742,7 @@ cyan = "#00ffff"
             default_provider: ProviderKind::from_str("gemini"),
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
+            startup_command: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -12661,6 +13755,7 @@ cyan = "#00ffff"
                 default_provider: Some("gemini".to_string()),
                 leading_branch: Some("main".to_string()),
                 auto_reopen_agents: None,
+                startup_command: None,
             })
             .expect("seed pinned project");
         app.projects.push(pinned);

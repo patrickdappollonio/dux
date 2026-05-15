@@ -157,6 +157,7 @@ impl App {
             default_provider: self.config.default_provider(),
             leading_branch: Some(leading_branch),
             auto_reopen_agents: None,
+            startup_command: None,
             current_branch: branch,
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -899,6 +900,11 @@ impl App {
         // in-memory state first and the DB call then failed, the session
         // would vanish from the UI but reappear on restart.
         self.session_store.delete_session(&session.id)?;
+        Self::spawn_delete_startup_command_logs(
+            self.paths.clone(),
+            session.project_id.clone(),
+            session.id.clone(),
+        );
 
         self.providers.remove(&session.id);
         self.running_provider_pins.remove(&session.id);
@@ -963,8 +969,8 @@ impl App {
                 (false, true, Some(branch_already_deleted)) => {
                     if branch_already_deleted {
                         self.set_info(format!(
-                            "Deleted agent (branch \"{}\" was already removed)",
-                            session.branch_name
+                            "Deleted agent (branch \"{}\" was already removed).",
+                            session.branch_name,
                         ));
                     } else {
                         let project_name = project
@@ -972,10 +978,10 @@ impl App {
                             .map(|p| p.name.as_str())
                             .unwrap_or("<unknown>");
                         self.set_info(format!(
-                            "Deleted {} agent from project \"{}\" with branch \"{}\"",
+                            "Deleted {} agent from project \"{}\" with branch \"{}\".",
                             session.provider.as_str(),
                             project_name,
-                            session.branch_name
+                            session.branch_name,
                         ));
                     }
                 }
@@ -1380,6 +1386,260 @@ impl App {
             session.branch_name
         ));
         Ok(())
+    }
+
+    pub(crate) fn open_configure_startup_command(&mut self) -> Result<()> {
+        let Some(project) = self.selected_project().cloned() else {
+            self.set_error("Select a project first.");
+            return Ok(());
+        };
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.prompt = PromptState::ConfigureStartupCommand {
+            project_id: project.id,
+            project_name: project.name.clone(),
+            input: TextInput::with_text(project.startup_command.unwrap_or_default())
+                .with_multiline(6)
+                .with_placeholder("Enter startup command..."),
+        };
+        self.input_target = InputTarget::None;
+        self.set_info("Enter a startup command for this project. Empty clears it.");
+        Ok(())
+    }
+
+    pub(crate) fn apply_configure_startup_command(&mut self) -> Result<()> {
+        let (project_id, project_name, command) = match &self.prompt {
+            PromptState::ConfigureStartupCommand {
+                project_id,
+                project_name,
+                input,
+            } => (
+                project_id.clone(),
+                project_name.clone(),
+                input.text.trim().to_string(),
+            ),
+            _ => return Ok(()),
+        };
+        self.prompt = PromptState::None;
+        self.input_target = InputTarget::None;
+        if !self.projects.iter().any(|project| project.id == project_id) {
+            self.set_error(format!("Could not find project \"{project_name}\"."));
+            return Ok(());
+        }
+        self.spawn_project_persistence(ProjectPersistenceAction::UpdateStartupCommand {
+            project_id,
+            project_name: project_name.clone(),
+            startup_command: (!command.is_empty()).then_some(command),
+        });
+        self.set_busy(format!(
+            "Saving startup command for project \"{project_name}\"..."
+        ));
+        Ok(())
+    }
+
+    pub(crate) fn rerun_startup_command_on_agent(&mut self) -> Result<()> {
+        let Some(session) = self.selected_session().cloned() else {
+            self.set_error("Select an agent first.");
+            return Ok(());
+        };
+        let Some(project) = self
+            .projects
+            .iter()
+            .find(|project| project.id == session.project_id)
+            .cloned()
+        else {
+            self.set_error("Could not find the selected agent's project.");
+            return Ok(());
+        };
+        let Some(command) = project
+            .startup_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+            .map(str::to_string)
+        else {
+            self.set_error(format!(
+                "Project \"{}\" does not have a startup command.",
+                project.name
+            ));
+            return Ok(());
+        };
+        let paths = self.paths.clone();
+        let tx = self.worker_tx.clone();
+        let branch = session.branch_name.clone();
+        let terminal = self.config.startup_command_terminal.clone();
+        std::thread::spawn(move || {
+            let result = crate::startup::run_startup_command(
+                &paths,
+                crate::startup::StartupCommandRun {
+                    project,
+                    session,
+                    command,
+                    terminal,
+                },
+            );
+            let _ = tx.send(WorkerEvent::StartupCommandRerunCompleted(result));
+        });
+        self.set_busy(format!(
+            "Rerunning startup command for agent \"{branch}\"..."
+        ));
+        Ok(())
+    }
+
+    pub(crate) fn open_startup_command_logs(&mut self) -> Result<()> {
+        let (scope_label, scope) = if let Some(session) = self.selected_session().cloned() {
+            let project_name = self.project_name_for_session(&session);
+            (
+                format!(
+                    "agent \"{}\" in project \"{}\"",
+                    session.branch_name, project_name
+                ),
+                crate::startup::StartupCommandLogScope::Agent {
+                    project_id: session.project_id,
+                    session_id: session.id,
+                },
+            )
+        } else if let Some(project) = self.selected_project().cloned() {
+            (
+                format!("project \"{}\"", project.name),
+                crate::startup::StartupCommandLogScope::Project {
+                    project_id: project.id,
+                },
+            )
+        } else {
+            self.set_error("Select an agent or project first.");
+            return Ok(());
+        };
+
+        self.spawn_startup_command_log_load(scope_label, scope);
+        Ok(())
+    }
+
+    pub(crate) fn select_startup_command_log(&mut self, selected: usize) {
+        let Some((path, count)) = (match &self.prompt {
+            PromptState::StartupCommandLogs(prompt) => prompt
+                .entries
+                .get(selected)
+                .map(|entry| (entry.path.clone(), prompt.entries.len())),
+            _ => None,
+        }) else {
+            return;
+        };
+        let content = crate::startup::read_log(&path)
+            .unwrap_or_else(|err| format!("Could not read {}: {err:#}", path.display()));
+        if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
+            prompt.selected = selected.min(count.saturating_sub(1));
+            prompt.content = content;
+            prompt.scroll_offset = 0;
+        }
+        self.startup_log_selection = None;
+    }
+
+    pub(crate) fn startup_command_log_filtered_indices(
+        prompt: &StartupCommandLogPrompt,
+    ) -> Vec<usize> {
+        let query = prompt.filter.text.trim().to_lowercase();
+        prompt
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                (query.is_empty() || entry.display_name.to_lowercase().contains(&query))
+                    .then_some(index)
+            })
+            .collect()
+    }
+
+    pub(crate) fn startup_command_log_selected_visual_index(
+        prompt: &StartupCommandLogPrompt,
+        visible_indices: &[usize],
+    ) -> Option<usize> {
+        visible_indices
+            .iter()
+            .position(|index| *index == prompt.selected)
+    }
+
+    pub(crate) fn select_startup_command_log_visual_index(&mut self, visual_index: usize) {
+        let Some(actual_index) = (match &self.prompt {
+            PromptState::StartupCommandLogs(prompt) => {
+                Self::startup_command_log_filtered_indices(prompt)
+                    .get(visual_index)
+                    .copied()
+            }
+            _ => None,
+        }) else {
+            return;
+        };
+        self.select_startup_command_log(actual_index);
+    }
+
+    pub(crate) fn open_selected_startup_command_log(&mut self) {
+        let Some(path) = self
+            .startup_log_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.path.clone())
+        else {
+            self.set_error("No startup command log is selected.");
+            return;
+        };
+        self.spawn_open_path(path, "startup command log file");
+    }
+
+    pub(crate) fn open_selected_startup_command_log_folder(&mut self) {
+        let Some(path) = self
+            .startup_log_viewer
+            .as_ref()
+            .and_then(|viewer| viewer.path.as_ref())
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+        else {
+            self.set_error("No startup command log folder is selected.");
+            return;
+        };
+        self.spawn_open_path(path, "startup command log folder");
+    }
+
+    fn spawn_open_path(&mut self, path: PathBuf, target: &'static str) {
+        let display = path.display().to_string();
+        let tx = self.worker_tx.clone();
+        std::thread::spawn(move || {
+            let result = crate::startup::open_path(&path).map_err(|err| format!("{err:#}"));
+            let _ = tx.send(WorkerEvent::OpenPathCompleted {
+                target: target.to_string(),
+                result,
+            });
+        });
+        self.set_busy(format!("Opening {target}: {display}"));
+    }
+
+    fn spawn_startup_command_log_load(
+        &mut self,
+        scope_label: String,
+        scope: crate::startup::StartupCommandLogScope,
+    ) {
+        let paths = self.paths.clone();
+        let tx = self.worker_tx.clone();
+        let status_label = scope_label.clone();
+        std::thread::spawn(move || {
+            let result = crate::startup::latest_log_for_scope(&paths, scope)
+                .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(WorkerEvent::StartupCommandLogsLoaded {
+                scope_label,
+                result,
+            });
+        });
+        self.set_busy(format!(
+            "Opening startup command logs for {status_label}..."
+        ));
+    }
+
+    fn spawn_delete_startup_command_logs(paths: DuxPaths, project_id: String, session_id: String) {
+        std::thread::spawn(move || {
+            if let Err(err) = crate::startup::delete_agent_logs(&paths, &project_id, &session_id) {
+                logger::error(&format!(
+                    "failed to delete startup command logs for session {session_id}: {err:#}"
+                ));
+            }
+        });
     }
 
     pub(crate) fn open_change_theme_prompt(&mut self) -> Result<()> {
@@ -2338,6 +2598,7 @@ mod tests {
             last_help_height: 0,
             last_help_lines: 0,
             fullscreen_overlay: FullscreenOverlay::None,
+            startup_log_viewer: None,
             status: StatusLine::new("ready"),
             prompt: PromptState::None,
             input_target: InputTarget::None,
@@ -2404,6 +2665,7 @@ mod tests {
             snapshot_buf: crate::pty::TerminalSnapshot::empty(),
             last_snapshot_id: None,
             terminal_selection: None,
+            startup_log_selection: None,
             _single_instance_lock: single_instance_lock,
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
@@ -2440,6 +2702,7 @@ mod tests {
             default_provider: ProviderKind::from_str(provider),
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
+            startup_command: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -2593,6 +2856,7 @@ mod tests {
             default_provider: ProviderKind::from_str(provider),
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
+            startup_command: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,

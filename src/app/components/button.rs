@@ -99,6 +99,7 @@ pub(crate) enum ButtonPressedTarget {
     ConfigReloadFailedClose,
     ConfigReloadFailedApply,
     AddProjectFailedOk,
+    StartupCommandLogsClose,
 }
 
 /// In-flight state for a button the user is currently pressing. `target`
@@ -211,15 +212,15 @@ impl<'a> Button<'a> {
         if self.state != ButtonState::Disabled {
             label_style = label_style.add_modifier(Modifier::BOLD);
         }
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
+            .border_style(Style::default().fg(border_color));
+        let inner = block.inner(area);
+        block.render(area, frame.buffer_mut());
         Paragraph::new(Line::from(Span::styled(self.label, label_style)))
             .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_set(border::ROUNDED)
-                    .border_style(Style::default().fg(border_color)),
-            )
-            .render(area, frame.buffer_mut());
+            .render(inner, frame.buffer_mut());
     }
 }
 

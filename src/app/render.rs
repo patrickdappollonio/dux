@@ -3373,6 +3373,346 @@ impl App {
                     offset: state.offset(),
                 };
             }
+            PromptState::ConfigureStartupCommand {
+                project_name,
+                input,
+                ..
+            } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect_exact(76, 16, frame.area());
+                self.clear_overlay_area(frame, area);
+                let outer = self.themed_overlay_block("Configure Startup Command");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+                let [label_area, input_area, hint_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(2),
+                        Constraint::Min(3),
+                        Constraint::Length(1),
+                    ])
+                    .areas(inner);
+                Paragraph::new(vec![
+                    Line::from(vec![
+                        Span::styled(" Project: ", Style::default().fg(self.theme.input_label_fg)),
+                        Span::styled(
+                            project_name.clone(),
+                            Style::default().fg(self.theme.input_label_fg),
+                        ),
+                    ]),
+                    Line::from(Span::styled(
+                        " Enter a command to run before the provider launches:",
+                        Style::default().fg(self.theme.input_label_fg),
+                    )),
+                ])
+                .render(label_area, frame.buffer_mut());
+
+                let focused = self.input_target == InputTarget::StartupCommand;
+                let input_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_set(border::ROUNDED)
+                    .border_style(Style::default().fg(if focused {
+                        self.theme.border_focused
+                    } else {
+                        self.theme.overlay_border
+                    }));
+                let text_area = input_block.inner(input_area);
+                input_block.render(input_area, frame.buffer_mut());
+
+                let mut render_input = input.clone();
+                render_input
+                    .set_display_width((text_area.width > 0).then_some(text_area.width as usize));
+                render_input.set_visible_lines(text_area.height as usize);
+                let visible = render_input.visible_lines();
+                let is_empty = render_input.is_empty();
+                if is_empty {
+                    if let Some(placeholder) = render_input.placeholder() {
+                        Paragraph::new(placeholder.to_string())
+                            .style(Style::default().fg(self.theme.hint_desc_fg))
+                            .render(text_area, frame.buffer_mut());
+                    }
+                } else {
+                    for (index, line_text) in visible.iter().enumerate() {
+                        if index >= text_area.height as usize {
+                            break;
+                        }
+                        let line_area =
+                            Rect::new(text_area.x, text_area.y + index as u16, text_area.width, 1);
+                        Paragraph::new(line_text.as_str()).render(line_area, frame.buffer_mut());
+                    }
+                }
+                if focused {
+                    let (cursor_row, cursor_col) = render_input.cursor_display_position();
+                    let cx = text_area.x + cursor_col as u16;
+                    let cy = text_area.y + cursor_row as u16;
+                    if cx < text_area.x + text_area.width && cy < text_area.y + text_area.height {
+                        frame.set_cursor_position((cx, cy));
+                    }
+                }
+
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let edit_key = self.bindings.label_for(Action::EngageCommitInput);
+                let exit_key = self.bindings.labels_for(Action::ExitCommitInput);
+                let clear_key = "Ctrl-d";
+                let mut hints = vec![Span::raw(" ")];
+                if focused {
+                    hints.extend(self.theme.key_badge_default(&exit_key));
+                    hints.push(Span::styled(
+                        " exit edit  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                    hints.extend(self.theme.key_badge_default(clear_key));
+                    hints.push(Span::styled(
+                        " clear",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                } else {
+                    hints.extend(self.theme.key_badge_default(&edit_key));
+                    hints.push(Span::styled(
+                        " edit  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                    hints.extend(self.theme.key_badge_default(&confirm_key));
+                    hints.push(Span::styled(
+                        " save  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                    hints.extend(self.theme.key_badge_default(clear_key));
+                    hints.push(Span::styled(
+                        " clear  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                    hints.extend(self.theme.key_badge_default(&close_key));
+                    hints.push(Span::styled(
+                        " cancel",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                }
+                Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
+                self.overlay_layout.active =
+                    OverlayMouseLayout::ConfigureStartupCommand { input: text_area };
+            }
+            PromptState::StartupCommandLogs(prompt) => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(92, 82, frame.area());
+                self.clear_overlay_area(frame, area);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let mut bottom_spans = vec![Span::raw(" ")];
+                let move_keys = self.bindings.labels_for(Action::MoveDown);
+                let search_key = self.bindings.label_for(Action::SearchToggle);
+                let open_file_key = self.bindings.label_for(Action::OpenStartupCommandLogFile);
+                let open_folder_key = self.bindings.label_for(Action::OpenStartupCommandLogFolder);
+                bottom_spans.extend(self.theme.key_badge_default(&move_keys));
+                bottom_spans.push(Span::styled(
+                    " logs  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&search_key));
+                bottom_spans.push(Span::styled(
+                    " search  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default("PgUp/PgDn"));
+                bottom_spans.push(Span::styled(
+                    " scroll  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&open_file_key));
+                bottom_spans.push(Span::styled(
+                    " Open file  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&open_folder_key));
+                bottom_spans.push(Span::styled(
+                    " Open folder  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&close_key));
+                bottom_spans.push(Span::styled(
+                    " close",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+
+                let title = format!("Startup Command Logs - {}", prompt.scope_label);
+                let block = self
+                    .themed_overlay_block(&title)
+                    .title_bottom(Line::from(bottom_spans))
+                    .border_style(Style::default().fg(self.theme.overlay_border));
+                let inner = block.inner(area);
+                block.render(area, frame.buffer_mut());
+                let [content_area, button_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(6), Constraint::Length(3)])
+                    .areas(inner);
+                let [left_area, _, body_area] = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Length(34),
+                        Constraint::Length(1),
+                        Constraint::Min(20),
+                    ])
+                    .areas(content_area);
+                let (filter_area, list_area) = if prompt.searching || !prompt.filter.is_empty() {
+                    let [filter_area, list_area] = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([Constraint::Length(3), Constraint::Min(1)])
+                        .areas(left_area);
+                    (Some(filter_area), list_area)
+                } else {
+                    (None, left_area)
+                };
+                let visible_indices = Self::startup_command_log_filtered_indices(prompt);
+                let items = if prompt.entries.is_empty() {
+                    vec![ListItem::new("No logs")]
+                } else if visible_indices.is_empty() {
+                    vec![ListItem::new("No matching logs")]
+                } else {
+                    visible_indices
+                        .iter()
+                        .filter_map(|index| prompt.entries.get(*index))
+                        .map(|entry| {
+                            let modified = entry
+                                .modified_at
+                                .map(|ts| ts.format("%Y-%m-%d %H:%M:%S").to_string())
+                                .unwrap_or_else(|| "unknown time".to_string());
+                            ListItem::new(vec![
+                                Line::from(Span::styled(
+                                    entry.display_name.clone(),
+                                    Style::default()
+                                        .fg(self.theme.help_section_header_fg)
+                                        .add_modifier(Modifier::BOLD),
+                                )),
+                                Line::from(Span::styled(
+                                    modified,
+                                    Style::default().fg(self.theme.hint_desc_fg),
+                                )),
+                            ])
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let selected_visual =
+                    Self::startup_command_log_selected_visual_index(prompt, &visible_indices);
+                let mut state = ListState::default().with_selected(selected_visual);
+                if let Some(filter_area) = filter_area {
+                    let filter_block = Block::default()
+                        .title(" Filter ")
+                        .borders(Borders::ALL)
+                        .border_set(border::ROUNDED)
+                        .border_style(Style::default().fg(if prompt.searching {
+                            self.theme.border_focused
+                        } else {
+                            self.theme.overlay_border
+                        }))
+                        .style(Style::default().bg(self.theme.overlay_bg));
+                    let filter_inner = filter_block.inner(filter_area);
+                    filter_block.render(filter_area, frame.buffer_mut());
+                    let text = if prompt.filter.is_empty() && prompt.searching {
+                        "type to filter logs"
+                    } else {
+                        prompt.filter.text.as_str()
+                    };
+                    Paragraph::new(text)
+                        .style(Style::default().fg(if prompt.filter.is_empty() {
+                            self.theme.hint_desc_fg
+                        } else {
+                            self.theme.text_fg
+                        }))
+                        .render(filter_inner, frame.buffer_mut());
+                    if prompt.searching {
+                        let cursor_x = filter_inner
+                            .x
+                            .saturating_add(prompt.filter.cursor as u16)
+                            .min(filter_inner.x + filter_inner.width.saturating_sub(1));
+                        frame.set_cursor_position((cursor_x, filter_inner.y));
+                    }
+                }
+                let list_block = Block::default()
+                    .title(" Runs ")
+                    .borders(Borders::ALL)
+                    .border_set(border::ROUNDED)
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
+                let list_inner = list_block.inner(list_area);
+                StatefulWidget::render(
+                    List::new(items)
+                        .block(list_block)
+                        .highlight_style(self.theme.selection_style()),
+                    list_area,
+                    frame.buffer_mut(),
+                    &mut state,
+                );
+                let body_block = Block::default()
+                    .title(" Output ")
+                    .borders(Borders::ALL)
+                    .border_set(border::ROUNDED)
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
+                let body_inner = body_block.inner(body_area);
+                body_block.render(body_area, frame.buffer_mut());
+                let content_lines = crate::app::input::startup_command_log_visual_lines(
+                    &prompt.content,
+                    body_inner.width,
+                );
+                let max_scroll = u16::try_from(content_lines.len())
+                    .unwrap_or(u16::MAX)
+                    .saturating_sub(body_inner.height);
+                let scroll_offset = prompt.scroll_offset.min(max_scroll);
+                for (display_row, line) in content_lines
+                    .iter()
+                    .skip(scroll_offset as usize)
+                    .take(body_inner.height as usize)
+                    .enumerate()
+                {
+                    let y = body_inner.y + display_row as u16;
+                    for (display_col, ch) in
+                        line.chars().take(body_inner.width as usize).enumerate()
+                    {
+                        let x = body_inner.x + display_col as u16;
+                        let selected =
+                            self.startup_log_selection
+                                .as_ref()
+                                .is_some_and(|selection| {
+                                    selection.anchor != selection.end
+                                        && selection.contains(
+                                            scroll_offset + display_row as u16,
+                                            display_col as u16,
+                                        )
+                                });
+                        let style = if selected {
+                            self.theme.selection_style()
+                        } else {
+                            Style::default().fg(self.theme.text_fg)
+                        };
+                        frame.buffer_mut().set_string(x, y, ch.to_string(), style);
+                    }
+                }
+
+                let close_width = 16;
+                let close_area = Rect {
+                    x: button_area.x + button_area.width.saturating_sub(close_width) / 2,
+                    y: button_area.y,
+                    width: close_width.min(button_area.width),
+                    height: 3,
+                };
+                Button::new("Close")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::StartupCommandLogsClose,
+                        self.pressed_button,
+                        false,
+                        true,
+                    ))
+                    .render(frame, close_area, &self.theme);
+                self.overlay_layout.active = OverlayMouseLayout::StartupCommandLogs {
+                    area,
+                    list: list_inner,
+                    body: body_inner,
+                    items: visible_indices.len(),
+                    offset: state.offset(),
+                    close_button: close_area,
+                };
+            }
             PromptState::PickEditor {
                 session_label,
                 worktree_path,
@@ -5819,6 +6159,10 @@ impl App {
                 self.render_fullscreen_terminal(frame);
                 return;
             }
+            FullscreenOverlay::StartupLog => {
+                self.render_fullscreen_startup_log(frame);
+                return;
+            }
             FullscreenOverlay::None => {}
         }
         if !matches!(self.prompt, PromptState::None) {
@@ -5874,6 +6218,172 @@ impl App {
         self.session_surface = SessionSurface::Terminal;
         self.render_agent_terminal(frame, area, " Terminal ", true);
         self.session_surface = saved;
+    }
+
+    fn render_fullscreen_startup_log(&mut self, frame: &mut Frame) {
+        self.render_dim_overlay(frame);
+        let area = centered_rect(96, 94, frame.area());
+        Clear.render(area, frame.buffer_mut());
+        frame
+            .buffer_mut()
+            .set_style(area, Style::default().bg(self.theme.app_bg));
+
+        let title = self
+            .startup_log_viewer
+            .as_ref()
+            .map(|viewer| {
+                format!(
+                    " Startup command log · {} · {} ",
+                    viewer.scope_label, viewer.display_name
+                )
+            })
+            .unwrap_or_else(|| " Startup command log ".to_string());
+        let outer_block = self.themed_block(&title, true);
+        let inner = outer_block.inner(area);
+        outer_block.render(area, frame.buffer_mut());
+        if inner.height < 2 || inner.width < 4 {
+            return;
+        }
+
+        let [term_area, hint_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(2)])
+            .areas(inner);
+        self.mouse_layout.agent_term = Some(term_area);
+
+        let Some(viewer) = &mut self.startup_log_viewer else {
+            return;
+        };
+        let lines =
+            crate::app::input::startup_command_log_visual_lines(&viewer.content, term_area.width);
+        let max_scroll = u16::try_from(lines.len())
+            .unwrap_or(u16::MAX)
+            .saturating_sub(term_area.height);
+        viewer.scroll_offset = viewer.scroll_offset.min(max_scroll);
+        let query = viewer.search.text.trim().to_lowercase();
+
+        for (row, line) in lines
+            .iter()
+            .skip(viewer.scroll_offset as usize)
+            .take(term_area.height as usize)
+            .enumerate()
+        {
+            let line_style = if !query.is_empty() && line.to_lowercase().contains(&query) {
+                self.theme.selection_style()
+            } else {
+                Style::default().fg(self.theme.text_fg)
+            };
+            let y = term_area.y + row as u16;
+            for (col, ch) in line.chars().take(term_area.width as usize).enumerate() {
+                let selected = self.terminal_selection.as_ref().is_some_and(|selection| {
+                    selection.anchor != selection.end
+                        && selection.contains(viewer.scroll_offset + row as u16, col as u16)
+                });
+                let style = if selected {
+                    self.theme.selection_style()
+                } else {
+                    line_style
+                };
+                frame
+                    .buffer_mut()
+                    .set_string(term_area.x + col as u16, y, ch.to_string(), style);
+            }
+        }
+
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        let search_key = self.bindings.label_for(Action::SearchToggle);
+        let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
+        let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
+        let open_file = self.bindings.label_for(Action::OpenStartupCommandLogFile);
+        let open_folder = self.bindings.label_for(Action::OpenStartupCommandLogFolder);
+        let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+        let mut spans = Vec::new();
+        if viewer.searching {
+            spans.extend(self.theme.dim_key_badge_default(&close_key));
+            spans.push(Span::styled(" close search", desc_style));
+        } else {
+            spans.extend(self.theme.dim_key_badge_default(&close_key));
+            spans.push(Span::styled(" close  ", desc_style));
+            spans.extend(self.theme.dim_key_badge_default(&scroll_up));
+            spans.push(Span::styled("/", desc_style));
+            spans.extend(self.theme.dim_key_badge_default(&scroll_down));
+            spans.push(Span::styled(" scroll  ", desc_style));
+            spans.extend(self.theme.dim_key_badge_default(&search_key));
+            spans.push(Span::styled(" search  ", desc_style));
+            spans.extend(self.theme.dim_key_badge_default(&open_file));
+            spans.push(Span::styled(" Open file  ", desc_style));
+            spans.extend(self.theme.dim_key_badge_default(&open_folder));
+            spans.push(Span::styled(" Open folder", desc_style));
+        }
+        Paragraph::new(Line::from(spans))
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(self.theme.border_normal)),
+            )
+            .render(hint_area, frame.buffer_mut());
+
+        if self
+            .startup_log_viewer
+            .as_ref()
+            .is_some_and(|viewer| viewer.searching)
+        {
+            self.render_startup_log_search_bar(frame, inner);
+        }
+    }
+
+    fn render_startup_log_search_bar(&mut self, frame: &mut Frame, area: Rect) {
+        let Some(viewer) = &self.startup_log_viewer else {
+            return;
+        };
+        let query = viewer.search.text.clone();
+        let cursor = viewer.search.cursor.min(viewer.search.text.len());
+        if area.height < 3 {
+            return;
+        }
+
+        let bar_area = Rect::new(
+            area.x,
+            area.y + area.height.saturating_sub(3),
+            area.width,
+            3,
+        );
+        self.clear_overlay_area(frame, bar_area);
+
+        let mut bottom_spans = vec![Span::raw(" ")];
+        for (key, desc) in &[("Enter", "done"), ("Esc", "cancel")] {
+            let badge = self.theme.key_badge_default(key);
+            bottom_spans.extend(
+                badge
+                    .into_iter()
+                    .map(|s| Span::styled(s.content.to_string(), s.style)),
+            );
+            bottom_spans.push(Span::styled(
+                format!(" {desc}  "),
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+        }
+
+        let input_block = self
+            .themed_overlay_block("Search log")
+            .title_bottom(Line::from(bottom_spans));
+        let input_inner = input_block.inner(bar_area);
+        Paragraph::new(render_single_line_cursor_input(
+            "/ ",
+            &query,
+            cursor,
+            self.theme.input_cursor_fg,
+            self.theme.input_cursor_bg,
+        ))
+        .block(input_block)
+        .render(bar_area, frame.buffer_mut());
+
+        let cursor_col = query[..cursor].chars().count() + 2;
+        let cx = input_inner.x + cursor_col as u16;
+        let cy = input_inner.y;
+        if cx < input_inner.x + input_inner.width && cy < input_inner.y + input_inner.height {
+            frame.set_cursor_position((cx, cy));
+        }
     }
 
     fn render_macro_bar(&mut self, frame: &mut Frame, area: Rect) {

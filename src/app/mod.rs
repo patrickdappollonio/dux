@@ -83,6 +83,7 @@ pub struct App {
     pub(crate) last_help_height: u16,
     pub(crate) last_help_lines: u16,
     pub(crate) fullscreen_overlay: FullscreenOverlay,
+    pub(crate) startup_log_viewer: Option<StartupLogViewer>,
     pub(crate) status: StatusLine,
     pub(crate) prompt: PromptState,
     pub(crate) input_target: InputTarget,
@@ -195,6 +196,8 @@ pub struct App {
     last_snapshot_id: Option<String>,
     /// Active text selection in the terminal viewport, if any.
     pub(crate) terminal_selection: Option<TerminalSelection>,
+    /// Active text selection in the startup command log output pane, if any.
+    pub(crate) startup_log_selection: Option<TerminalSelection>,
     /// Exclusive lock held for the lifetime of this `App` so only one dux
     /// instance runs against a given config directory. Released
     /// automatically on drop (including crashes), so there is nothing to
@@ -297,6 +300,7 @@ pub(crate) enum FullscreenOverlay {
     None,
     Agent,
     Terminal,
+    StartupLog,
 }
 
 #[derive(Clone, Debug)]
@@ -487,6 +491,28 @@ pub(crate) struct ChangeThemePrompt {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct StartupCommandLogPrompt {
+    pub(crate) scope_label: String,
+    pub(crate) entries: Vec<crate::startup::StartupCommandLogEntry>,
+    pub(crate) selected: usize,
+    pub(crate) filter: TextInput,
+    pub(crate) searching: bool,
+    pub(crate) content: String,
+    pub(crate) scroll_offset: u16,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct StartupLogViewer {
+    pub(crate) scope_label: String,
+    pub(crate) path: Option<PathBuf>,
+    pub(crate) display_name: String,
+    pub(crate) content: String,
+    pub(crate) scroll_offset: u16,
+    pub(crate) search: TextInput,
+    pub(crate) searching: bool,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct ProjectWorktreeEntry {
     pub(crate) path: PathBuf,
     pub(crate) branch_name: String,
@@ -608,6 +634,13 @@ pub(crate) enum PromptState {
     ChangeDefaultProvider(ChangeDefaultProviderPrompt),
     ChangeProjectDefaultProvider(ChangeProjectDefaultProviderPrompt),
     ChangeTheme(ChangeThemePrompt),
+    ConfigureStartupCommand {
+        project_id: String,
+        project_name: String,
+        input: TextInput,
+    },
+    #[allow(dead_code)]
+    StartupCommandLogs(StartupCommandLogPrompt),
     PickProjectWorktree(PickProjectWorktreePrompt),
     KillRunning(KillRunningPrompt),
     ConfirmKillRunning(ConfirmKillRunningPrompt),
@@ -974,6 +1007,7 @@ pub(crate) enum InputTarget {
     Agent,
     Terminal,
     CommitMessage,
+    StartupCommand,
 }
 
 #[derive(Clone, Copy)]
@@ -1150,6 +1184,17 @@ pub(crate) enum OverlayMouseLayout {
         items: usize,
         offset: usize,
     },
+    StartupCommandLogs {
+        area: Rect,
+        list: Rect,
+        body: Rect,
+        items: usize,
+        offset: usize,
+        close_button: Rect,
+    },
+    ConfigureStartupCommand {
+        input: Rect,
+    },
     KillRunning {
         input: Option<Rect>,
         list: Rect,
@@ -1226,6 +1271,7 @@ pub(crate) enum MouseClickTarget {
     UnstagedPane,
     StagedPane,
     CommandPalette,
+    StartupCommandInput,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1343,6 +1389,7 @@ pub(crate) enum AgentLaunchKind {
         status_message: String,
         repo_path: String,
         owns_worktree: bool,
+        startup_result: Option<crate::startup::StartupCommandResult>,
     },
     Reconnect {
         status_message: String,
@@ -1498,6 +1545,15 @@ pub(crate) enum WorkerEvent {
         action: ProjectPersistenceAction,
         result: Result<(), String>,
     },
+    StartupCommandRerunCompleted(crate::startup::StartupCommandResult),
+    StartupCommandLogsLoaded {
+        scope_label: String,
+        result: Result<crate::startup::StartupCommandLatestLog, String>,
+    },
+    OpenPathCompleted {
+        target: String,
+        result: Result<(), String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1533,6 +1589,11 @@ pub(crate) enum ProjectPersistenceAction {
         project_id: String,
         project_name: String,
         auto_reopen_agents: Option<bool>,
+    },
+    UpdateStartupCommand {
+        project_id: String,
+        project_name: String,
+        startup_command: Option<String>,
     },
 }
 
@@ -1574,8 +1635,15 @@ impl App {
         signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&sigwinch_flag))?;
 
         let session_store = SessionStore::open(&paths.sessions_db_path)?;
-        migrate_config_projects_to_store(&mut config, &paths, &bindings, &session_store)?;
+        sync_config_projects_with_store(&mut config, &paths, &bindings, &session_store)?;
         let projects = load_projects(&session_store.load_projects()?, &config);
+        persist_runtime_projects_to_config_and_store(
+            &projects,
+            &mut config,
+            &paths,
+            &bindings,
+            &session_store,
+        )?;
         let sessions = session_store.load_sessions()?;
         let (worker_tx, worker_rx) = mpsc::channel();
         let watched_worktree: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
@@ -1627,6 +1695,7 @@ impl App {
             last_help_height: 0,
             last_help_lines: 0,
             fullscreen_overlay: FullscreenOverlay::None,
+            startup_log_viewer: None,
             status,
             prompt: PromptState::None,
             input_target: InputTarget::None,
@@ -1694,6 +1763,7 @@ impl App {
             snapshot_buf: TerminalSnapshot::empty(),
             last_snapshot_id: None,
             terminal_selection: None,
+            startup_log_selection: None,
             _single_instance_lock: single_instance_lock,
         };
         app.restore_sessions();
@@ -1742,10 +1812,7 @@ impl App {
                     continue;
                 }
 
-                if matches!(
-                    self.input_target,
-                    InputTarget::Agent | InputTarget::Terminal
-                ) {
+                if self.should_poll_raw_input() {
                     // Interactive mode: read raw stdin and forward to PTY.
                     // crossterm's event reader is not called — all bytes
                     // (keyboard, mouse, paste) go to the child process
@@ -1852,6 +1919,15 @@ impl App {
         result
     }
 
+    fn should_poll_raw_input(&self) -> bool {
+        matches!(self.prompt, PromptState::None)
+            && !matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog)
+            && matches!(
+                self.input_target,
+                InputTarget::Agent | InputTarget::Terminal
+            )
+    }
+
     fn restore_sessions(&mut self) {
         logger::info(&format!(
             "restoring {} persisted sessions",
@@ -1948,6 +2024,14 @@ impl App {
             self.set_info(format!(
                 "Closed fullscreen terminal. Press {key} to reopen."
             ));
+            return true;
+        }
+        if matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog) {
+            self.fullscreen_overlay = FullscreenOverlay::None;
+            self.startup_log_viewer = None;
+            self.terminal_selection = None;
+            self.startup_log_selection = None;
+            self.set_info("Closed startup command log.");
             return true;
         }
         if !matches!(self.prompt, PromptState::None) {
@@ -2122,6 +2206,26 @@ impl App {
             && matches!(self.gh_status, crate::model::GhStatus::Available)
     }
 
+    pub(crate) fn persist_config_projects_from_runtime(&mut self) -> Result<()> {
+        let existing_projects = self.config.projects.clone();
+        self.config.projects = self
+            .projects
+            .iter()
+            .map(|project| runtime_project_to_config(project, &existing_projects))
+            .collect();
+        save_config(&self.paths.config_path, &self.config, &self.bindings)
+    }
+
+    pub(crate) fn persist_projects_to_config_and_store(&mut self) -> Result<()> {
+        persist_runtime_projects_to_config_and_store(
+            &self.projects,
+            &mut self.config,
+            &self.paths,
+            &self.bindings,
+            &self.session_store,
+        )
+    }
+
     pub(crate) fn filtered_palette_commands(
         &self,
         input: &str,
@@ -2151,6 +2255,9 @@ impl App {
             "reload-config" => self.reload_config_from_disk(),
             "toggle-project-auto-reopen-agents" => self.toggle_project_auto_reopen_agents(),
             "toggle-agent-auto-reopen" => self.toggle_agent_auto_reopen(),
+            "configure-startup-command" => self.open_configure_startup_command(),
+            "rerun-startup-command-on-agent" => self.rerun_startup_command_on_agent(),
+            "read-startup-command-logs" => self.open_startup_command_logs(),
             "pull-project" => self.refresh_selected_project(),
             "delete-project" => self.delete_selected_project(),
             "remove-project" => self.remove_selected_project(),
@@ -2340,7 +2447,7 @@ impl App {
         };
     }
 
-    fn apply_reloaded_config(&mut self, config: Config) -> Result<()> {
+    fn apply_reloaded_config(&mut self, mut config: Config) -> Result<()> {
         let bindings = RuntimeBindings::from_keys_config(&config.keys);
         self.interactive_patterns = bindings.interactive_byte_patterns();
         self.bindings = bindings;
@@ -2355,6 +2462,14 @@ impl App {
         self.commit_pane_height_pct = config.ui.commit_pane_height_pct;
         self.github_integration_enabled = config.ui.github_integration;
         self.pr_banner_at_bottom = config.ui.pr_banner_position == "bottom";
+        self.projects = load_projects(&self.session_store.load_projects()?, &config);
+        persist_runtime_projects_to_config_and_store(
+            &self.projects,
+            &mut config,
+            &self.paths,
+            &self.bindings,
+            &self.session_store,
+        )?;
         self.config = config;
 
         refresh_project_defaults(&mut self.projects, &self.config);
@@ -3052,6 +3167,7 @@ pub(crate) fn load_projects(
             default_provider: provider,
             leading_branch,
             auto_reopen_agents: project.auto_reopen_agents,
+            startup_command: project.startup_command.clone(),
             current_branch,
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: missing,
@@ -3060,21 +3176,248 @@ pub(crate) fn load_projects(
     projects
 }
 
-pub(crate) fn migrate_config_projects_to_store(
+pub(crate) fn persist_runtime_projects_to_config_and_store(
+    projects: &[Project],
     config: &mut Config,
     paths: &DuxPaths,
     bindings: &RuntimeBindings,
     session_store: &SessionStore,
 ) -> Result<()> {
-    if config.projects.is_empty() {
-        return Ok(());
+    let existing_projects = config.projects.clone();
+    let stored_project_configs = projects
+        .iter()
+        .map(|project| runtime_project_to_config(project, &existing_projects))
+        .collect::<Vec<_>>();
+    let config_project_configs = stored_project_configs
+        .iter()
+        .cloned()
+        .map(|mut project| {
+            project.leading_branch = None;
+            project
+        })
+        .collect::<Vec<_>>();
+
+    let stored_projects = session_store.load_projects()?;
+    for (index, project_config) in stored_project_configs.iter().enumerate() {
+        let stored_project = stored_projects.iter().find(|stored| {
+            stored.id == project_config.id || same_expanded_project_path(stored, project_config)
+        });
+        if stored_project != Some(project_config) {
+            session_store.upsert_project_at(project_config, index as i64)?;
+        }
     }
 
-    for (index, project) in config.projects.iter().enumerate() {
-        session_store.upsert_project_at(project, index as i64)?;
+    if config.projects != config_project_configs {
+        config.projects = config_project_configs;
+        save_config(&paths.config_path, config, bindings)?;
     }
-    config.projects.clear();
-    save_config(&paths.config_path, config, bindings)
+
+    Ok(())
+}
+
+pub(crate) fn sync_config_projects_with_store(
+    config: &mut Config,
+    paths: &DuxPaths,
+    bindings: &RuntimeBindings,
+    session_store: &SessionStore,
+) -> Result<()> {
+    validate_project_records("config.toml", &config.projects)?;
+    let mut stored = session_store.load_projects()?;
+    validate_project_records("SQLite", &stored)?;
+
+    let mut changed_config = false;
+    let mut changed_store = false;
+    let mut merged = config.projects.clone();
+
+    for (index, cfg_project) in config.projects.iter().enumerate() {
+        match stored.iter().position(|stored_project| {
+            stored_project.id == cfg_project.id
+                || same_expanded_project_path(stored_project, cfg_project)
+        }) {
+            Some(stored_index) => {
+                let stored_project = &stored[stored_index];
+                let (merged_config_project, merged_stored_project) =
+                    merge_project_records(cfg_project, stored_project)?;
+                if &merged_config_project != cfg_project {
+                    merged[index] = merged_config_project;
+                    changed_config = true;
+                }
+                if &merged_stored_project != stored_project {
+                    session_store.upsert_project_at(&merged_stored_project, stored_index as i64)?;
+                    stored[stored_index] = merged_stored_project;
+                    changed_store = true;
+                }
+            }
+            None => {
+                session_store.upsert_project_at(cfg_project, index as i64)?;
+                changed_store = true;
+                stored.push(cfg_project.clone());
+            }
+        }
+    }
+
+    for stored_project in stored {
+        let exists = merged.iter().any(|cfg_project| {
+            cfg_project.id == stored_project.id
+                || same_expanded_project_path(cfg_project, &stored_project)
+        });
+        if !exists {
+            let mut portable = stored_project;
+            portable.path = portable_project_path(&portable.path);
+            merged.push(portable);
+            changed_config = true;
+        }
+    }
+
+    if changed_config {
+        config.projects = merged;
+        save_config(&paths.config_path, config, bindings)?;
+    } else if changed_store {
+        // Keep the on-disk config normalized when the database was repaired
+        // from config-only projects.
+        save_config(&paths.config_path, config, bindings)?;
+    }
+    Ok(())
+}
+
+fn validate_project_records(source: &str, projects: &[crate::config::ProjectConfig]) -> Result<()> {
+    for (index, project) in projects.iter().enumerate() {
+        for other in projects.iter().skip(index + 1) {
+            if project.id == other.id {
+                anyhow::bail!(
+                    "Project sync conflict in {source}: duplicate project id \"{}\". Remove or rename one [[projects]] entry, then restart dux.",
+                    project.id
+                );
+            }
+            if same_expanded_project_path(project, other) {
+                anyhow::bail!(
+                    "Project sync conflict in {source}: duplicate project path \"{}\". Remove one duplicate project entry, then restart dux.",
+                    expanded_project_path(project).unwrap_or_else(|| project.path.clone())
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn merge_project_records(
+    config_project: &crate::config::ProjectConfig,
+    stored_project: &crate::config::ProjectConfig,
+) -> Result<(crate::config::ProjectConfig, crate::config::ProjectConfig)> {
+    let config_path = expanded_project_path(config_project);
+    let stored_path = expanded_project_path(stored_project);
+    if config_project.id == stored_project.id && config_path != stored_path {
+        anyhow::bail!(
+            "Project sync conflict for id \"{}\": config.toml points to \"{}\" but SQLite points to \"{}\". Edit config.toml or remove/re-add the project so both stores agree.",
+            config_project.id,
+            config_project.path,
+            stored_project.path
+        );
+    }
+    if config_path == stored_path && config_project.id != stored_project.id {
+        anyhow::bail!(
+            "Project sync conflict for path \"{}\": config.toml uses id \"{}\" but SQLite uses id \"{}\". Edit config.toml or remove/re-add the project so both stores agree.",
+            config_path.unwrap_or_else(|| config_project.path.clone()),
+            config_project.id,
+            stored_project.id
+        );
+    }
+
+    let mut merged_config = config_project.clone();
+    let mut merged_stored = stored_project.clone();
+
+    sync_config_authoritative_project_field(&mut merged_config.name, &mut merged_stored.name);
+    sync_config_authoritative_project_field(
+        &mut merged_config.default_provider,
+        &mut merged_stored.default_provider,
+    );
+    if merged_stored.leading_branch.is_none() {
+        merged_stored.leading_branch = merged_config.leading_branch.clone();
+    }
+    merged_config.leading_branch = None;
+    sync_config_authoritative_project_field(
+        &mut merged_config.startup_command,
+        &mut merged_stored.startup_command,
+    );
+    sync_config_authoritative_project_field(
+        &mut merged_config.auto_reopen_agents,
+        &mut merged_stored.auto_reopen_agents,
+    );
+
+    Ok((merged_config, merged_stored))
+}
+
+fn sync_config_authoritative_project_field<T>(
+    config_value: &mut Option<T>,
+    stored_value: &mut Option<T>,
+) where
+    T: Clone,
+{
+    match config_value.as_ref() {
+        Some(config) => {
+            *stored_value = Some(config.clone());
+        }
+        None => {
+            *config_value = stored_value.clone();
+        }
+    }
+}
+
+fn same_expanded_project_path(
+    left: &crate::config::ProjectConfig,
+    right: &crate::config::ProjectConfig,
+) -> bool {
+    expanded_project_path(left).is_some_and(|left_path| {
+        expanded_project_path(right).is_some_and(|right_path| left_path == right_path)
+    })
+}
+
+fn expanded_project_path(project: &crate::config::ProjectConfig) -> Option<String> {
+    crate::config::expand_path(&project.path)
+}
+
+pub(crate) fn portable_project_path(path: &str) -> String {
+    let Some(home) = home::home_dir() else {
+        return path.to_string();
+    };
+    let path_buf = Path::new(path);
+    if let Ok(relative) = path_buf.strip_prefix(&home) {
+        let relative = relative.to_string_lossy();
+        if relative.is_empty() {
+            "$HOME".to_string()
+        } else {
+            format!("$HOME/{}", relative)
+        }
+    } else {
+        path.to_string()
+    }
+}
+
+pub(crate) fn runtime_project_to_config(
+    project: &Project,
+    existing_projects: &[crate::config::ProjectConfig],
+) -> crate::config::ProjectConfig {
+    let path = existing_projects
+        .iter()
+        .find(|existing| {
+            existing.id == project.id
+                && expanded_project_path(existing).is_some_and(|expanded| expanded == project.path)
+        })
+        .map(|existing| existing.path.clone())
+        .unwrap_or_else(|| portable_project_path(&project.path));
+
+    crate::config::ProjectConfig {
+        id: project.id.clone(),
+        path,
+        name: Some(project.name.clone()),
+        default_provider: project
+            .explicit_default_provider
+            .as_ref()
+            .map(|provider| provider.as_str().to_string()),
+        leading_branch: project.leading_branch.clone(),
+        auto_reopen_agents: project.auto_reopen_agents,
+        startup_command: project.startup_command.clone(),
+    }
 }
 
 // ── Resource monitor helpers ───────────────────────────────────────────────
@@ -3213,6 +3556,7 @@ mod tests {
             default_provider: ProviderKind::from_str("codex"),
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
+            startup_command: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -3407,7 +3751,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_legacy_config_projects_to_sqlite_and_strips_config() {
+    fn config_only_project_is_synced_to_sqlite_and_preserved() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let root = dir.path().to_path_buf();
         let paths = DuxPaths {
@@ -3438,10 +3782,10 @@ leading_branch = "main"
         let bindings = RuntimeBindings::from_keys_config(&config.keys);
         let store = SessionStore::open(&paths.sessions_db_path).expect("store");
 
-        migrate_config_projects_to_store(&mut config, &paths, &bindings, &store)
-            .expect("migrate projects");
+        sync_config_projects_with_store(&mut config, &paths, &bindings, &store)
+            .expect("sync projects");
 
-        assert!(config.projects.is_empty());
+        assert_eq!(config.projects.len(), 1);
         let projects = store.load_projects().expect("load projects");
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].id, "project-1");
@@ -3451,8 +3795,208 @@ leading_branch = "main"
         assert_eq!(projects[0].leading_branch.as_deref(), Some("main"));
 
         let saved = std::fs::read_to_string(&paths.config_path).expect("read config");
-        assert!(!saved.contains("[[projects]]"));
-        assert!(!saved.contains("project-1"));
+        assert!(saved.contains("[[projects]]"));
+        assert!(saved.contains("project-1"));
+        assert!(!saved.contains("leading_branch"));
+    }
+
+    #[test]
+    fn sqlite_only_project_is_written_to_config() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root: root.clone(),
+        };
+        paths.ensure_dirs().expect("dirs");
+        std::fs::write(&paths.config_path, "[defaults]\nprovider = \"codex\"\n").expect("config");
+        let mut config = ensure_config(&paths).expect("load config");
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        store
+            .upsert_project(&crate::config::ProjectConfig {
+                id: "project-db".to_string(),
+                path: root.join("repo").to_string_lossy().to_string(),
+                name: Some("repo".to_string()),
+                default_provider: Some("codex".to_string()),
+                leading_branch: Some("main".to_string()),
+                auto_reopen_agents: None,
+                startup_command: Some("npm install".to_string()),
+            })
+            .expect("seed project");
+
+        sync_config_projects_with_store(&mut config, &paths, &bindings, &store)
+            .expect("sync projects");
+
+        assert_eq!(config.projects.len(), 1);
+        let saved = std::fs::read_to_string(&paths.config_path).expect("read config");
+        assert!(saved.contains("id = \"project-db\""));
+        assert!(saved.contains("startup_command = \"npm install\""));
+        assert!(!saved.contains("leading_branch"));
+    }
+
+    #[test]
+    fn config_project_backfills_missing_sqlite_optional_fields() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root: root.clone(),
+        };
+        paths.ensure_dirs().expect("dirs");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        std::fs::write(
+            &paths.config_path,
+            format!(
+                "[defaults]\nprovider = \"codex\"\n\n[[projects]]\nid = \"project-1\"\npath = \"{}\"\nname = \"repo\"\nleading_branch = \"main\"\n",
+                repo.display()
+            ),
+        )
+        .expect("config");
+        let mut config = ensure_config(&paths).expect("load config");
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        store
+            .upsert_project(&crate::config::ProjectConfig {
+                id: "project-1".to_string(),
+                path: repo.to_string_lossy().to_string(),
+                name: Some("repo".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+            })
+            .expect("seed project");
+
+        sync_config_projects_with_store(&mut config, &paths, &bindings, &store)
+            .expect("sync projects");
+
+        let projects = store.load_projects().expect("load projects");
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].leading_branch.as_deref(), Some("main"));
+        let saved = std::fs::read_to_string(&paths.config_path).expect("read config");
+        assert!(!saved.contains("leading_branch"));
+    }
+
+    #[test]
+    fn derived_project_leading_branch_is_persisted_to_sqlite_only() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root: root.clone(),
+        };
+        paths.ensure_dirs().expect("dirs");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        std::process::Command::new("git")
+            .arg("init")
+            .arg(&repo)
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .arg("checkout")
+            .arg("-b")
+            .arg("main")
+            .current_dir(&repo)
+            .output()
+            .expect("git checkout main");
+        std::fs::write(
+            &paths.config_path,
+            format!(
+                "[defaults]\nprovider = \"codex\"\n\n[[projects]]\nid = \"project-1\"\npath = \"{}\"\nname = \"repo\"\n",
+                repo.display()
+            ),
+        )
+        .expect("config");
+        let mut config = ensure_config(&paths).expect("load config");
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        store
+            .upsert_project(&crate::config::ProjectConfig {
+                id: "project-1".to_string(),
+                path: repo.to_string_lossy().to_string(),
+                name: Some("repo".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+            })
+            .expect("seed project");
+
+        sync_config_projects_with_store(&mut config, &paths, &bindings, &store)
+            .expect("sync projects");
+        let projects = load_projects(&store.load_projects().expect("load projects"), &config);
+        assert_eq!(projects[0].leading_branch.as_deref(), Some("main"));
+
+        persist_runtime_projects_to_config_and_store(
+            &projects,
+            &mut config,
+            &paths,
+            &bindings,
+            &store,
+        )
+        .expect("persist derived projects");
+
+        let saved = std::fs::read_to_string(&paths.config_path).expect("read config");
+        assert!(!saved.contains("leading_branch"));
+        let stored = store.load_projects().expect("reload projects");
+        assert_eq!(stored[0].leading_branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn config_project_values_update_sqlite_on_sync() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root: root.clone(),
+        };
+        paths.ensure_dirs().expect("dirs");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        std::fs::write(
+            &paths.config_path,
+            format!(
+                "[defaults]\nprovider = \"codex\"\n\n[[projects]]\nid = \"project-1\"\npath = \"{}\"\nname = \"repo\"\nstartup_command = \"npm install\"\n",
+                repo.display()
+            ),
+        )
+        .expect("config");
+        let mut config = ensure_config(&paths).expect("load config");
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+        store
+            .upsert_project(&crate::config::ProjectConfig {
+                id: "project-1".to_string(),
+                path: repo.to_string_lossy().to_string(),
+                name: Some("repo".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: Some("pnpm install".to_string()),
+            })
+            .expect("seed project");
+
+        sync_config_projects_with_store(&mut config, &paths, &bindings, &store)
+            .expect("sync projects");
+
+        let projects = store.load_projects().expect("load projects");
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].startup_command.as_deref(), Some("npm install"));
     }
 
     #[test]
@@ -3591,6 +4135,7 @@ leading_branch = "main"
             default_provider: ProviderKind::new("codex"),
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
+            startup_command: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Leading,
             path_missing: false,
