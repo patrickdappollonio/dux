@@ -2171,6 +2171,16 @@ impl App {
             .count()
     }
 
+    pub(crate) fn diff_comment_count_for_path(&self, rel_path: &str) -> usize {
+        let Some(session_id) = self.selected_session().map(|s| s.id.as_str()) else {
+            return 0;
+        };
+        self.diff_comments
+            .keys()
+            .filter(|key| key.session_id == session_id && key.rel_path == rel_path)
+            .count()
+    }
+
     fn current_diff_file(&self) -> Option<&str> {
         let CenterMode::Diff { rel_path, .. } = &self.center_mode else {
             return None;

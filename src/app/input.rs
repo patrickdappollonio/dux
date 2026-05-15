@@ -9342,6 +9342,66 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn diff_comment_count_for_path_counts_selected_session_matching_file_only() {
+        let mut app = test_app(default_bindings());
+        let now = Utc::now();
+        app.sessions.push(AgentSession {
+            id: "session-2".to_string(),
+            project_id: app.projects[0].id.clone(),
+            project_path: Some(app.projects[0].path.clone()),
+            provider: ProviderKind::from_str("codex"),
+            source_branch: "main".to_string(),
+            branch_name: "other-agent".to_string(),
+            worktree_path: app.paths.worktrees_root.join("other").display().to_string(),
+            title: None,
+            started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
+            status: SessionStatus::Detached,
+            created_at: now,
+            updated_at: now,
+        });
+        let selected_file =
+            crate::app::DiffCommentKey::new("session-1", &diff_anchor(45, "## title"));
+        app.diff_comments.insert(
+            selected_file.clone(),
+            crate::app::DiffComment {
+                key: selected_file,
+                text: "First".to_string(),
+            },
+        );
+        let other_file = crate::app::DiffCommentKey::new(
+            "session-1",
+            &DiffAnchor {
+                rel_path: "OTHER.md".to_string(),
+                side: DiffSide::New,
+                line_number: 8,
+                line_content: "Other file".to_string(),
+                tag: DiffRowTag::Add,
+            },
+        );
+        app.diff_comments.insert(
+            other_file.clone(),
+            crate::app::DiffComment {
+                key: other_file,
+                text: "Wrong file".to_string(),
+            },
+        );
+        let other_session =
+            crate::app::DiffCommentKey::new("session-2", &diff_anchor(45, "## title"));
+        app.diff_comments.insert(
+            other_session.clone(),
+            crate::app::DiffComment {
+                key: other_session,
+                text: "Wrong session".to_string(),
+            },
+        );
+
+        assert_eq!(app.diff_comment_count_for_path("README.md"), 1);
+        assert_eq!(app.diff_comment_count_for_path("OTHER.md"), 1);
+    }
+
+    #[test]
     fn delete_diff_comment_action_removes_selected_line_comment() {
         let mut app = test_app(default_bindings());
         open_commentable_diff(&mut app);

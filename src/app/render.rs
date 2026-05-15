@@ -1126,7 +1126,7 @@ impl App {
                 .and_then(|anchor| self.diff_comment_for_anchor(anchor))
                 .is_some();
             let selected = selected_row == Some(idx);
-            let marker = if has_comment { "● " } else { "  " };
+            let marker = if has_comment { "⚐ " } else { "  " };
             let marker_style = if has_comment {
                 Style::default().fg(self.theme.warning_fg)
             } else if selected {
@@ -1955,14 +1955,17 @@ impl App {
                 // Build the right-aligned stats string, e.g. "+12 -3".
                 let stats =
                     format_line_stats(file.additions, file.deletions, file.binary, &self.theme);
-                let stats_width = stats.iter().map(|s| s.width()).sum::<usize>();
+                let comment_count = self.diff_comment_count_for_path(&file.path);
+                let comment_spans = format_diff_comment_count(comment_count, &self.theme);
+                let meta_spans = join_file_row_meta_spans(comment_spans, stats);
+                let meta_width = meta_spans.iter().map(|s| s.width()).sum::<usize>();
 
                 // Status prefix takes 3 chars ("M  ").
                 let prefix_width = 3;
-                // Leave 1 char gap between path and stats.
+                // Leave 1 char gap between path and right-aligned metadata.
                 let path_budget = inner_width
                     .saturating_sub(prefix_width)
-                    .saturating_sub(stats_width)
+                    .saturating_sub(meta_width)
                     .saturating_sub(1);
 
                 let path = if is_selected {
@@ -1975,7 +1978,7 @@ impl App {
                 let padding = inner_width
                     .saturating_sub(prefix_width)
                     .saturating_sub(path_display_width)
-                    .saturating_sub(stats_width);
+                    .saturating_sub(meta_width);
 
                 let base_style = if is_selected {
                     sel_style
@@ -1991,17 +1994,17 @@ impl App {
                     Span::styled(path, base_style),
                     Span::styled(" ".repeat(padding), base_style),
                 ];
-                // For stats spans, keep their green/red fg but apply selection bg when selected.
-                let stats_base = if is_selected {
+                // For metadata spans, keep their fg but apply selection bg when selected.
+                let meta_base = if is_selected {
                     Style::default()
                         .bg(self.theme.selection_bg)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
-                spans.extend(stats.into_iter().map(|s| {
+                spans.extend(meta_spans.into_iter().map(|s| {
                     let fg = s.style.fg.unwrap_or(Color::Reset);
-                    Span::styled(s.content, stats_base.fg(fg))
+                    Span::styled(s.content, meta_base.fg(fg))
                 }));
                 ListItem::new(Line::from(spans))
             })
@@ -7193,6 +7196,32 @@ pub(crate) fn format_line_stats(
     spans
 }
 
+fn format_diff_comment_count(count: usize, theme: &crate::theme::Theme) -> Vec<Span<'static>> {
+    if count == 0 {
+        return Vec::new();
+    }
+    vec![Span::styled(
+        format!("⚐{count}"),
+        Style::default().fg(theme.warning_fg),
+    )]
+}
+
+fn join_file_row_meta_spans(
+    comment_spans: Vec<Span<'static>>,
+    stats: Vec<Span<'static>>,
+) -> Vec<Span<'static>> {
+    if comment_spans.is_empty() {
+        return stats;
+    }
+    if stats.is_empty() {
+        return comment_spans;
+    }
+    let mut spans = comment_spans;
+    spans.push(Span::raw(" "));
+    spans.extend(stats);
+    spans
+}
+
 pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -7510,6 +7539,19 @@ mod tests {
     #[test]
     fn scrollback_indicator_hides_at_live_bottom() {
         assert_eq!(scrollback_indicator_label(0, 800), None);
+    }
+
+    #[test]
+    fn file_row_metadata_joins_comment_count_and_stats() {
+        let theme = crate::theme::Theme::default_dark();
+        let comments = format_diff_comment_count(2, &theme);
+        let stats = format_line_stats(3, 1, false, &theme);
+        let text = join_file_row_meta_spans(comments, stats)
+            .into_iter()
+            .map(|span| span.content.to_string())
+            .collect::<String>();
+
+        assert_eq!(text, "⚐2 +3 -1");
     }
 
     #[test]
