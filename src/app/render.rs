@@ -1126,7 +1126,7 @@ impl App {
                 .and_then(|anchor| self.diff_comment_for_anchor(anchor))
                 .is_some();
             let selected = selected_row == Some(idx);
-            let marker = if has_comment { "⚐ " } else { "  " };
+            let marker = if has_comment { "⚑ " } else { "  " };
             let marker_style = if has_comment {
                 Style::default().fg(self.theme.warning_fg)
             } else if selected {
@@ -7201,7 +7201,7 @@ fn format_diff_comment_count(count: usize, theme: &crate::theme::Theme) -> Vec<S
         return Vec::new();
     }
     vec![Span::styled(
-        format!("⚐{count}"),
+        format!("⚑{count}"),
         Style::default().fg(theme.warning_fg),
     )]
 }
@@ -7551,7 +7551,7 @@ mod tests {
             .map(|span| span.content.to_string())
             .collect::<String>();
 
-        assert_eq!(text, "⚐2 +3 -1");
+        assert_eq!(text, "⚑2 +3 -1");
     }
 
     #[test]
