@@ -560,7 +560,7 @@ pub(crate) enum ConfirmNonDefaultBranchFocus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NameNewAgentFocus {
     Input,
-    Checkbox,
+    RandomizedNameCheckbox,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1381,6 +1381,7 @@ pub(crate) enum CreateAgentRequest {
         project: Project,
         custom_name: Option<String>,
         use_existing_branch: bool,
+        pull_before_create: bool,
     },
     PullRequest {
         project: Project,

@@ -2749,7 +2749,7 @@ impl App {
                     self.prompt = PromptState::None;
                 }
                 Some(Action::ToggleSelection) => {
-                    self.toggle_name_new_agent_randomized_name();
+                    self.focus_next_name_new_agent_control(!is_reverse_tab(key));
                 }
                 Some(Action::Confirm) => {
                     // Extract the name from the input before taking ownership.
@@ -2845,12 +2845,12 @@ impl App {
                         let checkbox_focused = matches!(
                             self.prompt,
                             PromptState::NameNewAgent {
-                                focus: NameNewAgentFocus::Checkbox,
+                                focus: NameNewAgentFocus::RandomizedNameCheckbox,
                                 ..
                             }
                         );
                         if checkbox_focused {
-                            self.toggle_name_new_agent_randomized_name();
+                            self.toggle_focused_name_new_agent_checkbox();
                         } else if let PromptState::NameNewAgent { input, .. } = &mut self.prompt {
                             input.handle_key(key);
                         }
@@ -4445,6 +4445,30 @@ impl App {
         }
     }
 
+    fn focus_next_name_new_agent_control(&mut self, forward: bool) {
+        if let PromptState::NameNewAgent { focus, .. } = &mut self.prompt {
+            *focus = match (*focus, forward) {
+                (NameNewAgentFocus::Input, true) => NameNewAgentFocus::RandomizedNameCheckbox,
+                (NameNewAgentFocus::RandomizedNameCheckbox, true) => NameNewAgentFocus::Input,
+                (NameNewAgentFocus::Input, false) => NameNewAgentFocus::RandomizedNameCheckbox,
+                (NameNewAgentFocus::RandomizedNameCheckbox, false) => NameNewAgentFocus::Input,
+            };
+        }
+    }
+
+    fn toggle_focused_name_new_agent_checkbox(&mut self) {
+        let focus = match &self.prompt {
+            PromptState::NameNewAgent { focus, .. } => *focus,
+            _ => return,
+        };
+        match focus {
+            NameNewAgentFocus::RandomizedNameCheckbox => {
+                self.toggle_name_new_agent_randomized_name()
+            }
+            NameNewAgentFocus::Input => {}
+        }
+    }
+
     fn toggle_name_new_agent_randomized_name(&mut self) {
         if let PromptState::NameNewAgent {
             input,
@@ -4454,7 +4478,7 @@ impl App {
             ..
         } = &mut self.prompt
         {
-            *focus = NameNewAgentFocus::Checkbox;
+            *focus = NameNewAgentFocus::RandomizedNameCheckbox;
             *randomize_name = !*randomize_name;
             if *randomize_name {
                 let name = crate::git::docker_style_name();
@@ -6932,6 +6956,7 @@ not_a_real_action = ["x"]
                 project: app.projects[0].clone(),
                 custom_name: None,
                 use_existing_branch: false,
+                pull_before_create: false,
             },
             input: TextInput::with_text("reuse-me".to_string()),
             randomize_name: false,
@@ -7368,12 +7393,58 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn fresh_agent_request_uses_pull_before_create_config_default() {
+        let mut app = test_app(default_bindings());
+        app.config.defaults.pull_before_creating_agent_by_default = true;
+
+        app.create_agent_for_selected_project().unwrap();
+        complete_create_agent_branch_inspection(&mut app, "main", "main");
+
+        match &app.prompt {
+            PromptState::NameNewAgent { request, .. } => match request {
+                CreateAgentRequest::NewProject {
+                    pull_before_create, ..
+                } => assert!(*pull_before_create),
+                other => panic!("expected NewProject request, got {other:?}"),
+            },
+            other => panic!("expected NameNewAgent prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fresh_agent_prompt_does_not_expose_pull_before_create_checkbox() {
+        let mut app = test_app(default_bindings());
+        app.config.defaults.pull_before_creating_agent_by_default = true;
+
+        app.create_agent_for_selected_project().unwrap();
+        complete_create_agent_branch_inspection(&mut app, "main", "main");
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::NameNewAgent { focus, .. } => {
+                assert_eq!(*focus, NameNewAgentFocus::RandomizedNameCheckbox)
+            }
+            other => panic!("expected NameNewAgent prompt, got {other:?}"),
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::NameNewAgent { focus, .. } => assert_eq!(*focus, NameNewAgentFocus::Input),
+            other => panic!("expected NameNewAgent prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn name_prompt_toggle_randomized_name_fills_and_clears_input() {
         let mut app = test_app(default_bindings());
         app.create_agent_for_selected_project().unwrap();
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .unwrap();
 
         let generated = match &app.prompt {
@@ -7385,7 +7456,7 @@ not_a_real_action = ["x"]
                 ..
             } => {
                 assert!(*randomize_name);
-                assert_eq!(*focus, NameNewAgentFocus::Checkbox);
+                assert_eq!(*focus, NameNewAgentFocus::RandomizedNameCheckbox);
                 assert!(!input.text.is_empty());
                 assert_eq!(randomized_name.as_deref(), Some(input.text.as_str()));
                 input.text.clone()
@@ -7394,6 +7465,10 @@ not_a_real_action = ["x"]
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .unwrap();
 
         match &app.prompt {
@@ -10461,7 +10536,7 @@ cyan = "#00ffff"
                 ..
             } => {
                 assert!(*randomize_name);
-                assert_eq!(*focus, NameNewAgentFocus::Checkbox);
+                assert_eq!(*focus, NameNewAgentFocus::RandomizedNameCheckbox);
                 assert!(!input.text.is_empty());
                 assert_eq!(randomized_name.as_deref(), Some(input.text.as_str()));
             }

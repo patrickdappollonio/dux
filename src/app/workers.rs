@@ -1576,8 +1576,27 @@ pub(crate) fn run_create_agent_job(
             project,
             custom_name,
             use_existing_branch,
+            pull_before_create,
         } => {
             let repo_path = PathBuf::from(&project.path);
+
+            if pull_before_create {
+                let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
+                    "Pulling latest changes for project \"{}\" before creating the agent...",
+                    project.name
+                )));
+                if let Err(err) = git::pull_current_branch(&repo_path) {
+                    logger::error(&format!(
+                        "pre-create pull failed for {}: {err}",
+                        project.path
+                    ));
+                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
+                        "Failed to pull latest changes for project \"{}\" before creating the agent: {err}",
+                        project.name
+                    )));
+                    return;
+                }
+            }
 
             // Resolve the branch name early so we can check for an
             // existing branch before calling git worktree add.  When no
@@ -2492,6 +2511,63 @@ mod tests {
                 assert_eq!(message, "Forking an agent requires choosing a name first.");
             }
             _ => panic!("expected missing-name failure"),
+        }
+        assert!(worker_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn fresh_worker_reports_pre_create_pull_failure_before_worktree_creation() {
+        let tmp = tempdir().expect("tempdir");
+        let paths = DuxPaths {
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+            root: tmp.path().to_path_buf(),
+        };
+        let project = Project {
+            id: "project-1".to_string(),
+            name: "demo".to_string(),
+            path: tmp.path().join("not-a-repo").to_string_lossy().to_string(),
+            explicit_default_provider: None,
+            default_provider: ProviderKind::from_str("codex"),
+            leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
+            current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Unknown,
+            path_missing: false,
+        };
+        let (worker_tx, worker_rx) = mpsc::channel();
+
+        run_create_agent_job(
+            CreateAgentRequest::NewProject {
+                project,
+                custom_name: Some("agent-branch".to_string()),
+                use_existing_branch: false,
+                pull_before_create: true,
+            },
+            paths,
+            Config::default(),
+            worker_tx,
+            (80, 24),
+        );
+
+        match worker_rx.recv().expect("worker event") {
+            WorkerEvent::CreateAgentProgress(message) => {
+                assert_eq!(
+                    message,
+                    "Pulling latest changes for project \"demo\" before creating the agent..."
+                );
+            }
+            _ => panic!("expected pre-create pull progress"),
+        }
+        match worker_rx.recv().expect("worker event") {
+            WorkerEvent::CreateAgentFailed(message) => {
+                assert!(message.contains(
+                    "Failed to pull latest changes for project \"demo\" before creating the agent"
+                ));
+            }
+            _ => panic!("expected pre-create pull failure"),
         }
         assert!(worker_rx.try_recv().is_err());
     }

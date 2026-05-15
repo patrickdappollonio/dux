@@ -201,6 +201,7 @@ impl App {
             project,
             custom_name: None,
             use_existing_branch: false,
+            pull_before_create: self.config.defaults.pull_before_creating_agent_by_default,
         })
     }
 
