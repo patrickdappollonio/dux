@@ -1047,9 +1047,10 @@ impl App {
             let add_comment = self.bindings.label_for(Action::FocusAgent);
             let delete_comment = self.bindings.label_for(Action::DeleteDiffComment);
             let send_comments = self.bindings.label_for(Action::SendDiffComments);
-            let close = self.bindings.label_for(Action::CloseOverlay);
+            let close = self.bindings.label_for(Action::ExitInteractive);
             let pending = self.pending_diff_comment_count_for_selected_session();
             let orphaned = self.current_diff_orphaned_comment_count();
+            let selected_comment = self.current_diff_selected_comment_key().is_some();
             let mut spans: Vec<Span> = Vec::new();
             let mut send_spans: Vec<Span> = Vec::new();
 
@@ -1057,9 +1058,9 @@ impl App {
                 spans.extend(self.theme.dim_key_badge_default(&add_comment));
                 spans.push(Span::styled(" comment. ", desc_style));
             }
-            if !delete_comment.is_empty() {
+            if !delete_comment.is_empty() && (selected_comment || orphaned > 0) {
                 spans.extend(self.theme.dim_key_badge_default(&delete_comment));
-                if self.current_diff_selected_comment_key().is_some() {
+                if selected_comment {
                     spans.push(Span::styled(" delete comment. ", desc_style));
                 } else if orphaned > 0 {
                     spans.push(Span::styled(" dismiss orphaned. ", desc_style));
