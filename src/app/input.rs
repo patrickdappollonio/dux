@@ -9738,6 +9738,58 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn fullscreen_agent_shows_configured_send_diff_comments_hint() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let bindings = bindings_with_overrides(&[(Action::SendDiffComments, &["ctrl-o"])]);
+        let mut app = test_app(bindings);
+        app.interactive_patterns = app.bindings.interactive_byte_patterns();
+        app.center_mode = CenterMode::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        let key = crate::app::DiffCommentKey::new("session-1", &diff_anchor(45, "## title"));
+        app.diff_comments.insert(
+            key.clone(),
+            crate::app::DiffComment {
+                key,
+                text: "Can we adjust this?".to_string(),
+            },
+        );
+
+        let matched = app.interactive_patterns.match_sequence(&[0x0f]);
+        assert_eq!(
+            matched.map(|(action, _)| action),
+            Some(Action::SendDiffComments),
+            "configured send-comments key should be intercepted in fullscreen agent mode"
+        );
+
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(
+            rendered.contains("Ctrl-o"),
+            "expected configured send-comments key in fullscreen agent hints, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("send comments"),
+            "expected send-comments hint in fullscreen agent hints, got: {rendered}"
+        );
+    }
+
+    #[test]
     fn a_key_does_not_open_diff_comment_editor() {
         let mut app = test_app(default_bindings());
         open_commentable_diff(&mut app);

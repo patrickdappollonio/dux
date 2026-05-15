@@ -1696,6 +1696,8 @@ impl App {
             let reconnect = self.bindings.labels_for(Action::ReconnectAgent);
 
             let macro_key = self.bindings.label_for(Action::OpenMacroBar);
+            let send_comments = self.bindings.label_for(Action::SendDiffComments);
+            let pending_comments = self.pending_diff_comment_count_for_selected_session();
             let hint_line = if is_input {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
@@ -1715,6 +1717,11 @@ impl App {
                     spans.push(Span::styled(" ", desc_style));
                     spans.extend(self.theme.dim_key_badge_default(&macro_key));
                     spans.push(Span::styled(" macros.", desc_style));
+                }
+                if pending_comments > 0 && !send_comments.is_empty() {
+                    spans.push(Span::styled(" ", desc_style));
+                    spans.extend(self.theme.dim_key_badge_default(&send_comments));
+                    spans.push(Span::styled(" send comments.", desc_style));
                 }
                 Line::from(spans)
             } else if scrollback_offset > 0 {
