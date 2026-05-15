@@ -307,6 +307,13 @@ impl App {
         {
             return Ok(false);
         }
+        if key.code == KeyCode::Esc
+            && self.focus == FocusPane::Files
+            && (self.files_search_active || self.has_files_search())
+        {
+            self.handle_files_key(key)?;
+            return Ok(false);
+        }
         if let Some(ref mut scroll) = self.help_scroll {
             // Help overlay is open — consume all keys, only scroll keys do anything.
             let max_help = self
@@ -761,7 +768,11 @@ impl App {
 
     fn handle_files_search_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc | KeyCode::Enter => {
+            KeyCode::Esc => {
+                self.clear_files_search();
+                return;
+            }
+            KeyCode::Enter => {
                 self.files_search_active = false;
                 return;
             }
@@ -7669,6 +7680,36 @@ not_a_real_action = ["x"]
 
         assert_eq!(app.right_section, RightSection::Unstaged);
         assert_eq!(app.files_index, 1);
+    }
+
+    #[test]
+    fn esc_clears_active_files_search() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Files;
+        app.right_section = RightSection::Unstaged;
+        app.unstaged_files = vec![ChangedFile {
+            path: "src/main.rs".into(),
+            status: "M".into(),
+            additions: 2,
+            deletions: 1,
+            binary: false,
+        }];
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        for ch in ['m', 'a', 'i', 'n'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap();
+        }
+
+        assert!(app.files_search_active);
+        assert_eq!(app.files_search.text, "main");
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(!app.files_search_active);
+        assert!(app.files_search.is_empty());
     }
 
     #[test]
