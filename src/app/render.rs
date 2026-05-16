@@ -623,6 +623,7 @@ impl App {
                             Span::styled(dot.to_string(), Style::default().fg(dot_color)),
                         ]))
                     }
+                    LeftItem::EmptyProjectsSpacer => ListItem::new(Line::from("")),
                     LeftItem::EmptyProjectsSeparator => ListItem::new(Line::from(Span::styled(
                         "─",
                         Style::default().fg(self.theme.header_separator_fg),
@@ -732,6 +733,7 @@ impl App {
                         ListItem::new(Line::from(spans))
                     }
                 }
+                LeftItem::EmptyProjectsSpacer => ListItem::new(Line::from("")),
                 LeftItem::Session(index) => {
                     let session = &self.sessions[*index];
                     let is_last = !left_items

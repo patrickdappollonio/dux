@@ -1777,6 +1777,7 @@ impl App {
                 self.sessions.get(*index).map(|s| s.worktree_path.clone())
             }
             Some(LeftItem::Project(index)) => self.projects.get(*index).map(|p| p.path.clone()),
+            Some(LeftItem::EmptyProjectsSpacer) => None,
             Some(LeftItem::EmptyProjectsSeparator) => None,
             None => None,
         };
