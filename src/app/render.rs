@@ -3,6 +3,7 @@ use super::components::{
     shared_button_width,
 };
 use super::*;
+use std::path::Path;
 
 /// ASCII art logo displayed in the agent pane when no content is active.
 const ASCII_LOGO: &[&str] = &[
@@ -604,20 +605,9 @@ impl App {
                                 } else {
                                     "▾"
                                 };
-                            let icon = if project.branch_status == ProjectBranchStatus::NotLeading {
-                                "‼"
-                            } else {
-                                icon
-                            };
                             ListItem::new(Line::from(Span::styled(
                                 icon,
-                                Style::default().fg(
-                                    if project.branch_status == ProjectBranchStatus::NotLeading {
-                                        self.theme.warning_fg
-                                    } else {
-                                        self.theme.project_icon
-                                    },
-                                ),
+                                Style::default().fg(self.theme.project_icon),
                             )))
                         }
                     }
@@ -737,12 +727,6 @@ impl App {
                             spans.push(Span::styled(
                                 format!(" ({count})"),
                                 Style::default().fg(self.theme.provider_label_fg),
-                            ));
-                        }
-                        if project.branch_status == ProjectBranchStatus::NotLeading {
-                            spans.push(Span::styled(
-                                " ‼",
-                                Style::default().fg(self.theme.warning_fg),
                             ));
                         }
                         ListItem::new(Line::from(spans))
@@ -2446,7 +2430,8 @@ impl App {
                 searching,
                 editing_path,
                 path_input,
-                ..
+                tab_completions,
+                tab_index,
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(72, 70, frame.area());
@@ -2460,7 +2445,22 @@ impl App {
                         .filter(|e| e.label.to_lowercase().contains(&needle))
                         .collect()
                 };
-                let items = if *loading {
+                let completion_items = tab_completions
+                    .iter()
+                    .map(|completion| {
+                        ListItem::new(Line::from(vec![Span::styled(
+                            path_completion_display_label(completion),
+                            Style::default().fg(self.theme.text_fg),
+                        )]))
+                    })
+                    .collect::<Vec<_>>();
+                let items = if *editing_path {
+                    if completion_items.is_empty() {
+                        vec![ListItem::new("No matching directories.")]
+                    } else {
+                        completion_items
+                    }
+                } else if *loading {
                     let idx = self.spinner_frame_index();
                     let spinner = crate::theme::SPINNER_FRAMES[idx];
                     vec![ListItem::new(Line::from(vec![
@@ -2502,8 +2502,14 @@ impl App {
                         })
                         .collect::<Vec<_>>()
                 };
+                let item_count = if *editing_path {
+                    tab_completions.len()
+                } else {
+                    visible.len()
+                };
+                let selected_index = if *editing_path { *tab_index } else { *selected };
                 let mut state = ListState::default()
-                    .with_selected(Some((*selected).min(visible.len().saturating_sub(1))));
+                    .with_selected(Some(selected_index.min(item_count.saturating_sub(1))));
                 let has_filter = !filter.is_empty();
                 let show_top_input = *searching || has_filter || *editing_path;
                 let (top_areas, list_render_area) = if show_top_input {
@@ -2538,9 +2544,10 @@ impl App {
                     let search_key = self.bindings.label_for(Action::SearchToggle);
                     let open_key = self.bindings.label_for(Action::OpenEntry);
                     let goto_key = self.bindings.label_for(Action::GoToPath);
+                    let exit_path_key = self.bindings.label_for(Action::ExitPathEditorOnProjectAdd);
                     let mut bottom_spans = vec![Span::raw(" ")];
                     if *editing_path {
-                        // Path editor: Tab/Enter/Esc are text-input controls, not rebindable.
+                        // Path editor: Tab/Enter are text-input controls, not rebindable.
                         bottom_spans.extend(self.theme.key_badge_default("Tab"));
                         bottom_spans.push(Span::styled(
                             " complete  ",
@@ -2548,12 +2555,12 @@ impl App {
                         ));
                         bottom_spans.extend(self.theme.key_badge_default("Enter"));
                         bottom_spans.push(Span::styled(
-                            " go  ",
+                            " add  ",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
-                        bottom_spans.extend(self.theme.key_badge_default("Esc"));
+                        bottom_spans.extend(self.theme.key_badge_default(&exit_path_key));
                         bottom_spans.push(Span::styled(
-                            " cancel",
+                            " browse",
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
                     } else if *searching {
@@ -2606,7 +2613,7 @@ impl App {
                     self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
                         input: Some(input_inner),
                         list: list_inner,
-                        items: visible.len(),
+                        items: item_count,
                         offset: state.offset(),
                     };
                 } else {
@@ -2657,7 +2664,7 @@ impl App {
                     self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
                         input: None,
                         list: list_inner,
-                        items: visible.len(),
+                        items: item_count,
                         offset: state.offset(),
                     };
                 }
@@ -3474,6 +3481,174 @@ impl App {
                     offset: state.offset(),
                 };
             }
+            PromptState::PickProjectWorktree(prompt) => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(78, 58, frame.area());
+                self.clear_overlay_area(frame, area);
+
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let move_down = self.bindings.label_for(Action::MoveDown);
+                let move_up = self.bindings.label_for(Action::MoveUp);
+                let mut bottom_spans = vec![Span::raw(" ")];
+                bottom_spans.extend(self.theme.key_badge_default(&move_down));
+                bottom_spans.push(Span::styled(
+                    " down  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&move_up));
+                bottom_spans.push(Span::styled(
+                    " up  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
+                bottom_spans.push(Span::styled(
+                    " use  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&close_key));
+                bottom_spans.push(Span::styled(
+                    " cancel",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+
+                let [details_area, list_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(4), Constraint::Min(6)])
+                    .areas(area);
+
+                let detail_lines = vec![
+                    Line::from(vec![
+                        Span::styled(" Project: ", Style::default().fg(self.theme.hint_desc_fg)),
+                        Span::styled(
+                            prompt.project.name.as_str(),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(" Repo: ", Style::default().fg(self.theme.hint_desc_fg)),
+                        Span::styled(
+                            prompt.project.path.as_str(),
+                            Style::default().fg(self.theme.text_fg),
+                        ),
+                    ]),
+                ];
+                Paragraph::new(detail_lines)
+                    .block(
+                        self.themed_overlay_block("New Agent From Worktree")
+                            .title_bottom(Line::from(bottom_spans)),
+                    )
+                    .render(details_area, frame.buffer_mut());
+
+                let rows = project_worktree_visual_rows(
+                    &prompt.entries,
+                    prompt.loading,
+                    prompt.error.as_deref(),
+                );
+                let path_col = prompt
+                    .entries
+                    .iter()
+                    .map(|entry| entry.display_name().chars().count())
+                    .max()
+                    .unwrap_or(8)
+                    .clamp(8, 24);
+                let items = rows
+                    .iter()
+                    .map(|row| match row {
+                        ProjectWorktreeVisualRow::Header(label) => {
+                            ListItem::new(Line::from(Span::styled(
+                                format!(" {label}"),
+                                Style::default()
+                                    .fg(self.theme.help_section_header_fg)
+                                    .add_modifier(Modifier::BOLD),
+                            )))
+                        }
+                        ProjectWorktreeVisualRow::Empty(message) => {
+                            ListItem::new(Line::from(Span::styled(
+                                format!("  {message}"),
+                                Style::default().fg(self.theme.hint_dim_desc_fg),
+                            )))
+                        }
+                        ProjectWorktreeVisualRow::Entry(index) => {
+                            let entry = &prompt.entries[*index];
+                            let style = if entry.is_selectable {
+                                Style::default().fg(self.theme.text_fg)
+                            } else {
+                                Style::default().fg(self.theme.hint_dim_desc_fg)
+                            };
+                            let kind = if entry.is_project_checkout {
+                                "project"
+                            } else if entry.is_external {
+                                "external"
+                            } else {
+                                "managed"
+                            };
+                            let session_suffix = entry
+                                .existing_session_id
+                                .as_ref()
+                                .map(|id| format!("  agent {id}"))
+                                .unwrap_or_default();
+                            let kind_style = if !entry.is_selectable {
+                                Style::default().fg(self.theme.hint_dim_desc_fg)
+                            } else if entry.is_managed_by_dux {
+                                Style::default().fg(self.theme.branch_fg)
+                            } else {
+                                Style::default().fg(self.theme.hint_desc_fg)
+                            };
+                            let branch_label_style = Style::default().fg(if entry.is_selectable {
+                                self.theme.branch_fg
+                            } else {
+                                self.theme.hint_dim_desc_fg
+                            });
+                            let branch_value_style = Style::default().fg(if entry.is_selectable {
+                                self.theme.hint_desc_fg
+                            } else {
+                                self.theme.hint_dim_desc_fg
+                            });
+                            let name = git::ellipsize_middle(&entry.display_name(), path_col);
+                            ListItem::new(Line::from(vec![
+                                Span::styled(
+                                    format!("  {:path_col$}", name),
+                                    style.add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(format!("  {:<8}", kind), kind_style),
+                                Span::styled("  branch: ", branch_label_style),
+                                Span::styled(entry.branch_name.as_str(), branch_value_style),
+                                Span::styled(
+                                    session_suffix,
+                                    Style::default().fg(self.theme.hint_dim_desc_fg),
+                                ),
+                            ]))
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let selected_visual = prompt.selected.and_then(|selected| {
+                    rows.iter().position(|row| {
+                        matches!(row, ProjectWorktreeVisualRow::Entry(index) if *index == selected)
+                    })
+                });
+                let mut state = ListState::default().with_selected(selected_visual);
+                let list_block = Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
+                let list_inner = list_block.inner(list_area);
+                StatefulWidget::render(
+                    List::new(items)
+                        .block(list_block)
+                        .highlight_style(self.theme.selection_style()),
+                    list_area,
+                    frame.buffer_mut(),
+                    &mut state,
+                );
+                self.overlay_layout.active = OverlayMouseLayout::PickProjectWorktree {
+                    list: list_inner,
+                    items: rows.len(),
+                    offset: state.offset(),
+                };
+            }
             PromptState::KillRunning(prompt) => {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(78, 72, frame.area());
@@ -4002,6 +4177,58 @@ impl App {
                     checkbox,
                 };
             }
+            PromptState::AddProjectFailed { message, .. } => {
+                self.render_dim_overlay(frame);
+                let dialog_width = 68.min(frame.area().width.max(1));
+                let inner_width = dialog_width.saturating_sub(2);
+                let mut body_lines = vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " The project could not be added.",
+                        Style::default().fg(self.theme.warning_fg),
+                    )),
+                    Line::from(""),
+                ];
+                for line in message.lines().take(6) {
+                    body_lines.push(Line::from(format!(" {line}")));
+                }
+                let body_height = wrapped_line_count(&body_lines, inner_width, false);
+                let area = centered_rect_exact(dialog_width, 2 + body_height + 3, frame.area());
+                self.clear_overlay_area(frame, area);
+                let outer = self.themed_overlay_block("Add Project Failed");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(body_height), Constraint::Length(3)])
+                    .areas(inner);
+
+                Paragraph::new(body_lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let btn_width = shared_button_width(&["OK"]);
+                let ok_area = Rect {
+                    x: buttons_area.x + buttons_area.width.saturating_sub(btn_width) / 2,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                Button::new("OK")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::AddProjectFailedOk,
+                        self.pressed_button,
+                        true,
+                        true,
+                    ))
+                    .render(frame, ok_area, &self.theme);
+
+                self.overlay_layout.active =
+                    OverlayMouseLayout::AddProjectFailed { ok_button: ok_area };
+            }
             PromptState::ConfirmDeleteAgent {
                 branch_name,
                 focus,
@@ -4069,9 +4296,10 @@ impl App {
                 }
                 let body_height = wrapped_line_count(&body_lines, inner_width, false);
                 let checkbox_spacing = u16::from(!*worktree_shared);
+                let button_spacing = u16::from(!*worktree_shared);
                 let area = centered_rect_exact(
                     dialog_width,
-                    2 + body_height + checkbox_spacing + checkbox_height + 3,
+                    2 + body_height + checkbox_spacing + checkbox_height + button_spacing + 3,
                     frame.area(),
                 );
                 self.clear_overlay_area(frame, area);
@@ -4079,12 +4307,13 @@ impl App {
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
 
-                let [body_area, _, checkbox_area, buttons_area] = Layout::default()
+                let [body_area, _, checkbox_area, _, buttons_area] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(body_height),
                         Constraint::Length(checkbox_spacing),
                         Constraint::Length(checkbox_height),
+                        Constraint::Length(button_spacing),
                         Constraint::Length(3),
                     ])
                     .areas(inner);
@@ -4432,7 +4661,6 @@ impl App {
                 let inner_width = dialog_width.saturating_sub(2);
                 let has_checkbox =
                     matches!(kind, BranchWarningKind::Known { .. }) && action.allows_add_anyway();
-                let is_create_agent = matches!(action, NonDefaultBranchAction::CreateAgent { .. });
 
                 // Body: warning text + the "new worktrees branch from …" note,
                 // plus a dim info line on the heuristic path explaining why dux
@@ -4440,43 +4668,22 @@ impl App {
                 let mut body_lines = vec![Line::from("")];
                 match kind {
                     BranchWarningKind::Known { default_branch } => {
-                        if is_create_agent {
-                            body_lines
-                                .push(Line::from(" This project checkout has changed and is no"));
-                            body_lines.push(Line::from(vec![
-                                Span::raw(" longer on the default branch "),
-                                Span::styled(
-                                    default_branch.as_str(),
-                                    Style::default().add_modifier(Modifier::BOLD),
-                                ),
-                                Span::raw("."),
-                            ]));
-                            body_lines.push(Line::from(""));
-                            body_lines.push(Line::from(vec![
-                                Span::raw(" Current branch: "),
-                                Span::styled(
-                                    current_branch.as_str(),
-                                    Style::default().add_modifier(Modifier::BOLD),
-                                ),
-                            ]));
-                        } else {
-                            body_lines.push(Line::from(vec![
-                                Span::raw(" This repository is on branch "),
-                                Span::styled(
-                                    current_branch.as_str(),
-                                    Style::default().add_modifier(Modifier::BOLD),
-                                ),
-                                Span::raw(", but the"),
-                            ]));
-                            body_lines.push(Line::from(vec![
-                                Span::raw(" remote default branch is "),
-                                Span::styled(
-                                    default_branch.as_str(),
-                                    Style::default().add_modifier(Modifier::BOLD),
-                                ),
-                                Span::raw("."),
-                            ]));
-                        }
+                        body_lines.push(Line::from(vec![
+                            Span::raw(" This repository is on branch "),
+                            Span::styled(
+                                current_branch.as_str(),
+                                Style::default().add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(", but the"),
+                        ]));
+                        body_lines.push(Line::from(vec![
+                            Span::raw(" remote default branch is "),
+                            Span::styled(
+                                default_branch.as_str(),
+                                Style::default().add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw("."),
+                        ]));
                     }
                     BranchWarningKind::Heuristic => {
                         body_lines.push(Line::from(vec![
@@ -4491,11 +4698,8 @@ impl App {
                     }
                 }
                 body_lines.push(Line::from(""));
-                let worktree_warning = if is_create_agent {
-                    " New agents should branch from the default branch.".to_string()
-                } else {
-                    format!(" New worktrees will branch from \"{current_branch}\".")
-                };
+                let worktree_warning =
+                    format!(" New worktrees will branch from \"{current_branch}\".");
                 body_lines.push(Line::from(Span::styled(
                     worktree_warning,
                     Style::default().fg(self.theme.warning_fg),
@@ -4595,11 +4799,7 @@ impl App {
                 // "Check Out & Add" and "Add Anyway" in the calculation keeps
                 // the layout stable when the user toggles the checkbox —
                 // otherwise the buttons would resize mid-modal.
-                let btn_width = if is_create_agent {
-                    shared_button_width(&["Cancel", "Check Out & Create"])
-                } else {
-                    shared_button_width(&["Cancel", "Add Anyway", "Check Out & Add"])
-                };
+                let btn_width = shared_button_width(&["Cancel", "Add Anyway", "Check Out & Add"]);
                 let gap = 2u16;
                 let total = btn_width * 2 + gap;
                 let left_offset = buttons_area.width.saturating_sub(total) / 2;
@@ -4621,9 +4821,7 @@ impl App {
                 // pressing it will do. When the checkbox is on and we know the
                 // default branch, the action is a two-step (switch + add),
                 // otherwise it's the original "Add Anyway" add-as-is.
-                let add_label = if is_create_agent {
-                    "Check Out & Create"
-                } else if has_checkbox && *checkout_default {
+                let add_label = if has_checkbox && *checkout_default {
                     "Check Out & Add"
                 } else {
                     "Add Anyway"
@@ -4963,34 +5161,55 @@ impl App {
                 hint_para.render(hint_area, frame.buffer_mut());
             }
             PromptState::NameNewAgent {
+                request,
                 input,
                 randomize_name,
                 focus,
                 ..
             } => {
                 self.render_dim_overlay(frame);
-                let checkbox = Checkbox::new("Use randomized pet name")
+                let randomize_checkbox = Checkbox::new("Use randomized pet name")
                     .checked(*randomize_name)
-                    .state(if *focus == NameNewAgentFocus::Checkbox {
+                    .state(if *focus == NameNewAgentFocus::RandomizedNameCheckbox {
                         CheckboxState::Focused
                     } else {
                         CheckboxState::Normal
                     });
                 let dialog_width = 60.min(frame.area().width.max(1));
                 let inner_width = dialog_width.saturating_sub(2);
-                let checkbox_height = checkbox
+                let randomize_checkbox_height = randomize_checkbox
                     .layout(
                         inner_width,
-                        checkbox.marker_style(Style::default()),
-                        checkbox.label_style(Style::default()),
+                        randomize_checkbox.marker_style(Style::default()),
+                        randomize_checkbox.label_style(Style::default()),
                     )
                     .height
                     .saturating_add(1);
                 let checkbox_spacing = 1;
                 let footer_spacing = 1;
+                let context_line = match request {
+                    CreateAgentRequest::ExistingManagedWorktree { worktree_path, .. } => {
+                        Some(format!(
+                            " This starts a fresh agent session in {}.",
+                            worktree_path.display()
+                        ))
+                    }
+                    CreateAgentRequest::ForkExternalWorktree {
+                        source_worktree_path,
+                        ..
+                    } => Some(format!(
+                        " External worktree will be copied into a fresh managed dux worktree: {}.",
+                        source_worktree_path.display()
+                    )),
+                    _ => None,
+                };
+                let context_height = u16::from(context_line.is_some());
                 let area = centered_rect_exact(
                     dialog_width,
-                    8 + checkbox_spacing + checkbox_height + footer_spacing,
+                    8 + context_height
+                        + checkbox_spacing
+                        + randomize_checkbox_height
+                        + footer_spacing,
                     frame.area(),
                 );
                 self.clear_overlay_area(frame, area);
@@ -4999,23 +5218,45 @@ impl App {
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
 
-                let [label_area, input_area, _, checkbox_area, _, hint_area] = Layout::default()
+                let [
+                    label_area,
+                    context_area,
+                    input_area,
+                    _,
+                    randomize_checkbox_area,
+                    _,
+                    hint_area,
+                ] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(1),
+                        Constraint::Length(context_height),
                         Constraint::Length(3),
                         Constraint::Length(checkbox_spacing),
-                        Constraint::Length(checkbox_height),
+                        Constraint::Length(randomize_checkbox_height),
                         Constraint::Length(footer_spacing),
                         Constraint::Min(1),
                     ])
                     .areas(inner);
 
+                let label = if matches!(request, CreateAgentRequest::ExistingManagedWorktree { .. })
+                {
+                    " Enter a display name for the new agent:"
+                } else {
+                    " Enter a name for the new agent (used as branch name):"
+                };
                 Paragraph::new(Line::from(Span::styled(
-                    " Enter a name for the new agent (used as branch name):",
+                    label,
                     Style::default().fg(self.theme.input_label_fg),
                 )))
                 .render(label_area, frame.buffer_mut());
+                if let Some(context_line) = context_line {
+                    Paragraph::new(Line::from(Span::styled(
+                        git::ellipsize_middle(&context_line, inner.width as usize),
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )))
+                    .render(context_area, frame.buffer_mut());
+                }
 
                 // Input field with cursor indicator.
                 let display = if input.cursor < input.text.len() {
@@ -5051,12 +5292,12 @@ impl App {
                     .block(input_block)
                     .render(input_area, frame.buffer_mut());
 
-                let (checkbox_rect, _) = self.render_overlay_checkbox(
+                let (randomized_name_checkbox_rect, _) = self.render_overlay_checkbox(
                     frame,
-                    checkbox_area,
+                    randomize_checkbox_area,
                     "Use randomized pet name",
                     *randomize_name,
-                    if *focus == NameNewAgentFocus::Checkbox {
+                    if *focus == NameNewAgentFocus::RandomizedNameCheckbox {
                         CheckboxState::Focused
                     } else {
                         CheckboxState::Normal
@@ -5081,7 +5322,11 @@ impl App {
                 ));
                 hints.extend(self.theme.key_badge_default(&toggle_key));
                 hints.push(Span::styled(
-                    " randomize  ",
+                    " focus  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                hints.push(Span::styled(
+                    "Space toggle  ",
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
                 hints.extend(self.theme.key_badge_default(&close_key));
@@ -5094,7 +5339,7 @@ impl App {
                     input: input_inner,
                     checkbox: Some(OverlayCheckbox {
                         id: OverlayCheckboxId::NameNewAgentRandomizedPetName,
-                        rect: checkbox_rect,
+                        rect: randomized_name_checkbox_rect,
                     }),
                 };
             }
@@ -6299,6 +6544,18 @@ fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {
     Some(format!(" {scrolled}/{total} {noun} "))
 }
 
+fn path_completion_display_label(completion: &str) -> String {
+    let trimmed = completion.trim_end_matches('/');
+    let Some(folder) = Path::new(trimmed)
+        .file_name()
+        .and_then(|part| part.to_str())
+    else {
+        return completion.to_string();
+    };
+
+    format!(".../{folder}/")
+}
+
 impl App {
     /// Render the GitHub PR pill as a single-line pill using Unicode
     /// half-block characters for the caps and a solid background:
@@ -6532,6 +6789,16 @@ mod tests {
         assert_eq!(spans[0].style, prose);
         assert_eq!(spans[1].style, quoted);
         assert_eq!(spans[3].style, quoted);
+    }
+
+    #[test]
+    fn path_completion_display_label_handles_unicode_leaf() {
+        assert_eq!(path_completion_display_label("/tmp/项目/"), ".../项目/");
+    }
+
+    #[test]
+    fn path_completion_display_label_keeps_root_without_leaf() {
+        assert_eq!(path_completion_display_label("/"), "/");
     }
 
     #[test]
@@ -6773,6 +7040,14 @@ mod tests {
     fn format_bytes_gib_range() {
         assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GiB");
         assert_eq!(format_bytes(1024 * 1024 * 1024 * 3), "3.0 GiB");
+    }
+
+    #[test]
+    fn path_completion_display_label_shows_folder_only() {
+        assert_eq!(
+            path_completion_display_label("/Users/patrick/project/"),
+            ".../project/"
+        );
     }
 
     #[test]

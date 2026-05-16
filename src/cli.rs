@@ -220,6 +220,42 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         defaults.ui.branch_sync_interval,
         current.ui.branch_sync_interval,
     );
+    diff_bool(
+        &mut changes,
+        "ui.show_diff_line_numbers",
+        defaults.ui.show_diff_line_numbers,
+        current.ui.show_diff_line_numbers,
+    );
+    diff_u16(
+        &mut changes,
+        "ui.diff_tab_width",
+        defaults.ui.diff_tab_width,
+        current.ui.diff_tab_width,
+    );
+    diff_bool(
+        &mut changes,
+        "ui.github_integration",
+        defaults.ui.github_integration,
+        current.ui.github_integration,
+    );
+    diff_bool(
+        &mut changes,
+        "ui.auto_reopen_agents",
+        defaults.ui.auto_reopen_agents,
+        current.ui.auto_reopen_agents,
+    );
+    diff_str(
+        &mut changes,
+        "ui.pr_banner_position",
+        &defaults.ui.pr_banner_position,
+        &current.ui.pr_banner_position,
+    );
+    diff_str(
+        &mut changes,
+        "ui.theme",
+        &defaults.ui.theme,
+        &current.ui.theme,
+    );
 
     // [editor]
     diff_str(
@@ -272,14 +308,6 @@ fn run_diff_summary(current: &Config) -> Result<()> {
 
     // [providers.*]
     diff_providers(&mut changes, &defaults, current);
-
-    // [[projects]]
-    if !current.projects.is_empty() {
-        changes.push(format!(
-            "projects: {} project(s) configured",
-            current.projects.len()
-        ));
-    }
 
     // [macros]
     if !current.macros.entries.is_empty() {
@@ -788,6 +816,8 @@ mod tests {
                     worktree_path: worktree.to_string_lossy().to_string(),
                     title: None,
                     started_providers: Vec::new(),
+                    desired_running: false,
+                    auto_reopen_enabled: true,
                     status: SessionStatus::Active,
                     created_at: now,
                     updated_at: now,

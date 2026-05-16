@@ -1,5 +1,7 @@
 # dux
 
+[![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/patrickdappollonio/dux/total)](https://github.com/patrickdappollonio/dux/releases/latest) [![NPM Downloads](https://img.shields.io/npm/dm/%40patrickdappollonio%2Fdux)](https://www.npmjs.com/package/@patrickdappollonio/dux) ![GitHub License](https://img.shields.io/github/license/patrickdappollonio/dux)
+
 <img src="assets/dux-logo.png" width="200" align="right" />
 
 Your AI agents deserve a proper office. **dux** (pronounced "dooks") is a terminal UI that lets you run multiple AI coding agents side by side, each in its own git worktree, with full companion terminals, macros, commit generation, and a command palette that knows more tricks than you do.
@@ -72,6 +74,8 @@ Grab the latest release for your platform from the [Releases](https://github.com
 
 dux organizes work around **projects** (git repos) and **agents** (worktree sessions). When you create an agent, dux branches off a new git worktree so the agent has its own isolated copy of the code. No conflicts with your main checkout, no stepping on other agents' changes.
 
+Already have a Git worktree you want dux to use? The `new-agent-from-worktree` command in the palette lets you pick from existing worktrees for the selected project. If the worktree is already managed by dux, dux reuses it and reconnects like a continuable session; if it's outside dux's managed worktree directory, dux copies it into a fresh managed worktree first so the original checkout is left alone.
+
 The interface has three panes:
 
 - **Left:** your projects and agent sessions
@@ -93,6 +97,8 @@ resume_args = ["--continue"]
 
 Set `resume_args` and dux can reconnect to detached or crashed sessions. Omit it if your CLI doesn't support resuming; dux will just relaunch it.
 
+When a provider supports resume args, dux can auto-reopen agents that were still running when the app exited. A normal agent exit with status code 0 is treated as intentional and will not be reopened. The feature is off by default; enable it globally with `[ui].auto_reopen_agents = true`, opt out a project with `auto_reopen_agents = false` in its `[[projects]]` entry, or use the `toggle-project-auto-reopen-agents` and `toggle-agent-auto-reopen` palette commands for project and per-agent opt-outs.
+
 Switch providers from the command palette. dux sticks to one agent per worktree, so provider changes happen in place:
 
 - **`change-agent-provider`** swaps the *selected* worktree's provider on next launch. If the agent is still running, dux records your choice and warns you — the running agent keeps going until you exit and relaunch it, at which point it spawns with the new provider. If you've used that provider on this worktree before, dux passes its `resume_args` so you pick up the previous conversation instead of starting fresh.
@@ -101,7 +107,7 @@ Switch providers from the command palette. dux sticks to one agent per worktree,
 
 The header shows `default provider: …` when the selected project inherits the global fallback. If a project has its own override, the header shows `project provider: …` plus `global default: …`. It also adds `current provider: …` when the selected agent is using a different one, so you always know which CLI you're talking to.
 
-You can also set a default per-project in the config file, which wins over the global default for that one project.
+Project-specific provider defaults are managed from inside dux with `change-project-default-provider`; `config.toml` only stores the global fallback.
 
 ### Macros
 
@@ -120,7 +126,7 @@ Each macro can be scoped to the agent pane, the companion terminal, or both.
 
 The right pane is a full git staging area. Stage and unstage files, view syntax-highlighted diffs, write commit messages, push, and pull, all without leaving dux.
 
-**AI commit messages:** Stage your changes, hit a key, and dux sends the diff to your provider in oneshot mode. It drafts a commit message using Conventional Commits, you tweak it (or don't), and commit. The prompt is fully customizable per-project.
+**AI commit messages:** Stage your changes, hit a key, and dux sends the diff to your provider in oneshot mode. It drafts a commit message using Conventional Commits, you tweak it (or don't), and commit. The prompt is customizable once in `config.toml` for the whole app.
 
 **PR tracking:** With the `gh` CLI installed, dux tracks pull requests for your agent branches and shows status pills right in the interface.
 
@@ -138,7 +144,7 @@ Press the palette key and you get fuzzy-searchable access to every action in dux
 
 ### Configuration
 
-The config file at `~/.config/dux/config.toml` (Linux) or `~/.dux/config.toml` (macOS) is exhaustively commented. Every setting is explained inline, so you should never need to leave the file to understand an option. Every keybinding is rebindable. Every pane width, scrollback limit, and default provider is configurable.
+The config file at `~/.config/dux/config.toml` (Linux) or `~/.dux/config.toml` (macOS) is exhaustively commented. Every setting is explained inline, so you should never need to leave the file to understand an option. Every keybinding is rebindable. Every pane width, scrollback limit, default provider, and startup agent reopening behavior is configurable.
 
 ```bash
 dux config path          # Print the config file path

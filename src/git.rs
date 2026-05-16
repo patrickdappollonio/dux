@@ -11,6 +11,27 @@ use content_inspector::{ContentType, inspect};
 use crate::logger;
 use crate::model::ChangedFile;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitWorktree {
+    pub path: PathBuf,
+    pub head: Option<String>,
+    pub branch_name: Option<String>,
+    pub detached: bool,
+}
+
+impl GitWorktree {
+    pub fn label(&self) -> String {
+        if let Some(branch_name) = &self.branch_name {
+            return branch_name.clone();
+        }
+        if let Some(head) = &self.head {
+            let short = head.chars().take(7).collect::<String>();
+            return format!("detached {short}");
+        }
+        "detached HEAD".to_string()
+    }
+}
+
 /// Where a branch was found when checking for its existence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BranchLocation {
@@ -95,6 +116,77 @@ pub fn is_git_repo(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktree>> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "worktree",
+            "list",
+            "--porcelain",
+            "-z",
+        ])
+        .output()
+        .with_context(|| format!("failed to list worktrees for {}", repo_path.display()))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git worktree list failed for {}: {}",
+            repo_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    parse_worktree_list_porcelain_z(&output.stdout)
+}
+
+pub fn parse_worktree_list_porcelain_z(bytes: &[u8]) -> Result<Vec<GitWorktree>> {
+    let mut worktrees = Vec::new();
+    let mut current: Option<GitWorktree> = None;
+
+    for raw in bytes.split(|byte| *byte == 0) {
+        if raw.is_empty() {
+            if let Some(entry) = current.take() {
+                worktrees.push(entry);
+            }
+            continue;
+        }
+        let token = String::from_utf8_lossy(raw);
+        if let Some(path) = token.strip_prefix("worktree ") {
+            if let Some(entry) = current.take() {
+                worktrees.push(entry);
+            }
+            current = Some(GitWorktree {
+                path: PathBuf::from(path),
+                head: None,
+                branch_name: None,
+                detached: false,
+            });
+        } else if let Some(head) = token.strip_prefix("HEAD ") {
+            if let Some(entry) = &mut current {
+                entry.head = Some(head.to_string());
+            }
+        } else if let Some(branch) = token.strip_prefix("branch ") {
+            if let Some(entry) = &mut current {
+                entry.branch_name = Some(
+                    branch
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(branch)
+                        .to_string(),
+                );
+            }
+        } else if token == "detached"
+            && let Some(entry) = &mut current
+        {
+            entry.detached = true;
+        }
+    }
+
+    if let Some(entry) = current {
+        worktrees.push(entry);
+    }
+
+    Ok(worktrees)
+}
+
 pub fn is_dirty(repo_path: &Path) -> Result<bool> {
     let output = Command::new("git")
         .args([
@@ -167,19 +259,7 @@ pub fn switch_branch(repo_path: &Path, branch_name: &str) -> Result<()> {
 pub fn branch_exists(repo_path: &Path, name: &str) -> Option<BranchLocation> {
     let repo = repo_path.to_string_lossy();
     let local_ref = format!("refs/heads/{name}");
-    let local = Command::new("git")
-        .args([
-            "-C",
-            repo.as_ref(),
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &local_ref,
-        ])
-        .output()
-        .ok()
-        .is_some_and(|o| o.status.success());
-    if local {
+    if ref_exists(repo_path, &local_ref) {
         return Some(BranchLocation::Local);
     }
     let remote_ref = format!("refs/remotes/origin/{name}");
@@ -199,6 +279,26 @@ pub fn branch_exists(repo_path: &Path, name: &str) -> Option<BranchLocation> {
         return Some(BranchLocation::Remote);
     }
     None
+}
+
+pub fn local_branch_exists(repo_path: &Path, name: &str) -> bool {
+    ref_exists(repo_path, &format!("refs/heads/{name}"))
+}
+
+fn ref_exists(repo_path: &Path, ref_name: &str) -> bool {
+    let repo = repo_path.to_string_lossy();
+    Command::new("git")
+        .args([
+            "-C",
+            repo.as_ref(),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            ref_name,
+        ])
+        .output()
+        .ok()
+        .is_some_and(|o| o.status.success())
 }
 
 /// Creates a worktree that checks out an **existing** branch (no `-b`).
@@ -234,15 +334,6 @@ pub fn create_worktree_existing_branch(
     }
     let canonical = worktree_path.canonicalize().unwrap_or(worktree_path);
     Ok((branch_name.to_string(), canonical))
-}
-
-pub fn create_worktree(
-    repo_path: &Path,
-    worktrees_root: &Path,
-    project_name: &str,
-    custom_name: Option<&str>,
-) -> Result<(String, PathBuf)> {
-    create_worktree_from_start_point(repo_path, worktrees_root, project_name, None, custom_name)
 }
 
 pub fn fetch_pull_request_head(repo_path: &Path, pr_number: u64, branch_name: &str) -> Result<()> {
@@ -1151,6 +1242,22 @@ mod tests {
         wt
     }
 
+    #[test]
+    fn parse_worktree_list_porcelain_z_handles_branches_detached_and_spaces() {
+        let input = b"worktree /repo/main checkout\0HEAD 1111111111111111111111111111111111111111\0branch refs/heads/main\0\0worktree /repo/feature\0HEAD 2222222222222222222222222222222222222222\0branch refs/heads/feature/x\0\0worktree /repo/detached\0HEAD abcdef1234567890\0detached\0\0";
+
+        let entries = parse_worktree_list_porcelain_z(input).unwrap();
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].path, PathBuf::from("/repo/main checkout"));
+        assert_eq!(entries[0].branch_name.as_deref(), Some("main"));
+        assert_eq!(entries[0].label(), "main");
+        assert_eq!(entries[1].branch_name.as_deref(), Some("feature/x"));
+        assert_eq!(entries[2].branch_name, None);
+        assert!(entries[2].detached);
+        assert_eq!(entries[2].label(), "detached abcdef1");
+    }
+
     fn run_git(cwd: &Path, args: &[&str]) {
         let out = Command::new("git")
             .args(args)
@@ -1642,8 +1749,14 @@ mod tests {
     fn create_worktree_uses_custom_name() {
         let repo = init_test_repo();
         let worktrees_root = repo.path().join("agents");
-        let (branch, path) =
-            create_worktree(repo.path(), &worktrees_root, "proj", Some("my-agent")).unwrap();
+        let (branch, path) = create_worktree_from_start_point(
+            repo.path(),
+            &worktrees_root,
+            "proj",
+            None,
+            Some("my-agent"),
+        )
+        .unwrap();
         assert_eq!(branch, "my-agent");
         assert!(path.ends_with("proj/my-agent"));
         assert!(path.exists());
@@ -1653,7 +1766,9 @@ mod tests {
     fn create_worktree_generates_name_when_none() {
         let repo = init_test_repo();
         let worktrees_root = repo.path().join("agents");
-        let (branch, path) = create_worktree(repo.path(), &worktrees_root, "proj", None).unwrap();
+        let (branch, path) =
+            create_worktree_from_start_point(repo.path(), &worktrees_root, "proj", None, None)
+                .unwrap();
         // Auto-generated names contain a dash (docker-style petname).
         assert!(branch.contains('-'), "expected dash in '{branch}'");
         assert!(path.exists());
@@ -1680,6 +1795,28 @@ mod tests {
         assert_eq!(branch, "my-fork");
         assert!(forked.ends_with("proj/my-fork"));
         assert_eq!(head_commit(&forked).unwrap(), source_head);
+    }
+
+    #[test]
+    fn create_worktree_from_start_point_uses_named_base_branch() {
+        let repo = init_test_repo();
+        let feature = add_worktree(repo.path(), "feature");
+        fs::write(feature.join("feature.txt"), "feature\n").unwrap();
+        commit_all(&feature, "add feature marker");
+
+        let main_head = head_commit(repo.path()).unwrap();
+        let worktrees_root = repo.path().join("agents");
+        let (_branch, agent) = create_worktree_from_start_point(
+            repo.path(),
+            &worktrees_root,
+            "proj",
+            Some("main"),
+            Some("agent-from-main"),
+        )
+        .unwrap();
+
+        assert_eq!(head_commit(&agent).unwrap(), main_head);
+        assert!(!agent.join("feature.txt").exists());
     }
 
     // ── agent_name_char_map tests ───────────────────────────────

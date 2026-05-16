@@ -11,6 +11,7 @@ pub enum Action {
     ToggleProject,
     NewAgent,
     NewAgentFromPr,
+    NewAgentFromWorktree,
     ForkAgent,
     ChangeAgentProvider,
     ChangeDefaultProvider,
@@ -68,6 +69,7 @@ pub enum Action {
     // Overlays and dialogs
     SearchToggle,
     GoToPath,
+    ExitPathEditorOnProjectAdd,
     OpenEntry,
     AddCurrentDir,
     Confirm,
@@ -88,6 +90,8 @@ pub enum Action {
     ToggleDiffLineNumbers,
     ResourceMonitor,
     ToggleGithubIntegration,
+    ToggleProjectAutoReopenAgents,
+    ToggleAgentAutoReopen,
     ToggleRandomizedPetNameDefault,
     TogglePrBannerPosition,
     ForceReconnectAgent,
@@ -191,6 +195,7 @@ impl Action {
             Action::ToggleProject => "toggle_project",
             Action::NewAgent => "new_agent",
             Action::NewAgentFromPr => "new_agent_from_pr",
+            Action::NewAgentFromWorktree => "new_agent_from_worktree",
             Action::ForkAgent => "fork_agent",
             Action::ChangeAgentProvider => "change_agent_provider",
             Action::ChangeDefaultProvider => "change_default_provider",
@@ -241,6 +246,7 @@ impl Action {
             Action::ResizeShrink => "resize_shrink",
             Action::SearchToggle => "search_toggle",
             Action::GoToPath => "go_to_path",
+            Action::ExitPathEditorOnProjectAdd => "exit_path_editor_on_project_add",
             Action::OpenEntry => "open_entry",
             Action::AddCurrentDir => "add_current_dir",
             Action::Confirm => "confirm",
@@ -261,6 +267,8 @@ impl Action {
             Action::ToggleDiffLineNumbers => "toggle_diff_line_numbers",
             Action::ResourceMonitor => "resource_monitor",
             Action::ToggleGithubIntegration => "toggle_github_integration",
+            Action::ToggleProjectAutoReopenAgents => "toggle_project_auto_reopen_agents",
+            Action::ToggleAgentAutoReopen => "toggle_agent_auto_reopen",
             Action::ToggleRandomizedPetNameDefault => "toggle_randomized_pet_name_default",
             Action::TogglePrBannerPosition => "toggle_pr_banner_position",
             Action::ForceReconnectAgent => "force_reconnect_agent",
@@ -277,6 +285,7 @@ impl Action {
             Action::ToggleProject => "Collapse or expand the selected project.",
             Action::NewAgent => "Create a new agent session (worktree).",
             Action::NewAgentFromPr => "Create a new agent session from a GitHub pull request.",
+            Action::NewAgentFromWorktree => "Create a new agent from an existing git worktree.",
             Action::ForkAgent => "Fork the selected agent into a fresh worktree and session.",
             Action::ChangeAgentProvider => {
                 "Swap the selected agent worktree to a different provider."
@@ -344,6 +353,7 @@ impl Action {
             Action::ResizeShrink => "Shrink the left pane width.",
             Action::SearchToggle => "Toggle search mode in search-capable lists and overlays.",
             Action::GoToPath => "Open path editor in the project browser.",
+            Action::ExitPathEditorOnProjectAdd => "Exit typed-path mode in the project browser.",
             Action::OpenEntry => "Open or navigate into the selected entry in the project browser.",
             Action::AddCurrentDir => "Add the current directory as a project.",
             Action::Confirm => "Confirm the selected action in a dialog.",
@@ -365,6 +375,10 @@ impl Action {
             Action::ToggleDiffLineNumbers => "Toggle line numbers in diff view.",
             Action::ResourceMonitor => "Show CPU and memory usage for dux and all running agents.",
             Action::ToggleGithubIntegration => "Toggle GitHub PR integration.",
+            Action::ToggleProjectAutoReopenAgents => {
+                "Toggle startup auto-reopen for agents in the selected project."
+            }
+            Action::ToggleAgentAutoReopen => "Toggle startup auto-reopen for the selected agent.",
             Action::ToggleRandomizedPetNameDefault => {
                 "Toggle whether the agent name prompt starts with a random pet name."
             }
@@ -384,6 +398,7 @@ impl Action {
             | Action::MoveUp
             | Action::ToggleProject
             | Action::NewAgent
+            | Action::NewAgentFromWorktree
             | Action::ForkAgent
             | Action::ChangeAgentProvider
             | Action::FocusAgent
@@ -434,6 +449,7 @@ impl Action {
             Action::ResizeGrow | Action::ResizeShrink => Some("Resize mode"),
             Action::SearchToggle
             | Action::GoToPath
+            | Action::ExitPathEditorOnProjectAdd
             | Action::OpenEntry
             | Action::AddCurrentDir
             | Action::Confirm
@@ -452,6 +468,8 @@ impl Action {
             | Action::ToggleDiffLineNumbers
             | Action::ResourceMonitor
             | Action::ToggleGithubIntegration
+            | Action::ToggleProjectAutoReopenAgents
+            | Action::ToggleAgentAutoReopen
             | Action::ToggleRandomizedPetNameDefault
             | Action::TogglePrBannerPosition
             | Action::ForceReconnectAgent
@@ -574,6 +592,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         }),
     },
     BindingDef {
+        action: Action::NewAgentFromWorktree,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "new-agent-from-worktree",
+            description: "Create a new agent from an existing git worktree",
+        }),
+    },
+    BindingDef {
         action: Action::ForkAgent,
         default_keys: &[key!(f)],
         scopes: &[BindingScope::Left],
@@ -640,6 +669,28 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "reload-config",
             description: "Reload config.toml after validating it",
+        }),
+    },
+    BindingDef {
+        action: Action::ToggleProjectAutoReopenAgents,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "toggle-project-auto-reopen-agents",
+            description: "Opt the selected project in or out of startup agent reopening",
+        }),
+    },
+    BindingDef {
+        action: Action::ToggleAgentAutoReopen,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "toggle-agent-auto-reopen",
+            description: "Opt the selected agent in or out of startup reopening",
         }),
     },
     BindingDef {
@@ -1271,6 +1322,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         help: Some(HelpEntry {
             section: "Overlays",
             description: "Open path editor in the project browser",
+        }),
+        hint_contexts: &[],
+        palette: None,
+    },
+    BindingDef {
+        action: Action::ExitPathEditorOnProjectAdd,
+        default_keys: &[key!(ctrl - g)],
+        scopes: &[BindingScope::Browser],
+        help: Some(HelpEntry {
+            section: "Overlays",
+            description: "Exit typed-path mode in the project browser",
         }),
         hint_contexts: &[],
         palette: None,
@@ -2437,6 +2499,7 @@ mod tests {
         assert!(actions_in_defs.contains(&Action::ExitCommitInput));
         assert!(actions_in_defs.contains(&Action::PushToRemote));
         assert!(actions_in_defs.contains(&Action::AddCurrentDir));
+        assert!(actions_in_defs.contains(&Action::ExitPathEditorOnProjectAdd));
         assert!(actions_in_defs.contains(&Action::SearchFiles));
         assert!(actions_in_defs.contains(&Action::SearchNext));
         assert!(actions_in_defs.contains(&Action::ForceRedraw));

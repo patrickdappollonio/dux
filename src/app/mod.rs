@@ -27,8 +27,8 @@ use uuid::Uuid;
 
 use crate::clipboard::Clipboard;
 use crate::config::{
-    Config, DuxPaths, MacroSurface, ProjectConfig, ProviderCommandConfig, check_provider_available,
-    ensure_config, save_config, validate_keys,
+    Config, DuxPaths, MacroSurface, ProviderCommandConfig, check_provider_available, ensure_config,
+    save_config, validate_keys,
 };
 use crate::diff::SyntaxCache;
 use crate::editor::DetectedEditor;
@@ -101,6 +101,7 @@ pub struct App {
     pub(crate) terminal_return_to_list: bool,
     pub(crate) terminal_counter: usize,
     pub(crate) create_agent_in_flight: bool,
+    pub(crate) agent_launches_in_flight: HashSet<String>,
     pub(crate) pulls_in_flight: HashSet<String>,
     pub(crate) resource_stats_in_flight: bool,
     pub(crate) last_pty_size: (u16, u16),
@@ -486,6 +487,43 @@ pub(crate) struct ChangeThemePrompt {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct ProjectWorktreeEntry {
+    pub(crate) path: PathBuf,
+    pub(crate) branch_name: String,
+    pub(crate) is_managed_by_dux: bool,
+    pub(crate) existing_session_id: Option<String>,
+    pub(crate) is_external: bool,
+    pub(crate) is_project_checkout: bool,
+    pub(crate) is_selectable: bool,
+}
+
+impl ProjectWorktreeEntry {
+    pub(crate) fn display_name(&self) -> String {
+        self.path
+            .file_name()
+            .and_then(|part| part.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| self.path.display().to_string())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ProjectWorktreeVisualRow {
+    Header(&'static str),
+    Empty(String),
+    Entry(usize),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PickProjectWorktreePrompt {
+    pub(crate) project: Project,
+    pub(crate) entries: Vec<ProjectWorktreeEntry>,
+    pub(crate) loading: bool,
+    pub(crate) selected: Option<usize>,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct ConfirmKillRunningPrompt {
     pub(crate) previous: KillRunningPrompt,
     pub(crate) action: KillRunningAction,
@@ -522,7 +560,7 @@ pub(crate) enum ConfirmNonDefaultBranchFocus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NameNewAgentFocus {
     Input,
-    Checkbox,
+    RandomizedNameCheckbox,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -562,10 +600,15 @@ pub(crate) enum PromptState {
         tab_completions: Vec<String>,
         tab_index: usize,
     },
+    AddProjectFailed {
+        message: String,
+        return_prompt: Box<PromptState>,
+    },
     ChangeAgentProvider(ChangeAgentProviderPrompt),
     ChangeDefaultProvider(ChangeDefaultProviderPrompt),
     ChangeProjectDefaultProvider(ChangeProjectDefaultProviderPrompt),
     ChangeTheme(ChangeThemePrompt),
+    PickProjectWorktree(PickProjectWorktreePrompt),
     KillRunning(KillRunningPrompt),
     ConfirmKillRunning(ConfirmKillRunningPrompt),
     ConfigReloadFailed {
@@ -685,18 +728,29 @@ pub(crate) fn branch_status_from_warning(
     }
 }
 
+pub(crate) fn leading_branch_for_project(path: &Path, current_branch: &str) -> String {
+    match git::remote_default_branch(path) {
+        Some(default) => default,
+        None => current_branch.to_string(),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum NonDefaultBranchAction {
-    AddProject { path: String, name: String },
-    CreateAgent { project: Project },
-    CheckoutProjectDefault { project: Project },
+    AddProject {
+        path: String,
+        name: String,
+        leading_branch: String,
+    },
+    CheckoutProjectDefault {
+        project: Project,
+    },
 }
 
 impl NonDefaultBranchAction {
     pub(crate) fn repo_path(&self) -> &str {
         match self {
             Self::AddProject { path, .. } => path,
-            Self::CreateAgent { project } => &project.path,
             Self::CheckoutProjectDefault { project } => &project.path,
         }
     }
@@ -704,6 +758,12 @@ impl NonDefaultBranchAction {
     pub(crate) fn allows_add_anyway(&self) -> bool {
         matches!(self, Self::AddProject { .. })
     }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CreateAgentBranchInspection {
+    pub(crate) current_branch: String,
+    pub(crate) leading_branch: String,
 }
 
 #[derive(Clone, Debug)]
@@ -745,6 +805,132 @@ pub(crate) fn build_visual_rows(rows: &[ResourceStats], expanded: &HashSet<u32>)
         }
     }
     visual
+}
+
+pub(crate) fn project_worktree_visual_rows(
+    entries: &[ProjectWorktreeEntry],
+    loading: bool,
+    error: Option<&str>,
+) -> Vec<ProjectWorktreeVisualRow> {
+    if loading {
+        return vec![ProjectWorktreeVisualRow::Empty(
+            "Loading project worktrees...".to_string(),
+        )];
+    }
+    if let Some(error) = error {
+        return vec![ProjectWorktreeVisualRow::Empty(format!(
+            "Could not load worktrees: {error}"
+        ))];
+    }
+
+    let available = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.is_selectable)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let project_checkout = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.is_project_checkout)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let disabled = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| !entry.is_selectable && !entry.is_project_checkout)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+
+    let mut rows = Vec::new();
+    rows.push(ProjectWorktreeVisualRow::Header("Available Worktrees"));
+    if available.is_empty() {
+        rows.push(ProjectWorktreeVisualRow::Empty(
+            "No available worktrees. Worktrees that already have agents are shown below."
+                .to_string(),
+        ));
+    } else {
+        rows.extend(available.into_iter().map(ProjectWorktreeVisualRow::Entry));
+    }
+    if !disabled.is_empty() {
+        rows.push(ProjectWorktreeVisualRow::Header("Already Has Agent"));
+        rows.extend(disabled.into_iter().map(ProjectWorktreeVisualRow::Entry));
+    }
+    if !project_checkout.is_empty() {
+        rows.push(ProjectWorktreeVisualRow::Header("Project Checkout"));
+        rows.extend(
+            project_checkout
+                .into_iter()
+                .map(ProjectWorktreeVisualRow::Entry),
+        );
+    }
+    rows
+}
+
+pub(crate) fn selectable_project_worktree_indices(entries: &[ProjectWorktreeEntry]) -> Vec<usize> {
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| entry.is_selectable.then_some(index))
+        .collect()
+}
+
+fn canonical_or_original(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+pub(crate) fn classify_project_worktrees(
+    project: &Project,
+    paths: &DuxPaths,
+    sessions: &[AgentSession],
+    worktrees: Vec<git::GitWorktree>,
+) -> Vec<ProjectWorktreeEntry> {
+    let managed_project_root = paths.worktrees_root.join(&project.name);
+    let project_checkout_path = canonical_or_original(Path::new(&project.path));
+    let session_by_path = sessions
+        .iter()
+        .map(|session| {
+            (
+                canonical_or_original(Path::new(&session.worktree_path)),
+                session.id.clone(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut entries = worktrees
+        .into_iter()
+        .map(|worktree| {
+            let canonical_path = canonical_or_original(&worktree.path);
+            let existing_session_id = session_by_path.get(&canonical_path).cloned();
+            let is_project_checkout = canonical_path == project_checkout_path;
+            let is_managed_by_dux = git::is_under(&managed_project_root, &worktree.path);
+            let is_external = !is_managed_by_dux;
+            let is_selectable = existing_session_id.is_none() && !is_project_checkout;
+            ProjectWorktreeEntry {
+                path: canonical_path,
+                branch_name: worktree.label(),
+                is_managed_by_dux,
+                existing_session_id,
+                is_external,
+                is_project_checkout,
+                is_selectable,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    entries.sort_by(|a, b| {
+        a.is_selectable
+            .cmp(&b.is_selectable)
+            .reverse()
+            .then_with(|| a.is_project_checkout.cmp(&b.is_project_checkout))
+            .then_with(|| {
+                a.branch_name
+                    .to_lowercase()
+                    .cmp(&b.branch_name.to_lowercase())
+            })
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    entries
 }
 
 #[derive(Clone, Debug)]
@@ -920,6 +1106,9 @@ pub(crate) enum OverlayMouseLayout {
         items: usize,
         offset: usize,
     },
+    AddProjectFailed {
+        ok_button: Rect,
+    },
     ChangeAgentProvider {
         list: Rect,
         items: usize,
@@ -942,6 +1131,11 @@ pub(crate) enum OverlayMouseLayout {
         apply_button: Rect,
     },
     PickEditor {
+        list: Rect,
+        items: usize,
+        offset: usize,
+    },
+    PickProjectWorktree {
         list: Rect,
         items: usize,
         offset: usize,
@@ -1141,11 +1335,44 @@ pub(crate) struct CompanionTerminal {
     pub(crate) client: PtyClient,
 }
 
-pub(crate) struct AgentReadyData {
-    pub session: AgentSession,
-    pub client: PtyClient,
-    pub pty_size: (u16, u16), // (rows, cols) the PTY was spawned with
-    pub status_message: String,
+#[derive(Clone, Debug)]
+pub(crate) enum AgentLaunchKind {
+    Create {
+        status_message: String,
+        repo_path: String,
+        owns_worktree: bool,
+    },
+    Reconnect {
+        status_message: String,
+    },
+    ForceReconnect {
+        status_message: String,
+    },
+    ResumeFallback {
+        status_message: String,
+    },
+    StartupAutoReopen,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AgentLaunchRequest {
+    pub(crate) session: AgentSession,
+    pub(crate) provider_config: ProviderCommandConfig,
+    pub(crate) resume: bool,
+    pub(crate) pty_size: (u16, u16),
+    pub(crate) scrollback_lines: usize,
+    pub(crate) kind: AgentLaunchKind,
+}
+
+pub(crate) struct AgentLaunchReadyData {
+    pub(crate) request: AgentLaunchRequest,
+    pub(crate) client: PtyClient,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AgentLaunchFailedData {
+    pub(crate) request: AgentLaunchRequest,
+    pub(crate) message: String,
 }
 
 #[derive(Clone, Debug)]
@@ -1154,6 +1381,7 @@ pub(crate) enum CreateAgentRequest {
         project: Project,
         custom_name: Option<String>,
         use_existing_branch: bool,
+        pull_before_create: bool,
     },
     PullRequest {
         project: Project,
@@ -1172,12 +1400,26 @@ pub(crate) enum CreateAgentRequest {
         source_label: String,
         custom_name: Option<String>,
     },
+    ExistingManagedWorktree {
+        project: Project,
+        worktree_path: PathBuf,
+        branch_name: String,
+        custom_name: Option<String>,
+    },
+    ForkExternalWorktree {
+        project: Project,
+        source_worktree_path: PathBuf,
+        source_label: String,
+        source_branch: String,
+        custom_name: Option<String>,
+    },
 }
 
 pub(crate) enum WorkerEvent {
     CreateAgentProgress(String),
-    CreateAgentReady(Box<AgentReadyData>),
     CreateAgentFailed(String),
+    AgentLaunchReady(Box<AgentLaunchReadyData>),
+    AgentLaunchFailed(Box<AgentLaunchFailedData>),
     ChangedFilesReady {
         staged: Vec<ChangedFile>,
         unstaged: Vec<ChangedFile>,
@@ -1193,6 +1435,10 @@ pub(crate) enum WorkerEvent {
     BrowserEntriesReady {
         dir: PathBuf,
         entries: Vec<BrowserEntry>,
+    },
+    ProjectWorktreesReady {
+        project_id: String,
+        result: Result<Vec<ProjectWorktreeEntry>, String>,
     },
     ClipboardCopyCompleted {
         /// Human-readable success message shown in the status bar.
@@ -1234,7 +1480,7 @@ pub(crate) enum WorkerEvent {
     /// the New Agent prompt.
     CreateAgentBranchInspected {
         project: Project,
-        result: Result<(String, Option<BranchWarningKind>), String>,
+        result: Result<CreateAgentBranchInspection, String>,
     },
     ProjectBranchStatusReady {
         project_id: String,
@@ -1246,6 +1492,10 @@ pub(crate) enum WorkerEvent {
     },
     ConfigReloadReady(Box<Result<Config, String>>),
     ConfigRecoverCompleted(Result<(), String>),
+    ProjectPersistenceCompleted {
+        action: ProjectPersistenceAction,
+        result: Result<(), String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1255,6 +1505,33 @@ pub(crate) enum PullTarget {
         project_name: String,
     },
     Session,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ProjectPersistenceAction {
+    Add {
+        project: Project,
+        status_message: String,
+    },
+    Remove {
+        project_id: String,
+        project_name: String,
+    },
+    Delete {
+        project_id: String,
+        project_name: String,
+    },
+    UpdateDefaultProvider {
+        project_id: String,
+        project_name: String,
+        provider: Option<ProviderKind>,
+        global_default: ProviderKind,
+    },
+    UpdateAutoReopen {
+        project_id: String,
+        project_name: String,
+        auto_reopen_agents: Option<bool>,
+    },
 }
 
 mod components;
@@ -1273,7 +1550,7 @@ impl App {
         paths: DuxPaths,
         single_instance_lock: SingleInstanceLock,
     ) -> Result<Self> {
-        let config = ensure_config(&paths)?;
+        let mut config = ensure_config(&paths)?;
 
         logger::init(&config.logging, &paths);
         logger::info("bootstrapping dux");
@@ -1295,7 +1572,8 @@ impl App {
         signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&sigwinch_flag))?;
 
         let session_store = SessionStore::open(&paths.sessions_db_path)?;
-        let projects = load_projects(&config);
+        migrate_config_projects_to_store(&mut config, &paths, &bindings, &session_store)?;
+        let projects = load_projects(&session_store.load_projects()?, &config);
         let sessions = session_store.load_sessions()?;
         let (worker_tx, worker_rx) = mpsc::channel();
         let watched_worktree: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
@@ -1361,6 +1639,7 @@ impl App {
             terminal_return_to_list: false,
             terminal_counter: 0,
             create_agent_in_flight: false,
+            agent_launches_in_flight: HashSet::new(),
             pulls_in_flight: HashSet::new(),
             resource_stats_in_flight: false,
             last_pty_size: (0, 0),
@@ -1587,6 +1866,33 @@ impl App {
             } else {
                 self.mark_session_status(&id, SessionStatus::Exited);
             }
+        }
+        self.auto_reopen_eligible_sessions();
+    }
+
+    fn auto_reopen_eligible_sessions(&mut self) {
+        if !self.config.ui.auto_reopen_agents {
+            return;
+        }
+
+        let sessions = self.sessions.clone();
+        for session in sessions {
+            if !session.desired_running
+                || !session.auto_reopen_enabled
+                || !Path::new(&session.worktree_path).exists()
+                || !self.project_allows_auto_reopen(&session.project_id)
+            {
+                continue;
+            }
+
+            let cfg = provider_config(&self.config, &session.provider);
+            if !cfg.supports_session_resume() {
+                continue;
+            }
+
+            let request =
+                self.agent_launch_request(session, true, AgentLaunchKind::StartupAutoReopen);
+            self.dispatch_agent_launch(request);
         }
     }
 
@@ -1834,12 +2140,15 @@ impl App {
         match command {
             "new-agent" => self.create_agent_for_selected_project(),
             "new-agent-from-pr" => self.open_new_agent_from_pr_prompt(),
+            "new-agent-from-worktree" => self.create_agent_from_existing_worktree(),
             "fork-agent" => self.fork_selected_session(),
             "change-agent-provider" => self.open_change_agent_provider_prompt(),
             "change-default-provider" => self.open_change_default_provider_prompt(),
             "change-project-default-provider" => self.open_change_project_default_provider_prompt(),
             "change-theme" => self.open_change_theme_prompt(),
             "reload-config" => self.reload_config_from_disk(),
+            "toggle-project-auto-reopen-agents" => self.toggle_project_auto_reopen_agents(),
+            "toggle-agent-auto-reopen" => self.toggle_agent_auto_reopen(),
             "pull-project" => self.refresh_selected_project(),
             "delete-project" => self.delete_selected_project(),
             "remove-project" => self.remove_selected_project(),
@@ -2046,7 +2355,7 @@ impl App {
         self.pr_banner_at_bottom = config.ui.pr_banner_position == "bottom";
         self.config = config;
 
-        self.projects = load_projects(&self.config);
+        refresh_project_defaults(&mut self.projects, &self.config);
         self.selected_left = self
             .selected_left
             .min(self.projects.len().saturating_sub(1));
@@ -2238,31 +2547,26 @@ impl App {
         }
     }
 
-    pub(crate) fn project_config(&self, project_id: &str) -> Option<&ProjectConfig> {
-        self.config
-            .projects
-            .iter()
-            .find(|project| project.id == project_id)
-    }
-
-    pub(crate) fn project_config_mut(&mut self, project_id: &str) -> Option<&mut ProjectConfig> {
-        self.config
-            .projects
-            .iter_mut()
-            .find(|project| project.id == project_id)
-    }
-
     pub(crate) fn project_explicit_default_provider(
         &self,
         project_id: &str,
     ) -> Option<ProviderKind> {
-        self.project_config(project_id)
-            .and_then(|project| project.default_provider.as_deref())
-            .map(ProviderKind::from_str)
+        self.projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .and_then(|project| project.explicit_default_provider.clone())
     }
 
     pub(crate) fn project_uses_explicit_default_provider(&self, project_id: &str) -> bool {
         self.project_explicit_default_provider(project_id).is_some()
+    }
+
+    pub(crate) fn project_allows_auto_reopen(&self, project_id: &str) -> bool {
+        self.projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .and_then(|project| project.auto_reopen_agents)
+            .unwrap_or(true)
     }
 
     pub(crate) fn selected_session(&self) -> Option<&AgentSession> {
@@ -2515,6 +2819,23 @@ impl App {
         }
     }
 
+    pub(crate) fn mark_session_desired_running(&mut self, session_id: &str, desired: bool) {
+        if let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|candidate| candidate.id == session_id)
+        {
+            if session.desired_running == desired {
+                return;
+            }
+            session.desired_running = desired;
+            session.updated_at = Utc::now();
+            let _ = self.session_store.upsert_session(session);
+        } else {
+            let _ = self.session_store.set_desired_running(session_id, desired);
+        }
+    }
+
     pub(crate) fn mark_session_provider_started(&mut self, session_id: &str) {
         let Some(session) = self
             .sessions
@@ -2674,19 +2995,19 @@ impl App {
 pub(crate) fn refresh_project_defaults(projects: &mut [Project], config: &Config) {
     let fallback = config.default_provider();
     for project in projects.iter_mut() {
-        let explicit = config
-            .projects
-            .iter()
-            .find(|cfg| cfg.id == project.id)
-            .and_then(|cfg| cfg.default_provider.as_deref())
-            .map(ProviderKind::from_str);
-        project.default_provider = explicit.unwrap_or_else(|| fallback.clone());
+        project.default_provider = project
+            .explicit_default_provider
+            .clone()
+            .unwrap_or_else(|| fallback.clone());
     }
 }
 
-pub(crate) fn load_projects(config: &Config) -> Vec<Project> {
+pub(crate) fn load_projects(
+    project_configs: &[crate::config::ProjectConfig],
+    config: &Config,
+) -> Vec<Project> {
     let mut projects = Vec::new();
-    for project in config.projects.iter() {
+    for project in project_configs {
         let (path, missing) = match crate::config::expand_path(&project.path) {
             Some(expanded) => {
                 let p = PathBuf::from(&expanded);
@@ -2703,6 +3024,15 @@ pub(crate) fn load_projects(config: &Config) -> Vec<Project> {
             .as_deref()
             .map(ProviderKind::from_str)
             .unwrap_or_else(|| config.default_provider());
+        let current_branch = if missing {
+            String::new()
+        } else {
+            git::current_branch(&path).unwrap_or_else(|_| "main".to_string())
+        };
+        let leading_branch = project
+            .leading_branch
+            .clone()
+            .or_else(|| (!missing).then(|| leading_branch_for_project(&path, &current_branch)));
         projects.push(Project {
             id: project.id.clone(),
             name: project.name.clone().unwrap_or_else(|| {
@@ -2712,17 +3042,36 @@ pub(crate) fn load_projects(config: &Config) -> Vec<Project> {
                     .to_string()
             }),
             path: path.to_string_lossy().to_string(),
+            explicit_default_provider: project
+                .default_provider
+                .as_deref()
+                .map(ProviderKind::from_str),
             default_provider: provider,
-            current_branch: if missing {
-                String::new()
-            } else {
-                git::current_branch(&path).unwrap_or_else(|_| "main".to_string())
-            },
+            leading_branch,
+            auto_reopen_agents: project.auto_reopen_agents,
+            current_branch,
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: missing,
         });
     }
     projects
+}
+
+pub(crate) fn migrate_config_projects_to_store(
+    config: &mut Config,
+    paths: &DuxPaths,
+    bindings: &RuntimeBindings,
+    session_store: &SessionStore,
+) -> Result<()> {
+    if config.projects.is_empty() {
+        return Ok(());
+    }
+
+    for (index, project) in config.projects.iter().enumerate() {
+        session_store.upsert_project_at(project, index as i64)?;
+    }
+    config.projects.clear();
+    save_config(&paths.config_path, config, bindings)
 }
 
 // ── Resource monitor helpers ───────────────────────────────────────────────
@@ -2857,7 +3206,10 @@ mod tests {
             id: id.to_string(),
             name: id.to_string(),
             path: format!("/tmp/{id}"),
+            explicit_default_provider: None,
             default_provider: ProviderKind::from_str("codex"),
+            leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -2876,6 +3228,8 @@ mod tests {
             worktree_path: format!("/tmp/worktrees/{id}"),
             title: None,
             started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
             status: SessionStatus::Detached,
             created_at: now,
             updated_at: now,
@@ -3022,6 +3376,55 @@ mod tests {
     }
 
     #[test]
+    fn migrates_legacy_config_projects_to_sqlite_and_strips_config() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root: root.clone(),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).expect("worktrees");
+        std::fs::write(
+            &paths.config_path,
+            r#"
+[defaults]
+provider = "codex"
+
+[[projects]]
+id = "project-1"
+path = "$CODE/dux"
+name = "dux"
+default_provider = "claude"
+leading_branch = "main"
+"#,
+        )
+        .expect("write config");
+
+        let mut config = ensure_config(&paths).expect("load config");
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        let store = SessionStore::open(&paths.sessions_db_path).expect("store");
+
+        migrate_config_projects_to_store(&mut config, &paths, &bindings, &store)
+            .expect("migrate projects");
+
+        assert!(config.projects.is_empty());
+        let projects = store.load_projects().expect("load projects");
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].id, "project-1");
+        assert_eq!(projects[0].path, "$CODE/dux");
+        assert_eq!(projects[0].name.as_deref(), Some("dux"));
+        assert_eq!(projects[0].default_provider.as_deref(), Some("claude"));
+        assert_eq!(projects[0].leading_branch.as_deref(), Some("main"));
+
+        let saved = std::fs::read_to_string(&paths.config_path).expect("read config");
+        assert!(!saved.contains("[[projects]]"));
+        assert!(!saved.contains("project-1"));
+    }
+
+    #[test]
     fn current_process_is_descendant_of_pid_1() {
         use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
@@ -3133,6 +3536,155 @@ mod tests {
         expanded.insert(999);
         let visual = build_visual_rows(&rows, &expanded);
         assert_eq!(visual.len(), 3);
+    }
+
+    #[test]
+    fn classify_project_worktrees_marks_managed_external_and_existing_agent() {
+        let root =
+            std::env::temp_dir().join(format!("dux-classify-worktrees-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        let managed = root.join("worktrees").join("demo").join("managed-orphan");
+        let external = root.join("external checkout");
+        let existing = root.join("worktrees").join("demo").join("existing-agent");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&managed).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        fs::create_dir_all(&existing).unwrap();
+
+        let project = Project {
+            id: "project-1".to_string(),
+            name: "demo".to_string(),
+            path: repo.to_string_lossy().to_string(),
+            explicit_default_provider: None,
+            default_provider: ProviderKind::new("codex"),
+            leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
+            current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Leading,
+            path_missing: false,
+        };
+        let paths = DuxPaths {
+            root: root.clone(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("lock"),
+        };
+        let sessions = vec![AgentSession {
+            id: "session-1".to_string(),
+            project_id: project.id.clone(),
+            project_path: Some(project.path.clone()),
+            provider: ProviderKind::new("codex"),
+            source_branch: "main".to_string(),
+            branch_name: "existing".to_string(),
+            worktree_path: existing.to_string_lossy().to_string(),
+            title: None,
+            started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
+            status: SessionStatus::Detached,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }];
+        let worktrees = vec![
+            git::GitWorktree {
+                path: repo.clone(),
+                head: Some("0000000".to_string()),
+                branch_name: Some("main".to_string()),
+                detached: false,
+            },
+            git::GitWorktree {
+                path: managed.clone(),
+                head: Some("1111111".to_string()),
+                branch_name: Some("managed-orphan".to_string()),
+                detached: false,
+            },
+            git::GitWorktree {
+                path: external.clone(),
+                head: Some("2222222".to_string()),
+                branch_name: Some("feature".to_string()),
+                detached: false,
+            },
+            git::GitWorktree {
+                path: existing.clone(),
+                head: Some("3333333".to_string()),
+                branch_name: Some("existing".to_string()),
+                detached: false,
+            },
+        ];
+
+        let entries = classify_project_worktrees(&project, &paths, &sessions, worktrees);
+        let managed_entry = entries
+            .iter()
+            .find(|entry| entry.path == managed.canonicalize().unwrap())
+            .unwrap();
+        assert!(managed_entry.is_managed_by_dux);
+        assert!(!managed_entry.is_external);
+        assert!(managed_entry.is_selectable);
+
+        let external_entry = entries
+            .iter()
+            .find(|entry| entry.path == external.canonicalize().unwrap())
+            .unwrap();
+        assert!(!external_entry.is_managed_by_dux);
+        assert!(external_entry.is_external);
+        assert!(external_entry.is_selectable);
+
+        let existing_entry = entries
+            .iter()
+            .find(|entry| entry.path == existing.canonicalize().unwrap())
+            .unwrap();
+        assert_eq!(
+            existing_entry.existing_session_id.as_deref(),
+            Some("session-1")
+        );
+        assert!(!existing_entry.is_selectable);
+
+        let project_checkout_entry = entries
+            .iter()
+            .find(|entry| entry.path == repo.canonicalize().unwrap())
+            .unwrap();
+        assert!(project_checkout_entry.is_project_checkout);
+        assert!(!project_checkout_entry.is_selectable);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn project_worktree_visual_rows_separate_project_checkout() {
+        let entries = vec![
+            ProjectWorktreeEntry {
+                path: PathBuf::from("/repo/managed"),
+                branch_name: "feature".to_string(),
+                is_managed_by_dux: true,
+                existing_session_id: None,
+                is_external: false,
+                is_project_checkout: false,
+                is_selectable: true,
+            },
+            ProjectWorktreeEntry {
+                path: PathBuf::from("/repo/main"),
+                branch_name: "main".to_string(),
+                is_managed_by_dux: false,
+                existing_session_id: None,
+                is_external: true,
+                is_project_checkout: true,
+                is_selectable: false,
+            },
+        ];
+
+        let rows = project_worktree_visual_rows(&entries, false, None);
+
+        assert!(matches!(
+            rows.first(),
+            Some(ProjectWorktreeVisualRow::Header("Available Worktrees"))
+        ));
+        assert!(
+            rows.iter()
+                .any(|row| matches!(row, ProjectWorktreeVisualRow::Header("Project Checkout")))
+        );
+        assert_eq!(selectable_project_worktree_indices(&entries), vec![0]);
     }
 
     #[test]

@@ -1,0 +1,48 @@
+name: Bug report
+description: Report something that is not working as expected in dux.
+title: "Bug: "
+labels:
+  - bug
+body:
+  - type: input
+    id: version
+    attributes:
+      label: What version of dux are you running?
+      placeholder: "dux 0.0.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you do and what should've happened?
+      description: Describe the command, workflow, or action you ran and the result you expected.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead?
+      description: Include the full error message or unexpected behavior you saw.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Is there a way to reproduce it?
+      description: List the steps, commands, files, or environment needed to reproduce the issue. If not, say so.
+      placeholder: |
+        1. Run ...
+        2. See ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: debugging
+    attributes:
+      label: Additional debugging information
+      description: Add logs, configuration, OS/shell details, screenshots, or anything else that may help.
+    validations:
+      required: true

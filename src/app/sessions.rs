@@ -44,27 +44,16 @@ impl App {
     }
 
     pub(crate) fn add_project(&mut self, raw_path: String, name: String) -> Result<()> {
-        let path = PathBuf::from(raw_path.trim())
-            .canonicalize()
-            .unwrap_or_else(|_| PathBuf::from(raw_path.trim()));
+        let path = match self.validate_project_add_path(&raw_path) {
+            Ok(path) => path,
+            Err(message) => {
+                self.set_error(message);
+                return Ok(());
+            }
+        };
         logger::info(&format!("attempting to add project {}", path.display()));
-        if !path.exists() || !git::is_git_repo(&path) {
-            logger::error(&format!("add project rejected for {}", path.display()));
-            self.set_error(format!("\"{}\" is not a git repository.", path.display()));
-            return Ok(());
-        }
-        if self
-            .projects
-            .iter()
-            .any(|project| Path::new(&project.path) == path.as_path())
-        {
-            self.set_error(format!(
-                "\"{}\" is already registered as a project.",
-                path.display()
-            ));
-            return Ok(());
-        }
         let branch = git::current_branch(&path)?;
+        let leading_branch = leading_branch_for_project(&path, &branch);
 
         if let Some(kind) = branch_warning_kind(&path, &branch) {
             // Default the checkbox to on for the confident path so hitting
@@ -76,6 +65,7 @@ impl App {
                 action: NonDefaultBranchAction::AddProject {
                     path: path.to_string_lossy().to_string(),
                     name,
+                    leading_branch,
                 },
                 current_branch: branch,
                 kind,
@@ -86,10 +76,37 @@ impl App {
         }
 
         let path_str = path.to_string_lossy().to_string();
-        self.finish_add_project(path_str, name, branch)
+        self.finish_add_project(path_str, name, branch, leading_branch)
     }
 
-    /// Saves the project to config and adds it to the runtime project list.
+    pub(crate) fn validate_project_add_path(
+        &self,
+        raw_path: &str,
+    ) -> std::result::Result<PathBuf, String> {
+        let trimmed = raw_path.trim();
+        let path = PathBuf::from(trimmed)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(trimmed));
+        if !path.exists() || !git::is_git_repo(&path) {
+            logger::error(&format!("add project rejected for {}", path.display()));
+            return Err(format!("\"{}\" is not a git repository.", path.display()));
+        }
+        if self.projects.iter().any(|project| {
+            PathBuf::from(&project.path)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(&project.path))
+                == path
+        }) {
+            return Err(format!(
+                "\"{}\" is already registered as a project.",
+                path.display()
+            ));
+        }
+        Ok(path)
+    }
+
+    /// Starts saving the project to SQLite and adds it to the runtime project
+    /// list only after the worker confirms the write.
     /// Called directly when no branch warning is needed, or after the user
     /// confirms "Add Anyway" in the non-default-branch dialog.
     pub(crate) fn finish_add_project(
@@ -97,6 +114,29 @@ impl App {
         path: String,
         name: String,
         branch: String,
+        leading_branch: String,
+    ) -> Result<()> {
+        let path_buf = PathBuf::from(&path);
+        let display_name = if name.trim().is_empty() {
+            path_buf
+                .file_name()
+                .and_then(|part| part.to_str())
+                .unwrap_or("project")
+                .to_string()
+        } else {
+            name.trim().to_string()
+        };
+        let status_message = format!("Added project \"{display_name}\" to workspace");
+        self.finish_add_project_with_status(path, name, branch, leading_branch, status_message)
+    }
+
+    pub(crate) fn finish_add_project_with_status(
+        &mut self,
+        path: String,
+        name: String,
+        branch: String,
+        leading_branch: String,
+        status_message: String,
     ) -> Result<()> {
         let path_buf = PathBuf::from(&path);
         let display_name = if name.trim().is_empty() {
@@ -109,26 +149,24 @@ impl App {
             name.trim().to_string()
         };
         let project_id = Uuid::new_v4().to_string();
-        self.config.projects.push(ProjectConfig {
-            id: project_id.clone(),
-            path: path.clone(),
-            name: Some(display_name.clone()),
-            default_provider: None,
-            commit_prompt: None,
-        });
-        save_config(&self.paths.config_path, &self.config, &self.bindings)?;
-        self.projects.push(Project {
+        let project = Project {
             id: project_id,
             name: display_name.clone(),
-            path,
+            path: path.clone(),
+            explicit_default_provider: None,
             default_provider: self.config.default_provider(),
+            leading_branch: Some(leading_branch),
+            auto_reopen_agents: None,
             current_branch: branch,
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
-        });
-        self.rebuild_left_items();
+        };
         logger::info(&format!("registered project {}", path_buf.display()));
-        self.set_info(format!("Added project \"{display_name}\" to workspace"));
+        self.spawn_project_persistence(ProjectPersistenceAction::Add {
+            project,
+            status_message,
+        });
+        self.set_busy(format!("Saving project \"{display_name}\" to workspace..."));
         Ok(())
     }
 
@@ -149,38 +187,47 @@ impl App {
     pub(crate) fn continue_create_agent_after_branch_inspection(
         &mut self,
         mut project: Project,
-        current_branch: String,
-        warning_kind: Option<BranchWarningKind>,
+        inspection: CreateAgentBranchInspection,
     ) -> Result<()> {
-        if let Some(kind) = warning_kind {
-            match kind {
-                BranchWarningKind::Known { .. } => {
-                    project.current_branch = current_branch.clone();
-                    self.prompt = PromptState::ConfirmNonDefaultBranch {
-                        action: NonDefaultBranchAction::CreateAgent { project },
-                        current_branch,
-                        kind,
-                        focus: ConfirmNonDefaultBranchFocus::Cancel,
-                        checkout_default: true,
-                    };
-                }
-                BranchWarningKind::Heuristic => {
-                    self.set_error(format!(
-                        "Can't determine the default branch for project \"{}\" while it is on \"{}\". Check out the leading branch in your terminal, then create the agent.",
-                        project.name, current_branch
-                    ));
-                }
-            }
-            return Ok(());
-        }
-
-        project.current_branch = current_branch;
-        project.branch_status = ProjectBranchStatus::Leading;
+        project.current_branch = inspection.current_branch;
+        project.leading_branch = Some(inspection.leading_branch);
+        project.branch_status =
+            if project.leading_branch.as_deref() == Some(&project.current_branch) {
+                ProjectBranchStatus::Leading
+            } else {
+                ProjectBranchStatus::NotLeading
+            };
         self.open_name_new_agent_prompt(CreateAgentRequest::NewProject {
             project,
             custom_name: None,
             use_existing_branch: false,
+            pull_before_create: self.config.defaults.pull_before_creating_agent_by_default,
         })
+    }
+
+    pub(crate) fn create_agent_from_existing_worktree(&mut self) -> Result<()> {
+        let Some(project) = self.selected_project().cloned() else {
+            self.set_error("Select a project first.");
+            return Ok(());
+        };
+
+        if project.path_missing {
+            self.set_warning(format!("Project path not found: {}", project.path));
+            return Ok(());
+        }
+
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.prompt = PromptState::PickProjectWorktree(PickProjectWorktreePrompt {
+            project: project.clone(),
+            entries: Vec::new(),
+            loading: true,
+            selected: None,
+            error: None,
+        });
+        self.spawn_project_worktrees_worker(project);
+        self.set_busy("Loading git worktrees for the selected project...");
+        Ok(())
     }
 
     pub(crate) fn fork_selected_session(&mut self) -> Result<()> {
@@ -245,20 +292,31 @@ impl App {
     }
 
     pub(crate) fn open_name_new_agent_prompt(&mut self, request: CreateAgentRequest) -> Result<()> {
-        let explicit_name = match &request {
+        let initial_name = match &request {
             CreateAgentRequest::NewProject { custom_name, .. }
-            | CreateAgentRequest::ForkSession { custom_name, .. } => custom_name.clone(),
+            | CreateAgentRequest::ForkSession { custom_name, .. }
+            | CreateAgentRequest::ForkExternalWorktree { custom_name, .. } => custom_name.clone(),
             CreateAgentRequest::PullRequest {
                 custom_name,
                 head_branch,
                 ..
             } => custom_name.clone().or_else(|| Some(head_branch.clone())),
+            CreateAgentRequest::ExistingManagedWorktree {
+                custom_name,
+                worktree_path,
+                ..
+            } => custom_name.clone().or_else(|| {
+                worktree_path
+                    .file_name()
+                    .and_then(|part| part.to_str())
+                    .map(str::to_string)
+            }),
         };
         let randomize_name =
-            explicit_name.is_none() && self.config.defaults.enable_randomized_pet_name_by_default;
+            initial_name.is_none() && self.config.defaults.enable_randomized_pet_name_by_default;
         let mut input = TextInput::new().with_char_map(crate::git::agent_name_char_map);
         let mut randomized_name = None;
-        if let Some(name) = explicit_name {
+        if let Some(name) = initial_name {
             input.set_text(name);
         } else if randomize_name {
             let name = crate::git::docker_style_name();
@@ -276,6 +334,13 @@ impl App {
             focus: NameNewAgentFocus::Input,
         };
         Ok(())
+    }
+
+    pub(crate) fn open_name_new_agent_prompt_for_request(
+        &mut self,
+        request: CreateAgentRequest,
+    ) -> Result<()> {
+        self.open_name_new_agent_prompt(request)
     }
 
     /// Spawns a background worker that runs `git switch <target_branch>` in
@@ -355,35 +420,45 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn spawn_pty_for_session(
-        &self,
-        session: &AgentSession,
-        resume: bool,
-    ) -> Result<PtyClient> {
-        let cfg = provider_config(&self.config, &session.provider);
-        let launch_args = cfg.interactive_args(resume);
-        let (rows, cols) = if self.last_pty_size != (0, 0) {
+    fn pty_size_for_launch(&self) -> (u16, u16) {
+        if self.last_pty_size != (0, 0) {
             self.last_pty_size
         } else {
             (24, 80)
-        };
-        logger::debug(&format!(
-            "spawning PTY {:?} {:?} in {} ({}x{}, resume_supported={})",
-            cfg.command,
-            launch_args,
-            session.worktree_path,
-            cols,
-            rows,
-            cfg.supports_session_resume()
-        ));
-        PtyClient::spawn(
-            &cfg.command,
-            launch_args,
-            Path::new(&session.worktree_path),
-            rows,
-            cols,
-            self.config.ui.agent_scrollback_lines,
-        )
+        }
+    }
+
+    pub(crate) fn agent_launch_request(
+        &self,
+        session: AgentSession,
+        resume: bool,
+        kind: AgentLaunchKind,
+    ) -> AgentLaunchRequest {
+        let cfg = provider_config(&self.config, &session.provider);
+        AgentLaunchRequest {
+            session,
+            provider_config: cfg,
+            resume,
+            pty_size: self.pty_size_for_launch(),
+            scrollback_lines: self.config.ui.agent_scrollback_lines,
+            kind,
+        }
+    }
+
+    pub(crate) fn dispatch_agent_launch(&mut self, request: AgentLaunchRequest) -> bool {
+        let session_id = request.session.id.clone();
+        if !self.agent_launches_in_flight.insert(session_id.clone()) {
+            self.set_info(format!(
+                "Agent \"{}\" is already launching.",
+                request.session.branch_name
+            ));
+            return false;
+        }
+        let tx = self.worker_tx.clone();
+        thread::spawn(move || {
+            super::workers::run_agent_launch_job(request, tx);
+        });
+        true
     }
 
     pub(crate) fn should_resume_session(&self, session: &AgentSession) -> bool {
@@ -832,8 +907,19 @@ impl App {
         self.clear_companion_terminals_for_session(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
         self.update_branch_sync_sessions();
+        let project_still_has_sessions = self
+            .sessions
+            .iter()
+            .any(|candidate| candidate.project_id == session.project_id);
         self.rebuild_left_items();
-        self.selected_left = self.selected_left.saturating_sub(1);
+        if project_still_has_sessions {
+            self.selected_left = self.selected_left.saturating_sub(1);
+            self.ensure_selectable_left_item();
+        } else if let Some(project_index) = self.left_items().iter().position(|item| {
+            matches!(item, LeftItem::Project(index) if self.projects[*index].id == session.project_id)
+        }) {
+            self.selected_left = project_index;
+        }
         self.reload_changed_files();
 
         // Detect contract violation unconditionally, regardless of
@@ -1210,9 +1296,6 @@ impl App {
             return Ok(());
         };
         self.prompt = PromptState::None;
-        let previous = self
-            .project_config(&prompt.project_id)
-            .and_then(|project| project.default_provider.clone());
         if selected.is_current {
             let message = match selected.provider {
                 Some(provider) => format!(
@@ -1230,40 +1313,72 @@ impl App {
             return Ok(());
         }
 
-        let Some(project_config) = self.project_config_mut(&prompt.project_id) else {
+        if !self
+            .projects
+            .iter()
+            .any(|project| project.id == prompt.project_id)
+        {
             self.set_error(format!(
-                "Could not find config for project \"{}\".",
+                "Could not find project \"{}\".",
                 prompt.project_name
-            ));
-            return Ok(());
-        };
-        project_config.default_provider =
-            selected.provider.as_ref().map(|p| p.as_str().to_string());
-        if let Err(err) = save_config(&self.paths.config_path, &self.config, &self.bindings) {
-            if let Some(project_config) = self.project_config_mut(&prompt.project_id) {
-                project_config.default_provider = previous;
-            }
-            self.set_error(format!(
-                "Couldn't persist the project provider change: {err:#}"
             ));
             return Ok(());
         }
 
-        refresh_project_defaults(&mut self.projects, &self.config);
-        self.rebuild_left_items();
-        let message = match selected.provider {
-            Some(provider) => format!(
-                "Project provider for \"{}\" changed to {}. Future agents in this project will use it; existing agents keep their current provider.",
-                prompt.project_name,
-                provider.as_str(),
-            ),
-            None => format!(
-                "\"{}\" now inherits the global default provider ({}). Future agents in this project will use it unless you add a project override again.",
-                prompt.project_name,
-                prompt.global_default.as_str(),
-            ),
+        self.spawn_project_persistence(ProjectPersistenceAction::UpdateDefaultProvider {
+            project_id: prompt.project_id,
+            project_name: prompt.project_name.clone(),
+            provider: selected.provider,
+            global_default: prompt.global_default,
+        });
+        self.set_busy(format!(
+            "Saving provider preference for project \"{}\"...",
+            prompt.project_name
+        ));
+        Ok(())
+    }
+
+    pub(crate) fn toggle_project_auto_reopen_agents(&mut self) -> Result<()> {
+        let Some(project) = self.selected_project().cloned() else {
+            self.set_error("Select a project first.");
+            return Ok(());
         };
-        self.set_info(message);
+        let enabled = self.project_allows_auto_reopen(&project.id);
+        self.spawn_project_persistence(ProjectPersistenceAction::UpdateAutoReopen {
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
+            auto_reopen_agents: if enabled { Some(false) } else { None },
+        });
+        self.set_busy(format!(
+            "Saving auto-reopen preference for project \"{}\"...",
+            project.name
+        ));
+        Ok(())
+    }
+
+    pub(crate) fn toggle_agent_auto_reopen(&mut self) -> Result<()> {
+        let Some(session) = self.selected_session().cloned() else {
+            self.set_error("Select an agent first.");
+            return Ok(());
+        };
+        let enabled = !session.auto_reopen_enabled;
+        if let Some(current) = self
+            .sessions
+            .iter_mut()
+            .find(|candidate| candidate.id == session.id)
+        {
+            current.auto_reopen_enabled = enabled;
+            current.updated_at = Utc::now();
+            self.session_store.upsert_session(current)?;
+        } else {
+            self.session_store
+                .set_auto_reopen_enabled(&session.id, enabled)?;
+        }
+        self.set_info(format!(
+            "Startup auto-reopen {} for agent \"{}\".",
+            if enabled { "enabled" } else { "disabled" },
+            session.branch_name
+        ));
         Ok(())
     }
 
@@ -1385,14 +1500,14 @@ impl App {
             self.set_error("Delete all agents in this project first.");
             return Ok(());
         }
-        self.projects.retain(|p| p.id != project.id);
-        self.config
-            .projects
-            .retain(|p| Path::new(&p.path) != Path::new(&project.path));
-        save_config(&self.paths.config_path, &self.config, &self.bindings)?;
-        self.rebuild_left_items();
-        self.selected_left = self.selected_left.saturating_sub(1);
-        self.set_info(format!("Removed project \"{}\" from app", project.name));
+        self.spawn_project_persistence(ProjectPersistenceAction::Remove {
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
+        });
+        self.set_busy(format!(
+            "Removing project \"{}\" from workspace...",
+            project.name
+        ));
         Ok(())
     }
 
@@ -1445,16 +1560,12 @@ impl App {
                 self.do_delete_session(&session_id, true)?;
             }
         }
-        self.projects.retain(|candidate| candidate.id != project.id);
-        self.config
-            .projects
-            .retain(|candidate| Path::new(&candidate.path) != Path::new(&project.path));
-        save_config(&self.paths.config_path, &self.config, &self.bindings)?;
-        self.rebuild_left_items();
-        self.selected_left = self.selected_left.saturating_sub(1);
-        self.reload_changed_files();
-        self.set_info(format!(
-            "Deleted project \"{}\" and all its agents",
+        self.spawn_project_persistence(ProjectPersistenceAction::Delete {
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
+        });
+        self.set_busy(format!(
+            "Finishing deletion for project \"{}\" after removing its agents...",
             project.name
         ));
         Ok(())
@@ -1487,50 +1598,43 @@ impl App {
             "restarting agent \"{}\" with fresh session (no resume args)",
             session.branch_name
         ));
-        match self.spawn_pty_for_session(&session, false) {
-            Ok(client) => {
-                self.providers.insert(session.id.clone(), client);
-                self.mark_session_status(&session.id, SessionStatus::Active);
-                self.mark_session_provider_started(&session.id);
-                self.show_agent_surface();
-                self.input_target = InputTarget::Agent;
-                self.fullscreen_overlay = FullscreenOverlay::Agent;
-                let proj_name = self.project_name_for_session(&session);
-                let mut msg = format!(
-                    "Started fresh {} session for agent \"{}\" in project \"{}\". Use /sessions inside the agent to restore a prior conversation.",
-                    session.provider.as_str(),
-                    session.branch_name,
-                    proj_name,
-                );
-                if let Some(detached) = &detached_label {
-                    msg.push_str(&format!(
-                        " Agent \"{}\" was detached to avoid worktree conflicts.",
-                        detached,
-                    ));
-                }
-                if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
-                    && project.default_provider != session.provider
-                {
-                    let provider_label = if self.project_uses_explicit_default_provider(&project.id)
-                    {
-                        "current project provider"
-                    } else {
-                        "current global default provider"
-                    };
-                    msg.push_str(&format!(
-                        " Note: this agent uses {}. Your {provider_label} is {}.",
-                        session.provider.as_str(),
-                        project.default_provider.as_str(),
-                    ));
-                }
-                self.set_info(msg);
-            }
-            Err(err) => {
-                self.set_error(format!(
-                    "Fresh restart failed for agent \"{}\": {err}",
-                    session.branch_name
-                ));
-            }
+        let proj_name = self.project_name_for_session(&session);
+        let mut msg = format!(
+            "Started fresh {} session for agent \"{}\" in project \"{}\". Use /sessions inside the agent to restore a prior conversation.",
+            session.provider.as_str(),
+            session.branch_name,
+            proj_name,
+        );
+        if let Some(detached) = &detached_label {
+            msg.push_str(&format!(
+                " Agent \"{}\" was detached to avoid worktree conflicts.",
+                detached,
+            ));
+        }
+        if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
+            && project.default_provider != session.provider
+        {
+            let provider_label = if self.project_uses_explicit_default_provider(&project.id) {
+                "current project provider"
+            } else {
+                "current global default provider"
+            };
+            msg.push_str(&format!(
+                " Note: this agent uses {}. Your {provider_label} is {}.",
+                session.provider.as_str(),
+                project.default_provider.as_str(),
+            ));
+        }
+        let branch_name = session.branch_name.clone();
+        let request = self.agent_launch_request(
+            session,
+            false,
+            AgentLaunchKind::ForceReconnect {
+                status_message: msg,
+            },
+        );
+        if self.dispatch_agent_launch(request) {
+            self.set_busy(format!("Starting fresh agent \"{}\"...", branch_name));
         }
         Ok(())
     }
@@ -1559,63 +1663,52 @@ impl App {
             self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
 
         let use_resume = self.should_resume_session(&session);
-        match self.spawn_pty_for_session(&session, use_resume) {
-            Ok(client) => {
-                self.providers.insert(session.id.clone(), client);
-                if use_resume {
-                    self.resume_fallback_candidates
-                        .insert(session.id.clone(), Instant::now());
-                }
-                self.mark_session_status(&session.id, SessionStatus::Active);
-                self.mark_session_provider_started(&session.id);
-                self.show_agent_surface();
-                self.input_target = InputTarget::Agent;
-                self.fullscreen_overlay = FullscreenOverlay::Agent;
-                let proj_name = self.project_name_for_session(&session);
-                let mut msg = if use_resume {
-                    format!(
-                        "Resumed {} agent \"{}\" in project \"{}\".",
-                        session.provider.as_str(),
-                        session.branch_name,
-                        proj_name
-                    )
-                } else {
-                    format!(
-                        "Started fresh {} session for agent \"{}\" in project \"{}\". Use /sessions inside the agent to restore a prior conversation.",
-                        session.provider.as_str(),
-                        session.branch_name,
-                        proj_name
-                    )
-                };
-                if let Some(detached) = &detached_label {
-                    msg.push_str(&format!(
-                        " Agent \"{}\" was detached to avoid worktree conflicts.",
-                        detached,
-                    ));
-                }
-                if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
-                    && project.default_provider != session.provider
-                {
-                    let provider_label = if self.project_uses_explicit_default_provider(&project.id)
-                    {
-                        "current project provider"
-                    } else {
-                        "current global default provider"
-                    };
-                    msg.push_str(&format!(
-                        " Note: this agent uses {}. Your {provider_label} is {}.",
-                        session.provider.as_str(),
-                        project.default_provider.as_str(),
-                    ));
-                }
-                self.set_info(msg);
-            }
-            Err(err) => {
-                self.set_error(format!(
-                    "Reconnect failed for agent \"{}\": {err}",
-                    session.branch_name
-                ));
-            }
+        let proj_name = self.project_name_for_session(&session);
+        let mut msg = if use_resume {
+            format!(
+                "Resumed {} agent \"{}\" in project \"{}\".",
+                session.provider.as_str(),
+                session.branch_name,
+                proj_name
+            )
+        } else {
+            format!(
+                "Started fresh {} session for agent \"{}\" in project \"{}\". Use /sessions inside the agent to restore a prior conversation.",
+                session.provider.as_str(),
+                session.branch_name,
+                proj_name
+            )
+        };
+        if let Some(detached) = &detached_label {
+            msg.push_str(&format!(
+                " Agent \"{}\" was detached to avoid worktree conflicts.",
+                detached,
+            ));
+        }
+        if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
+            && project.default_provider != session.provider
+        {
+            let provider_label = if self.project_uses_explicit_default_provider(&project.id) {
+                "current project provider"
+            } else {
+                "current global default provider"
+            };
+            msg.push_str(&format!(
+                " Note: this agent uses {}. Your {provider_label} is {}.",
+                session.provider.as_str(),
+                project.default_provider.as_str(),
+            ));
+        }
+        let branch_name = session.branch_name.clone();
+        let request = self.agent_launch_request(
+            session,
+            use_resume,
+            AgentLaunchKind::Reconnect {
+                status_message: msg,
+            },
+        );
+        if self.dispatch_agent_launch(request) {
+            self.set_busy(format!("Launching agent \"{}\"...", branch_name));
         }
         Ok(())
     }
@@ -2258,6 +2351,7 @@ mod tests {
             terminal_return_to_list: false,
             terminal_counter: 0,
             create_agent_in_flight: false,
+            agent_launches_in_flight: std::collections::HashSet::new(),
             pulls_in_flight: std::collections::HashSet::new(),
             resource_stats_in_flight: false,
             last_pty_size: (0, 0),
@@ -2328,6 +2422,8 @@ mod tests {
             worktree_path: worktree.to_string(),
             title: None,
             started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
             status: SessionStatus::Detached,
             created_at: now,
             updated_at: now,
@@ -2339,7 +2435,10 @@ mod tests {
             id: id.to_string(),
             name: "demo".to_string(),
             path: "/tmp/project".to_string(),
+            explicit_default_provider: Some(ProviderKind::from_str(provider)),
             default_provider: ProviderKind::from_str(provider),
+            leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -2489,7 +2588,10 @@ mod tests {
             id: id.to_string(),
             name: "demo".to_string(),
             path: path.to_string(),
+            explicit_default_provider: Some(ProviderKind::from_str(provider)),
             default_provider: ProviderKind::from_str(provider),
+            leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -2642,6 +2744,63 @@ mod tests {
         assert!(
             worktree_dir.path().exists(),
             "worktree directory must be preserved when the flag is off",
+        );
+    }
+
+    #[test]
+    fn deleting_last_agent_selects_project_after_it_moves_to_empty_list() {
+        let mut project_with_deleted_agent = make_project("project-1", "claude");
+        project_with_deleted_agent.name = "deleted-agent-project".to_string();
+        let mut active_project = make_project("project-2", "codex");
+        active_project.name = "active-project".to_string();
+        let mut already_empty_project = make_project("project-3", "codex");
+        already_empty_project.name = "already-empty-project".to_string();
+
+        let mut deleted_session = make_session("s1", "claude", "/tmp/wt/a");
+        deleted_session.project_id = "project-1".to_string();
+        let mut remaining_session = make_session("s2", "codex", "/tmp/wt/b");
+        remaining_session.project_id = "project-2".to_string();
+
+        let mut app = test_app_with_sessions(
+            vec![deleted_session, remaining_session],
+            vec![
+                project_with_deleted_agent,
+                active_project,
+                already_empty_project,
+            ],
+        );
+        app.config.ui.empty_project_separator_min_projects = 3;
+        app.rebuild_left_items();
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(
+                |item| matches!(item, LeftItem::Session(index) if app.sessions[*index].id == "s1"),
+            )
+            .expect("deleted session row");
+
+        app.finish_delete_session("s1", false, None, true)
+            .expect("finish delete");
+
+        let separator_index = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::EmptyProjectsSeparator))
+            .expect("empty-project separator should remain");
+        let selected_project = app.selected_project().expect("selected project");
+        assert_eq!(selected_project.id, "project-1");
+        assert!(
+            app.selected_left > separator_index,
+            "project should be selected in the empty-project section"
+        );
+
+        app.create_agent_for_selected_project()
+            .expect("selected empty project should accept new-agent action");
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+        assert!(
+            app.status.text().contains("deleted-agent-project"),
+            "new-agent action should target the project that just moved to the empty list, got: {}",
+            app.status.text()
         );
     }
 

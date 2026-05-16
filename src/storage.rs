@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 
+use crate::config::ProjectConfig;
 use crate::model::{AgentSession, SessionStatus};
 
 /// A stored PR association loaded from the database.
@@ -47,6 +48,43 @@ impl SessionStore {
             );
             "#,
         )?;
+        self.conn.execute_batch(
+            r#"
+            create table if not exists projects (
+                id text primary key,
+                path text not null unique,
+                name text,
+                default_provider text,
+                leading_branch text,
+                auto_reopen_agents integer,
+                sort_order integer not null default 0,
+                created_at text not null,
+                updated_at text not null
+            );
+            "#,
+        )?;
+        ensure_column(&self.conn, "projects", "name", "text")?;
+        ensure_column(&self.conn, "projects", "default_provider", "text")?;
+        ensure_column(&self.conn, "projects", "leading_branch", "text")?;
+        ensure_column(&self.conn, "projects", "auto_reopen_agents", "integer")?;
+        ensure_column(
+            &self.conn,
+            "projects",
+            "sort_order",
+            "integer not null default 0",
+        )?;
+        ensure_column(
+            &self.conn,
+            "projects",
+            "created_at",
+            "text not null default ''",
+        )?;
+        ensure_column(
+            &self.conn,
+            "projects",
+            "updated_at",
+            "text not null default ''",
+        )?;
         ensure_column(&self.conn, "agent_sessions", "title", "text")?;
         ensure_column(&self.conn, "agent_sessions", "project_path", "text")?;
         ensure_column(
@@ -54,6 +92,18 @@ impl SessionStore {
             "agent_sessions",
             "started_providers",
             "text not null default '[]'",
+        )?;
+        ensure_column(
+            &self.conn,
+            "agent_sessions",
+            "desired_running",
+            "integer not null default 0",
+        )?;
+        ensure_column(
+            &self.conn,
+            "agent_sessions",
+            "auto_reopen_enabled",
+            "integer not null default 1",
         )?;
         self.conn.execute_batch(
             r#"
@@ -87,6 +137,147 @@ impl SessionStore {
             "text not null default ''",
         )?;
         ensure_column(&self.conn, "session_prs", "url", "text not null default ''")?;
+        Ok(())
+    }
+
+    /// Insert or update a project. If a project with the same path already
+    /// exists under a different id, keep the existing id so sessions remain
+    /// attached and refresh the editable metadata.
+    pub fn upsert_project(&self, project: &ProjectConfig) -> Result<()> {
+        let sort_order = self.next_project_sort_order()?;
+        self.upsert_project_at(project, sort_order)
+    }
+
+    pub fn upsert_project_at(&self, project: &ProjectConfig, sort_order: i64) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let updated = self.conn.execute(
+            r#"
+            update projects
+            set path = ?2,
+                name = ?3,
+                default_provider = ?4,
+                leading_branch = ?5,
+                auto_reopen_agents = ?6,
+                sort_order = ?7,
+                updated_at = ?8
+            where id = ?1
+            "#,
+            params![
+                project.id,
+                project.path,
+                project.name,
+                project.default_provider,
+                project.leading_branch,
+                project.auto_reopen_agents,
+                sort_order,
+                now,
+            ],
+        )?;
+        if updated > 0 {
+            return Ok(());
+        }
+
+        self.conn.execute(
+            r#"
+            insert into projects
+                (id, path, name, default_provider, leading_branch, auto_reopen_agents, sort_order, created_at, updated_at)
+            values
+                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+            on conflict(path) do update set
+                name=excluded.name,
+                default_provider=excluded.default_provider,
+                leading_branch=excluded.leading_branch,
+                auto_reopen_agents=excluded.auto_reopen_agents,
+                sort_order=excluded.sort_order,
+                updated_at=excluded.updated_at
+            "#,
+            params![
+                project.id,
+                project.path,
+                project.name,
+                project.default_provider,
+                project.leading_branch,
+                project.auto_reopen_agents,
+                sort_order,
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn next_project_sort_order(&self) -> Result<i64> {
+        self.conn
+            .query_row(
+                "select coalesce(max(sort_order) + 1, 0) from projects",
+                [],
+                |row| row.get(0),
+            )
+            .context("failed to compute next project sort order")
+    }
+
+    pub fn load_projects(&self) -> Result<Vec<ProjectConfig>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            select id, path, name, default_provider, leading_branch, auto_reopen_agents
+            from projects
+            order by sort_order, name collate nocase, path collate nocase
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ProjectConfig {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                name: row.get(2)?,
+                default_provider: row.get(3)?,
+                leading_branch: row.get(4)?,
+                auto_reopen_agents: row.get(5)?,
+            })
+        })?;
+
+        let mut projects = Vec::new();
+        for row in rows {
+            projects.push(row?);
+        }
+        Ok(projects)
+    }
+
+    pub fn update_project_default_provider(
+        &self,
+        project_id: &str,
+        default_provider: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            update projects
+            set default_provider = ?2,
+                updated_at = ?3
+            where id = ?1
+            "#,
+            params![project_id, default_provider, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_project_auto_reopen(
+        &self,
+        project_id: &str,
+        auto_reopen_agents: Option<bool>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            update projects
+            set auto_reopen_agents = ?2,
+                updated_at = ?3
+            where id = ?1
+            "#,
+            params![project_id, auto_reopen_agents, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_project(&self, id: &str) -> Result<()> {
+        self.conn
+            .execute("delete from projects where id = ?1", params![id])?;
         Ok(())
     }
 
@@ -184,9 +375,9 @@ impl SessionStore {
         self.conn.execute(
             r#"
             insert into agent_sessions
-                (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, status, created_at, updated_at)
+                (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, desired_running, auto_reopen_enabled, status, created_at, updated_at)
             values
-                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
             on conflict(id) do update set
                 project_path=excluded.project_path,
                 provider=excluded.provider,
@@ -195,6 +386,8 @@ impl SessionStore {
                 worktree_path=excluded.worktree_path,
                 title=excluded.title,
                 started_providers=excluded.started_providers,
+                desired_running=excluded.desired_running,
+                auto_reopen_enabled=excluded.auto_reopen_enabled,
                 status=excluded.status,
                 updated_at=excluded.updated_at
             "#,
@@ -208,6 +401,8 @@ impl SessionStore {
                 session.worktree_path,
                 session.title,
                 serialize_started_providers(&session.started_providers),
+                session.desired_running,
+                session.auto_reopen_enabled,
                 session.status.as_str(),
                 session.created_at.to_rfc3339(),
                 session.updated_at.to_rfc3339(),
@@ -219,15 +414,15 @@ impl SessionStore {
     pub fn load_sessions(&self) -> Result<Vec<AgentSession>> {
         let mut stmt = self.conn.prepare(
             r#"
-            select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, status, created_at, updated_at
+            select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, desired_running, auto_reopen_enabled, status, created_at, updated_at
             from agent_sessions
             order by updated_at desc
             "#,
         )?;
         let rows = stmt.query_map([], |row| {
             let started_providers: String = row.get(8)?;
-            let created_at: String = row.get(10)?;
-            let updated_at: String = row.get(11)?;
+            let created_at: String = row.get(12)?;
+            let updated_at: String = row.get(13)?;
             Ok(AgentSession {
                 id: row.get(0)?,
                 project_id: row.get::<_, String>(1).unwrap_or_default(),
@@ -238,7 +433,9 @@ impl SessionStore {
                 title: row.get(6)?,
                 project_path: row.get(7)?,
                 started_providers: parse_started_providers(&started_providers),
-                status: SessionStatus::from_str(row.get::<_, String>(9)?.as_str()),
+                desired_running: row.get(9)?,
+                auto_reopen_enabled: row.get(10)?,
+                status: SessionStatus::from_str(row.get::<_, String>(11)?.as_str()),
                 created_at: parse_time(&created_at).unwrap_or_else(Utc::now),
                 updated_at: parse_time(&updated_at).unwrap_or_else(Utc::now),
             })
@@ -254,6 +451,22 @@ impl SessionStore {
     pub fn delete_session(&self, id: &str) -> Result<()> {
         self.conn
             .execute("delete from agent_sessions where id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn set_desired_running(&self, id: &str, desired_running: bool) -> Result<()> {
+        self.conn.execute(
+            "update agent_sessions set desired_running = ?2, updated_at = ?3 where id = ?1",
+            params![id, desired_running, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_auto_reopen_enabled(&self, id: &str, enabled: bool) -> Result<()> {
+        self.conn.execute(
+            "update agent_sessions set auto_reopen_enabled = ?2, updated_at = ?3 where id = ?1",
+            params![id, enabled, Utc::now().to_rfc3339()],
+        )?;
         Ok(())
     }
 }
@@ -312,6 +525,8 @@ fn test_session(
         worktree_path: format!("/tmp/{id}"),
         title: None,
         started_providers: Vec::new(),
+        desired_running: false,
+        auto_reopen_enabled: true,
         status: SessionStatus::Active,
         created_at,
         updated_at,
@@ -381,6 +596,117 @@ mod tests {
             loaded[0].started_providers,
             vec!["claude".to_string(), "codex".to_string()]
         );
+    }
+    #[test]
+    fn projects_round_trip_all_project_fields() {
+        let store = test_store();
+        let project = ProjectConfig {
+            id: "project-1".to_string(),
+            path: "$CODE/dux".to_string(),
+            name: Some("dux".to_string()),
+            default_provider: Some("codex".to_string()),
+            leading_branch: Some("main".to_string()),
+            auto_reopen_agents: Some(false),
+        };
+
+        store.upsert_project(&project).unwrap();
+
+        let loaded = store.load_projects().unwrap();
+        assert_eq!(loaded, vec![project]);
+    }
+
+    #[test]
+    fn project_path_conflict_keeps_existing_id() {
+        let store = test_store();
+        store
+            .upsert_project(&ProjectConfig {
+                id: "stable-id".to_string(),
+                path: "/repo".to_string(),
+                name: Some("old".to_string()),
+                default_provider: None,
+                leading_branch: Some("main".to_string()),
+                auto_reopen_agents: None,
+            })
+            .unwrap();
+
+        store
+            .upsert_project(&ProjectConfig {
+                id: "new-id".to_string(),
+                path: "/repo".to_string(),
+                name: Some("new".to_string()),
+                default_provider: Some("claude".to_string()),
+                leading_branch: Some("trunk".to_string()),
+                auto_reopen_agents: Some(false),
+            })
+            .unwrap();
+
+        let loaded = store.load_projects().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "stable-id");
+        assert_eq!(loaded[0].name.as_deref(), Some("new"));
+        assert_eq!(loaded[0].default_provider.as_deref(), Some("claude"));
+        assert_eq!(loaded[0].leading_branch.as_deref(), Some("trunk"));
+        assert_eq!(loaded[0].auto_reopen_agents, Some(false));
+    }
+
+    #[test]
+    fn auto_reopen_fields_round_trip() {
+        let store = test_store();
+        let now = Utc::now();
+        let mut session = test_session("auto", now, now);
+        session.desired_running = true;
+        session.auto_reopen_enabled = false;
+
+        store.upsert_session(&session).unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].desired_running);
+        assert!(!loaded[0].auto_reopen_enabled);
+
+        store.set_auto_reopen_enabled("auto", true).unwrap();
+        store.set_desired_running("auto", false).unwrap();
+        let loaded = store.load_sessions().unwrap();
+        assert!(!loaded[0].desired_running);
+        assert!(loaded[0].auto_reopen_enabled);
+    }
+
+    #[test]
+    fn auto_reopen_fields_migrate_from_old_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            create table agent_sessions (
+                id text primary key,
+                project_id text not null,
+                provider text not null,
+                source_branch text not null,
+                branch_name text not null,
+                worktree_path text not null,
+                title text,
+                project_path text,
+                status text not null,
+                created_at text not null,
+                updated_at text not null
+            );
+            insert into agent_sessions (
+                id, project_id, provider, source_branch, branch_name,
+                worktree_path, title, project_path, status, created_at, updated_at
+            ) values (
+                'old', 'proj', 'claude', 'main', 'agent', '/tmp/agent',
+                null, null, 'detached', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+            );
+            "#,
+        )
+        .unwrap();
+
+        let store = SessionStore { conn };
+        store.migrate().unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(!loaded[0].desired_running);
+        assert!(loaded[0].auto_reopen_enabled);
     }
 }
 

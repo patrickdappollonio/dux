@@ -9,7 +9,6 @@ const MAX_RIGHT_WIDTH_PCT: u16 = 50;
 const MIN_CENTER_WIDTH_PCT: u16 = 20;
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 const ESC_AMBIGUITY_TIMEOUT: Duration = Duration::from_millis(25);
-const NON_DEFAULT_BRANCH_HOVER_STATUS: &str = "Repo isn't on the default branch. Press Ctrl+P and run checkout-project-default-branch to check out main.";
 
 /// Maximum size of `loading_input_buf`. During the loading phase we
 /// accumulate bytes only to detect a (possibly multi-byte) ExitInteractive
@@ -92,6 +91,7 @@ enum PromptMouseTarget {
     BrowseProjectInput,
     BrowseProjectItem(usize),
     PickEditorItem(usize),
+    PickProjectWorktreeItem(usize),
     ChangeThemeItem(usize),
     ChangeAgentProviderItem(usize),
     ChangeAgentProviderCancel,
@@ -126,6 +126,7 @@ enum PromptMouseTarget {
     ConfirmUseExistingBranchUse,
     ConfigReloadFailedClose,
     ConfigReloadFailedApply,
+    AddProjectFailedOk,
     Checkbox(OverlayCheckboxId),
     RenameInput,
     NameNewAgentInput,
@@ -208,11 +209,13 @@ impl ButtonPressedTarget {
             PromptMouseTarget::ConfigReloadFailedApply => {
                 Some(ButtonPressedTarget::ConfigReloadFailedApply)
             }
+            PromptMouseTarget::AddProjectFailedOk => Some(ButtonPressedTarget::AddProjectFailedOk),
             PromptMouseTarget::CommandInput
             | PromptMouseTarget::CommandItem(_)
             | PromptMouseTarget::BrowseProjectInput
             | PromptMouseTarget::BrowseProjectItem(_)
             | PromptMouseTarget::PickEditorItem(_)
+            | PromptMouseTarget::PickProjectWorktreeItem(_)
             | PromptMouseTarget::ChangeThemeItem(_)
             | PromptMouseTarget::ChangeAgentProviderItem(_)
             | PromptMouseTarget::ChangeDefaultProviderItem(_)
@@ -302,6 +305,13 @@ impl App {
         if self.bindings.lookup(&key, BindingScope::Global) == Some(Action::CloseOverlay)
             && self.close_top_overlay()
         {
+            return Ok(false);
+        }
+        if key.code == KeyCode::Esc
+            && self.focus == FocusPane::Files
+            && (self.files_search_active || self.has_files_search())
+        {
+            self.handle_files_key(key)?;
             return Ok(false);
         }
         if let Some(ref mut scroll) = self.help_scroll {
@@ -559,6 +569,7 @@ impl App {
                     self.open_project_browser()?;
                 }
                 Action::NewAgent => self.create_agent_for_selected_project()?,
+                Action::NewAgentFromWorktree => self.create_agent_from_existing_worktree()?,
                 Action::ForkAgent => self.fork_selected_session()?,
                 Action::RefreshProject => self.refresh_selected_project()?,
                 Action::CheckoutProjectDefaultBranch => {
@@ -757,7 +768,11 @@ impl App {
 
     fn handle_files_search_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc | KeyCode::Enter => {
+            KeyCode::Esc => {
+                self.clear_files_search();
+                return;
+            }
+            KeyCode::Enter => {
                 self.files_search_active = false;
                 return;
             }
@@ -983,8 +998,7 @@ impl App {
             return Ok(());
         };
         let worktree = PathBuf::from(&session.worktree_path);
-        let project_path = session.project_path.as_deref().unwrap_or("");
-        let base_prompt = self.config.commit_prompt_for_project(project_path);
+        let base_prompt = self.config.default_commit_prompt();
 
         // Capture the staged diff up-front so the provider does not need tool
         // access to inspect it. The diff is appended after the prompt text.
@@ -1955,14 +1969,17 @@ impl App {
             let is_plain_char = matches!(key.code, KeyCode::Char(_))
                 && !key.modifiers.contains(KeyModifiers::CONTROL);
 
-            // Path editor is pure text input — keep hardcoded KeyCode matches.
+            // Path editor keeps text editing local, with one browser-scoped
+            // escape hatch back to directory browsing.
             if is_editing_path {
+                let path_editor_action = if is_plain_char {
+                    None
+                } else {
+                    self.bindings.lookup(&key, BindingScope::Browser)
+                };
+                let mut add_path: Option<String> = None;
+                let mut refresh_completions = false;
                 if let PromptState::BrowseProjects {
-                    current_dir,
-                    entries,
-                    loading,
-                    selected,
-                    filter,
                     editing_path,
                     path_input,
                     tab_completions,
@@ -1970,105 +1987,58 @@ impl App {
                     ..
                 } = &mut self.prompt
                 {
-                    let mut browse_to: Option<PathBuf> = None;
-                    let mut error_msg = None;
-                    match key.code {
-                        KeyCode::Esc => {
+                    match path_editor_action {
+                        Some(Action::ExitPathEditorOnProjectAdd) => {
                             *editing_path = false;
                             path_input.clear();
                             tab_completions.clear();
                             *tab_index = 0;
                         }
-                        KeyCode::Tab | KeyCode::BackTab => {
-                            if tab_completions.is_empty() {
-                                let input_path = PathBuf::from(path_input.text.as_str());
-                                let (search_dir, prefix) =
-                                    if input_path.is_dir() && path_input.text.ends_with('/') {
-                                        (input_path.clone(), String::new())
-                                    } else {
-                                        let parent = input_path
-                                            .parent()
-                                            .unwrap_or_else(|| std::path::Path::new("/"));
-                                        let file_name = input_path
-                                            .file_name()
-                                            .map(|f| f.to_string_lossy().to_string())
-                                            .unwrap_or_default();
-                                        (parent.to_path_buf(), file_name)
-                                    };
-                                if let Ok(read) = std::fs::read_dir(&search_dir) {
-                                    let prefix_lower = prefix.to_lowercase();
-                                    let mut candidates: Vec<String> = read
-                                        .filter_map(|e| e.ok())
-                                        .filter(|e| {
-                                            e.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
-                                        })
-                                        .filter(|e| {
-                                            let name =
-                                                e.file_name().to_string_lossy().to_lowercase();
-                                            !name.starts_with('.')
-                                                && name.starts_with(&prefix_lower)
-                                        })
-                                        .map(|e| {
-                                            let mut full = search_dir
-                                                .join(e.file_name())
-                                                .to_string_lossy()
-                                                .to_string();
-                                            full.push('/');
-                                            full
-                                        })
-                                        .collect();
-                                    candidates.sort();
-                                    *tab_completions = candidates;
-                                    *tab_index = 0;
-                                }
-                            } else if is_reverse_tab(key) {
-                                if *tab_index == 0 {
-                                    *tab_index = tab_completions.len().saturating_sub(1);
-                                } else {
-                                    *tab_index -= 1;
-                                }
-                            } else {
-                                *tab_index = (*tab_index + 1) % tab_completions.len();
-                            }
-                            if let Some(completion) = tab_completions.get(*tab_index) {
-                                path_input.set_text(completion.clone());
-                            }
-                        }
-                        KeyCode::Enter => {
-                            let new_dir = PathBuf::from(path_input.text.trim());
-                            if new_dir.is_dir() {
-                                *current_dir = new_dir.clone();
-                                entries.clear();
-                                *loading = true;
-                                *selected = 0;
-                                filter.clear();
-                                browse_to = Some(new_dir);
-                            } else {
-                                error_msg =
-                                    Some(format!("{} is not a directory.", path_input.text.trim()));
-                            }
-                            *editing_path = false;
-                            path_input.clear();
-                            tab_completions.clear();
-                            *tab_index = 0;
-                        }
-                        KeyCode::Up | KeyCode::Down => {
-                            tab_completions.clear();
-                            *tab_index = 0;
-                        }
-                        _ => {
-                            if path_input.handle_key(key) {
+                        _ => match key.code {
+                            KeyCode::Esc => {
+                                *editing_path = false;
+                                path_input.clear();
                                 tab_completions.clear();
                                 *tab_index = 0;
                             }
-                        }
+                            KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {
+                                if tab_completions.is_empty() {
+                                    *tab_completions =
+                                        Self::path_editor_completion_candidates(&path_input.text);
+                                    *tab_index = 0;
+                                } else if key.code == KeyCode::Up || is_reverse_tab(key) {
+                                    if *tab_index == 0 {
+                                        *tab_index = tab_completions.len().saturating_sub(1);
+                                    } else {
+                                        *tab_index -= 1;
+                                    }
+                                } else if key.code == KeyCode::Down {
+                                    *tab_index = (*tab_index + 1) % tab_completions.len();
+                                }
+                                if key.code == KeyCode::Tab
+                                    && !is_reverse_tab(key)
+                                    && let Some(completion) = tab_completions.get(*tab_index)
+                                {
+                                    path_input.set_text(completion.clone());
+                                    refresh_completions = true;
+                                }
+                            }
+                            KeyCode::Enter => {
+                                add_path = Some(path_input.text.trim().to_string());
+                            }
+                            _ => {
+                                if path_input.handle_key(key) {
+                                    refresh_completions = true;
+                                }
+                            }
+                        },
                     }
-                    if let Some(msg) = error_msg {
-                        self.set_error(msg);
-                    }
-                    if let Some(dir) = browse_to {
-                        self.spawn_browser_entries(&dir);
-                    }
+                }
+                if refresh_completions {
+                    self.refresh_path_editor_completions();
+                }
+                if let Some(path) = add_path {
+                    self.add_project_from_browser_path(path);
                 }
                 return Ok(false);
             }
@@ -2152,6 +2122,7 @@ impl App {
                         }
                         path_input.set_text(p);
                     }
+                    self.refresh_path_editor_completions();
                 }
                 Some(Action::Confirm) if is_searching => {
                     if let PromptState::BrowseProjects { searching, .. } = &mut self.prompt {
@@ -2164,10 +2135,7 @@ impl App {
                 Some(Action::AddCurrentDir) if !is_searching => {
                     if let PromptState::BrowseProjects { current_dir, .. } = &self.prompt {
                         let path = current_dir.to_string_lossy().to_string();
-                        self.prompt = PromptState::None;
-                        if let Err(e) = self.add_project(path, String::new()) {
-                            self.set_error(format!("{e:#}"));
-                        }
+                        self.add_project_from_browser_path(path);
                     }
                 }
                 _ => {
@@ -2199,6 +2167,39 @@ impl App {
                 }
                 Some(Action::Confirm) => {
                     self.open_selected_pick_editor();
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+
+        if let PromptState::PickProjectWorktree(prompt) = &mut self.prompt {
+            match self.bindings.lookup(&key, BindingScope::Palette) {
+                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+                Some(Action::MoveDown) => {
+                    let selectable = selectable_project_worktree_indices(&prompt.entries);
+                    if let Some(current) = prompt.selected
+                        && let Some(position) = selectable.iter().position(|idx| *idx == current)
+                        && let Some(next) = selectable.get(position + 1)
+                    {
+                        prompt.selected = Some(*next);
+                    } else if prompt.selected.is_none() {
+                        prompt.selected = selectable.into_iter().next();
+                    }
+                }
+                Some(Action::MoveUp) => {
+                    let selectable = selectable_project_worktree_indices(&prompt.entries);
+                    if let Some(current) = prompt.selected
+                        && let Some(position) = selectable.iter().position(|idx| *idx == current)
+                        && position > 0
+                    {
+                        prompt.selected = Some(selectable[position - 1]);
+                    } else if prompt.selected.is_none() {
+                        prompt.selected = selectable.into_iter().next();
+                    }
+                }
+                Some(Action::Confirm) => {
+                    self.open_selected_project_worktree_agent_prompt()?;
                 }
                 _ => {}
             }
@@ -2440,6 +2441,15 @@ impl App {
                     }
                 },
                 _ => {}
+            }
+            return Ok(false);
+        }
+
+        if matches!(self.prompt, PromptState::AddProjectFailed { .. }) {
+            let action = self.bindings.lookup(&key, BindingScope::Dialog);
+            let is_space = key.code == KeyCode::Char(' ');
+            if matches!(action, Some(Action::Confirm | Action::CloseOverlay)) || is_space {
+                self.resolve_add_project_failed();
             }
             return Ok(false);
         }
@@ -2739,7 +2749,7 @@ impl App {
                     self.prompt = PromptState::None;
                 }
                 Some(Action::ToggleSelection) => {
-                    self.toggle_name_new_agent_randomized_name();
+                    self.focus_next_name_new_agent_control(!is_reverse_tab(key));
                 }
                 Some(Action::Confirm) => {
                     // Extract the name from the input before taking ownership.
@@ -2767,9 +2777,11 @@ impl App {
                         unreachable!()
                     };
 
-                    // For NewProject requests, check whether the branch already
+                    // For fresh project agents, check whether the branch already
                     // exists locally or on the remote before creating a new one.
-                    if let Some(project) = create_agent_request_project(&request) {
+                    // PR-based agents intentionally skip this prompt because the
+                    // PR head branch is expected to exist upstream.
+                    if let CreateAgentRequest::NewProject { project, .. } = &request {
                         let repo_path = std::path::PathBuf::from(&project.path);
                         if let Some(location) = git::branch_exists(&repo_path, &name) {
                             set_create_agent_request_custom_name(&mut request, name.clone());
@@ -2803,6 +2815,27 @@ impl App {
                                 "Forking agent \"{source_label}\" as \"{name}\" by cloning its current worktree contents into a fresh session...",
                             )
                         }
+                        CreateAgentRequest::ExistingManagedWorktree {
+                            project,
+                            worktree_path,
+                            ..
+                        } => {
+                            format!(
+                                "Starting agent \"{name}\" in existing worktree {} for project \"{}\"...",
+                                worktree_path.display(),
+                                project.name
+                            )
+                        }
+                        CreateAgentRequest::ForkExternalWorktree {
+                            project,
+                            source_label,
+                            ..
+                        } => {
+                            format!(
+                                "Copying external worktree \"{source_label}\" into a managed worktree \"{name}\" for project \"{}\"...",
+                                project.name
+                            )
+                        }
                     };
                     set_create_agent_request_custom_name(&mut request, name);
                     self.dispatch_create_agent_request(request, msg)?;
@@ -2812,12 +2845,12 @@ impl App {
                         let checkbox_focused = matches!(
                             self.prompt,
                             PromptState::NameNewAgent {
-                                focus: NameNewAgentFocus::Checkbox,
+                                focus: NameNewAgentFocus::RandomizedNameCheckbox,
                                 ..
                             }
                         );
                         if checkbox_focused {
-                            self.toggle_name_new_agent_randomized_name();
+                            self.toggle_focused_name_new_agent_checkbox();
                         } else if let PromptState::NameNewAgent { input, .. } = &mut self.prompt {
                             input.handle_key(key);
                         }
@@ -3203,6 +3236,13 @@ impl App {
                 ..
             } => Self::overlay_row_at(list, offset, items, column, row)
                 .map(PromptMouseTarget::PickEditorItem),
+            OverlayMouseLayout::PickProjectWorktree {
+                list,
+                items,
+                offset,
+                ..
+            } => Self::overlay_row_at(list, offset, items, column, row)
+                .map(PromptMouseTarget::PickProjectWorktreeItem),
             OverlayMouseLayout::ResourceMonitor { .. } => None,
             OverlayMouseLayout::ChangeTheme {
                 list,
@@ -3407,6 +3447,13 @@ impl App {
                     None
                 }
             }
+            OverlayMouseLayout::AddProjectFailed { ok_button } => {
+                if contains_point(ok_button, column, row) {
+                    Some(PromptMouseTarget::AddProjectFailedOk)
+                } else {
+                    None
+                }
+            }
             OverlayMouseLayout::RenameSession { input, checkbox } => {
                 if checkbox.is_some_and(|checkbox| contains_point(checkbox.rect, column, row)) {
                     checkbox.map(|checkbox| PromptMouseTarget::Checkbox(checkbox.id))
@@ -3593,32 +3640,6 @@ impl App {
             self.selected_left = index;
             self.close_diff_view();
             self.reload_changed_files();
-        }
-    }
-
-    fn update_non_default_branch_hover_status(&mut self, column: u16, row: u16) {
-        let hovering_not_leading_project = match self.mouse_target(column, row) {
-            Some(MouseTarget::LeftRow(index)) => self
-                .left_items()
-                .get(index)
-                .and_then(|item| match item {
-                    LeftItem::Project(project_index) => self.projects.get(*project_index),
-                    LeftItem::Session(_) => None,
-                    LeftItem::EmptyProjectsSeparator => None,
-                })
-                .is_some_and(|project| {
-                    !project.path_missing
-                        && project.branch_status == ProjectBranchStatus::NotLeading
-                }),
-            _ => false,
-        };
-
-        if hovering_not_leading_project {
-            self.set_warning(NON_DEFAULT_BRANCH_HOVER_STATUS);
-        } else if self.status.tone() == crate::statusline::StatusTone::Warning
-            && self.status.text() == NON_DEFAULT_BRANCH_HOVER_STATUS
-        {
-            self.set_info("");
         }
     }
 
@@ -3919,6 +3940,97 @@ impl App {
         }
     }
 
+    fn path_editor_completion_candidates(input: &str) -> Vec<String> {
+        let input_path = PathBuf::from(input);
+        let (search_dir, prefix) = if input_path.is_dir() && input.ends_with('/') {
+            (input_path, String::new())
+        } else {
+            let parent = input_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("/"));
+            let file_name = input_path
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_default();
+            (parent.to_path_buf(), file_name)
+        };
+
+        let Ok(read) = std::fs::read_dir(search_dir.clone()) else {
+            return Vec::new();
+        };
+        let prefix_lower = prefix.to_lowercase();
+        let mut candidates: Vec<String> = read
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+            .filter(|entry| {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                !name.starts_with('.') && name.starts_with(&prefix_lower)
+            })
+            .map(|entry| {
+                let mut full = search_dir
+                    .join(entry.file_name())
+                    .to_string_lossy()
+                    .to_string();
+                full.push('/');
+                full
+            })
+            .collect();
+        candidates.sort();
+        candidates
+    }
+
+    fn refresh_path_editor_completions(&mut self) {
+        let input = match &self.prompt {
+            PromptState::BrowseProjects {
+                editing_path: true,
+                path_input,
+                ..
+            } => path_input.text.clone(),
+            _ => return,
+        };
+        let candidates = Self::path_editor_completion_candidates(&input);
+        if let PromptState::BrowseProjects {
+            tab_completions,
+            tab_index,
+            ..
+        } = &mut self.prompt
+        {
+            *tab_completions = candidates;
+            *tab_index = 0;
+        }
+    }
+
+    fn add_project_from_browser_path(&mut self, path: String) {
+        let return_prompt = self.prompt.clone();
+        if let Err(message) = self.validate_project_add_path(&path) {
+            self.open_add_project_failed_modal(message, return_prompt);
+            return;
+        }
+        self.prompt = PromptState::None;
+        if let Err(error) = self.add_project(path, String::new()) {
+            self.open_add_project_failed_modal(format!("{error:#}"), return_prompt);
+        }
+    }
+
+    fn open_add_project_failed_modal(&mut self, message: String, return_prompt: PromptState) {
+        self.prompt = PromptState::AddProjectFailed {
+            message,
+            return_prompt: Box::new(return_prompt),
+        };
+    }
+
+    fn resolve_add_project_failed(&mut self) -> bool {
+        let return_prompt = match std::mem::replace(&mut self.prompt, PromptState::None) {
+            PromptState::AddProjectFailed { return_prompt, .. } => *return_prompt,
+            other => {
+                self.prompt = other;
+                return false;
+            }
+        };
+        self.prompt = return_prompt;
+        false
+    }
+
     fn set_pick_editor_selection(&mut self, index: usize) {
         let count = match &self.prompt {
             PromptState::PickEditor { editors, .. } => editors.len(),
@@ -3954,6 +4066,83 @@ impl App {
         {
             self.set_error(format!("{e:#}"));
         }
+    }
+
+    fn set_project_worktree_selection_from_visual_row(&mut self, visual_index: usize) {
+        let entry_index = match &self.prompt {
+            PromptState::PickProjectWorktree(prompt) => {
+                let rows = project_worktree_visual_rows(
+                    &prompt.entries,
+                    prompt.loading,
+                    prompt.error.as_deref(),
+                );
+                rows.get(visual_index).and_then(|row| match row {
+                    ProjectWorktreeVisualRow::Entry(index)
+                        if prompt
+                            .entries
+                            .get(*index)
+                            .is_some_and(|entry| entry.is_selectable) =>
+                    {
+                        Some(*index)
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        };
+        let Some(entry_index) = entry_index else {
+            return;
+        };
+        if let PromptState::PickProjectWorktree(prompt) = &mut self.prompt {
+            prompt.selected = Some(entry_index);
+        }
+    }
+
+    fn open_selected_project_worktree_agent_prompt(&mut self) -> Result<()> {
+        let (project, entry) = match &self.prompt {
+            PromptState::PickProjectWorktree(prompt) => {
+                let Some(selected) = prompt.selected else {
+                    self.set_error("No available worktree is selected.");
+                    return Ok(());
+                };
+                let Some(entry) = prompt.entries.get(selected).cloned() else {
+                    self.set_error("No available worktree is selected.");
+                    return Ok(());
+                };
+                if !entry.is_selectable {
+                    self.set_error("That worktree already has an agent.");
+                    return Ok(());
+                }
+                (prompt.project.clone(), entry)
+            }
+            _ => return Ok(()),
+        };
+
+        let request = if entry.is_external {
+            CreateAgentRequest::ForkExternalWorktree {
+                project,
+                source_worktree_path: entry.path.clone(),
+                source_label: entry.display_name(),
+                source_branch: entry.branch_name.clone(),
+                custom_name: Some(entry.display_name()),
+            }
+        } else {
+            let managed_root = self.paths.worktrees_root.join(&project.name);
+            let default_name = entry
+                .path
+                .strip_prefix(&managed_root)
+                .ok()
+                .map(|relative| relative.to_string_lossy().to_string())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| entry.display_name());
+            CreateAgentRequest::ExistingManagedWorktree {
+                project,
+                worktree_path: entry.path.clone(),
+                branch_name: entry.branch_name.clone(),
+                custom_name: Some(default_name),
+            }
+        };
+        self.open_name_new_agent_prompt_for_request(request)
     }
 
     fn next_change_agent_provider_focus(
@@ -4171,19 +4360,19 @@ impl App {
             let target = default_branch.expect("checkout_default implies known default branch");
             let reason = match action {
                 NonDefaultBranchAction::AddProject { .. } => "before adding the project",
-                NonDefaultBranchAction::CreateAgent { .. } => "before creating the agent",
                 NonDefaultBranchAction::CheckoutProjectDefault { .. } => "for the selected project",
             };
             self.dispatch_non_default_branch_checkout(action, target, reason.to_string());
         } else {
             match action {
-                NonDefaultBranchAction::AddProject { path, name } => {
-                    if let Err(e) = self.finish_add_project(path, name, branch) {
+                NonDefaultBranchAction::AddProject {
+                    path,
+                    name,
+                    leading_branch,
+                } => {
+                    if let Err(e) = self.finish_add_project(path, name, branch, leading_branch) {
                         self.set_error(format!("{e:#}"));
                     }
-                }
-                NonDefaultBranchAction::CreateAgent { .. } => {
-                    self.set_error("Check out the default branch before creating an agent.");
                 }
                 NonDefaultBranchAction::CheckoutProjectDefault { .. } => {
                     self.set_error("Check out the default branch before retrying.");
@@ -4225,7 +4414,9 @@ impl App {
                     project.name
                 )
             }
-            CreateAgentRequest::ForkSession { .. } => unreachable!(),
+            CreateAgentRequest::ForkSession { .. }
+            | CreateAgentRequest::ExistingManagedWorktree { .. }
+            | CreateAgentRequest::ForkExternalWorktree { .. } => unreachable!(),
         };
         if let Err(e) = self.dispatch_create_agent_request(request, msg) {
             self.set_error(format!("{e:#}"));
@@ -4254,6 +4445,30 @@ impl App {
         }
     }
 
+    fn focus_next_name_new_agent_control(&mut self, forward: bool) {
+        if let PromptState::NameNewAgent { focus, .. } = &mut self.prompt {
+            *focus = match (*focus, forward) {
+                (NameNewAgentFocus::Input, true) => NameNewAgentFocus::RandomizedNameCheckbox,
+                (NameNewAgentFocus::RandomizedNameCheckbox, true) => NameNewAgentFocus::Input,
+                (NameNewAgentFocus::Input, false) => NameNewAgentFocus::RandomizedNameCheckbox,
+                (NameNewAgentFocus::RandomizedNameCheckbox, false) => NameNewAgentFocus::Input,
+            };
+        }
+    }
+
+    fn toggle_focused_name_new_agent_checkbox(&mut self) {
+        let focus = match &self.prompt {
+            PromptState::NameNewAgent { focus, .. } => *focus,
+            _ => return,
+        };
+        match focus {
+            NameNewAgentFocus::RandomizedNameCheckbox => {
+                self.toggle_name_new_agent_randomized_name()
+            }
+            NameNewAgentFocus::Input => {}
+        }
+    }
+
     fn toggle_name_new_agent_randomized_name(&mut self) {
         if let PromptState::NameNewAgent {
             input,
@@ -4263,7 +4478,7 @@ impl App {
             ..
         } = &mut self.prompt
         {
-            *focus = NameNewAgentFocus::Checkbox;
+            *focus = NameNewAgentFocus::RandomizedNameCheckbox;
             *randomize_name = !*randomize_name;
             if *randomize_name {
                 let name = crate::git::docker_style_name();
@@ -4524,6 +4739,15 @@ impl App {
                     self.open_selected_pick_editor();
                 }
             }
+            PromptMouseTarget::PickProjectWorktreeItem(index) => {
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                self.set_project_worktree_selection_from_visual_row(index);
+                if double_click && let Err(err) = self.open_selected_project_worktree_agent_prompt()
+                {
+                    self.set_error(format!("{err:#}"));
+                }
+            }
             PromptMouseTarget::ChangeThemeItem(index) => {
                 let double_click =
                     self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
@@ -4613,7 +4837,8 @@ impl App {
             | PromptMouseTarget::ConfirmUseExistingBranchCancel
             | PromptMouseTarget::ConfirmUseExistingBranchUse
             | PromptMouseTarget::ConfigReloadFailedClose
-            | PromptMouseTarget::ConfigReloadFailedApply => {
+            | PromptMouseTarget::ConfigReloadFailedApply
+            | PromptMouseTarget::AddProjectFailedOk => {
                 debug_assert!(
                     false,
                     "button target {:?} should be dispatched via activate_button, not \
@@ -4733,6 +4958,7 @@ impl App {
                 self.resolve_config_reload_failed(false)
             }
             ButtonPressedTarget::ConfigReloadFailedApply => self.resolve_config_reload_failed(true),
+            ButtonPressedTarget::AddProjectFailedOk => self.resolve_add_project_failed(),
         }
     }
 
@@ -5173,9 +5399,6 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) if self.mouse_drag.take().is_some() => {
                 self.persist_pane_widths();
             }
-            MouseEventKind::Moved => {
-                self.update_non_default_branch_hover_status(mouse.column, mouse.row);
-            }
             MouseEventKind::ScrollDown => match self.mouse_target(mouse.column, mouse.row) {
                 Some(MouseTarget::LeftRow(_)) => {
                     self.handle_left_mouse_wheel(true, mouse.column, mouse.row)
@@ -5360,6 +5583,7 @@ impl App {
     pub(crate) fn exit_interactive_mode(&mut self) {
         let return_to_terminal_list =
             matches!(self.input_target, InputTarget::Terminal) && self.terminal_return_to_list;
+        let return_to_projects = matches!(self.input_target, InputTarget::Agent);
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.session_surface = SessionSurface::Agent;
@@ -5371,6 +5595,9 @@ impl App {
         if return_to_terminal_list {
             self.left_section = LeftSection::Terminals;
             self.clamp_terminal_cursor();
+            self.focus = FocusPane::Left;
+        } else if return_to_projects {
+            self.left_section = LeftSection::Projects;
             self.focus = FocusPane::Left;
         }
         self.set_info("Exited interactive mode.");
@@ -5408,19 +5635,13 @@ impl App {
     }
 }
 
-fn create_agent_request_project(request: &CreateAgentRequest) -> Option<&Project> {
-    match request {
-        CreateAgentRequest::NewProject { project, .. }
-        | CreateAgentRequest::PullRequest { project, .. } => Some(project),
-        CreateAgentRequest::ForkSession { .. } => None,
-    }
-}
-
 fn set_create_agent_request_custom_name(request: &mut CreateAgentRequest, name: String) {
     match request {
         CreateAgentRequest::NewProject { custom_name, .. }
         | CreateAgentRequest::ForkSession { custom_name, .. }
-        | CreateAgentRequest::PullRequest { custom_name, .. } => {
+        | CreateAgentRequest::PullRequest { custom_name, .. }
+        | CreateAgentRequest::ExistingManagedWorktree { custom_name, .. }
+        | CreateAgentRequest::ForkExternalWorktree { custom_name, .. } => {
             *custom_name = Some(name);
         }
     }
@@ -5432,17 +5653,18 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex, mpsc};
 
+    use super::DOUBLE_CLICK_THRESHOLD;
     use super::components::{ButtonPressedTarget, PressedButton};
-    use super::{DOUBLE_CLICK_THRESHOLD, NON_DEFAULT_BRANCH_HOVER_STATUS};
     use crate::app::{
-        App, BranchWarningKind, CenterMode, ConfigReloadFailedFocus, ConfirmKillRunningPrompt,
-        ConfirmNonDefaultBranchFocus, CreateAgentRequest, DeleteAgentFocus, FocusPane,
-        FullscreenOverlay, InputTarget, KillRunningAction, KillRunningFocus,
-        KillRunningFooterAction, KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftItem,
-        LeftSection, MacroBarState, MouseClickTarget, MouseLayoutState, NameNewAgentFocus,
-        NonDefaultBranchAction, OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout,
-        OverlayMouseLayoutState, ProcessInfo, PromptState, PullTarget, ResolvedPullRequest,
-        ResourceStats, RightSection, RuntimeTargetId, TextInput, WorkerEvent,
+        AgentLaunchKind, App, BranchWarningKind, CenterMode, ConfigReloadFailedFocus,
+        ConfirmKillRunningPrompt, ConfirmNonDefaultBranchFocus, CreateAgentBranchInspection,
+        CreateAgentRequest, DeleteAgentFocus, FocusPane, FullscreenOverlay, InputTarget,
+        KillRunningAction, KillRunningFocus, KillRunningFooterAction, KillRunningPrompt,
+        KillableRuntime, KillableRuntimeKind, LeftItem, LeftSection, MacroBarState,
+        MouseClickTarget, MouseLayoutState, NameNewAgentFocus, NonDefaultBranchAction,
+        OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout, OverlayMouseLayoutState,
+        PickProjectWorktreePrompt, ProcessInfo, ProjectWorktreeEntry, PromptState, PullTarget,
+        ResolvedPullRequest, ResourceStats, RightSection, RuntimeTargetId, TextInput, WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
@@ -5538,16 +5760,15 @@ mod tests {
         );
     }
 
-    fn complete_create_agent_branch_inspection(
-        app: &mut App,
-        branch: &str,
-        warning_kind: Option<BranchWarningKind>,
-    ) {
+    fn complete_create_agent_branch_inspection(app: &mut App, branch: &str, leading_branch: &str) {
         let project = app.projects[0].clone();
         app.worker_tx
             .send(WorkerEvent::CreateAgentBranchInspected {
                 project,
-                result: Ok((branch.to_string(), warning_kind)),
+                result: Ok(CreateAgentBranchInspection {
+                    current_branch: branch.to_string(),
+                    leading_branch: leading_branch.to_string(),
+                }),
             })
             .unwrap();
         app.drain_events();
@@ -5573,11 +5794,24 @@ mod tests {
             id: "project-1".to_string(),
             name: "demo".to_string(),
             path: root.to_string_lossy().to_string(),
+            explicit_default_provider: None,
             default_provider: ProviderKind::from_str("codex"),
+            leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         };
+        session_store
+            .upsert_project(&ProjectConfig {
+                id: project.id.clone(),
+                path: project.path.clone(),
+                name: Some(project.name.clone()),
+                default_provider: None,
+                leading_branch: project.leading_branch.clone(),
+                auto_reopen_agents: project.auto_reopen_agents,
+            })
+            .expect("seed project");
         let session = AgentSession {
             id: "session-1".to_string(),
             project_id: project.id.clone(),
@@ -5588,6 +5822,8 @@ mod tests {
             worktree_path: paths.worktrees_root.to_string_lossy().to_string(),
             title: None,
             started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
             status: SessionStatus::Detached,
             created_at: now,
             updated_at: now,
@@ -5644,6 +5880,7 @@ mod tests {
             terminal_return_to_list: false,
             terminal_counter: 0,
             create_agent_in_flight: false,
+            agent_launches_in_flight: std::collections::HashSet::new(),
             pulls_in_flight: std::collections::HashSet::new(),
             resource_stats_in_flight: false,
             last_pty_size: (0, 0),
@@ -6508,6 +6745,8 @@ not_a_real_action = ["x"]
             worktree_path: app.paths.worktrees_root.join("other").display().to_string(),
             title: None,
             started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
             status: SessionStatus::Detached,
             created_at: now,
             updated_at: now,
@@ -6647,7 +6886,8 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
 
         app.create_agent_for_selected_project().unwrap();
-        complete_create_agent_branch_inspection(&mut app, "main", None);
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+        complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         match &app.prompt {
             PromptState::NameNewAgent {
@@ -6664,97 +6904,28 @@ not_a_real_action = ["x"]
             }
             other => panic!("expected name-new-agent prompt, got {other:?}"),
         }
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
+        assert_eq!(
+            app.status.message(),
+            "Branch check complete for \"demo\". Confirm or edit the agent name to continue."
+        );
     }
 
     #[test]
-    fn create_agent_known_non_default_branch_opens_checkout_modal() {
+    fn create_agent_known_non_default_branch_opens_name_prompt_with_leading_branch() {
         let mut app = test_app(default_bindings());
         let repo_path = PathBuf::from(&app.projects[0].path);
         set_remote_default(&repo_path, "main");
         run_git(&repo_path, &["switch", "-c", "feature"]);
 
         app.create_agent_for_selected_project().unwrap();
-        complete_create_agent_branch_inspection(
-            &mut app,
-            "feature",
-            Some(BranchWarningKind::Known {
-                default_branch: "main".to_string(),
-            }),
-        );
+        complete_create_agent_branch_inspection(&mut app, "feature", "main");
 
-        match &app.prompt {
-            PromptState::ConfirmNonDefaultBranch {
-                action,
-                current_branch,
-                kind,
-                checkout_default,
-                ..
-            } => {
-                assert!(matches!(action, NonDefaultBranchAction::CreateAgent { .. }));
-                assert_eq!(current_branch, "feature");
-                assert!(matches!(
-                    kind,
-                    BranchWarningKind::Known { default_branch } if default_branch == "main"
-                ));
-                assert!(*checkout_default);
-            }
-            other => panic!("expected non-default branch prompt, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn create_agent_unknown_default_on_feature_sets_error() {
-        let mut app = test_app(default_bindings());
-        let repo_path = PathBuf::from(&app.projects[0].path);
-        run_git(&repo_path, &["switch", "-c", "feature"]);
-
-        app.create_agent_for_selected_project().unwrap();
-        complete_create_agent_branch_inspection(
-            &mut app,
-            "feature",
-            Some(BranchWarningKind::Heuristic),
-        );
-
-        assert!(matches!(app.prompt, PromptState::None));
-        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
-        assert!(
-            app.status
-                .text()
-                .contains("Can't determine the default branch")
-        );
-    }
-
-    #[test]
-    fn create_agent_unknown_default_on_main_opens_name_prompt() {
-        let mut app = test_app(default_bindings());
-
-        app.create_agent_for_selected_project().unwrap();
-        complete_create_agent_branch_inspection(&mut app, "main", None);
-
-        assert!(matches!(app.prompt, PromptState::NameNewAgent { .. }));
-    }
-
-    #[test]
-    fn create_agent_checkout_success_opens_name_prompt_and_updates_branch() {
-        let mut app = test_app(default_bindings());
-        let mut project = app.projects[0].clone();
-        project.current_branch = "feature".to_string();
-
-        app.worker_tx
-            .send(WorkerEvent::NonDefaultBranchCheckoutCompleted {
-                action: NonDefaultBranchAction::CreateAgent { project },
-                target_branch: "main".to_string(),
-                result: Ok(()),
-            })
-            .unwrap();
-
-        app.drain_events();
-
-        assert_eq!(app.projects[0].current_branch, "main");
         match &app.prompt {
             PromptState::NameNewAgent { request, .. } => match request {
                 CreateAgentRequest::NewProject { project, .. } => {
-                    assert_eq!(project.current_branch, "main");
+                    assert_eq!(project.current_branch, "feature");
+                    assert_eq!(project.leading_branch.as_deref(), Some("main"));
                 }
                 other => panic!("expected new project request, got {other:?}"),
             },
@@ -6763,23 +6934,121 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn create_agent_checkout_failure_sets_error_without_name_prompt() {
+    fn create_agent_heuristic_feature_opens_name_prompt_with_stored_branch() {
         let mut app = test_app(default_bindings());
-        let project = app.projects[0].clone();
+        let repo_path = PathBuf::from(&app.projects[0].path);
+        run_git(&repo_path, &["switch", "-c", "feature"]);
 
-        app.worker_tx
-            .send(WorkerEvent::NonDefaultBranchCheckoutCompleted {
-                action: NonDefaultBranchAction::CreateAgent { project },
-                target_branch: "main".to_string(),
-                result: Err("switch failed".to_string()),
-            })
+        app.create_agent_for_selected_project().unwrap();
+        complete_create_agent_branch_inspection(&mut app, "feature", "main");
+
+        assert!(matches!(app.prompt, PromptState::NameNewAgent { .. }));
+    }
+
+    #[test]
+    fn create_agent_unknown_default_on_main_opens_name_prompt() {
+        let mut app = test_app(default_bindings());
+
+        app.create_agent_for_selected_project().unwrap();
+        complete_create_agent_branch_inspection(&mut app, "main", "main");
+
+        assert!(matches!(app.prompt, PromptState::NameNewAgent { .. }));
+    }
+
+    #[test]
+    fn new_project_agent_existing_branch_opens_use_existing_prompt() {
+        let mut app = test_app(default_bindings());
+        let repo_path = PathBuf::from(&app.projects[0].path);
+        run_git(&repo_path, &["branch", "reuse-me"]);
+
+        app.prompt = PromptState::NameNewAgent {
+            request: CreateAgentRequest::NewProject {
+                project: app.projects[0].clone(),
+                custom_name: None,
+                use_existing_branch: false,
+                pull_before_create: false,
+            },
+            input: TextInput::with_text("reuse-me".to_string()),
+            randomize_name: false,
+            randomized_name: None,
+            focus: NameNewAgentFocus::Input,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
 
-        app.drain_events();
+        match &app.prompt {
+            PromptState::ConfirmUseExistingBranch {
+                request,
+                branch_name,
+                location,
+                confirm_selected,
+            } => {
+                assert!(matches!(request, CreateAgentRequest::NewProject { .. }));
+                assert_eq!(branch_name, "reuse-me");
+                assert_eq!(*location, crate::git::BranchLocation::Local);
+                assert!(!*confirm_selected);
+            }
+            other => panic!("expected use-existing-branch prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pull_request_agent_existing_branch_skips_use_existing_prompt() {
+        let mut app = test_app(default_bindings());
+        let repo_path = PathBuf::from(&app.projects[0].path);
+        run_git(&repo_path, &["branch", "feature/pr-42"]);
+        app.create_agent_in_flight = true;
+
+        app.prompt = PromptState::NameNewAgent {
+            request: CreateAgentRequest::PullRequest {
+                project: app.projects[0].clone(),
+                host: "github.com".to_string(),
+                owner_repo: "octocat/Hello-World".to_string(),
+                number: 42,
+                title: "Fix issue".to_string(),
+                state: "OPEN".to_string(),
+                head_branch: "feature/pr-42".to_string(),
+                custom_name: Some("feature/pr-42".to_string()),
+                use_existing_branch: false,
+            },
+            input: TextInput::with_text("feature/pr-42".to_string()),
+            randomize_name: false,
+            randomized_name: None,
+            focus: NameNewAgentFocus::Input,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
 
         assert!(matches!(app.prompt, PromptState::None));
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
-        assert!(app.status.text().contains("Couldn't check out \"main\""));
+        assert!(
+            app.status
+                .text()
+                .contains("An agent is already being created or forked.")
+        );
+    }
+
+    #[test]
+    fn create_agent_missing_leading_branch_sets_error_without_name_prompt() {
+        let mut app = test_app(default_bindings());
+        app.projects[0].leading_branch = Some("missing-main".to_string());
+
+        app.create_agent_for_selected_project().unwrap();
+        drain_until(&mut app, |app| {
+            app.status
+                .text()
+                .contains("leading branch \"missing-main\"")
+        });
+
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            app.status
+                .text()
+                .contains("Restore that branch or re-add the project")
+        );
     }
 
     #[test]
@@ -6831,7 +7100,7 @@ not_a_real_action = ["x"]
         app.config.defaults.enable_randomized_pet_name_by_default = true;
 
         app.create_agent_for_selected_project().unwrap();
-        complete_create_agent_branch_inspection(&mut app, "main", None);
+        complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         match &app.prompt {
             PromptState::NameNewAgent {
@@ -6849,12 +7118,343 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn fork_agent_prefills_name_when_randomized_default_enabled() {
+        let mut app = test_app(default_bindings());
+        app.config.defaults.enable_randomized_pet_name_by_default = true;
+
+        app.fork_selected_session().unwrap();
+
+        match &app.prompt {
+            PromptState::NameNewAgent {
+                request,
+                input,
+                randomize_name,
+                randomized_name,
+                ..
+            } => {
+                assert!(matches!(request, CreateAgentRequest::ForkSession { .. }));
+                assert!(*randomize_name);
+                assert!(!input.text.is_empty());
+                assert_eq!(randomized_name.as_deref(), Some(input.text.as_str()));
+            }
+            other => panic!("expected name-new-agent prompt, got {other:?}"),
+        }
+        assert!(!app.create_agent_in_flight);
+    }
+
+    #[test]
+    fn palette_command_opens_project_worktree_picker() {
+        let mut app = test_app(default_bindings());
+        app.selected_left = 0;
+
+        app.execute_command("new-agent-from-worktree".to_string())
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::PickProjectWorktree(prompt) => {
+                assert_eq!(prompt.project.id, app.projects[0].id);
+                assert!(prompt.loading);
+                assert!(prompt.entries.is_empty());
+            }
+            other => panic!("expected PickProjectWorktree prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn disabled_project_worktree_entries_cannot_be_selected_or_confirmed() {
+        let mut app = test_app(default_bindings());
+        let project = app.projects[0].clone();
+        app.prompt = PromptState::PickProjectWorktree(PickProjectWorktreePrompt {
+            project,
+            entries: vec![ProjectWorktreeEntry {
+                path: PathBuf::from("/tmp/has-agent"),
+                branch_name: "main".to_string(),
+                is_managed_by_dux: true,
+                existing_session_id: Some("session-1".to_string()),
+                is_external: false,
+                is_project_checkout: false,
+                is_selectable: false,
+            }],
+            loading: false,
+            selected: None,
+            error: None,
+        });
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(matches!(
+            app.prompt,
+            PromptState::PickProjectWorktree(PickProjectWorktreePrompt { selected: None, .. })
+        ));
+    }
+
+    #[test]
+    fn selecting_managed_orphan_worktree_opens_name_prompt() {
+        let mut app = test_app(default_bindings());
+        let project = app.projects[0].clone();
+        let worktree_path = app.paths.worktrees_root.join("demo").join("orphan");
+        app.prompt = PromptState::PickProjectWorktree(PickProjectWorktreePrompt {
+            project,
+            entries: vec![ProjectWorktreeEntry {
+                path: worktree_path.clone(),
+                branch_name: "orphan".to_string(),
+                is_managed_by_dux: true,
+                existing_session_id: None,
+                is_external: false,
+                is_project_checkout: false,
+                is_selectable: true,
+            }],
+            loading: false,
+            selected: Some(0),
+            error: None,
+        });
+
+        app.open_selected_project_worktree_agent_prompt().unwrap();
+
+        match &app.prompt {
+            PromptState::NameNewAgent { request, input, .. } => match request {
+                CreateAgentRequest::ExistingManagedWorktree {
+                    project,
+                    worktree_path: selected_path,
+                    branch_name,
+                    ..
+                } => {
+                    assert_eq!(project.id, app.projects[0].id);
+                    assert_eq!(selected_path, &worktree_path);
+                    assert_eq!(branch_name, "orphan");
+                    assert_eq!(input.text, "orphan");
+                }
+                other => panic!("expected ExistingManagedWorktree request, got {other:?}"),
+            },
+            other => panic!("expected NameNewAgent prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn managed_worktree_default_name_overrides_randomized_default() {
+        let mut app = test_app(default_bindings());
+        app.config.defaults.enable_randomized_pet_name_by_default = true;
+        let project = app.projects[0].clone();
+        let worktree_path = app.paths.worktrees_root.join("demo").join("managed-name");
+        app.prompt = PromptState::PickProjectWorktree(PickProjectWorktreePrompt {
+            project,
+            entries: vec![ProjectWorktreeEntry {
+                path: worktree_path,
+                branch_name: "feature/other-name".to_string(),
+                is_managed_by_dux: true,
+                existing_session_id: None,
+                is_external: false,
+                is_project_checkout: false,
+                is_selectable: true,
+            }],
+            loading: false,
+            selected: Some(0),
+            error: None,
+        });
+
+        app.open_selected_project_worktree_agent_prompt().unwrap();
+
+        match &app.prompt {
+            PromptState::NameNewAgent {
+                input,
+                randomize_name,
+                randomized_name,
+                ..
+            } => {
+                assert_eq!(input.text, "managed-name");
+                assert!(!*randomize_name);
+                assert!(randomized_name.is_none());
+            }
+            other => panic!("expected NameNewAgent prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn imported_managed_worktree_is_tracked_for_resume_fallback() {
+        let mut app = test_app(default_bindings());
+        let worktree = app.paths.worktrees_root.join("demo").join("imported");
+        std::fs::create_dir_all(&worktree).expect("imported worktree");
+        let session = AgentSession {
+            id: "imported-session".to_string(),
+            project_id: app.projects[0].id.clone(),
+            project_path: Some(app.projects[0].path.clone()),
+            provider: ProviderKind::from_str("codex"),
+            source_branch: "main".to_string(),
+            branch_name: "main".to_string(),
+            worktree_path: worktree.to_string_lossy().to_string(),
+            title: Some("imported".to_string()),
+            started_providers: vec!["codex".to_string()],
+            desired_running: true,
+            auto_reopen_enabled: true,
+            status: SessionStatus::Active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let args = vec!["-c".to_string(), "sleep 1".to_string()];
+        let client = PtyClient::spawn("/bin/sh", &args, &worktree, 24, 80, 1_000)
+            .expect("spawn imported agent");
+
+        let request = app.agent_launch_request(
+            session.clone(),
+            true,
+            AgentLaunchKind::Create {
+                status_message: "imported".to_string(),
+                repo_path: app.projects[0].path.clone(),
+                owns_worktree: false,
+            },
+        );
+        app.worker_tx
+            .send(WorkerEvent::AgentLaunchReady(Box::new(
+                crate::app::AgentLaunchReadyData { request, client },
+            )))
+            .unwrap();
+        app.drain_events();
+
+        assert!(app.resume_fallback_candidates.contains_key(&session.id));
+        assert_eq!(
+            app.sessions
+                .iter()
+                .find(|candidate| candidate.id == session.id)
+                .and_then(|candidate| candidate.title.as_deref()),
+            Some("imported")
+        );
+    }
+
+    #[test]
+    fn selecting_external_worktree_opens_name_prompt_with_fork_request() {
+        let mut app = test_app(default_bindings());
+        let project = app.projects[0].clone();
+        let worktree_path = PathBuf::from("/tmp/external-checkout");
+        app.prompt = PromptState::PickProjectWorktree(PickProjectWorktreePrompt {
+            project,
+            entries: vec![ProjectWorktreeEntry {
+                path: worktree_path.clone(),
+                branch_name: "feature".to_string(),
+                is_managed_by_dux: false,
+                existing_session_id: None,
+                is_external: true,
+                is_project_checkout: false,
+                is_selectable: true,
+            }],
+            loading: false,
+            selected: Some(0),
+            error: None,
+        });
+
+        app.open_selected_project_worktree_agent_prompt().unwrap();
+
+        match &app.prompt {
+            PromptState::NameNewAgent { request, input, .. } => match request {
+                CreateAgentRequest::ForkExternalWorktree {
+                    source_worktree_path,
+                    source_branch,
+                    ..
+                } => {
+                    assert_eq!(source_worktree_path, &worktree_path);
+                    assert_eq!(source_branch, "feature");
+                    assert_eq!(input.text, "external-checkout");
+                }
+                other => panic!("expected ForkExternalWorktree request, got {other:?}"),
+            },
+            other => panic!("expected NameNewAgent prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn external_worktree_default_name_overrides_randomized_default() {
+        let mut app = test_app(default_bindings());
+        app.config.defaults.enable_randomized_pet_name_by_default = true;
+        let project = app.projects[0].clone();
+        let worktree_path = PathBuf::from("/tmp/external-checkout");
+        app.prompt = PromptState::PickProjectWorktree(PickProjectWorktreePrompt {
+            project,
+            entries: vec![ProjectWorktreeEntry {
+                path: worktree_path,
+                branch_name: "feature".to_string(),
+                is_managed_by_dux: false,
+                existing_session_id: None,
+                is_external: true,
+                is_project_checkout: false,
+                is_selectable: true,
+            }],
+            loading: false,
+            selected: Some(0),
+            error: None,
+        });
+
+        app.open_selected_project_worktree_agent_prompt().unwrap();
+
+        match &app.prompt {
+            PromptState::NameNewAgent {
+                input,
+                randomize_name,
+                randomized_name,
+                ..
+            } => {
+                assert_eq!(input.text, "external-checkout");
+                assert!(!*randomize_name);
+                assert!(randomized_name.is_none());
+            }
+            other => panic!("expected NameNewAgent prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fresh_agent_request_uses_pull_before_create_config_default() {
+        let mut app = test_app(default_bindings());
+        app.config.defaults.pull_before_creating_agent_by_default = true;
+
+        app.create_agent_for_selected_project().unwrap();
+        complete_create_agent_branch_inspection(&mut app, "main", "main");
+
+        match &app.prompt {
+            PromptState::NameNewAgent { request, .. } => match request {
+                CreateAgentRequest::NewProject {
+                    pull_before_create, ..
+                } => assert!(*pull_before_create),
+                other => panic!("expected NewProject request, got {other:?}"),
+            },
+            other => panic!("expected NameNewAgent prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fresh_agent_prompt_does_not_expose_pull_before_create_checkbox() {
+        let mut app = test_app(default_bindings());
+        app.config.defaults.pull_before_creating_agent_by_default = true;
+
+        app.create_agent_for_selected_project().unwrap();
+        complete_create_agent_branch_inspection(&mut app, "main", "main");
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::NameNewAgent { focus, .. } => {
+                assert_eq!(*focus, NameNewAgentFocus::RandomizedNameCheckbox)
+            }
+            other => panic!("expected NameNewAgent prompt, got {other:?}"),
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::NameNewAgent { focus, .. } => assert_eq!(*focus, NameNewAgentFocus::Input),
+            other => panic!("expected NameNewAgent prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn name_prompt_toggle_randomized_name_fills_and_clears_input() {
         let mut app = test_app(default_bindings());
         app.create_agent_for_selected_project().unwrap();
-        complete_create_agent_branch_inspection(&mut app, "main", None);
+        complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .unwrap();
 
         let generated = match &app.prompt {
@@ -6866,7 +7466,7 @@ not_a_real_action = ["x"]
                 ..
             } => {
                 assert!(*randomize_name);
-                assert_eq!(*focus, NameNewAgentFocus::Checkbox);
+                assert_eq!(*focus, NameNewAgentFocus::RandomizedNameCheckbox);
                 assert!(!input.text.is_empty());
                 assert_eq!(randomized_name.as_deref(), Some(input.text.as_str()));
                 input.text.clone()
@@ -6875,6 +7475,10 @@ not_a_real_action = ["x"]
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .unwrap();
 
         match &app.prompt {
@@ -7164,6 +7768,36 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn esc_clears_active_files_search() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Files;
+        app.right_section = RightSection::Unstaged;
+        app.unstaged_files = vec![ChangedFile {
+            path: "src/main.rs".into(),
+            status: "M".into(),
+            additions: 2,
+            deletions: 1,
+            binary: false,
+        }];
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        for ch in ['m', 'a', 'i', 'n'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap();
+        }
+
+        assert!(app.files_search_active);
+        assert_eq!(app.files_search.text, "main");
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(!app.files_search_active);
+        assert!(app.files_search.is_empty());
+    }
+
+    #[test]
     fn enter_opens_selected_file_diff_from_files_pane() {
         let mut app = test_app(default_bindings());
         init_git_repo_with_modified_file(
@@ -7226,28 +7860,6 @@ not_a_real_action = ["x"]
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 1));
 
         assert_eq!(app.focus, FocusPane::Left);
-    }
-
-    #[test]
-    fn mouse_hover_non_default_project_shows_status_reason() {
-        let mut app = test_app(default_bindings());
-        install_mouse_layout(&mut app);
-        app.projects[0].branch_status = ProjectBranchStatus::NotLeading;
-
-        app.handle_mouse(mouse(MouseEventKind::Moved, 2, 1));
-
-        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
-        assert_eq!(app.status.text(), NON_DEFAULT_BRANCH_HOVER_STATUS);
-    }
-
-    #[test]
-    fn mouse_hover_ordinary_project_does_not_show_non_default_status() {
-        let mut app = test_app(default_bindings());
-        install_mouse_layout(&mut app);
-
-        app.handle_mouse(mouse(MouseEventKind::Moved, 2, 1));
-
-        assert_eq!(app.status.text(), "ready");
     }
 
     #[test]
@@ -7610,6 +8222,8 @@ not_a_real_action = ["x"]
             worktree_path: app.paths.worktrees_root.to_string_lossy().to_string(),
             title: None,
             started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
             status: SessionStatus::Detached,
             created_at: now,
             updated_at: now,
@@ -7647,7 +8261,10 @@ not_a_real_action = ["x"]
                 id: format!("empty-project-{idx}"),
                 name: format!("empty {idx}"),
                 path: path.clone(),
+                explicit_default_provider: None,
                 default_provider: ProviderKind::from_str("codex"),
+                leading_branch: Some("main".to_string()),
+                auto_reopen_agents: None,
                 current_branch: "main".to_string(),
                 branch_status: ProjectBranchStatus::Unknown,
                 path_missing: false,
@@ -8419,6 +9036,262 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn project_browser_typed_enter_failure_opens_modal_and_restores_path() {
+        let mut app = test_app(default_bindings());
+        let root = PathBuf::from(&app.projects[0].path);
+        let outside = tempdir().expect("outside tempdir");
+        let typed = outside.path().join("not-a-repo");
+        std::fs::create_dir_all(&typed).expect("typed dir");
+        app.prompt = PromptState::BrowseProjects {
+            current_dir: root,
+            entries: Vec::new(),
+            loading: false,
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            editing_path: true,
+            path_input: TextInput::with_text(typed.to_string_lossy().to_string()),
+            tab_completions: Vec::new(),
+            tab_index: 0,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::AddProjectFailed { message, .. } => {
+                assert!(message.contains("not a git repository"));
+            }
+            other => panic!("expected add-project failure modal, got {other:?}"),
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                editing_path,
+                path_input,
+                ..
+            } => {
+                assert!(*editing_path);
+                assert_eq!(path_input.text, typed.to_string_lossy());
+            }
+            other => panic!("expected browser prompt restored, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_browser_typed_enter_duplicate_failure_restores_path() {
+        let mut app = test_app(default_bindings());
+        let root = PathBuf::from(&app.projects[0].path);
+        app.prompt = PromptState::BrowseProjects {
+            current_dir: root.clone(),
+            entries: Vec::new(),
+            loading: false,
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            editing_path: true,
+            path_input: TextInput::with_text(root.to_string_lossy().to_string()),
+            tab_completions: Vec::new(),
+            tab_index: 0,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::AddProjectFailed { message, .. } => {
+                assert!(message.contains("already registered"));
+            }
+            other => panic!("expected add-project failure modal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn added_project_is_selected_after_save_completes() {
+        let mut app = test_app(default_bindings());
+        let project_dir = app.paths.root.join("second-project");
+        std::fs::create_dir_all(&project_dir).expect("project dir");
+        init_test_repo(&project_dir);
+
+        app.add_project(project_dir.to_string_lossy().to_string(), String::new())
+            .expect("add project");
+        drain_until(&mut app, |app| {
+            app.status
+                .text()
+                .contains("Added project \"second-project\" to workspace")
+        });
+
+        let selected = app.selected_project().expect("selected project");
+        assert_eq!(selected.name, "second-project");
+        assert_eq!(
+            PathBuf::from(&selected.path).canonicalize().unwrap(),
+            project_dir.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn project_browser_typed_arrows_select_and_tab_applies_completion() {
+        let mut app = test_app(default_bindings());
+        let root = PathBuf::from(&app.projects[0].path);
+        let alpha = root.join("alpha");
+        let alpine = root.join("alpine");
+        std::fs::create_dir_all(&alpha).expect("alpha dir");
+        std::fs::create_dir_all(&alpine).expect("alpine dir");
+        std::fs::create_dir_all(alpha.join("child")).expect("child dir");
+        let typed = root.join("al").to_string_lossy().to_string();
+        app.prompt = PromptState::BrowseProjects {
+            current_dir: root.clone(),
+            entries: Vec::new(),
+            loading: false,
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            editing_path: true,
+            path_input: TextInput::with_text(typed.clone()),
+            tab_completions: Vec::new(),
+            tab_index: 0,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                path_input,
+                tab_completions,
+                tab_index,
+                ..
+            } => {
+                assert_eq!(tab_completions.len(), 2);
+                assert_eq!(*tab_index, 0);
+                assert_eq!(path_input.text, typed);
+            }
+            other => panic!("expected browser prompt, got {other:?}"),
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                path_input,
+                tab_index,
+                ..
+            } => {
+                assert_eq!(*tab_index, 1);
+                assert_eq!(path_input.text, typed);
+            }
+            other => panic!("expected browser prompt, got {other:?}"),
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                path_input,
+                tab_completions,
+                tab_index,
+                ..
+            } => {
+                assert!(
+                    path_input.text.ends_with("alpha/") || path_input.text.ends_with("alpine/")
+                );
+                assert_eq!(*tab_index, 0);
+                if path_input.text.ends_with("alpha/") {
+                    assert_eq!(tab_completions.len(), 1);
+                    assert!(tab_completions[0].ends_with("child/"));
+                }
+            }
+            other => panic!("expected browser prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_browser_typed_up_down_select_completions_without_applying() {
+        let mut app = test_app(default_bindings());
+        let root = PathBuf::from(&app.projects[0].path);
+        app.prompt = PromptState::BrowseProjects {
+            current_dir: root,
+            entries: Vec::new(),
+            loading: false,
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            editing_path: true,
+            path_input: TextInput::with_text("/tmp/demo".to_string()),
+            tab_completions: vec!["/tmp/demo/".to_string(), "/tmp/demo-two/".to_string()],
+            tab_index: 1,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                path_input,
+                tab_index,
+                ..
+            } => {
+                assert_eq!(*tab_index, 0);
+                assert_eq!(path_input.text, "/tmp/demo");
+            }
+            other => panic!("expected browser prompt, got {other:?}"),
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                path_input,
+                tab_completions,
+                tab_index,
+                ..
+            } => {
+                assert_eq!(tab_completions.len(), 2);
+                assert_eq!(*tab_index, 1);
+                assert_eq!(path_input.text, "/tmp/demo");
+            }
+            other => panic!("expected browser prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_browser_exit_path_editor_binding_returns_to_browse_mode() {
+        let mut app = test_app(default_bindings());
+        let root = PathBuf::from(&app.projects[0].path);
+        app.prompt = PromptState::BrowseProjects {
+            current_dir: root,
+            entries: Vec::new(),
+            loading: false,
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            editing_path: true,
+            path_input: TextInput::with_text("/tmp/demo".to_string()),
+            tab_completions: vec!["/tmp/demo/".to_string()],
+            tab_index: 0,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                editing_path,
+                path_input,
+                tab_completions,
+                ..
+            } => {
+                assert!(!*editing_path);
+                assert!(path_input.is_empty());
+                assert!(tab_completions.is_empty());
+            }
+            other => panic!("expected browser prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn mouse_click_pick_editor_row_selects_then_double_click_opens_editor() {
         let mut app = test_app(default_bindings());
         std::fs::create_dir_all(&app.sessions[0].worktree_path).expect("worktree");
@@ -9062,6 +9935,61 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn exit_interactive_from_agent_overlay_returns_to_projects() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Center;
+        app.left_section = LeftSection::Terminals;
+        app.input_target = InputTarget::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        app.process_raw_input_bytes(&[0x07]).unwrap();
+
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+        assert_eq!(app.session_surface, SessionSurface::Agent);
+        assert_eq!(app.left_section, LeftSection::Projects);
+        assert_eq!(app.focus, FocusPane::Left);
+    }
+
+    #[test]
+    fn custom_exit_interactive_key_reopens_minimized_agent_from_projects() {
+        let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["home"])]);
+        let mut app = test_app(bindings);
+        let session_id = app.sessions[0].id.clone();
+        app.providers.insert(
+            session_id,
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "printf ready; sleep 0.2".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+
+        app.focus = FocusPane::Center;
+        app.input_target = InputTarget::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        app.process_raw_input_bytes(b"\x1b[H").unwrap();
+
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+        assert_eq!(app.left_section, LeftSection::Projects);
+        assert_eq!(app.focus, FocusPane::Left);
+
+        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+        assert_eq!(app.focus, FocusPane::Center);
+    }
+
+    #[test]
     fn ctrl_g_enters_interactive_mode_from_center_pane() {
         let mut app = test_app(default_bindings());
         app.focus = FocusPane::Center;
@@ -9401,6 +10329,53 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn delete_agent_dialog_spaces_checkbox_from_buttons() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmDeleteAgent {
+            session_id: app.sessions[0].id.clone(),
+            branch_name: app.sessions[0].branch_name.clone(),
+            focus: DeleteAgentFocus::Cancel,
+            delete_worktree: false,
+            worktree_shared: false,
+        };
+
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let (checkbox, cancel_button) = match app.overlay_layout.active {
+            OverlayMouseLayout::ConfirmDeleteAgent {
+                checkbox: Some(checkbox),
+                cancel_button,
+                ..
+            } => (checkbox.rect, cancel_button),
+            other => panic!("expected delete-agent overlay layout, got {other:?}"),
+        };
+        let spacer_y = checkbox.y + checkbox.height;
+
+        assert_eq!(
+            cancel_button.y,
+            spacer_y + 1,
+            "buttons should start one blank row below the checkbox"
+        );
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((cancel_button.x, spacer_y))
+                .expect("spacer cell")
+                .symbol(),
+            " ",
+            "expected blank space between checkbox and buttons"
+        );
+    }
+
+    #[test]
     fn shift_tab_moves_delete_agent_focus_backwards() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
@@ -9487,6 +10462,7 @@ cyan = "#00ffff"
             action: NonDefaultBranchAction::AddProject {
                 path: "/tmp/project".to_string(),
                 name: "project".to_string(),
+                leading_branch: "main".to_string(),
             },
             current_branch: "feature".to_string(),
             kind: BranchWarningKind::Known {
@@ -9532,6 +10508,7 @@ cyan = "#00ffff"
             action: NonDefaultBranchAction::AddProject {
                 path: "/tmp/project".to_string(),
                 name: "project".to_string(),
+                leading_branch: "feature".to_string(),
             },
             current_branch: "feature".to_string(),
             kind: BranchWarningKind::Heuristic,
@@ -9610,7 +10587,7 @@ cyan = "#00ffff"
     fn mouse_click_name_prompt_checkbox_toggles_randomized_name() {
         let mut app = test_app(default_bindings());
         app.create_agent_for_selected_project().unwrap();
-        complete_create_agent_branch_inspection(&mut app, "main", None);
+        complete_create_agent_branch_inspection(&mut app, "main", "main");
         install_name_new_agent_overlay(&mut app);
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 12));
@@ -9624,7 +10601,7 @@ cyan = "#00ffff"
                 ..
             } => {
                 assert!(*randomize_name);
-                assert_eq!(*focus, NameNewAgentFocus::Checkbox);
+                assert_eq!(*focus, NameNewAgentFocus::RandomizedNameCheckbox);
                 assert!(!input.text.is_empty());
                 assert_eq!(randomized_name.as_deref(), Some(input.text.as_str()));
             }
@@ -9753,7 +10730,11 @@ cyan = "#00ffff"
 
         // Wait for the process to exit.
         std::thread::sleep(std::time::Duration::from_millis(200));
-        app.drain_events();
+        drain_until(&mut app, |app| {
+            app.providers.contains_key(&session_id)
+                && !app.agent_launches_in_flight.contains(&session_id)
+                && app.status.text().contains("No prior session to resume")
+        });
 
         // The fallback should have spawned a fresh session, so the provider
         // is still present and the session is active (not detached).
@@ -9835,7 +10816,11 @@ cyan = "#00ffff"
 
         // Wait for the process to produce its one line and exit.
         std::thread::sleep(std::time::Duration::from_millis(200));
-        app.drain_events();
+        drain_until(&mut app, |app| {
+            app.providers.contains_key(&session_id)
+                && !app.agent_launches_in_flight.contains(&session_id)
+                && app.status.text().contains("No prior session to resume")
+        });
 
         // Despite having output, the fallback should trigger because the
         // output is minimal (one line, no scrollback).
@@ -9878,6 +10863,101 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn zero_exit_clears_desired_running() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let args = vec!["-c".to_string(), "exit 0".to_string()];
+        let client =
+            PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn zero-exit");
+        app.providers.insert(session_id.clone(), client);
+        app.mark_session_desired_running(&session_id, true);
+        app.mark_session_status(&session_id, SessionStatus::Active);
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.drain_events();
+
+        assert!(!app.sessions[0].desired_running);
+        let loaded = app.session_store.load_sessions().expect("load sessions");
+        assert!(!loaded[0].desired_running);
+    }
+
+    #[test]
+    fn nonzero_exit_keeps_desired_running() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let args = vec!["-c".to_string(), "exit 1".to_string()];
+        let client = PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
+            .expect("spawn nonzero-exit");
+        app.providers.insert(session_id.clone(), client);
+        app.mark_session_desired_running(&session_id, true);
+        app.mark_session_status(&session_id, SessionStatus::Active);
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.drain_events();
+
+        assert!(app.sessions[0].desired_running);
+        let loaded = app.session_store.load_sessions().expect("load sessions");
+        assert!(loaded[0].desired_running);
+    }
+
+    #[test]
+    fn startup_auto_reopens_eligible_sessions() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.sessions[0].id.clone();
+        app.config.providers.commands.insert(
+            "codex".to_string(),
+            crate::config::ProviderCommandConfig {
+                command: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "exit 1".to_string()],
+                resume_args: Some(vec!["-c".to_string(), "sleep 5".to_string()]),
+                ..Default::default()
+            },
+        );
+        app.config.ui.auto_reopen_agents = true;
+        app.sessions[0].desired_running = true;
+
+        app.restore_sessions();
+        drain_until(&mut app, |app| {
+            app.providers.contains_key(&session_id)
+                && !app.agent_launches_in_flight.contains(&session_id)
+                && app.sessions[0].status == SessionStatus::Active
+        });
+
+        assert!(app.providers.contains_key(&session_id));
+        assert_eq!(app.sessions[0].status, SessionStatus::Active);
+    }
+
+    #[test]
+    fn startup_auto_reopen_respects_global_project_and_agent_opt_outs() {
+        let mut app = test_app(default_bindings());
+        app.config.providers.commands.insert(
+            "codex".to_string(),
+            crate::config::ProviderCommandConfig {
+                command: "/bin/sh".to_string(),
+                resume_args: Some(vec!["-c".to_string(), "sleep 5".to_string()]),
+                ..Default::default()
+            },
+        );
+        app.sessions[0].desired_running = true;
+
+        app.config.ui.auto_reopen_agents = false;
+        app.restore_sessions();
+        assert!(app.providers.is_empty());
+
+        app.config.ui.auto_reopen_agents = true;
+        app.projects[0].auto_reopen_agents = Some(false);
+        app.restore_sessions();
+        assert!(app.providers.is_empty());
+
+        app.projects[0].auto_reopen_agents = None;
+        app.sessions[0].auto_reopen_enabled = false;
+        app.restore_sessions();
+        assert!(app.providers.is_empty());
+    }
+
+    #[test]
     fn hung_resume_falls_back_to_fresh_session_once() {
         let mut app = test_app(default_bindings());
         app.config.providers.commands.insert(
@@ -9905,7 +10985,11 @@ cyan = "#00ffff"
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
 
-        app.drain_events();
+        drain_until(&mut app, |app| {
+            app.providers.contains_key(&session_id)
+                && !app.agent_launches_in_flight.contains(&session_id)
+                && app.status.text().contains("Resume timed out")
+        });
 
         assert!(
             app.providers.contains_key(&session_id),
@@ -11401,32 +12485,29 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.config.defaults.provider = "codex".to_string();
 
-        // project-1 inherits the global default (no explicit override).
-        app.config.projects.push(ProjectConfig {
-            id: app.projects[0].id.clone(),
-            path: app.projects[0].path.clone(),
-            name: Some(app.projects[0].name.clone()),
-            default_provider: None,
-            commit_prompt: None,
-        });
-
         // project-2 pins itself to "gemini" and must not be touched.
         let pinned = Project {
             id: "project-2".to_string(),
             name: "pinned".to_string(),
             path: app.paths.root.join("pinned").display().to_string(),
+            explicit_default_provider: Some(ProviderKind::from_str("gemini")),
             default_provider: ProviderKind::from_str("gemini"),
+            leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         };
-        app.config.projects.push(ProjectConfig {
-            id: pinned.id.clone(),
-            path: pinned.path.clone(),
-            name: Some(pinned.name.clone()),
-            default_provider: Some("gemini".to_string()),
-            commit_prompt: None,
-        });
+        app.session_store
+            .upsert_project(&ProjectConfig {
+                id: pinned.id.clone(),
+                path: pinned.path.clone(),
+                name: Some(pinned.name.clone()),
+                default_provider: Some("gemini".to_string()),
+                leading_branch: Some("main".to_string()),
+                auto_reopen_agents: None,
+            })
+            .expect("seed pinned project");
         app.projects.push(pinned);
 
         let original_session_provider = app.sessions[0].provider.clone();
@@ -11483,13 +12564,6 @@ cyan = "#00ffff"
     fn change_default_provider_rejects_current_selection_without_mutating_config() {
         let mut app = test_app(default_bindings());
         app.config.defaults.provider = "codex".to_string();
-        app.config.projects.push(ProjectConfig {
-            id: app.projects[0].id.clone(),
-            path: app.projects[0].path.clone(),
-            name: Some(app.projects[0].name.clone()),
-            default_provider: None,
-            commit_prompt: None,
-        });
 
         app.open_change_default_provider_prompt()
             .expect("open default provider picker");
@@ -11517,33 +12591,73 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn toggle_project_auto_reopen_persists_opt_out() {
+        let mut app = test_app(default_bindings());
+        app.selected_left = 0;
+
+        app.execute_command("toggle-project-auto-reopen-agents".to_string())
+            .expect("toggle project auto-reopen");
+        drain_until(&mut app, |app| {
+            app.status
+                .text()
+                .contains("Startup auto-reopen disabled for project")
+        });
+
+        assert_eq!(app.projects[0].auto_reopen_agents, Some(false));
+        let persisted = app.session_store.load_projects().expect("load projects");
+        assert_eq!(persisted[0].auto_reopen_agents, Some(false));
+        assert!(
+            app.status
+                .text()
+                .contains("Startup auto-reopen disabled for project")
+        );
+    }
+
+    #[test]
+    fn toggle_agent_auto_reopen_persists_session_opt_out() {
+        let mut app = test_app(default_bindings());
+
+        app.execute_command("toggle-agent-auto-reopen".to_string())
+            .expect("toggle agent auto-reopen");
+
+        assert!(!app.sessions[0].auto_reopen_enabled);
+        let loaded = app.session_store.load_sessions().expect("load sessions");
+        assert_eq!(loaded.len(), 1);
+        assert!(!loaded[0].auto_reopen_enabled);
+        assert!(
+            app.status
+                .text()
+                .contains("Startup auto-reopen disabled for agent")
+        );
+    }
+
+    #[test]
     fn change_project_default_provider_updates_selected_project_only() {
         let mut app = test_app(default_bindings());
         app.config.defaults.provider = "codex".to_string();
-        app.config.projects.push(ProjectConfig {
-            id: app.projects[0].id.clone(),
-            path: app.projects[0].path.clone(),
-            name: Some(app.projects[0].name.clone()),
-            default_provider: None,
-            commit_prompt: None,
-        });
 
         let pinned = Project {
             id: "project-2".to_string(),
             name: "pinned".to_string(),
             path: app.paths.root.join("pinned").display().to_string(),
+            explicit_default_provider: Some(ProviderKind::from_str("gemini")),
             default_provider: ProviderKind::from_str("gemini"),
+            leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         };
-        app.config.projects.push(ProjectConfig {
-            id: pinned.id.clone(),
-            path: pinned.path.clone(),
-            name: Some(pinned.name.clone()),
-            default_provider: Some("gemini".to_string()),
-            commit_prompt: None,
-        });
+        app.session_store
+            .upsert_project(&ProjectConfig {
+                id: pinned.id.clone(),
+                path: pinned.path.clone(),
+                name: Some(pinned.name.clone()),
+                default_provider: Some("gemini".to_string()),
+                leading_branch: Some("main".to_string()),
+                auto_reopen_agents: None,
+            })
+            .expect("seed pinned project");
         app.projects.push(pinned);
 
         app.open_change_project_default_provider_prompt()
@@ -11567,18 +12681,18 @@ cyan = "#00ffff"
 
         app.apply_change_project_default_provider()
             .expect("apply project provider");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        app.drain_events();
 
         assert_eq!(app.config.defaults.provider, "codex");
-        let persisted = crate::config::ensure_config(&app.paths).expect("reload config");
+        let persisted = app.session_store.load_projects().expect("load projects");
         let inherited_cfg = persisted
-            .projects
             .iter()
             .find(|project| project.id == "project-1")
             .expect("project-1 config");
         assert_eq!(inherited_cfg.default_provider.as_deref(), Some("claude"));
 
         let pinned_cfg = persisted
-            .projects
             .iter()
             .find(|project| project.id == "project-2")
             .expect("project-2 config");
@@ -11602,13 +12716,10 @@ cyan = "#00ffff"
     fn change_project_default_provider_can_revert_to_global_default() {
         let mut app = test_app(default_bindings());
         app.config.defaults.provider = "codex".to_string();
-        app.config.projects.push(ProjectConfig {
-            id: app.projects[0].id.clone(),
-            path: app.projects[0].path.clone(),
-            name: Some(app.projects[0].name.clone()),
-            default_provider: Some("gemini".to_string()),
-            commit_prompt: None,
-        });
+        app.session_store
+            .update_project_default_provider(&app.projects[0].id, Some("gemini"))
+            .expect("seed project override");
+        app.projects[0].explicit_default_provider = Some(ProviderKind::from_str("gemini"));
         app.projects[0].default_provider = ProviderKind::from_str("gemini");
 
         app.open_change_project_default_provider_prompt()
@@ -11626,10 +12737,11 @@ cyan = "#00ffff"
 
         app.apply_change_project_default_provider()
             .expect("apply inherit global");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        app.drain_events();
 
-        let persisted = crate::config::ensure_config(&app.paths).expect("reload config");
+        let persisted = app.session_store.load_projects().expect("load projects");
         let config = persisted
-            .projects
             .iter()
             .find(|project| project.id == "project-1")
             .expect("project-1 config");
@@ -11664,38 +12776,6 @@ cyan = "#00ffff"
         assert!(
             rendered.contains("dux development"),
             "expected local build version label, got: {rendered}"
-        );
-    }
-
-    #[test]
-    fn non_default_project_uses_double_exclamation_marker() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let mut app = test_app(default_bindings());
-        app.projects[0].branch_status = ProjectBranchStatus::NotLeading;
-        app.rebuild_left_items();
-
-        let backend = TestBackend::new(120, 24);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| app.render(frame))
-            .expect("render frame");
-        let rendered: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-
-        assert!(
-            rendered.contains("demo (1) ‼"),
-            "expected non-default project marker, got: {rendered}"
-        );
-        assert!(
-            !rendered.contains("demo (1) !"),
-            "old non-default project marker should not render"
         );
     }
 
@@ -11741,13 +12821,7 @@ cyan = "#00ffff"
 
         let mut app = test_app(default_bindings());
         app.config.defaults.provider = "claude".to_string();
-        app.config.projects.push(ProjectConfig {
-            id: app.projects[0].id.clone(),
-            path: app.projects[0].path.clone(),
-            name: Some(app.projects[0].name.clone()),
-            default_provider: Some("codex".to_string()),
-            commit_prompt: None,
-        });
+        app.projects[0].explicit_default_provider = Some(ProviderKind::from_str("codex"));
         app.projects[0].default_provider = ProviderKind::from_str("codex");
         app.sessions[0].provider = ProviderKind::from_str("gemini");
         app.rebuild_left_items();
@@ -11791,13 +12865,7 @@ cyan = "#00ffff"
 
         let mut app = test_app(default_bindings());
         app.config.defaults.provider = "codex".to_string();
-        app.config.projects.push(ProjectConfig {
-            id: app.projects[0].id.clone(),
-            path: app.projects[0].path.clone(),
-            name: Some(app.projects[0].name.clone()),
-            default_provider: None,
-            commit_prompt: None,
-        });
+        app.projects[0].explicit_default_provider = None;
         app.projects[0].default_provider = ProviderKind::from_str("codex");
         app.sessions[0].provider = ProviderKind::from_str("codex");
         app.rebuild_left_items();
