@@ -5034,6 +5034,7 @@ impl App {
                     self.reconnect_selected_session()?;
                 }
             }
+            Some(LeftItem::EmptyProjectsSpacer) => {}
             Some(LeftItem::EmptyProjectsSeparator) => {}
             None => {}
         }
@@ -8283,12 +8284,16 @@ not_a_real_action = ["x"]
 
         assert!(matches!(
             app.left_items().get(2),
+            Some(LeftItem::EmptyProjectsSpacer)
+        ));
+        assert!(matches!(
+            app.left_items().get(3),
             Some(LeftItem::EmptyProjectsSeparator)
         ));
 
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.selected_left, 3);
+        assert_eq!(app.selected_left, 4);
 
         app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
             .unwrap();
@@ -8304,7 +8309,7 @@ not_a_real_action = ["x"]
         install_mouse_layout(&mut app);
         app.selected_left = 1;
 
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 3));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 4));
 
         assert_eq!(app.selected_left, 1);
     }
@@ -12777,6 +12782,43 @@ cyan = "#00ffff"
             rendered.contains("dux development"),
             "expected local build version label, got: {rendered}"
         );
+    }
+
+    #[test]
+    fn empty_projects_separator_centers_label_and_empty_projects_use_quiet_style() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::style::Modifier;
+
+        let mut app = test_app(default_bindings());
+        append_empty_projects(&mut app, 4);
+        app.config.ui.empty_project_separator_min_projects = 5;
+        app.rebuild_left_items();
+
+        let backend = TestBackend::new(160, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let buffer = terminal.backend().buffer();
+        let spacer_row: String = (1u16..31u16).map(|x| buffer[(x, 4)].symbol()).collect();
+        let separator_row: String = (1u16..31u16).map(|x| buffer[(x, 5)].symbol()).collect();
+
+        assert_eq!(spacer_row, "                              ");
+        assert_eq!(separator_row, "── Projects with no agents ───");
+        assert_eq!(buffer[(1, 5)].fg, app.theme.header_separator_fg);
+        assert_eq!(buffer[(5, 5)].fg, app.theme.provider_label_fg);
+        assert!(
+            buffer[(3, 2)].modifier.contains(Modifier::BOLD),
+            "project above the empty-projects separator should stay bold"
+        );
+        assert!(
+            !buffer[(3, 6)].modifier.contains(Modifier::BOLD),
+            "project below the empty-projects separator should render at normal weight"
+        );
+        assert_eq!(buffer[(1, 6)].symbol(), "⧉");
+        assert_eq!(buffer[(1, 6)].fg, app.theme.provider_label_fg);
     }
 
     #[test]

@@ -1245,6 +1245,7 @@ pub(crate) enum LeftSection {
 pub(crate) enum LeftItem {
     Project(usize),
     Session(usize),
+    EmptyProjectsSpacer,
     EmptyProjectsSeparator,
 }
 
@@ -1283,6 +1284,7 @@ pub(crate) fn build_left_items(
     }
 
     if !items.is_empty() && !empty_projects.is_empty() {
+        items.push(LeftItem::EmptyProjectsSpacer);
         items.push(LeftItem::EmptyProjectsSeparator);
         for project_index in empty_projects {
             let project = &projects[project_index];
@@ -2542,6 +2544,7 @@ impl App {
                     .iter()
                     .find(|project| project.id == session.project_id)
             }),
+            Some(LeftItem::EmptyProjectsSpacer) => None,
             Some(LeftItem::EmptyProjectsSeparator) => None,
             None => None,
         }
@@ -3283,6 +3286,7 @@ mod tests {
                 LeftItem::Session(0),
                 LeftItem::Project(3),
                 LeftItem::Session(1),
+                LeftItem::EmptyProjectsSpacer,
                 LeftItem::EmptyProjectsSeparator,
                 LeftItem::Project(0),
                 LeftItem::Project(2),
@@ -3317,6 +3321,7 @@ mod tests {
                 LeftItem::Session(2),
                 LeftItem::Project(3),
                 LeftItem::Session(1),
+                LeftItem::EmptyProjectsSpacer,
                 LeftItem::EmptyProjectsSeparator,
                 LeftItem::Project(0),
                 LeftItem::Project(4),
@@ -3350,6 +3355,7 @@ mod tests {
                 LeftItem::Session(2),
                 LeftItem::Project(3),
                 LeftItem::Session(1),
+                LeftItem::EmptyProjectsSpacer,
                 LeftItem::EmptyProjectsSeparator,
                 LeftItem::Project(0),
                 LeftItem::Project(2),
@@ -3372,7 +3378,32 @@ mod tests {
         let items = build_left_items(&projects, &sessions, &HashSet::new(), 0);
 
         assert!(!items.contains(&LeftItem::EmptyProjectsSeparator));
+        assert!(!items.contains(&LeftItem::EmptyProjectsSpacer));
         assert_eq!(items[0], LeftItem::Project(0));
+    }
+
+    #[test]
+    fn build_left_items_omits_separator_when_no_project_has_sessions() {
+        let projects = vec![
+            test_project("project-1"),
+            test_project("project-2"),
+            test_project("project-3"),
+            test_project("project-4"),
+            test_project("project-5"),
+        ];
+
+        let items = build_left_items(&projects, &[], &HashSet::new(), 5);
+
+        assert_eq!(
+            items,
+            vec![
+                LeftItem::Project(0),
+                LeftItem::Project(1),
+                LeftItem::Project(2),
+                LeftItem::Project(3),
+                LeftItem::Project(4),
+            ]
+        );
     }
 
     #[test]

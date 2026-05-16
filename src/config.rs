@@ -693,7 +693,7 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "empty_project_separator_min_projects",
             comment: Some(CommentSource::Static(
-                "# Separate projects with no agents below an \"Empty projects\" divider once\n\
+                "# Separate projects with no agents below a \"Projects with no agents\" divider once\n\
                  # the total project count reaches this number. Set to 0 to disable.",
             )),
             value_fn: |c| FieldValue::U16(c.ui.empty_project_separator_min_projects),
