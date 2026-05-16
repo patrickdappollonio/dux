@@ -11700,6 +11700,41 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn empty_projects_separator_centers_label_and_empty_projects_use_quiet_style() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::style::Modifier;
+
+        let mut app = test_app(default_bindings());
+        append_empty_projects(&mut app, 4);
+        app.config.ui.empty_project_separator_min_projects = 5;
+        app.rebuild_left_items();
+
+        let backend = TestBackend::new(160, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let buffer = terminal.backend().buffer();
+        let separator_row: String = (1u16..31u16).map(|x| buffer[(x, 4)].symbol()).collect();
+
+        assert_eq!(separator_row, "── Projects with no agents ───");
+        assert_eq!(buffer[(1, 4)].fg, app.theme.header_separator_fg);
+        assert_eq!(buffer[(5, 4)].fg, app.theme.provider_label_fg);
+        assert!(
+            buffer[(3, 2)].modifier.contains(Modifier::BOLD),
+            "project above the empty-projects separator should stay bold"
+        );
+        assert!(
+            !buffer[(3, 5)].modifier.contains(Modifier::BOLD),
+            "project below the empty-projects separator should render at normal weight"
+        );
+        assert_eq!(buffer[(1, 5)].symbol(), "⧉");
+        assert_eq!(buffer[(1, 5)].fg, app.theme.provider_label_fg);
+    }
+
+    #[test]
     fn header_shows_project_and_global_provider_when_project_is_overridden() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;

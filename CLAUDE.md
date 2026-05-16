@@ -11,7 +11,7 @@ Principles that guide every decision in dux. If a change conflicts with a tenet,
 
 ### UI and Navigation
 
-- **New UI must use the theme engine.** Any new screen, pane, dialog, status text, or visual state must derive colors and styles from `Theme`/`theme.rs` rather than hardcoding visual values. If the existing theme surface lacks the needed meaning, add a semantic theme field first and wire every supported theme through it.
+- **New UI must use the theme engine.** Any new screen, pane, dialog, status text, or visual state must derive colors and styles from `Theme`/`theme.rs` rather than hardcoding visual values. Prefer reusing an existing semantic theme field when it already matches the visual meaning. Only add a new semantic theme field when the existing theme surface truly lacks the needed meaning, and when you do, wire every supported theme/default mapping through it in the same change so themes cannot drift.
 - **Tab and Shift-Tab navigate between panes.** This is the primary spatial navigation model.
 - **Panes have local key combinations.** A key combo bound in one pane does not necessarily work in another.
 - **Panes have interactive and non-interactive modes.** In interactive mode, all key combos (including global ones) are suppressed and input is forwarded to the PTY. In non-interactive mode, both local and global key combos are active.
@@ -128,7 +128,7 @@ When shelling out to git, **always ensure the command output is immune to user-s
 - Follow the existing `src/app/` submodule pattern when adding new concerns. If a new feature area grows beyond ~200 lines, extract it into its own submodule with `use super::*;` and an `impl App` block.
 - Keep changes scoped to one submodule at a time; avoid cross-cutting edits across multiple app submodules in the same PR when possible.
 - Use `theme.rs` constants for all colors and styles — never use raw `Color::*` values in rendering code.
-- When adding new UI elements, define semantic color names in `Theme` rather than picking ad-hoc colors. `theme.rs` is the single source of truth for visual styling.
+- When adding new UI elements, reuse existing semantic color names in `Theme` when they fit. Define a new semantic color only when no existing token fits, and update every supported theme/default mapping in the same change. `theme.rs` is the single source of truth for visual styling.
 - The canonical config renderer produces a fully commented config on first creation. Subsequent saves preserve user edits via `toml_edit`. Users can run `dux config diff` to see what changed or `dux config regenerate` to get the latest canonical template.
 - When a setting can have a sensible default at first boot (e.g., the user's home directory, platform-specific paths), resolve and store the concrete value in `config.toml` right away — do not leave it commented out or empty. Users should see a working value they can edit, not a placeholder they have to fill in.
 - Preserve safe failure behavior around project refresh and failed agent startup.

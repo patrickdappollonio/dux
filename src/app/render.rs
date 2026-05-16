@@ -274,6 +274,53 @@ fn wrapped_line_count(lines: &[Line<'_>], width: u16, trim: bool) -> u16 {
     total
 }
 
+fn empty_projects_separator_line(width: u16, theme: &Theme) -> Line<'static> {
+    const LABEL: &str = "Projects with no agents";
+    const PADDED_LABEL: &str = " Projects with no agents ";
+
+    if width == 0 {
+        return Line::from("");
+    }
+
+    let separator_style = Style::default().fg(theme.header_separator_fg);
+    let label_style = Style::default().fg(theme.provider_label_fg);
+    let label_width = PADDED_LABEL.chars().count();
+    let width = usize::from(width);
+
+    if width <= LABEL.chars().count() {
+        return Line::from(Span::styled(
+            LABEL.chars().take(width).collect::<String>(),
+            label_style,
+        ));
+    }
+
+    if width <= label_width {
+        let side_padding = width.saturating_sub(LABEL.chars().count()) / 2;
+        let right_padding = width
+            .saturating_sub(LABEL.chars().count())
+            .saturating_sub(side_padding);
+        return Line::from(Span::styled(
+            format!(
+                "{}{}{}",
+                " ".repeat(side_padding),
+                LABEL,
+                " ".repeat(right_padding)
+            ),
+            label_style,
+        ));
+    }
+
+    let remaining = width - label_width;
+    let left_width = remaining / 2;
+    let right_width = remaining - left_width;
+
+    Line::from(vec![
+        Span::styled("─".repeat(left_width), separator_style),
+        Span::styled(PADDED_LABEL, label_style),
+        Span::styled("─".repeat(right_width), separator_style),
+    ])
+}
+
 fn macro_edit_text_inner_area(popup: Rect) -> Rect {
     let outer_inner = Block::bordered().inner(popup);
     let [_, bordered_area, _] = Layout::default()
@@ -639,11 +686,18 @@ impl App {
         };
         let left_items = self.left_items();
         let projects_focused = focused && self.left_section == LeftSection::Projects;
+        let title = format!("Projects ({})", self.projects.len());
+        let projects_inner_width = self
+            .themed_block(&title, projects_focused)
+            .inner(projects_area)
+            .width;
+        let mut after_empty_projects_separator = false;
         let items = left_items
             .iter()
             .enumerate()
             .map(|(i, item)| match item {
                 LeftItem::Project(index) => {
+                    let is_below_empty_projects_separator = after_empty_projects_separator;
                     let project = &self.projects[*index];
                     if project.path_missing {
                         let spans = vec![
@@ -656,19 +710,28 @@ impl App {
                         ListItem::new(Line::from(spans))
                     } else {
                         let count = session_counts.get(&project.id).copied().unwrap_or(0);
-                        let icon = if count == 0 || self.collapsed_projects.contains(&project.id) {
+                        let icon = if is_below_empty_projects_separator {
+                            "⧉ "
+                        } else if count == 0 || self.collapsed_projects.contains(&project.id) {
                             "▸ "
                         } else {
                             "▾ "
                         };
+                        let icon_color = if is_below_empty_projects_separator {
+                            self.theme.provider_label_fg
+                        } else {
+                            self.theme.project_icon
+                        };
                         let mut spans = vec![
-                            Span::styled(icon, Style::default().fg(self.theme.project_icon)),
-                            Span::styled(
-                                project.name.clone(),
-                                Style::default()
-                                    .fg(self.theme.text_fg)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
+                            Span::styled(icon, Style::default().fg(icon_color)),
+                            Span::styled(project.name.clone(), {
+                                let style = Style::default().fg(self.theme.text_fg);
+                                if is_below_empty_projects_separator {
+                                    style
+                                } else {
+                                    style.add_modifier(Modifier::BOLD)
+                                }
+                            }),
                         ];
                         if count > 0 {
                             spans.push(Span::styled(
@@ -768,16 +831,15 @@ impl App {
                         .collect::<Vec<_>>(),
                     ))
                 }
-                LeftItem::EmptyProjectsSeparator => ListItem::new(Line::from(vec![
-                    Span::styled("── ", Style::default().fg(self.theme.header_separator_fg)),
-                    Span::styled(
-                        "Empty projects",
-                        Style::default().fg(self.theme.provider_label_fg),
-                    ),
-                ])),
+                LeftItem::EmptyProjectsSeparator => {
+                    after_empty_projects_separator = true;
+                    ListItem::new(empty_projects_separator_line(
+                        projects_inner_width,
+                        &self.theme,
+                    ))
+                }
             })
             .collect::<Vec<_>>();
-        let title = format!("Projects ({})", self.projects.len());
         self.mouse_layout.left_list = self
             .themed_block(&title, projects_focused)
             .inner(projects_area);
