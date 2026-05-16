@@ -6886,6 +6886,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
 
         app.create_agent_for_selected_project().unwrap();
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         match &app.prompt {
@@ -6903,6 +6904,11 @@ not_a_real_action = ["x"]
             }
             other => panic!("expected name-new-agent prompt, got {other:?}"),
         }
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
+        assert_eq!(
+            app.status.message(),
+            "Branch check complete for \"demo\". Confirm or edit the agent name to continue."
+        );
     }
 
     #[test]

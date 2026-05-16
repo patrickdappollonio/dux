@@ -449,6 +449,7 @@ impl App {
                 },
                 WorkerEvent::CreateAgentBranchInspected { project, result } => match result {
                     Ok(inspection) => {
+                        let project_name = project.name.clone();
                         if let Some(existing) =
                             self.projects.iter_mut().find(|p| p.id == project.id)
                         {
@@ -465,6 +466,10 @@ impl App {
                             self.continue_create_agent_after_branch_inspection(project, inspection)
                         {
                             self.set_error(format!("{err:#}"));
+                        } else {
+                            self.set_info(format!(
+                                "Branch check complete for \"{project_name}\". Confirm or edit the agent name to continue."
+                            ));
                         }
                     }
                     Err(err) => {
