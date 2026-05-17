@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 
 /// GitHub CLI availability status, checked once at startup.
@@ -60,6 +62,7 @@ pub struct Project {
     pub leading_branch: Option<String>,
     pub auto_reopen_agents: Option<bool>,
     pub startup_command: Option<String>,
+    pub env: BTreeMap<String, String>,
     pub current_branch: String,
     pub branch_status: ProjectBranchStatus,
     pub path_missing: bool,
