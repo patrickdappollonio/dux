@@ -25,6 +25,13 @@ Rules:
 - Focus on intent and impact, not mechanical description of lines added/removed.
 - Output ONLY the raw commit message. No preamble, no quotes, no explanation.";
 
+pub const DEFAULT_DIFF_COMMENT_PROMPT_TEMPLATE: &str = "\
+On `{filename}` line `{line_number}`:
+\t{line_content}
+Feedback:
+\t{message}
+";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -119,6 +126,8 @@ pub struct Defaults {
     pub provider: String,
     pub start_directory: Option<String>,
     pub commit_prompt: Option<String>,
+    pub diff_comment_prompt_separator: String,
+    pub diff_comment_prompt_template: String,
     pub enable_randomized_pet_name_by_default: bool,
     #[serde(default = "default_true")]
     pub pull_before_creating_agent_by_default: bool,
@@ -211,6 +220,7 @@ pub struct UiConfig {
     pub branch_sync_interval: u16,
     pub show_diff_line_numbers: bool,
     pub diff_tab_width: u16,
+    pub diff_comment_editor_max_lines: u16,
     pub github_integration: bool,
     pub auto_reopen_agents: bool,
     pub pr_banner_position: String,
@@ -240,6 +250,7 @@ impl Default for Config {
                 branch_sync_interval: 30,
                 show_diff_line_numbers: false,
                 diff_tab_width: 4,
+                diff_comment_editor_max_lines: 10,
                 github_integration: true,
                 auto_reopen_agents: false,
                 pr_banner_position: "bottom".to_string(),
@@ -280,6 +291,8 @@ impl Default for Defaults {
             provider: "claude".to_string(),
             start_directory,
             commit_prompt: Some(DEFAULT_COMMIT_PROMPT.to_string()),
+            diff_comment_prompt_separator: "---".to_string(),
+            diff_comment_prompt_template: DEFAULT_DIFF_COMMENT_PROMPT_TEMPLATE.to_string(),
             enable_randomized_pet_name_by_default: false,
             pull_before_creating_agent_by_default: true,
         }
@@ -377,6 +390,7 @@ impl Default for UiConfig {
             branch_sync_interval: 30,
             show_diff_line_numbers: false,
             diff_tab_width: 4,
+            diff_comment_editor_max_lines: 10,
             github_integration: true,
             auto_reopen_agents: false,
             pr_banner_position: "bottom".to_string(),
@@ -654,6 +668,23 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
         },
         ConfigEntry::Blank,
         ConfigEntry::Field {
+            key: "diff_comment_prompt_separator",
+            comment: Some(CommentSource::Static(
+                "# Separator inserted between queued diff comments when sending feedback to an agent.",
+            )),
+            value_fn: |c| FieldValue::Str(c.defaults.diff_comment_prompt_separator.clone()),
+        },
+        ConfigEntry::Field {
+            key: "diff_comment_prompt_template",
+            comment: Some(CommentSource::Static(
+                "# Template for each queued diff comment sent to an agent.\n# Available placeholders: {filename}, {line_number}, {line_content}, {message}.",
+            )),
+            value_fn: |c| {
+                FieldValue::MultilineStr(Some(c.defaults.diff_comment_prompt_template.clone()))
+            },
+        },
+        ConfigEntry::Blank,
+        ConfigEntry::Field {
             key: "enable_randomized_pet_name_by_default",
             comment: Some(CommentSource::Static(
                 "# When true, the new-agent name prompt starts with a random two-word pet name.\n\
@@ -765,6 +796,13 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
                 "# Number of spaces used to render tab characters in diffs.\n# Set to 0 to leave tabs as-is (they may render as zero-width).",
             )),
             value_fn: |c| FieldValue::U16(c.ui.diff_tab_width),
+        },
+        ConfigEntry::Field {
+            key: "diff_comment_editor_max_lines",
+            comment: Some(CommentSource::Static(
+                "# Maximum number of lines the inline diff comment editor grows to before scrolling.",
+            )),
+            value_fn: |c| FieldValue::U16(c.ui.diff_comment_editor_max_lines),
         },
         ConfigEntry::Field {
             key: "github_integration",
@@ -933,6 +971,18 @@ pub fn save_config(
         "commit_prompt",
         config.defaults.commit_prompt.as_deref(),
     );
+    patch_table_str(
+        &mut doc,
+        "defaults",
+        "diff_comment_prompt_separator",
+        &config.defaults.diff_comment_prompt_separator,
+    );
+    patch_table_opt_multiline(
+        &mut doc,
+        "defaults",
+        "diff_comment_prompt_template",
+        Some(&config.defaults.diff_comment_prompt_template),
+    );
     patch_table_bool(
         &mut doc,
         "defaults",
@@ -997,6 +1047,14 @@ pub fn save_config(
         config.ui.show_diff_line_numbers,
     );
     patch_table_u16(&mut doc, "ui", "diff_tab_width", config.ui.diff_tab_width);
+    patch_table_u16(
+        &mut doc,
+        "ui",
+        "diff_comment_editor_max_lines",
+        config.ui.diff_comment_editor_max_lines,
+    );
+    remove_table_key(&mut doc, "ui", "diff_comment_prompt_separator");
+    remove_table_key(&mut doc, "ui", "diff_comment_prompt_template");
     patch_table_bool(
         &mut doc,
         "ui",
@@ -1948,6 +2006,13 @@ mod tests {
         assert!(rendered.contains("auto_reopen_agents = false"));
         assert!(rendered.contains("staged_pane_height_pct = "));
         assert!(rendered.contains("commit_pane_height_pct = "));
+        assert!(rendered.contains("diff_comment_editor_max_lines = 10"));
+        assert!(rendered.contains("diff_comment_prompt_separator = \"---\""));
+        assert!(rendered.contains("diff_comment_prompt_template = \"\"\""));
+        assert!(rendered.contains("{filename}"));
+        assert!(rendered.contains("{line_number}"));
+        assert!(rendered.contains("{line_content}"));
+        assert!(rendered.contains("{message}"));
         assert!(rendered.contains("[editor]"));
         assert!(rendered.contains("default = \"cursor\""));
         assert!(rendered.contains("[keys]"));
@@ -2275,6 +2340,40 @@ dangerous = true
         let rendered = render_config_default(&config);
         let parsed: Config = toml::from_str(&rendered).expect("config should parse");
         assert_eq!(parsed.ui.commit_pane_height_pct, 30);
+    }
+
+    #[test]
+    fn default_config_round_trips_diff_comment_editor_max_lines() {
+        let mut config = Config::default();
+        config.ui.diff_comment_editor_max_lines = 12;
+        let rendered = render_config_default(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("config should parse");
+        assert_eq!(parsed.ui.diff_comment_editor_max_lines, 12);
+    }
+
+    #[test]
+    fn default_config_round_trips_diff_comment_prompt_separator() {
+        let mut config = Config::default();
+        config.defaults.diff_comment_prompt_separator = "### next comment".to_string();
+        let rendered = render_config_default(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("config should parse");
+        assert_eq!(
+            parsed.defaults.diff_comment_prompt_separator,
+            "### next comment"
+        );
+    }
+
+    #[test]
+    fn default_config_round_trips_diff_comment_prompt_template() {
+        let mut config = Config::default();
+        config.defaults.diff_comment_prompt_template =
+            "File {filename}:{line_number}\n{message}".to_string();
+        let rendered = render_config_default(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("config should parse");
+        assert_eq!(
+            parsed.defaults.diff_comment_prompt_template,
+            "File {filename}:{line_number}\n{message}"
+        );
     }
 
     #[test]
