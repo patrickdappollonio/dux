@@ -10,6 +10,15 @@ const MIN_CENTER_WIDTH_PCT: u16 = 20;
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 const ESC_AMBIGUITY_TIMEOUT: Duration = Duration::from_millis(25);
 
+fn configure_project_text_input_mut(prompt: &mut PromptState) -> Option<&mut TextInput> {
+    match prompt {
+        PromptState::ConfigureStartupCommand { input, .. }
+        | PromptState::ConfigureProjectEnv { input, .. }
+        | PromptState::ConfigureGlobalEnv { input, .. } => Some(input),
+        _ => None,
+    }
+}
+
 /// Maximum size of `loading_input_buf`. During the loading phase we
 /// accumulate bytes only to detect a (possibly multi-byte) ExitInteractive
 /// binding. Since any realistic binding fits in well under this cap, we
@@ -1078,7 +1087,12 @@ impl App {
             self.input_target = InputTarget::None;
             return Ok(());
         }
-        if let PromptState::ConfigureStartupCommand { input, .. } = &mut self.prompt {
+        if let Some(input) = match &mut self.prompt {
+            PromptState::ConfigureStartupCommand { input, .. }
+            | PromptState::ConfigureProjectEnv { input, .. }
+            | PromptState::ConfigureGlobalEnv { input, .. } => Some(input),
+            _ => None,
+        } {
             if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 input.clear();
             } else {
@@ -2622,19 +2636,30 @@ impl App {
             return Ok(false);
         }
 
-        if matches!(self.prompt, PromptState::ConfigureStartupCommand { .. })
-            && self.input_target == InputTarget::StartupCommand
+        if matches!(
+            self.prompt,
+            PromptState::ConfigureStartupCommand { .. }
+                | PromptState::ConfigureProjectEnv { .. }
+                | PromptState::ConfigureGlobalEnv { .. }
+        ) && self.input_target == InputTarget::StartupCommand
         {
             self.handle_startup_command_input_key(key)?;
             return Ok(false);
         }
 
-        if let PromptState::ConfigureStartupCommand { input, .. } = &mut self.prompt {
+        if matches!(
+            self.prompt,
+            PromptState::ConfigureStartupCommand { .. }
+                | PromptState::ConfigureProjectEnv { .. }
+                | PromptState::ConfigureGlobalEnv { .. }
+        ) {
             let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
             let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
             let files_action = self.bindings.lookup(&key, BindingScope::Files);
             if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                input.clear();
+                if let Some(input) = configure_project_text_input_mut(&mut self.prompt) {
+                    input.clear();
+                }
                 return Ok(false);
             }
             match palette_action.or(dialog_action).or(files_action) {
@@ -2643,11 +2668,19 @@ impl App {
                     self.input_target = InputTarget::None;
                 }
                 Some(Action::Confirm) => {
-                    self.apply_configure_startup_command()?;
+                    if matches!(self.prompt, PromptState::ConfigureGlobalEnv { .. }) {
+                        self.apply_configure_global_env()?;
+                    } else if matches!(self.prompt, PromptState::ConfigureProjectEnv { .. }) {
+                        self.apply_configure_project_env()?;
+                    } else {
+                        self.apply_configure_startup_command()?;
+                    }
                 }
                 Some(Action::EngageCommitInput) => {
                     self.input_target = InputTarget::StartupCommand;
-                    input.move_end();
+                    if let Some(input) = configure_project_text_input_mut(&mut self.prompt) {
+                        input.move_end();
+                    }
                 }
                 _ => {
                     if matches!(
@@ -2655,7 +2688,9 @@ impl App {
                         KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
                     ) {
                         self.input_target = InputTarget::StartupCommand;
-                        input.handle_key(key);
+                        if let Some(input) = configure_project_text_input_mut(&mut self.prompt) {
+                            input.handle_key(key);
+                        }
                     }
                 }
             }
@@ -4825,7 +4860,7 @@ impl App {
             OverlayMouseLayout::ConfigureStartupCommand { input } => input,
             _ => return,
         };
-        if let PromptState::ConfigureStartupCommand { input, .. } = &mut self.prompt {
+        if let Some(input) = configure_project_text_input_mut(&mut self.prompt) {
             let display_row = usize::from(row.saturating_sub(input_area.y));
             let display_col = usize::from(column.saturating_sub(input_area.x));
             input.set_cursor_from_display_pos(display_row, display_col);
@@ -6409,6 +6444,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
+            env: Default::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -6422,6 +6458,7 @@ mod tests {
                 leading_branch: project.leading_branch.clone(),
                 auto_reopen_agents: project.auto_reopen_agents,
                 startup_command: project.startup_command.clone(),
+                env: project.env.clone(),
             })
             .expect("seed project");
         let session = AgentSession {
@@ -9055,6 +9092,7 @@ not_a_real_action = ["x"]
                 leading_branch: Some("main".to_string()),
                 auto_reopen_agents: None,
                 startup_command: None,
+                env: Default::default(),
                 current_branch: "main".to_string(),
                 branch_status: ProjectBranchStatus::Unknown,
                 path_missing: false,
@@ -13591,6 +13629,7 @@ cyan = "#00ffff"
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
+            env: Default::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -13604,6 +13643,7 @@ cyan = "#00ffff"
                 leading_branch: Some("main".to_string()),
                 auto_reopen_agents: None,
                 startup_command: None,
+                env: pinned.env.clone(),
             })
             .expect("seed pinned project");
         app.projects.push(pinned);
@@ -13743,6 +13783,7 @@ cyan = "#00ffff"
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
+            env: Default::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -13756,6 +13797,7 @@ cyan = "#00ffff"
                 leading_branch: Some("main".to_string()),
                 auto_reopen_agents: None,
                 startup_command: None,
+                env: pinned.env.clone(),
             })
             .expect("seed pinned project");
         app.projects.push(pinned);

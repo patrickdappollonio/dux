@@ -29,6 +29,8 @@ Rules:
 #[serde(default)]
 pub struct Config {
     pub defaults: Defaults,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
     pub providers: ProvidersConfig,
     pub terminal: TerminalConfig,
     pub startup_command_terminal: StartupCommandTerminalConfig,
@@ -188,6 +190,8 @@ pub struct ProjectConfig {
     pub leading_branch: Option<String>,
     pub auto_reopen_agents: Option<bool>,
     pub startup_command: Option<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 fn new_project_id() -> String {
@@ -221,6 +225,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             defaults: Defaults::default(),
+            env: BTreeMap::new(),
             providers: ProvidersConfig::default(),
             terminal: TerminalConfig::default(),
             startup_command_terminal: StartupCommandTerminalConfig::default(),
@@ -480,7 +485,21 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     let mut config: Config = toml::from_str(&doc.to_string())
         .with_context(|| format!("failed to parse {}", paths.config_path.display()))?;
     config.providers.ensure_defaults();
+    validate_project_envs(&config)?;
     Ok(config)
+}
+
+fn validate_project_envs(config: &Config) -> Result<()> {
+    for project in &config.projects {
+        resolve_agent_env(&config.env, &project.env).with_context(|| {
+            format!(
+                "invalid env for project {}",
+                project.name.as_deref().unwrap_or(&project.path)
+            )
+        })?;
+    }
+    resolve_project_env(&config.env).context("invalid global env")?;
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -609,6 +628,8 @@ enum ConfigEntry {
     Providers,
     /// Renders `[[projects]]` declarations.
     Projects,
+    /// Renders the top-level `[env]` table.
+    Env,
     /// Renders the `[terminal]` section.
     Terminal,
     /// Renders the `[startup_command_terminal]` section.
@@ -672,6 +693,8 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             )),
             value_fn: |c| FieldValue::Bool(c.defaults.pull_before_creating_agent_by_default),
         },
+        ConfigEntry::Blank,
+        ConfigEntry::Env,
         ConfigEntry::Blank,
         ConfigEntry::Projects,
         ConfigEntry::Blank,
@@ -864,6 +887,7 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
                 }
             }
             ConfigEntry::Providers => render_provider_configs(&mut out, &config.providers),
+            ConfigEntry::Env => render_env_config(&mut out, &config.env),
             ConfigEntry::Projects => render_project_configs(&mut out, &config.projects),
             ConfigEntry::Terminal => render_terminal_config(&mut out, &config.terminal),
             ConfigEntry::StartupCommandTerminal => {
@@ -946,6 +970,9 @@ pub fn save_config(
         config.defaults.pull_before_creating_agent_by_default,
     );
     remove_table_key(&mut doc, "defaults", "prompt_for_name");
+
+    // --- [env] ---
+    patch_env_table(&mut doc, "env", &config.env);
 
     // --- [logging] ---
     patch_table_str(&mut doc, "logging", "level", &config.logging.level);
@@ -1258,9 +1285,30 @@ fn patch_projects(doc: &mut DocumentMut, projects: &[ProjectConfig]) {
         if let Some(command) = project.startup_command.as_deref() {
             table["startup_command"] = toml_edit::value(command);
         }
+        if !project.env.is_empty() {
+            let mut inline = InlineTable::new();
+            for (name, value) in &project.env {
+                inline.insert(name, Value::String(Formatted::new(value.clone())));
+            }
+            table["env"] = toml_edit::value(Value::InlineTable(inline));
+        }
         array.push(table);
     }
     doc["projects"] = Item::ArrayOfTables(array);
+}
+
+fn patch_env_table(doc: &mut DocumentMut, section: &str, env: &BTreeMap<String, String>) {
+    let table = ensure_table(doc, section);
+    let existing = table
+        .iter()
+        .map(|(key, _)| key.to_string())
+        .collect::<Vec<_>>();
+    for key in existing {
+        table.remove(&key);
+    }
+    for (name, value) in env {
+        table[name] = toml_edit::value(value.as_str());
+    }
 }
 
 fn render_keys_config(
@@ -1521,7 +1569,9 @@ fn render_project_configs(out: &mut String, projects: &[ProjectConfig]) {
     out.push_str(
         "# Projects are mirrored with dux's runtime database.\n\
          # Paths may use $HOME, ${HOME}, or ~ for portability across machines.\n\
-         # startup_command runs in each new agent worktree before the provider launches.\n",
+         # startup_command runs in each new agent worktree before the provider launches.\n\
+         # env defines per-project variables passed to agent and companion terminal PTYs.\n\
+         # Values may reference existing environment variables with $VAR or ${VAR}.\n",
     );
     if projects.is_empty() {
         out.push_str(
@@ -1531,7 +1581,8 @@ fn render_project_configs(out: &mut String, projects: &[ProjectConfig]) {
              # name = \"example\"\n\
              # default_provider = \"codex\"\n\
              # auto_reopen_agents = true\n\
-             # startup_command = \"npm install\"\n\n",
+             # startup_command = \"npm install\"\n\
+             # env = { EDITOR = \"true\", API_KEY = \"${FOOBAR_API_KEY}\" }\n\n",
         );
         return;
     }
@@ -1561,8 +1612,38 @@ fn render_project_configs(out: &mut String, projects: &[ProjectConfig]) {
                 escape_toml_string(command)
             ));
         }
+        if !project.env.is_empty() {
+            out.push_str("env = { ");
+            for (index, (key, value)) in project.env.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&format!("{} = \"{}\"", key, escape_toml_string(value)));
+            }
+            out.push_str(" }\n");
+        }
         out.push('\n');
     }
+}
+
+fn render_env_config(out: &mut String, env: &BTreeMap<String, String>) {
+    out.push_str("[env]\n");
+    out.push_str(
+        "# Environment variables passed to every agent PTY, companion terminal,\n\
+         # and startup command. Project-level env overrides keys defined here.\n\
+         # Values may reference existing environment variables with $VAR or ${VAR}.\n",
+    );
+    if env.is_empty() {
+        out.push_str(
+            "# EDITOR = \"true\"\n\
+             # API_KEY = \"${FOOBAR_API_KEY}\"\n\n",
+        );
+        return;
+    }
+    for (name, value) in env {
+        out.push_str(&format!("{} = \"{}\"\n", name, escape_toml_string(value)));
+    }
+    out.push('\n');
 }
 
 fn render_terminal_config(out: &mut String, terminal: &TerminalConfig) {
@@ -1817,6 +1898,71 @@ pub fn expand_env_vars(raw: &str) -> Option<String> {
     Some(result)
 }
 
+pub fn resolve_project_env(env: &BTreeMap<String, String>) -> Result<Vec<(String, String)>> {
+    let mut resolved = Vec::with_capacity(env.len());
+    for (name, value) in env {
+        validate_project_env_name(name)?;
+        let expanded = expand_env_vars(value)
+            .ok_or_else(|| anyhow!("environment variable {name} has invalid expansion syntax"))?;
+        if expanded.contains('\0') {
+            bail!("environment variable {name} contains a NUL byte");
+        }
+        resolved.push((name.clone(), expanded));
+    }
+    Ok(resolved)
+}
+
+pub fn resolve_agent_env(
+    global_env: &BTreeMap<String, String>,
+    project_env: &BTreeMap<String, String>,
+) -> Result<Vec<(String, String)>> {
+    let mut merged = global_env.clone();
+    merged.extend(project_env.clone());
+    resolve_project_env(&merged)
+}
+
+pub fn project_env_to_lines(env: &BTreeMap<String, String>) -> String {
+    env.iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn parse_project_env_lines(raw: &str) -> Result<BTreeMap<String, String>> {
+    let mut env = BTreeMap::new();
+    for (index, line) in raw.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = trimmed.split_once('=') else {
+            bail!("line {} must use KEY=value syntax", index + 1);
+        };
+        let name = name.trim();
+        validate_project_env_name(name)
+            .with_context(|| format!("line {} has an invalid variable name", index + 1))?;
+        if value.contains('\0') {
+            bail!("line {} contains a NUL byte", index + 1);
+        }
+        expand_env_vars(value).ok_or_else(|| {
+            anyhow!(
+                "line {} has invalid environment variable expansion syntax",
+                index + 1
+            )
+        })?;
+        env.insert(name.to_string(), value.to_string());
+    }
+    Ok(env)
+}
+
+fn validate_project_env_name(name: &str) -> Result<()> {
+    if is_valid_var_name(name) {
+        Ok(())
+    } else {
+        bail!("expected [A-Za-z_][A-Za-z0-9_]*")
+    }
+}
+
 /// Expand environment variables (`$VAR`, `${VAR}`) and tilde (`~`) in a path
 /// string.  Returns `None` when the result is unsafe (relative path, directory
 /// traversal via `..`, or invalid variable names).
@@ -1995,6 +2141,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: Some("npm install".to_string()),
+            env: Default::default(),
         });
         let rendered = render_config_default(&config);
         assert!(rendered.contains("[[projects]]"));
@@ -2081,6 +2228,7 @@ name = "test"
             leading_branch: None,
             auto_reopen_agents: None,
             startup_command: Some("echo ready".to_string()),
+            env: Default::default(),
         });
         let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
         save_config(&config_path, &config, &bindings).expect("save config");
@@ -3055,5 +3203,47 @@ args = [\"-l\"]
     #[test]
     fn expand_path_rejects_empty_braced_var_name() {
         assert!(expand_path("${}/foo").is_none());
+    }
+
+    #[test]
+    fn project_env_lines_parse_and_expand() {
+        unsafe { std::env::set_var("DUX_TEST_PROJECT_ENV_SOURCE", "secret") };
+        let env = parse_project_env_lines("EDITOR=true\nAPI_KEY=${DUX_TEST_PROJECT_ENV_SOURCE}")
+            .expect("parse env");
+        let resolved = resolve_project_env(&env).expect("resolve env");
+        assert!(resolved.contains(&("EDITOR".to_string(), "true".to_string())));
+        assert!(resolved.contains(&("API_KEY".to_string(), "secret".to_string())));
+        unsafe { std::env::remove_var("DUX_TEST_PROJECT_ENV_SOURCE") };
+    }
+
+    #[test]
+    fn project_env_lines_reject_invalid_names_and_expansions() {
+        assert!(parse_project_env_lines("1BAD=value").is_err());
+        assert!(parse_project_env_lines("GOOD=${}").is_err());
+        assert!(parse_project_env_lines("MISSING_EQUALS").is_err());
+    }
+
+    #[test]
+    fn agent_env_merges_global_and_project_with_project_override() {
+        let global = BTreeMap::from([
+            ("EDITOR".to_string(), "true".to_string()),
+            ("API_KEY".to_string(), "global".to_string()),
+        ]);
+        let project = BTreeMap::from([("API_KEY".to_string(), "project".to_string())]);
+
+        let resolved = resolve_agent_env(&global, &project).expect("resolve env");
+
+        assert!(resolved.contains(&("EDITOR".to_string(), "true".to_string())));
+        assert!(resolved.contains(&("API_KEY".to_string(), "project".to_string())));
+        assert!(!resolved.contains(&("API_KEY".to_string(), "global".to_string())));
+    }
+
+    #[test]
+    fn rendered_default_config_documents_global_env() {
+        let rendered = render_default_config();
+
+        assert!(rendered.contains("[env]"));
+        assert!(rendered.contains("# EDITOR = \"true\""));
+        assert!(rendered.contains("# API_KEY = \"${FOOBAR_API_KEY}\""));
     }
 }

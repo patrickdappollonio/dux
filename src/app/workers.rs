@@ -567,6 +567,24 @@ impl App {
                 WorkerEvent::ProjectPersistenceCompleted { action, result } => {
                     self.apply_project_persistence_result(action, result);
                 }
+                WorkerEvent::GlobalEnvPersistenceCompleted { env, result } => match result {
+                    Ok(()) => {
+                        self.config.env = env;
+                        if self.config.env.is_empty() {
+                            self.set_info("Global environment variables cleared.");
+                        } else {
+                            self.set_info(format!(
+                                "Saved {} global environment variable(s). New agents and terminals will receive them unless a project overrides the same key.",
+                                self.config.env.len()
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        self.set_error(format!(
+                            "Could not save global environment variables to config.toml: {err}"
+                        ));
+                    }
+                },
                 WorkerEvent::StartupCommandRerunCompleted(result) => match result.status {
                     Ok(()) => {
                         let palette_key = self.bindings.label_for(Action::OpenPalette);
@@ -794,6 +812,11 @@ impl App {
                         "Could not save the startup command for project \"{project_name}\": {err}"
                     ));
                 }
+                ProjectPersistenceAction::UpdateEnv { project_name, .. } => {
+                    self.set_error(format!(
+                        "Could not save environment variables for project \"{project_name}\": {err}"
+                    ));
+                }
             }
             return;
         }
@@ -939,6 +962,35 @@ impl App {
                     )),
                 }
             }
+            ProjectPersistenceAction::UpdateEnv {
+                project_id,
+                project_name,
+                env,
+            } => {
+                if let Some(project) = self
+                    .projects
+                    .iter_mut()
+                    .find(|project| project.id == project_id)
+                {
+                    project.env = env.clone();
+                }
+                if let Err(err) = self.persist_config_projects_from_runtime() {
+                    self.set_error(format!(
+                        "Environment variables saved to the database for \"{project_name}\", but config.toml could not be updated: {err:#}"
+                    ));
+                    return;
+                }
+                if env.is_empty() {
+                    self.set_info(format!(
+                        "Environment variables cleared for project \"{project_name}\"."
+                    ));
+                } else {
+                    self.set_info(format!(
+                        "Saved {} environment variable(s) for project \"{project_name}\". New agents and terminals will receive them.",
+                        env.len()
+                    ));
+                }
+            }
         }
     }
 
@@ -961,6 +1013,7 @@ impl App {
                             leading_branch: project.leading_branch.clone(),
                             auto_reopen_agents: project.auto_reopen_agents,
                             startup_command: project.startup_command.clone(),
+                            env: project.env.clone(),
                         })?;
                     }
                     ProjectPersistenceAction::Remove { project_id, .. }
@@ -994,11 +1047,32 @@ impl App {
                             startup_command.as_deref(),
                         )?;
                     }
+                    ProjectPersistenceAction::UpdateEnv {
+                        project_id, env, ..
+                    } => {
+                        store.update_project_env(project_id, env)?;
+                    }
                 }
                 Ok(())
             })()
             .map_err(|err| format!("{err:#}"));
             let _ = tx.send(WorkerEvent::ProjectPersistenceCompleted { action, result });
+        });
+    }
+
+    pub(crate) fn spawn_global_env_persistence(
+        &self,
+        env: std::collections::BTreeMap<String, String>,
+    ) {
+        let mut config = self.config.clone();
+        config.env = env.clone();
+        let config_path = self.paths.config_path.clone();
+        let tx = self.worker_tx.clone();
+        thread::spawn(move || {
+            let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
+            let result = crate::config::save_config(&config_path, &config, &bindings)
+                .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(WorkerEvent::GlobalEnvPersistenceCompleted { env, result });
         });
     }
 
@@ -2186,6 +2260,16 @@ pub(crate) fn run_create_agent_job(
         let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(hint));
         return;
     }
+    let env = match crate::config::resolve_agent_env(&config.env, &project.env) {
+        Ok(env) => env,
+        Err(err) => {
+            let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
+                "Invalid environment variables for project \"{}\": {err:#}",
+                project.name
+            )));
+            return;
+        }
+    };
     let startup_result = project
         .startup_command
         .as_deref()
@@ -2203,6 +2287,7 @@ pub(crate) fn run_create_agent_job(
                     session: session.clone(),
                     command: command.to_string(),
                     terminal: config.startup_command_terminal.clone(),
+                    env: env.clone(),
                 },
             )
         });
@@ -2237,6 +2322,7 @@ pub(crate) fn run_create_agent_job(
     let request = AgentLaunchRequest {
         session,
         provider_config: provider_cfg,
+        env,
         resume: launch_with_resume,
         pty_size: (rows, cols),
         scrollback_lines: config.ui.agent_scrollback_lines,
@@ -2263,13 +2349,14 @@ pub(crate) fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sende
         request.provider_config.supports_session_resume()
     ));
 
-    let client = match PtyClient::spawn(
+    let client = match PtyClient::spawn_with_env(
         &request.provider_config.command,
         launch_args,
         Path::new(&request.session.worktree_path),
         rows,
         cols,
         request.scrollback_lines,
+        &request.env,
     ) {
         Ok(client) => client,
         Err(err) => {
@@ -2664,6 +2751,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
+            env: Default::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -2728,6 +2816,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
+            env: Default::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,

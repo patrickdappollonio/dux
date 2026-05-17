@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
@@ -58,6 +60,7 @@ impl SessionStore {
                 leading_branch text,
                 auto_reopen_agents integer,
                 startup_command text,
+                env text not null default '{}',
                 sort_order integer not null default 0,
                 created_at text not null,
                 updated_at text not null
@@ -69,6 +72,7 @@ impl SessionStore {
         ensure_column(&self.conn, "projects", "leading_branch", "text")?;
         ensure_column(&self.conn, "projects", "auto_reopen_agents", "integer")?;
         ensure_column(&self.conn, "projects", "startup_command", "text")?;
+        ensure_column(&self.conn, "projects", "env", "text not null default '{}'")?;
         ensure_column(
             &self.conn,
             "projects",
@@ -161,8 +165,9 @@ impl SessionStore {
                 leading_branch = ?5,
                 auto_reopen_agents = ?6,
                 startup_command = ?7,
-                sort_order = ?8,
-                updated_at = ?9
+                env = ?8,
+                sort_order = ?9,
+                updated_at = ?10
             where id = ?1
             "#,
             params![
@@ -173,6 +178,7 @@ impl SessionStore {
                 project.leading_branch,
                 project.auto_reopen_agents,
                 project.startup_command,
+                serialize_project_env(&project.env),
                 sort_order,
                 now,
             ],
@@ -184,15 +190,16 @@ impl SessionStore {
         self.conn.execute(
             r#"
             insert into projects
-                (id, path, name, default_provider, leading_branch, auto_reopen_agents, startup_command, sort_order, created_at, updated_at)
+                (id, path, name, default_provider, leading_branch, auto_reopen_agents, startup_command, env, sort_order, created_at, updated_at)
             values
-                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
             on conflict(path) do update set
                 name=excluded.name,
                 default_provider=excluded.default_provider,
                 leading_branch=excluded.leading_branch,
                 auto_reopen_agents=excluded.auto_reopen_agents,
                 startup_command=excluded.startup_command,
+                env=excluded.env,
                 sort_order=excluded.sort_order,
                 updated_at=excluded.updated_at
             "#,
@@ -204,6 +211,7 @@ impl SessionStore {
                 project.leading_branch,
                 project.auto_reopen_agents,
                 project.startup_command,
+                serialize_project_env(&project.env),
                 sort_order,
                 now,
             ],
@@ -224,7 +232,7 @@ impl SessionStore {
     pub fn load_projects(&self) -> Result<Vec<ProjectConfig>> {
         let mut stmt = self.conn.prepare(
             r#"
-            select id, path, name, default_provider, leading_branch, auto_reopen_agents, startup_command
+            select id, path, name, default_provider, leading_branch, auto_reopen_agents, startup_command, env
             from projects
             order by sort_order, name collate nocase, path collate nocase
             "#,
@@ -238,6 +246,7 @@ impl SessionStore {
                 leading_branch: row.get(4)?,
                 auto_reopen_agents: row.get(5)?,
                 startup_command: row.get(6)?,
+                env: deserialize_project_env(row.get::<_, String>(7)?.as_str()),
             })
         })?;
 
@@ -295,6 +304,27 @@ impl SessionStore {
             where id = ?1
             "#,
             params![project_id, startup_command, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_project_env(
+        &self,
+        project_id: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            update projects
+            set env = ?2,
+                updated_at = ?3
+            where id = ?1
+            "#,
+            params![
+                project_id,
+                serialize_project_env(env),
+                Utc::now().to_rfc3339()
+            ],
         )?;
         Ok(())
     }
@@ -501,6 +531,14 @@ fn parse_time(value: &str) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
+fn serialize_project_env(env: &BTreeMap<String, String>) -> String {
+    serde_json::to_string(env).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn deserialize_project_env(value: &str) -> BTreeMap<String, String> {
+    serde_json::from_str::<BTreeMap<String, String>>(value).unwrap_or_default()
+}
+
 fn serialize_started_providers(started_providers: &[String]) -> String {
     serde_json::to_string(started_providers).unwrap_or_else(|_| "[]".to_string())
 }
@@ -632,6 +670,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: Some(false),
             startup_command: Some("npm install".to_string()),
+            env: BTreeMap::from([("EDITOR".to_string(), "true".to_string())]),
         };
 
         store.upsert_project(&project).unwrap();
@@ -652,6 +691,7 @@ mod tests {
                 leading_branch: Some("main".to_string()),
                 auto_reopen_agents: None,
                 startup_command: None,
+                env: Default::default(),
             })
             .unwrap();
 
@@ -664,6 +704,7 @@ mod tests {
                 leading_branch: Some("trunk".to_string()),
                 auto_reopen_agents: Some(false),
                 startup_command: Some("echo setup".to_string()),
+                env: BTreeMap::from([("API_KEY".to_string(), "${FOO_API_KEY}".to_string())]),
             })
             .unwrap();
 
@@ -675,6 +716,10 @@ mod tests {
         assert_eq!(loaded[0].leading_branch.as_deref(), Some("trunk"));
         assert_eq!(loaded[0].auto_reopen_agents, Some(false));
         assert_eq!(loaded[0].startup_command.as_deref(), Some("echo setup"));
+        assert_eq!(
+            loaded[0].env.get("API_KEY").map(String::as_str),
+            Some("${FOO_API_KEY}")
+        );
     }
 
     #[test]

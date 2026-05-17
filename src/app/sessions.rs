@@ -158,6 +158,7 @@ impl App {
             leading_branch: Some(leading_branch),
             auto_reopen_agents: None,
             startup_command: None,
+            env: std::collections::BTreeMap::new(),
             current_branch: branch,
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -436,9 +437,18 @@ impl App {
         kind: AgentLaunchKind,
     ) -> AgentLaunchRequest {
         let cfg = provider_config(&self.config, &session.provider);
+        let env = self
+            .projects
+            .iter()
+            .find(|project| project.id == session.project_id)
+            .and_then(|project| {
+                crate::config::resolve_agent_env(&self.config.env, &project.env).ok()
+            })
+            .unwrap_or_default();
         AgentLaunchRequest {
             session,
             provider_config: cfg,
+            env,
             resume,
             pty_size: self.pty_size_for_launch(),
             scrollback_lines: self.config.ui.agent_scrollback_lines,
@@ -484,13 +494,22 @@ impl App {
             cols,
             rows,
         ));
-        PtyClient::spawn(
+        let env = self
+            .projects
+            .iter()
+            .find(|project| project.id == session.project_id)
+            .and_then(|project| {
+                crate::config::resolve_agent_env(&self.config.env, &project.env).ok()
+            })
+            .unwrap_or_default();
+        PtyClient::spawn_with_env(
             &self.config.terminal.command,
             &self.config.terminal.args,
             Path::new(&session.worktree_path),
             rows,
             cols,
             self.config.ui.agent_scrollback_lines,
+            &env,
         )
     }
 
@@ -1437,6 +1456,96 @@ impl App {
         Ok(())
     }
 
+    pub(crate) fn open_configure_project_env(&mut self) -> Result<()> {
+        let Some(project) = self.selected_project().cloned() else {
+            self.set_error("Select a project first.");
+            return Ok(());
+        };
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.prompt = PromptState::ConfigureProjectEnv {
+            project_id: project.id,
+            project_name: project.name.clone(),
+            input: TextInput::with_text(crate::config::project_env_to_lines(&project.env))
+                .with_multiline(8)
+                .with_placeholder("KEY=value"),
+        };
+        self.set_info("Enter one environment variable per line as KEY=value. Empty clears them.");
+        Ok(())
+    }
+
+    pub(crate) fn open_configure_global_env(&mut self) -> Result<()> {
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.prompt = PromptState::ConfigureGlobalEnv {
+            project_name: "All projects".to_string(),
+            input: TextInput::with_text(crate::config::project_env_to_lines(&self.config.env))
+                .with_multiline(8)
+                .with_placeholder("KEY=value"),
+        };
+        self.set_info("Enter global environment variables as KEY=value. Empty clears them.");
+        Ok(())
+    }
+
+    pub(crate) fn apply_configure_global_env(&mut self) -> Result<()> {
+        let env = match &self.prompt {
+            PromptState::ConfigureGlobalEnv { input, .. } => {
+                match crate::config::parse_project_env_lines(&input.text) {
+                    Ok(env) => env,
+                    Err(err) => {
+                        self.set_error(format!(
+                            "Global environment variables are invalid: {err:#}"
+                        ));
+                        return Ok(());
+                    }
+                }
+            }
+            _ => return Ok(()),
+        };
+        self.prompt = PromptState::None;
+        self.input_target = InputTarget::None;
+        self.spawn_global_env_persistence(env);
+        self.set_busy("Saving global environment variables to config.toml...");
+        Ok(())
+    }
+
+    pub(crate) fn apply_configure_project_env(&mut self) -> Result<()> {
+        let (project_id, project_name, env) = match &self.prompt {
+            PromptState::ConfigureProjectEnv {
+                project_id,
+                project_name,
+                input,
+            } => {
+                let env = match crate::config::parse_project_env_lines(&input.text) {
+                    Ok(env) => env,
+                    Err(err) => {
+                        self.set_error(format!(
+                            "Environment variables for project \"{project_name}\" are invalid: {err:#}"
+                        ));
+                        return Ok(());
+                    }
+                };
+                (project_id.clone(), project_name.clone(), env)
+            }
+            _ => return Ok(()),
+        };
+        self.prompt = PromptState::None;
+        self.input_target = InputTarget::None;
+        if !self.projects.iter().any(|project| project.id == project_id) {
+            self.set_error(format!("Could not find project \"{project_name}\"."));
+            return Ok(());
+        }
+        self.spawn_project_persistence(ProjectPersistenceAction::UpdateEnv {
+            project_id,
+            project_name: project_name.clone(),
+            env,
+        });
+        self.set_busy(format!(
+            "Saving environment variables for project \"{project_name}\"..."
+        ));
+        Ok(())
+    }
+
     pub(crate) fn rerun_startup_command_on_agent(&mut self) -> Result<()> {
         let Some(session) = self.selected_session().cloned() else {
             self.set_error("Select an agent first.");
@@ -1468,6 +1577,8 @@ impl App {
         let tx = self.worker_tx.clone();
         let branch = session.branch_name.clone();
         let terminal = self.config.startup_command_terminal.clone();
+        let env =
+            crate::config::resolve_agent_env(&self.config.env, &project.env).unwrap_or_default();
         std::thread::spawn(move || {
             let result = crate::startup::run_startup_command(
                 &paths,
@@ -1476,6 +1587,7 @@ impl App {
                     session,
                     command,
                     terminal,
+                    env,
                 },
             );
             let _ = tx.send(WorkerEvent::StartupCommandRerunCompleted(result));
@@ -2703,6 +2815,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
+            env: Default::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -2857,6 +2970,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
+            env: Default::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
