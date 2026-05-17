@@ -95,6 +95,8 @@ pub enum Action {
     ToggleProjectAutoReopenAgents,
     ToggleAgentAutoReopen,
     ConfigureStartupCommand,
+    ConfigureGlobalEnv,
+    ConfigureProjectEnv,
     RerunStartupCommandOnAgent,
     ReadStartupCommandLogs,
     ToggleRandomizedPetNameDefault,
@@ -280,6 +282,8 @@ impl Action {
             Action::ToggleProjectAutoReopenAgents => "toggle_project_auto_reopen_agents",
             Action::ToggleAgentAutoReopen => "toggle_agent_auto_reopen",
             Action::ConfigureStartupCommand => "configure_startup_command",
+            Action::ConfigureGlobalEnv => "configure_global_env",
+            Action::ConfigureProjectEnv => "configure_project_env",
             Action::RerunStartupCommandOnAgent => "rerun_startup_command_on_agent",
             Action::ReadStartupCommandLogs => "read_startup_command_logs",
             Action::ToggleRandomizedPetNameDefault => "toggle_randomized_pet_name_default",
@@ -397,6 +401,12 @@ impl Action {
             Action::ConfigureStartupCommand => {
                 "Configure the selected project's startup command for newly created agents."
             }
+            Action::ConfigureGlobalEnv => {
+                "Configure environment variables for every project's agents and terminals."
+            }
+            Action::ConfigureProjectEnv => {
+                "Configure the selected project's environment variables for agents and terminals."
+            }
             Action::RerunStartupCommandOnAgent => {
                 "Rerun the selected agent's project startup command."
             }
@@ -497,6 +507,8 @@ impl Action {
             | Action::ToggleProjectAutoReopenAgents
             | Action::ToggleAgentAutoReopen
             | Action::ConfigureStartupCommand
+            | Action::ConfigureGlobalEnv
+            | Action::ConfigureProjectEnv
             | Action::RerunStartupCommandOnAgent
             | Action::ReadStartupCommandLogs
             | Action::ToggleRandomizedPetNameDefault
@@ -733,6 +745,28 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "configure-startup-command",
             description: "Configure the selected project's startup command",
+        }),
+    },
+    BindingDef {
+        action: Action::ConfigureGlobalEnv,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "configure-global-env",
+            description: "Configure environment variables inherited by every project",
+        }),
+    },
+    BindingDef {
+        action: Action::ConfigureProjectEnv,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "configure-project-env",
+            description: "Configure environment variables for the selected project's agents and terminals",
         }),
     },
     BindingDef {

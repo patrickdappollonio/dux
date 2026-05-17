@@ -3377,11 +3377,33 @@ impl App {
                 project_name,
                 input,
                 ..
+            }
+            | PromptState::ConfigureProjectEnv {
+                project_name,
+                input,
+                ..
+            }
+            | PromptState::ConfigureGlobalEnv {
+                project_name,
+                input,
+                ..
             } => {
+                let is_env = matches!(
+                    &self.prompt,
+                    PromptState::ConfigureProjectEnv { .. }
+                        | PromptState::ConfigureGlobalEnv { .. }
+                );
+                let is_global_env = matches!(&self.prompt, PromptState::ConfigureGlobalEnv { .. });
                 self.render_dim_overlay(frame);
-                let area = centered_rect_exact(76, 16, frame.area());
+                let area = centered_rect_exact(76, if is_env { 18 } else { 16 }, frame.area());
                 self.clear_overlay_area(frame, area);
-                let outer = self.themed_overlay_block("Configure Startup Command");
+                let outer = self.themed_overlay_block(if is_global_env {
+                    "Configure Global Environment"
+                } else if is_env {
+                    "Configure Project Environment"
+                } else {
+                    "Configure Startup Command"
+                });
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
                 let [label_area, input_area, hint_area] = Layout::default()
@@ -3394,14 +3416,25 @@ impl App {
                     .areas(inner);
                 Paragraph::new(vec![
                     Line::from(vec![
-                        Span::styled(" Project: ", Style::default().fg(self.theme.input_label_fg)),
+                        Span::styled(
+                            if is_global_env {
+                                " Scope: "
+                            } else {
+                                " Project: "
+                            },
+                            Style::default().fg(self.theme.input_label_fg),
+                        ),
                         Span::styled(
                             project_name.clone(),
                             Style::default().fg(self.theme.input_label_fg),
                         ),
                     ]),
                     Line::from(Span::styled(
-                        " Enter a command to run before the provider launches:",
+                        if is_env {
+                            " Enter one variable per line as KEY=value:"
+                        } else {
+                            " Enter a command to run before the provider launches:"
+                        },
                         Style::default().fg(self.theme.input_label_fg),
                     )),
                 ])

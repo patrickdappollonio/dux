@@ -17,6 +17,7 @@ pub struct StartupCommandRun {
     pub session: AgentSession,
     pub command: String,
     pub terminal: StartupCommandTerminalConfig,
+    pub env: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -189,7 +190,8 @@ pub fn run_startup_command(paths: &DuxPaths, run: StartupCommandRun) -> StartupC
         let shell_args = run.terminal.args.clone();
         let started = Utc::now();
         let started_instant = Instant::now();
-        let output = Command::new(&shell)
+        let mut command = Command::new(&shell);
+        command
             .args(&shell_args)
             .arg(&run.command)
             .current_dir(&run.session.worktree_path)
@@ -198,7 +200,11 @@ pub fn run_startup_command(paths: &DuxPaths, run: StartupCommandRun) -> StartupC
             .env("DUX_AGENT_ID", &run.session.id)
             .env("DUX_AGENT_BRANCH", &run.session.branch_name)
             .env("DUX_PROVIDER", run.session.provider.as_str())
-            .env("DUX_STARTUP_COMMAND_LOG", &log_path)
+            .env("DUX_STARTUP_COMMAND_LOG", &log_path);
+        for (name, value) in &run.env {
+            command.env(name, value);
+        }
+        let output = command
             .output()
             .with_context(|| format!("failed to run startup command through {shell}"))?;
         let ended = Utc::now();
@@ -368,6 +374,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: Some("echo setup".to_string()),
+            env: Default::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Leading,
             path_missing: false,
@@ -410,6 +417,7 @@ mod tests {
                     command: "/bin/sh".to_string(),
                     args: vec!["-c".to_string()],
                 },
+                env: Vec::new(),
             },
         );
 
@@ -450,6 +458,7 @@ mod tests {
                     command: "/bin/sh".to_string(),
                     args: vec!["-c".to_string()],
                 },
+                env: Vec::new(),
             },
         );
 
@@ -459,6 +468,34 @@ mod tests {
         assert!(log.contains("exit_code = 7"));
         assert!(log.contains("--- stderr ---"));
         assert!(log.contains("nope"));
+    }
+
+    #[test]
+    fn startup_command_receives_project_env() {
+        let tmp = tempdir().expect("tempdir");
+        let paths = test_paths(tmp.path());
+        let project = test_project(tmp.path());
+        let session = test_session(tmp.path());
+        let result = run_startup_command(
+            &paths,
+            StartupCommandRun {
+                project,
+                session,
+                command: "printf \"$EDITOR:$API_KEY\"".to_string(),
+                terminal: StartupCommandTerminalConfig {
+                    command: "/bin/sh".to_string(),
+                    args: vec!["-c".to_string()],
+                },
+                env: vec![
+                    ("EDITOR".to_string(), "true".to_string()),
+                    ("API_KEY".to_string(), "secret".to_string()),
+                ],
+            },
+        );
+
+        assert!(result.status.is_ok());
+        let log = read_log(&result.log_path).expect("log");
+        assert!(log.contains("--- stdout ---\ntrue:secret"));
     }
 
     #[test]
