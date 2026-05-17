@@ -58,6 +58,7 @@ impl App {
                         PullTarget::Project {
                             project_id,
                             project_name,
+                            ..
                         } => match result {
                             Ok(branch_name) => {
                                 if let Some(existing) = self
@@ -67,11 +68,20 @@ impl App {
                                     && let Some(branch_name) = branch_name
                                 {
                                     existing.current_branch = branch_name;
-                                    let warning = branch_warning_kind(
-                                        Path::new(&existing.path),
-                                        &existing.current_branch,
-                                    );
-                                    existing.branch_status = branch_status_from_warning(warning.as_ref());
+                                    existing.branch_status =
+                                        if existing.leading_branch.as_deref()
+                                            == Some(&existing.current_branch)
+                                        {
+                                            ProjectBranchStatus::Leading
+                                        } else if existing.leading_branch.is_some() {
+                                            ProjectBranchStatus::NotLeading
+                                        } else {
+                                            let warning = branch_warning_kind(
+                                                Path::new(&existing.path),
+                                                &existing.current_branch,
+                                            );
+                                            branch_status_from_warning(warning.as_ref())
+                                        };
                                 }
                                 self.set_info(format!(
                                     "Refreshed project \"{}\". Local branch is up to date with remote.",
@@ -1651,7 +1661,17 @@ pub(crate) fn run_checkout_project_default_branch_inspection_job(
     let repo_path = PathBuf::from(&project.path);
     let result = git::current_branch(&repo_path)
         .map(|branch| {
-            let warning_kind = branch_warning_kind(&repo_path, &branch);
+            let warning_kind = if let Some(leading_branch) = project.leading_branch.as_deref() {
+                if branch == leading_branch {
+                    None
+                } else {
+                    Some(BranchWarningKind::Known {
+                        default_branch: leading_branch.to_string(),
+                    })
+                }
+            } else {
+                branch_warning_kind(&repo_path, &branch)
+            };
             (branch, warning_kind)
         })
         .map_err(|err| format!("{err:#}"));
@@ -1743,7 +1763,18 @@ pub(crate) fn run_create_agent_job(
                     "Pulling latest changes for project \"{}\" before creating the agent...",
                     project.name
                 )));
-                if let Err(err) = git::pull_current_branch(&repo_path) {
+                let leading_branch = project
+                    .leading_branch
+                    .clone()
+                    .unwrap_or_else(|| project.current_branch.clone());
+                if let Err(err) = git::switch_branch_if_needed(&repo_path, &leading_branch)
+                    .and_then(|_| {
+                        if git::has_tracked_changes(&repo_path)? {
+                            return Err(anyhow::anyhow!("source checkout has uncommitted changes"));
+                        }
+                        git::pull_branch(&repo_path, &leading_branch)
+                    })
+                {
                     logger::error(&format!(
                         "pre-create pull failed for {}: {err}",
                         project.path
@@ -2645,6 +2676,21 @@ mod tests {
     use super::*;
     use crate::model::PrState;
 
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed in {}: {}",
+            args,
+            cwd.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     #[test]
     fn fork_worker_requires_name_from_prompt() {
         let tmp = tempdir().expect("tempdir");
@@ -2765,6 +2811,45 @@ mod tests {
             _ => panic!("expected pre-create pull failure"),
         }
         assert!(worker_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn checkout_project_default_branch_inspection_uses_stored_leading_branch() {
+        let repo = tempdir().expect("repo tempdir");
+        run_git(repo.path(), &["init", "-b", "trunk"]);
+        run_git(repo.path(), &["config", "user.name", "test"]);
+        run_git(repo.path(), &["config", "user.email", "t@t"]);
+        run_git(repo.path(), &["commit", "--allow-empty", "-m", "init"]);
+        run_git(repo.path(), &["switch", "-c", "feature"]);
+
+        let project = Project {
+            id: "project-1".to_string(),
+            name: "demo".to_string(),
+            path: repo.path().to_string_lossy().to_string(),
+            explicit_default_provider: None,
+            default_provider: ProviderKind::from_str("codex"),
+            leading_branch: Some("trunk".to_string()),
+            auto_reopen_agents: None,
+            startup_command: None,
+            current_branch: "feature".to_string(),
+            branch_status: ProjectBranchStatus::NotLeading,
+            path_missing: false,
+        };
+        let (worker_tx, worker_rx) = mpsc::channel();
+
+        run_checkout_project_default_branch_inspection_job(project, worker_tx);
+
+        match worker_rx.recv().expect("worker event") {
+            WorkerEvent::CheckoutProjectDefaultBranchInspected { result, .. } => {
+                let (current_branch, warning_kind) = result.expect("inspection");
+                assert_eq!(current_branch, "feature");
+                assert!(matches!(
+                    warning_kind,
+                    Some(BranchWarningKind::Known { default_branch }) if default_branch == "trunk"
+                ));
+            }
+            _ => panic!("expected checkout inspection event"),
+        }
     }
 
     #[test]

@@ -684,6 +684,7 @@ impl App {
             PullTarget::Project {
                 project_id: project.id,
                 project_name: project.name.clone(),
+                leading_branch: project.leading_branch.clone(),
             },
             format!("Refreshing project \"{}\" from remote…", project.name),
             format!(
