@@ -1561,6 +1561,7 @@ pub(crate) enum PullTarget {
     Project {
         project_id: String,
         project_name: String,
+        leading_branch: Option<String>,
     },
     Session,
 }

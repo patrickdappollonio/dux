@@ -1318,16 +1318,25 @@ impl App {
         self.set_busy(busy_message);
         thread::spawn(move || {
             let result = match &target {
-                PullTarget::Project { .. } => match git::is_dirty(&repo_path) {
-                    Ok(true) => Err(
-                        "Refresh blocked because the source checkout has uncommitted changes."
-                            .to_string(),
-                    ),
-                    Ok(false) => git::pull_current_branch(&repo_path)
+                PullTarget::Project { leading_branch, .. } => {
+                    let leading_branch = match leading_branch.clone() {
+                        Some(branch) => Ok(branch),
+                        None => git::current_branch(&repo_path)
+                            .map(|branch| leading_branch_for_project(&repo_path, &branch)),
+                    };
+                    leading_branch
+                        .and_then(|branch| {
+                            git::switch_branch_if_needed(&repo_path, &branch)?;
+                            if git::has_tracked_changes(&repo_path)? {
+                                return Err(anyhow::anyhow!(
+                                    "Refresh blocked because the source checkout has uncommitted changes."
+                                ));
+                            }
+                            git::pull_branch(&repo_path, &branch)
+                        })
                         .map(|_| git::current_branch(&repo_path).ok())
-                        .map_err(|e| e.to_string()),
-                    Err(e) => Err(e.to_string()),
-                },
+                        .map_err(|e| e.to_string())
+                }
                 PullTarget::Session => git::pull_current_branch(&repo_path)
                     .map(|_| None)
                     .map_err(|e| e.to_string()),
@@ -6956,6 +6965,7 @@ not_a_real_action = ["x"]
                 target: PullTarget::Project {
                     project_id: app.projects[0].id.clone(),
                     project_name: app.projects[0].name.clone(),
+                    leading_branch: app.projects[0].leading_branch.clone(),
                 },
                 result: Ok(Some("feature/demo".to_string())),
             })
@@ -6965,6 +6975,10 @@ not_a_real_action = ["x"]
 
         assert!(app.pulls_in_flight.is_empty());
         assert_eq!(app.projects[0].current_branch, "feature/demo");
+        assert_eq!(
+            app.projects[0].branch_status,
+            ProjectBranchStatus::NotLeading
+        );
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
     }
 

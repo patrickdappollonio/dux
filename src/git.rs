@@ -187,7 +187,25 @@ pub fn parse_worktree_list_porcelain_z(bytes: &[u8]) -> Result<Vec<GitWorktree>>
     Ok(worktrees)
 }
 
-pub fn is_dirty(repo_path: &Path) -> Result<bool> {
+pub fn pull_current_branch(repo_path: &Path) -> Result<()> {
+    let branch = current_branch(repo_path)?;
+    pull_origin_branch(repo_path, &branch)
+}
+
+pub fn pull_branch(repo_path: &Path, branch: &str) -> Result<()> {
+    switch_branch_if_needed(repo_path, branch)?;
+    pull_origin_branch(repo_path, branch)
+}
+
+pub fn switch_branch_if_needed(repo_path: &Path, branch: &str) -> Result<()> {
+    let current = current_branch(repo_path)?;
+    if current != branch {
+        switch_branch(repo_path, branch)?;
+    }
+    Ok(())
+}
+
+pub fn has_tracked_changes(repo_path: &Path) -> Result<bool> {
     let output = Command::new("git")
         .args([
             "-C",
@@ -204,11 +222,10 @@ pub fn is_dirty(repo_path: &Path) -> Result<bool> {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+    Ok(!output.stdout.is_empty())
 }
 
-pub fn pull_current_branch(repo_path: &Path) -> Result<()> {
-    let branch = current_branch(repo_path)?;
+fn pull_origin_branch(repo_path: &Path, branch: &str) -> Result<()> {
     let output = Command::new("git")
         .args([
             "-C",
@@ -216,7 +233,7 @@ pub fn pull_current_branch(repo_path: &Path) -> Result<()> {
             "pull",
             "--ff-only",
             "origin",
-            &branch,
+            branch,
         ])
         .output()?;
     if !output.status.success() {
@@ -2054,5 +2071,48 @@ mod tests {
             msg.contains("overwritten") || msg.contains("would be"),
             "expected conflict error, got: {msg}"
         );
+    }
+
+    #[test]
+    fn pull_branch_switches_to_requested_branch_before_pull() {
+        let bare_dir = tempfile::tempdir().unwrap();
+        let bare = bare_dir.path();
+        run_git(bare, &["init", "--bare", "-b", "main"]);
+
+        let staging_dir = tempfile::tempdir().unwrap();
+        let staging = staging_dir.path();
+        run_git(staging, &["clone", bare.to_str().unwrap(), "."]);
+        run_git(staging, &["config", "user.name", "test"]);
+        run_git(staging, &["config", "user.email", "t@t"]);
+        run_git(staging, &["commit", "--allow-empty", "-m", "init"]);
+        run_git(staging, &["push", "origin", "main"]);
+        run_git(staging, &["switch", "-c", "feature"]);
+        run_git(staging, &["commit", "--allow-empty", "-m", "feature"]);
+        run_git(staging, &["push", "origin", "feature"]);
+
+        let clone_dir = tempfile::tempdir().unwrap();
+        let clone = clone_dir.path();
+        run_git(clone, &["clone", bare.to_str().unwrap(), "."]);
+        run_git(clone, &["switch", "feature"]);
+        assert_eq!(current_branch(clone).unwrap(), "feature");
+
+        pull_branch(clone, "main").unwrap();
+
+        assert_eq!(current_branch(clone).unwrap(), "main");
+    }
+
+    #[test]
+    fn has_tracked_changes_ignores_untracked_files() {
+        let repo = init_test_repo();
+
+        fs::write(repo.path().join("scratch.txt"), "untracked\n").unwrap();
+        assert!(!has_tracked_changes(repo.path()).unwrap());
+
+        fs::write(repo.path().join("tracked.txt"), "clean\n").unwrap();
+        commit_all(repo.path(), "add tracked file");
+        assert!(!has_tracked_changes(repo.path()).unwrap());
+
+        fs::write(repo.path().join("tracked.txt"), "dirty\n").unwrap();
+        assert!(has_tracked_changes(repo.path()).unwrap());
     }
 }
