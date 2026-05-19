@@ -643,7 +643,13 @@ impl App {
         for (session_id, provider) in &mut self.providers {
             let exit_success = provider.try_wait().map(|status| status.success());
             if exit_success.is_some() || provider.is_exited() {
-                exited.push((session_id.clone(), exit_success));
+                let is_minimal = provider.has_minimal_output(5);
+                let excerpt = if is_minimal {
+                    provider.visible_text_excerpt(3)
+                } else {
+                    String::new()
+                };
+                exited.push((session_id.clone(), exit_success, is_minimal, excerpt));
             }
         }
 
@@ -651,7 +657,7 @@ impl App {
         // producing any output, retry with regular args (fresh session).
         // This handles `claude --continue || claude` style fallback.
         let mut retried = HashSet::new();
-        for (session_id, _) in &exited {
+        for (session_id, _, is_minimal, _) in &exited {
             if self.resume_fallback_candidates.remove(session_id).is_none() {
                 continue;
             }
@@ -659,11 +665,6 @@ impl App {
             // (no scrollback and ≤5 visible lines). A failed `--continue`
             // typically prints 1-2 lines of error; a real session produces
             // far more output and scrollback history.
-            let is_minimal = self
-                .providers
-                .get(session_id)
-                .map(|p| p.has_minimal_output(5))
-                .unwrap_or(true);
             if !is_minimal {
                 continue;
             }
@@ -696,7 +697,7 @@ impl App {
             }
         }
 
-        for (session_id, exit_success) in &exited {
+        for (session_id, exit_success, _, _) in &exited {
             if retried.contains(session_id) {
                 continue;
             }
@@ -712,17 +713,22 @@ impl App {
             // If the currently-viewed session just exited (and was not retried),
             // leave interactive mode.
             if let Some(current) = self.selected_session()
-                && exited.iter().any(|(id, _)| id == &current.id)
+                && let Some((_, exit_success, is_minimal, excerpt)) =
+                    exited.iter().find(|(id, _, _, _)| id == &current.id)
                 && !retried.contains(&current.id)
             {
                 let key = self.bindings.label_for(Action::ReconnectAgent);
                 if self.session_surface == SessionSurface::Agent {
+                    let status =
+                        agent_exit_status_message(*exit_success, *is_minimal, excerpt, &key);
                     self.input_target = InputTarget::None;
                     self.fullscreen_overlay = FullscreenOverlay::None;
                     self.focus = FocusPane::Left;
-                    self.set_info(format!(
-                        "Agent CLI process has exited. Press \"{key}\" to relaunch."
-                    ));
+                    if *exit_success == Some(false) {
+                        self.set_error(status);
+                    } else {
+                        self.set_info(status);
+                    }
                 } else {
                     self.set_info(format!(
                         "Agent CLI process exited. Companion terminal is still available; press \"{key}\" to relaunch the agent."
@@ -731,8 +737,9 @@ impl App {
             }
             // Trigger PR status check for exited agents.
             for sid in &exited {
-                if !retried.contains(&sid.0) {
-                    self.spawn_pr_check_for_session(&sid.0);
+                let session_id = &sid.0;
+                if !retried.contains(session_id) {
+                    self.spawn_pr_check_for_session(session_id);
                 }
             }
         }
@@ -1169,6 +1176,13 @@ impl App {
                 self.set_info(status_message);
             }
             AgentLaunchKind::ResumeFallback { status_message } => {
+                if self.selected_session().map(|selected| selected.id.as_str())
+                    == Some(session.id.as_str())
+                {
+                    self.show_agent_surface();
+                    self.input_target = InputTarget::Agent;
+                    self.fullscreen_overlay = FullscreenOverlay::Agent;
+                }
                 self.set_info(status_message);
             }
             AgentLaunchKind::StartupAutoReopen => {}
@@ -1652,6 +1666,72 @@ impl App {
                 self.mark_session_status(&session_id, SessionStatus::Detached);
             }
         }
+    }
+}
+
+fn agent_exit_status_message(
+    exit_success: Option<bool>,
+    is_minimal: bool,
+    excerpt: &str,
+    reconnect_key: &str,
+) -> String {
+    const MAX_EXIT_OUTPUT_CHARS: usize = 120;
+
+    let outcome = match exit_success {
+        Some(false) => "exited with an error",
+        Some(true) => "exited",
+        None => "exited",
+    };
+    let output = excerpt
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if output.is_empty() {
+        return format!("Agent CLI process has exited. Press \"{reconnect_key}\" to relaunch.");
+    }
+    if is_minimal {
+        let output = truncate_status_output(&output, MAX_EXIT_OUTPUT_CHARS);
+        let more = if output.truncated {
+            " Full output is visible in the agent pane."
+        } else {
+            ""
+        };
+        return format!(
+            "Agent CLI process {outcome}. Output: {}.{more} Press \"{reconnect_key}\" to relaunch.",
+            output.text
+        );
+    }
+
+    format!("Agent CLI process has exited. Press \"{reconnect_key}\" to relaunch.")
+}
+
+struct TruncatedStatusOutput {
+    text: String,
+    truncated: bool,
+}
+
+fn truncate_status_output(text: &str, max_chars: usize) -> TruncatedStatusOutput {
+    let mut chars = text.chars();
+    let mut truncated = false;
+    let mut output = String::new();
+    for _ in 0..max_chars {
+        let Some(ch) = chars.next() else {
+            return TruncatedStatusOutput {
+                text: output,
+                truncated,
+            };
+        };
+        output.push(ch);
+    }
+    if chars.next().is_some() {
+        truncated = true;
+        output.push('…');
+    }
+    TruncatedStatusOutput {
+        text: output,
+        truncated,
     }
 }
 
@@ -2380,9 +2460,33 @@ pub(crate) fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sende
         request.provider_config.supports_session_resume()
     ));
 
+    if let Err(message) = check_provider_available(&request.provider_config) {
+        logger::error(&format!(
+            "provider availability check failed for {}: {message}",
+            request.session.id
+        ));
+        if let AgentLaunchKind::Create {
+            repo_path,
+            owns_worktree,
+            ..
+        } = &request.kind
+            && *owns_worktree
+        {
+            let _ = git::remove_worktree(
+                Path::new(repo_path),
+                Path::new(&request.session.worktree_path),
+                &request.session.branch_name,
+            );
+        }
+        let _ = worker_tx.send(WorkerEvent::AgentLaunchFailed(Box::new(
+            AgentLaunchFailedData { request, message },
+        )));
+        return;
+    }
+
     let client = match PtyClient::spawn_with_env(
         &request.provider_config.command,
-        launch_args,
+        &launch_args,
         Path::new(&request.session.worktree_path),
         rows,
         cols,
@@ -2776,6 +2880,81 @@ mod tests {
             cwd.display(),
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    fn test_session(worktree: &Path) -> AgentSession {
+        AgentSession {
+            id: "session-1".to_string(),
+            project_id: "project-1".to_string(),
+            project_path: Some(worktree.to_string_lossy().to_string()),
+            provider: ProviderKind::from_str("custom"),
+            source_branch: "main".to_string(),
+            branch_name: "agent-branch".to_string(),
+            worktree_path: worktree.to_string_lossy().to_string(),
+            title: None,
+            started_providers: Vec::new(),
+            desired_running: true,
+            auto_reopen_enabled: true,
+            status: SessionStatus::Active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn launch_job_fails_before_pty_when_provider_command_is_missing() {
+        let tmp = tempdir().expect("tempdir");
+        let (worker_tx, worker_rx) = mpsc::channel();
+        let request = AgentLaunchRequest {
+            session: test_session(tmp.path()),
+            provider_config: ProviderCommandConfig {
+                command: "definitely-missing-provider-command".to_string(),
+                args: vec!["--ignored".to_string()],
+                ..Default::default()
+            },
+            resume: false,
+            pty_size: (24, 80),
+            scrollback_lines: 1_000,
+            env: Vec::new(),
+            kind: AgentLaunchKind::Reconnect {
+                status_message: "reconnect".to_string(),
+            },
+        };
+
+        run_agent_launch_job(request, worker_tx);
+
+        match worker_rx.recv().expect("worker event") {
+            WorkerEvent::AgentLaunchFailed(data) => {
+                assert!(data.message.contains("definitely-missing-provider-command"));
+                assert!(data.message.contains("not found on PATH"));
+            }
+            _ => panic!("expected launch failure"),
+        }
+        assert!(worker_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn agent_exit_status_message_caps_long_provider_output() {
+        let long_output = "x".repeat(200);
+
+        let message = agent_exit_status_message(Some(false), true, &long_output, "r");
+
+        assert!(message.contains("Output: "));
+        assert!(message.contains("…"));
+        assert!(message.contains("Full output is visible in the agent pane."));
+        assert!(
+            !message.contains(&long_output),
+            "status should not embed the full provider output"
+        );
+    }
+
+    #[test]
+    fn agent_exit_status_message_concats_short_provider_output() {
+        let message = agent_exit_status_message(Some(false), true, "first\nsecond", "r");
+
+        assert!(message.contains("Output: first second."));
+        assert!(!message.contains('|'));
+        assert!(!message.contains("Full output is visible"));
     }
 
     #[test]
