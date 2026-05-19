@@ -142,7 +142,14 @@ API_KEY = "${FOOBAR_API_KEY}"
 
 Project `env` values override global keys, because sometimes one repo deserves special treatment and the rest of your machine should not have to hear about it. Edit the global set from the palette with `configure-global-env`, and edit the selected project with `configure-project-env`.
 
-Project paths support `$HOME`, `${HOME}`, and `~` so the file can travel between machines without hardcoding your username like a tiny portability crime. Env values are passed to new agent PTYs, companion terminals, and startup commands. Values support the same `$VAR` and `${VAR}` expansion, so `API_KEY = "${FOOBAR_API_KEY}"` copies a secret from the parent environment while `EDITOR = "true"` can keep agents out of interactive editors. The startup command itself runs through your configured shell, so shell environment expansion works inside the command (`$HOME`, `${VAR}`, `$PATH`, `$EDITOR`, and friends). It runs with the agent worktree as the current directory, so relative paths point at the new checkout and normal shells report that through `$PWD`. dux also sets `DUX_PROJECT_PATH`, `DUX_WORKTREE_PATH`, `DUX_AGENT_ID`, `DUX_AGENT_BRANCH`, `DUX_PROVIDER`, and `DUX_STARTUP_COMMAND_LOG` for scripts that want to know where they are and who invited them.
+Project paths support `$HOME`, `${HOME}`, and `~` so the file can travel between machines without hardcoding your username like a tiny portability crime. Env values are passed to new agent PTYs, companion terminals, and startup commands. Values support the same `$VAR` and `${VAR}` expansion, so `API_KEY = "${FOOBAR_API_KEY}"` copies a secret from the parent environment while `EDITOR = "true"` can keep agents out of interactive editors. A terminal or agent may still start a shell that evaluates your profile files again; if those files reconfigure the same variables, dux cannot prevent that. Write shell defaults so they keep incoming values when present:
+
+```bash
+export VISUAL="${VISUAL:-nvim}"
+export EDITOR="${EDITOR:-$VISUAL}"
+```
+
+The startup command itself runs through your configured shell, so shell environment expansion works inside the command (`$HOME`, `${VAR}`, `$PATH`, `$EDITOR`, and friends). It runs with the agent worktree as the current directory, so relative paths point at the new checkout and normal shells report that through `$PWD`. dux also sets `DUX_PROJECT_PATH`, `DUX_WORKTREE_PATH`, `DUX_AGENT_ID`, `DUX_AGENT_BRANCH`, `DUX_PROVIDER`, and `DUX_STARTUP_COMMAND_LOG` for scripts that want to know where they are and who invited them.
 
 If the command fails, dux still creates the agent. The failure shows in the status line, because setup scripts are allowed to be dramatic but not allowed to block the show. Use `read-startup-command-logs` to open the latest log, and `rerun-startup-command-on-agent` when the fix is obvious and you want the machine to try again.
 
