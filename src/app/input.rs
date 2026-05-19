@@ -11891,6 +11891,8 @@ cyan = "#00ffff"
             "provider should still be present after fallback retry"
         );
         assert_eq!(app.sessions[0].status, SessionStatus::Active);
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
         assert!(
             !app.resume_fallback_candidates.contains_key(&session_id),
             "candidate should have been removed after fallback"
@@ -12051,6 +12053,34 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn quick_nonzero_exit_reports_minimal_output() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let args = vec![
+            "-c".to_string(),
+            "echo 'custom provider failed'; exit 1".to_string(),
+        ];
+        let client = PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
+            .expect("spawn nonzero-output");
+        app.providers.insert(session_id.clone(), client);
+        app.mark_session_desired_running(&session_id, true);
+        app.mark_session_status(&session_id, SessionStatus::Active);
+        app.selected_left = 1;
+        app.session_surface = SessionSurface::Agent;
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.drain_events();
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            app.status.text().contains("custom provider failed"),
+            "status should include provider output, got: {:?}",
+            app.status.text()
+        );
+    }
+
+    #[test]
     fn startup_auto_reopens_eligible_sessions() {
         let mut app = test_app(default_bindings());
         let session_id = app.sessions[0].id.clone();
@@ -12058,7 +12088,7 @@ cyan = "#00ffff"
             "codex".to_string(),
             crate::config::ProviderCommandConfig {
                 command: "/bin/sh".to_string(),
-                args: vec!["-c".to_string(), "exit 1".to_string()],
+                args: Vec::new(),
                 resume_args: Some(vec!["-c".to_string(), "sleep 5".to_string()]),
                 ..Default::default()
             },
