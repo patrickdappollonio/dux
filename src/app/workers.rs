@@ -1675,24 +1675,64 @@ fn agent_exit_status_message(
     excerpt: &str,
     reconnect_key: &str,
 ) -> String {
+    const MAX_EXIT_OUTPUT_CHARS: usize = 120;
+
     let outcome = match exit_success {
         Some(false) => "exited with an error",
         Some(true) => "exited",
         None => "exited",
     };
-    let excerpt = excerpt
+    let output = excerpt
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
-        .join(" | ");
-    if is_minimal && !excerpt.is_empty() {
+        .join(" ");
+    if output.is_empty() {
+        return format!("Agent CLI process has exited. Press \"{reconnect_key}\" to relaunch.");
+    }
+    if is_minimal {
+        let output = truncate_status_output(&output, MAX_EXIT_OUTPUT_CHARS);
+        let more = if output.truncated {
+            " Full output is visible in the agent pane."
+        } else {
+            ""
+        };
         return format!(
-            "Agent CLI process {outcome}. Output: {excerpt}. Press \"{reconnect_key}\" to relaunch."
+            "Agent CLI process {outcome}. Output: {}.{more} Press \"{reconnect_key}\" to relaunch.",
+            output.text
         );
     }
 
     format!("Agent CLI process has exited. Press \"{reconnect_key}\" to relaunch.")
+}
+
+struct TruncatedStatusOutput {
+    text: String,
+    truncated: bool,
+}
+
+fn truncate_status_output(text: &str, max_chars: usize) -> TruncatedStatusOutput {
+    let mut chars = text.chars();
+    let mut truncated = false;
+    let mut output = String::new();
+    for _ in 0..max_chars {
+        let Some(ch) = chars.next() else {
+            return TruncatedStatusOutput {
+                text: output,
+                truncated,
+            };
+        };
+        output.push(ch);
+    }
+    if chars.next().is_some() {
+        truncated = true;
+        output.push('…');
+    }
+    TruncatedStatusOutput {
+        text: output,
+        truncated,
+    }
 }
 
 /// Background job for "Add Project" when the user opted to have dux switch to
@@ -2891,6 +2931,30 @@ mod tests {
             _ => panic!("expected launch failure"),
         }
         assert!(worker_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn agent_exit_status_message_caps_long_provider_output() {
+        let long_output = "x".repeat(200);
+
+        let message = agent_exit_status_message(Some(false), true, &long_output, "r");
+
+        assert!(message.contains("Output: "));
+        assert!(message.contains("…"));
+        assert!(message.contains("Full output is visible in the agent pane."));
+        assert!(
+            !message.contains(&long_output),
+            "status should not embed the full provider output"
+        );
+    }
+
+    #[test]
+    fn agent_exit_status_message_concats_short_provider_output() {
+        let message = agent_exit_status_message(Some(false), true, "first\nsecond", "r");
+
+        assert!(message.contains("Output: first second."));
+        assert!(!message.contains('|'));
+        assert!(!message.contains("Full output is visible"));
     }
 
     #[test]
