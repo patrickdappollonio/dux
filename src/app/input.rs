@@ -10,6 +10,15 @@ const MIN_CENTER_WIDTH_PCT: u16 = 20;
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 const ESC_AMBIGUITY_TIMEOUT: Duration = Duration::from_millis(25);
 
+fn configure_project_text_input_mut(prompt: &mut PromptState) -> Option<&mut TextInput> {
+    match prompt {
+        PromptState::ConfigureStartupCommand { input, .. }
+        | PromptState::ConfigureProjectEnv { input, .. }
+        | PromptState::ConfigureGlobalEnv { input, .. } => Some(input),
+        _ => None,
+    }
+}
+
 /// Maximum size of `loading_input_buf`. During the loading phase we
 /// accumulate bytes only to detect a (possibly multi-byte) ExitInteractive
 /// binding. Since any realistic binding fits in well under this cap, we
@@ -1101,7 +1110,12 @@ impl App {
             self.input_target = InputTarget::None;
             return Ok(());
         }
-        if let PromptState::ConfigureStartupCommand { input, .. } = &mut self.prompt {
+        if let Some(input) = match &mut self.prompt {
+            PromptState::ConfigureStartupCommand { input, .. }
+            | PromptState::ConfigureProjectEnv { input, .. }
+            | PromptState::ConfigureGlobalEnv { input, .. } => Some(input),
+            _ => None,
+        } {
             if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 input.clear();
             } else {
@@ -1341,16 +1355,25 @@ impl App {
         self.set_busy(busy_message);
         thread::spawn(move || {
             let result = match &target {
-                PullTarget::Project { .. } => match git::is_dirty(&repo_path) {
-                    Ok(true) => Err(
-                        "Refresh blocked because the source checkout has uncommitted changes."
-                            .to_string(),
-                    ),
-                    Ok(false) => git::pull_current_branch(&repo_path)
+                PullTarget::Project { leading_branch, .. } => {
+                    let leading_branch = match leading_branch.clone() {
+                        Some(branch) => Ok(branch),
+                        None => git::current_branch(&repo_path)
+                            .map(|branch| leading_branch_for_project(&repo_path, &branch)),
+                    };
+                    leading_branch
+                        .and_then(|branch| {
+                            git::switch_branch_if_needed(&repo_path, &branch)?;
+                            if git::has_tracked_changes(&repo_path)? {
+                                return Err(anyhow::anyhow!(
+                                    "Refresh blocked because the source checkout has uncommitted changes."
+                                ));
+                            }
+                            git::pull_branch(&repo_path, &branch)
+                        })
                         .map(|_| git::current_branch(&repo_path).ok())
-                        .map_err(|e| e.to_string()),
-                    Err(e) => Err(e.to_string()),
-                },
+                        .map_err(|e| e.to_string())
+                }
                 PullTarget::Session => git::pull_current_branch(&repo_path)
                     .map(|_| None)
                     .map_err(|e| e.to_string()),
@@ -2687,19 +2710,30 @@ impl App {
             return Ok(false);
         }
 
-        if matches!(self.prompt, PromptState::ConfigureStartupCommand { .. })
-            && self.input_target == InputTarget::StartupCommand
+        if matches!(
+            self.prompt,
+            PromptState::ConfigureStartupCommand { .. }
+                | PromptState::ConfigureProjectEnv { .. }
+                | PromptState::ConfigureGlobalEnv { .. }
+        ) && self.input_target == InputTarget::StartupCommand
         {
             self.handle_startup_command_input_key(key)?;
             return Ok(false);
         }
 
-        if let PromptState::ConfigureStartupCommand { input, .. } = &mut self.prompt {
+        if matches!(
+            self.prompt,
+            PromptState::ConfigureStartupCommand { .. }
+                | PromptState::ConfigureProjectEnv { .. }
+                | PromptState::ConfigureGlobalEnv { .. }
+        ) {
             let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
             let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
             let files_action = self.bindings.lookup(&key, BindingScope::Files);
             if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                input.clear();
+                if let Some(input) = configure_project_text_input_mut(&mut self.prompt) {
+                    input.clear();
+                }
                 return Ok(false);
             }
             match palette_action.or(dialog_action).or(files_action) {
@@ -2708,11 +2742,19 @@ impl App {
                     self.input_target = InputTarget::None;
                 }
                 Some(Action::Confirm) => {
-                    self.apply_configure_startup_command()?;
+                    if matches!(self.prompt, PromptState::ConfigureGlobalEnv { .. }) {
+                        self.apply_configure_global_env()?;
+                    } else if matches!(self.prompt, PromptState::ConfigureProjectEnv { .. }) {
+                        self.apply_configure_project_env()?;
+                    } else {
+                        self.apply_configure_startup_command()?;
+                    }
                 }
                 Some(Action::EngageCommitInput) => {
                     self.input_target = InputTarget::StartupCommand;
-                    input.move_end();
+                    if let Some(input) = configure_project_text_input_mut(&mut self.prompt) {
+                        input.move_end();
+                    }
                 }
                 _ => {
                     if matches!(
@@ -2720,7 +2762,9 @@ impl App {
                         KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
                     ) {
                         self.input_target = InputTarget::StartupCommand;
-                        input.handle_key(key);
+                        if let Some(input) = configure_project_text_input_mut(&mut self.prompt) {
+                            input.handle_key(key);
+                        }
                     }
                 }
             }
@@ -4890,7 +4934,7 @@ impl App {
             OverlayMouseLayout::ConfigureStartupCommand { input } => input,
             _ => return,
         };
-        if let PromptState::ConfigureStartupCommand { input, .. } = &mut self.prompt {
+        if let Some(input) = configure_project_text_input_mut(&mut self.prompt) {
             let display_row = usize::from(row.saturating_sub(input_area.y));
             let display_col = usize::from(column.saturating_sub(input_area.x));
             input.set_cursor_from_display_pos(display_row, display_col);
@@ -6628,6 +6672,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
+            env: Default::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -6641,6 +6686,7 @@ mod tests {
                 leading_branch: project.leading_branch.clone(),
                 auto_reopen_agents: project.auto_reopen_agents,
                 startup_command: project.startup_command.clone(),
+                env: project.env.clone(),
             })
             .expect("seed project");
         let session = AgentSession {
@@ -7181,6 +7227,7 @@ not_a_real_action = ["x"]
                 target: PullTarget::Project {
                     project_id: app.projects[0].id.clone(),
                     project_name: app.projects[0].name.clone(),
+                    leading_branch: app.projects[0].leading_branch.clone(),
                 },
                 result: Ok(Some("feature/demo".to_string())),
             })
@@ -7190,6 +7237,10 @@ not_a_real_action = ["x"]
 
         assert!(app.pulls_in_flight.is_empty());
         assert_eq!(app.projects[0].current_branch, "feature/demo");
+        assert_eq!(
+            app.projects[0].branch_status,
+            ProjectBranchStatus::NotLeading
+        );
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
     }
 
@@ -9917,6 +9968,7 @@ not_a_real_action = ["x"]
                 leading_branch: Some("main".to_string()),
                 auto_reopen_agents: None,
                 startup_command: None,
+                env: Default::default(),
                 current_branch: "main".to_string(),
                 branch_status: ProjectBranchStatus::Unknown,
                 path_missing: false,
@@ -12701,6 +12753,8 @@ cyan = "#00ffff"
             "provider should still be present after fallback retry"
         );
         assert_eq!(app.sessions[0].status, SessionStatus::Active);
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
         assert!(
             !app.resume_fallback_candidates.contains_key(&session_id),
             "candidate should have been removed after fallback"
@@ -12861,6 +12915,34 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn quick_nonzero_exit_reports_minimal_output() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let args = vec![
+            "-c".to_string(),
+            "echo 'custom provider failed'; exit 1".to_string(),
+        ];
+        let client = PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
+            .expect("spawn nonzero-output");
+        app.providers.insert(session_id.clone(), client);
+        app.mark_session_desired_running(&session_id, true);
+        app.mark_session_status(&session_id, SessionStatus::Active);
+        app.selected_left = 1;
+        app.session_surface = SessionSurface::Agent;
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.drain_events();
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            app.status.text().contains("custom provider failed"),
+            "status should include provider output, got: {:?}",
+            app.status.text()
+        );
+    }
+
+    #[test]
     fn startup_auto_reopens_eligible_sessions() {
         let mut app = test_app(default_bindings());
         let session_id = app.sessions[0].id.clone();
@@ -12868,7 +12950,7 @@ cyan = "#00ffff"
             "codex".to_string(),
             crate::config::ProviderCommandConfig {
                 command: "/bin/sh".to_string(),
-                args: vec!["-c".to_string(), "exit 1".to_string()],
+                args: Vec::new(),
                 resume_args: Some(vec!["-c".to_string(), "sleep 5".to_string()]),
                 ..Default::default()
             },
@@ -14453,6 +14535,7 @@ cyan = "#00ffff"
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
+            env: Default::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -14466,6 +14549,7 @@ cyan = "#00ffff"
                 leading_branch: Some("main".to_string()),
                 auto_reopen_agents: None,
                 startup_command: None,
+                env: pinned.env.clone(),
             })
             .expect("seed pinned project");
         app.projects.push(pinned);
@@ -14605,6 +14689,7 @@ cyan = "#00ffff"
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
+            env: Default::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -14618,6 +14703,7 @@ cyan = "#00ffff"
                 leading_branch: Some("main".to_string()),
                 auto_reopen_agents: None,
                 startup_command: None,
+                env: pinned.env.clone(),
             })
             .expect("seed pinned project");
         app.projects.push(pinned);

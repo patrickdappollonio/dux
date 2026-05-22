@@ -58,6 +58,7 @@ impl App {
                         PullTarget::Project {
                             project_id,
                             project_name,
+                            ..
                         } => match result {
                             Ok(branch_name) => {
                                 if let Some(existing) = self
@@ -67,11 +68,20 @@ impl App {
                                     && let Some(branch_name) = branch_name
                                 {
                                     existing.current_branch = branch_name;
-                                    let warning = branch_warning_kind(
-                                        Path::new(&existing.path),
-                                        &existing.current_branch,
-                                    );
-                                    existing.branch_status = branch_status_from_warning(warning.as_ref());
+                                    existing.branch_status =
+                                        if existing.leading_branch.as_deref()
+                                            == Some(&existing.current_branch)
+                                        {
+                                            ProjectBranchStatus::Leading
+                                        } else if existing.leading_branch.is_some() {
+                                            ProjectBranchStatus::NotLeading
+                                        } else {
+                                            let warning = branch_warning_kind(
+                                                Path::new(&existing.path),
+                                                &existing.current_branch,
+                                            );
+                                            branch_status_from_warning(warning.as_ref())
+                                        };
                                 }
                                 self.set_info(format!(
                                     "Refreshed project \"{}\". Local branch is up to date with remote.",
@@ -567,6 +577,24 @@ impl App {
                 WorkerEvent::ProjectPersistenceCompleted { action, result } => {
                     self.apply_project_persistence_result(action, result);
                 }
+                WorkerEvent::GlobalEnvPersistenceCompleted { env, result } => match result {
+                    Ok(()) => {
+                        self.config.env = env;
+                        if self.config.env.is_empty() {
+                            self.set_info("Global environment variables cleared.");
+                        } else {
+                            self.set_info(format!(
+                                "Saved {} global environment variable(s). New agents and terminals will receive them unless a project overrides the same key.",
+                                self.config.env.len()
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        self.set_error(format!(
+                            "Could not save global environment variables to config.toml: {err}"
+                        ));
+                    }
+                },
                 WorkerEvent::StartupCommandRerunCompleted(result) => match result.status {
                     Ok(()) => {
                         let palette_key = self.bindings.label_for(Action::OpenPalette);
@@ -615,7 +643,13 @@ impl App {
         for (session_id, provider) in &mut self.providers {
             let exit_success = provider.try_wait().map(|status| status.success());
             if exit_success.is_some() || provider.is_exited() {
-                exited.push((session_id.clone(), exit_success));
+                let is_minimal = provider.has_minimal_output(5);
+                let excerpt = if is_minimal {
+                    provider.visible_text_excerpt(3)
+                } else {
+                    String::new()
+                };
+                exited.push((session_id.clone(), exit_success, is_minimal, excerpt));
             }
         }
 
@@ -623,7 +657,7 @@ impl App {
         // producing any output, retry with regular args (fresh session).
         // This handles `claude --continue || claude` style fallback.
         let mut retried = HashSet::new();
-        for (session_id, _) in &exited {
+        for (session_id, _, is_minimal, _) in &exited {
             if self.resume_fallback_candidates.remove(session_id).is_none() {
                 continue;
             }
@@ -631,11 +665,6 @@ impl App {
             // (no scrollback and ≤5 visible lines). A failed `--continue`
             // typically prints 1-2 lines of error; a real session produces
             // far more output and scrollback history.
-            let is_minimal = self
-                .providers
-                .get(session_id)
-                .map(|p| p.has_minimal_output(5))
-                .unwrap_or(true);
             if !is_minimal {
                 continue;
             }
@@ -668,7 +697,7 @@ impl App {
             }
         }
 
-        for (session_id, exit_success) in &exited {
+        for (session_id, exit_success, _, _) in &exited {
             if retried.contains(session_id) {
                 continue;
             }
@@ -684,17 +713,22 @@ impl App {
             // If the currently-viewed session just exited (and was not retried),
             // leave interactive mode.
             if let Some(current) = self.selected_session()
-                && exited.iter().any(|(id, _)| id == &current.id)
+                && let Some((_, exit_success, is_minimal, excerpt)) =
+                    exited.iter().find(|(id, _, _, _)| id == &current.id)
                 && !retried.contains(&current.id)
             {
                 let key = self.bindings.label_for(Action::ReconnectAgent);
                 if self.session_surface == SessionSurface::Agent {
+                    let status =
+                        agent_exit_status_message(*exit_success, *is_minimal, excerpt, &key);
                     self.input_target = InputTarget::None;
                     self.fullscreen_overlay = FullscreenOverlay::None;
                     self.focus = FocusPane::Left;
-                    self.set_info(format!(
-                        "Agent CLI process has exited. Press \"{key}\" to relaunch."
-                    ));
+                    if *exit_success == Some(false) {
+                        self.set_error(status);
+                    } else {
+                        self.set_info(status);
+                    }
                 } else {
                     self.set_info(format!(
                         "Agent CLI process exited. Companion terminal is still available; press \"{key}\" to relaunch the agent."
@@ -703,8 +737,9 @@ impl App {
             }
             // Trigger PR status check for exited agents.
             for sid in &exited {
-                if !retried.contains(&sid.0) {
-                    self.spawn_pr_check_for_session(&sid.0);
+                let session_id = &sid.0;
+                if !retried.contains(session_id) {
+                    self.spawn_pr_check_for_session(session_id);
                 }
             }
         }
@@ -792,6 +827,11 @@ impl App {
                 ProjectPersistenceAction::UpdateStartupCommand { project_name, .. } => {
                     self.set_error(format!(
                         "Could not save the startup command for project \"{project_name}\": {err}"
+                    ));
+                }
+                ProjectPersistenceAction::UpdateEnv { project_name, .. } => {
+                    self.set_error(format!(
+                        "Could not save environment variables for project \"{project_name}\": {err}"
                     ));
                 }
             }
@@ -939,6 +979,35 @@ impl App {
                     )),
                 }
             }
+            ProjectPersistenceAction::UpdateEnv {
+                project_id,
+                project_name,
+                env,
+            } => {
+                if let Some(project) = self
+                    .projects
+                    .iter_mut()
+                    .find(|project| project.id == project_id)
+                {
+                    project.env = env.clone();
+                }
+                if let Err(err) = self.persist_config_projects_from_runtime() {
+                    self.set_error(format!(
+                        "Environment variables saved to the database for \"{project_name}\", but config.toml could not be updated: {err:#}"
+                    ));
+                    return;
+                }
+                if env.is_empty() {
+                    self.set_info(format!(
+                        "Environment variables cleared for project \"{project_name}\"."
+                    ));
+                } else {
+                    self.set_info(format!(
+                        "Saved {} environment variable(s) for project \"{project_name}\". New agents and terminals will receive them.",
+                        env.len()
+                    ));
+                }
+            }
         }
     }
 
@@ -961,6 +1030,7 @@ impl App {
                             leading_branch: project.leading_branch.clone(),
                             auto_reopen_agents: project.auto_reopen_agents,
                             startup_command: project.startup_command.clone(),
+                            env: project.env.clone(),
                         })?;
                     }
                     ProjectPersistenceAction::Remove { project_id, .. }
@@ -994,11 +1064,32 @@ impl App {
                             startup_command.as_deref(),
                         )?;
                     }
+                    ProjectPersistenceAction::UpdateEnv {
+                        project_id, env, ..
+                    } => {
+                        store.update_project_env(project_id, env)?;
+                    }
                 }
                 Ok(())
             })()
             .map_err(|err| format!("{err:#}"));
             let _ = tx.send(WorkerEvent::ProjectPersistenceCompleted { action, result });
+        });
+    }
+
+    pub(crate) fn spawn_global_env_persistence(
+        &self,
+        env: std::collections::BTreeMap<String, String>,
+    ) {
+        let mut config = self.config.clone();
+        config.env = env.clone();
+        let config_path = self.paths.config_path.clone();
+        let tx = self.worker_tx.clone();
+        thread::spawn(move || {
+            let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
+            let result = crate::config::save_config(&config_path, &config, &bindings)
+                .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(WorkerEvent::GlobalEnvPersistenceCompleted { env, result });
         });
     }
 
@@ -1085,6 +1176,13 @@ impl App {
                 self.set_info(status_message);
             }
             AgentLaunchKind::ResumeFallback { status_message } => {
+                if self.selected_session().map(|selected| selected.id.as_str())
+                    == Some(session.id.as_str())
+                {
+                    self.show_agent_surface();
+                    self.input_target = InputTarget::Agent;
+                    self.fullscreen_overlay = FullscreenOverlay::Agent;
+                }
                 self.set_info(status_message);
             }
             AgentLaunchKind::StartupAutoReopen => {}
@@ -1571,6 +1669,72 @@ impl App {
     }
 }
 
+fn agent_exit_status_message(
+    exit_success: Option<bool>,
+    is_minimal: bool,
+    excerpt: &str,
+    reconnect_key: &str,
+) -> String {
+    const MAX_EXIT_OUTPUT_CHARS: usize = 120;
+
+    let outcome = match exit_success {
+        Some(false) => "exited with an error",
+        Some(true) => "exited",
+        None => "exited",
+    };
+    let output = excerpt
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if output.is_empty() {
+        return format!("Agent CLI process has exited. Press \"{reconnect_key}\" to relaunch.");
+    }
+    if is_minimal {
+        let output = truncate_status_output(&output, MAX_EXIT_OUTPUT_CHARS);
+        let more = if output.truncated {
+            " Full output is visible in the agent pane."
+        } else {
+            ""
+        };
+        return format!(
+            "Agent CLI process {outcome}. Output: {}.{more} Press \"{reconnect_key}\" to relaunch.",
+            output.text
+        );
+    }
+
+    format!("Agent CLI process has exited. Press \"{reconnect_key}\" to relaunch.")
+}
+
+struct TruncatedStatusOutput {
+    text: String,
+    truncated: bool,
+}
+
+fn truncate_status_output(text: &str, max_chars: usize) -> TruncatedStatusOutput {
+    let mut chars = text.chars();
+    let mut truncated = false;
+    let mut output = String::new();
+    for _ in 0..max_chars {
+        let Some(ch) = chars.next() else {
+            return TruncatedStatusOutput {
+                text: output,
+                truncated,
+            };
+        };
+        output.push(ch);
+    }
+    if chars.next().is_some() {
+        truncated = true;
+        output.push('…');
+    }
+    TruncatedStatusOutput {
+        text: output,
+        truncated,
+    }
+}
+
 /// Background job for "Add Project" when the user opted to have dux switch to
 /// the default branch first. Runs `git switch <target_branch>` in the source
 /// repo and reports the outcome via
@@ -1651,7 +1815,17 @@ pub(crate) fn run_checkout_project_default_branch_inspection_job(
     let repo_path = PathBuf::from(&project.path);
     let result = git::current_branch(&repo_path)
         .map(|branch| {
-            let warning_kind = branch_warning_kind(&repo_path, &branch);
+            let warning_kind = if let Some(leading_branch) = project.leading_branch.as_deref() {
+                if branch == leading_branch {
+                    None
+                } else {
+                    Some(BranchWarningKind::Known {
+                        default_branch: leading_branch.to_string(),
+                    })
+                }
+            } else {
+                branch_warning_kind(&repo_path, &branch)
+            };
             (branch, warning_kind)
         })
         .map_err(|err| format!("{err:#}"));
@@ -1743,7 +1917,18 @@ pub(crate) fn run_create_agent_job(
                     "Pulling latest changes for project \"{}\" before creating the agent...",
                     project.name
                 )));
-                if let Err(err) = git::pull_current_branch(&repo_path) {
+                let leading_branch = project
+                    .leading_branch
+                    .clone()
+                    .unwrap_or_else(|| project.current_branch.clone());
+                if let Err(err) = git::switch_branch_if_needed(&repo_path, &leading_branch)
+                    .and_then(|_| {
+                        if git::has_tracked_changes(&repo_path)? {
+                            return Err(anyhow::anyhow!("source checkout has uncommitted changes"));
+                        }
+                        git::pull_branch(&repo_path, &leading_branch)
+                    })
+                {
                     logger::error(&format!(
                         "pre-create pull failed for {}: {err}",
                         project.path
@@ -2186,6 +2371,16 @@ pub(crate) fn run_create_agent_job(
         let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(hint));
         return;
     }
+    let env = match crate::config::resolve_agent_env(&config.env, &project.env) {
+        Ok(env) => env,
+        Err(err) => {
+            let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(format!(
+                "Invalid environment variables for project \"{}\": {err:#}",
+                project.name
+            )));
+            return;
+        }
+    };
     let startup_result = project
         .startup_command
         .as_deref()
@@ -2203,6 +2398,7 @@ pub(crate) fn run_create_agent_job(
                     session: session.clone(),
                     command: command.to_string(),
                     terminal: config.startup_command_terminal.clone(),
+                    env: env.clone(),
                 },
             )
         });
@@ -2237,6 +2433,7 @@ pub(crate) fn run_create_agent_job(
     let request = AgentLaunchRequest {
         session,
         provider_config: provider_cfg,
+        env,
         resume: launch_with_resume,
         pty_size: (rows, cols),
         scrollback_lines: config.ui.agent_scrollback_lines,
@@ -2263,13 +2460,38 @@ pub(crate) fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sende
         request.provider_config.supports_session_resume()
     ));
 
-    let client = match PtyClient::spawn(
+    if let Err(message) = check_provider_available(&request.provider_config) {
+        logger::error(&format!(
+            "provider availability check failed for {}: {message}",
+            request.session.id
+        ));
+        if let AgentLaunchKind::Create {
+            repo_path,
+            owns_worktree,
+            ..
+        } = &request.kind
+            && *owns_worktree
+        {
+            let _ = git::remove_worktree(
+                Path::new(repo_path),
+                Path::new(&request.session.worktree_path),
+                &request.session.branch_name,
+            );
+        }
+        let _ = worker_tx.send(WorkerEvent::AgentLaunchFailed(Box::new(
+            AgentLaunchFailedData { request, message },
+        )));
+        return;
+    }
+
+    let client = match PtyClient::spawn_with_env(
         &request.provider_config.command,
-        launch_args,
+        &launch_args,
         Path::new(&request.session.worktree_path),
         rows,
         cols,
         request.scrollback_lines,
+        &request.env,
     ) {
         Ok(client) => client,
         Err(err) => {
@@ -2645,6 +2867,96 @@ mod tests {
     use super::*;
     use crate::model::PrState;
 
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed in {}: {}",
+            args,
+            cwd.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn test_session(worktree: &Path) -> AgentSession {
+        AgentSession {
+            id: "session-1".to_string(),
+            project_id: "project-1".to_string(),
+            project_path: Some(worktree.to_string_lossy().to_string()),
+            provider: ProviderKind::from_str("custom"),
+            source_branch: "main".to_string(),
+            branch_name: "agent-branch".to_string(),
+            worktree_path: worktree.to_string_lossy().to_string(),
+            title: None,
+            started_providers: Vec::new(),
+            desired_running: true,
+            auto_reopen_enabled: true,
+            status: SessionStatus::Active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn launch_job_fails_before_pty_when_provider_command_is_missing() {
+        let tmp = tempdir().expect("tempdir");
+        let (worker_tx, worker_rx) = mpsc::channel();
+        let request = AgentLaunchRequest {
+            session: test_session(tmp.path()),
+            provider_config: ProviderCommandConfig {
+                command: "definitely-missing-provider-command".to_string(),
+                args: vec!["--ignored".to_string()],
+                ..Default::default()
+            },
+            resume: false,
+            pty_size: (24, 80),
+            scrollback_lines: 1_000,
+            env: Vec::new(),
+            kind: AgentLaunchKind::Reconnect {
+                status_message: "reconnect".to_string(),
+            },
+        };
+
+        run_agent_launch_job(request, worker_tx);
+
+        match worker_rx.recv().expect("worker event") {
+            WorkerEvent::AgentLaunchFailed(data) => {
+                assert!(data.message.contains("definitely-missing-provider-command"));
+                assert!(data.message.contains("not found on PATH"));
+            }
+            _ => panic!("expected launch failure"),
+        }
+        assert!(worker_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn agent_exit_status_message_caps_long_provider_output() {
+        let long_output = "x".repeat(200);
+
+        let message = agent_exit_status_message(Some(false), true, &long_output, "r");
+
+        assert!(message.contains("Output: "));
+        assert!(message.contains("…"));
+        assert!(message.contains("Full output is visible in the agent pane."));
+        assert!(
+            !message.contains(&long_output),
+            "status should not embed the full provider output"
+        );
+    }
+
+    #[test]
+    fn agent_exit_status_message_concats_short_provider_output() {
+        let message = agent_exit_status_message(Some(false), true, "first\nsecond", "r");
+
+        assert!(message.contains("Output: first second."));
+        assert!(!message.contains('|'));
+        assert!(!message.contains("Full output is visible"));
+    }
+
     #[test]
     fn fork_worker_requires_name_from_prompt() {
         let tmp = tempdir().expect("tempdir");
@@ -2664,6 +2976,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
+            env: Default::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -2728,6 +3041,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
+            env: Default::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -2765,6 +3079,46 @@ mod tests {
             _ => panic!("expected pre-create pull failure"),
         }
         assert!(worker_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn checkout_project_default_branch_inspection_uses_stored_leading_branch() {
+        let repo = tempdir().expect("repo tempdir");
+        run_git(repo.path(), &["init", "-b", "trunk"]);
+        run_git(repo.path(), &["config", "user.name", "test"]);
+        run_git(repo.path(), &["config", "user.email", "t@t"]);
+        run_git(repo.path(), &["commit", "--allow-empty", "-m", "init"]);
+        run_git(repo.path(), &["switch", "-c", "feature"]);
+
+        let project = Project {
+            id: "project-1".to_string(),
+            name: "demo".to_string(),
+            path: repo.path().to_string_lossy().to_string(),
+            explicit_default_provider: None,
+            default_provider: ProviderKind::from_str("codex"),
+            leading_branch: Some("trunk".to_string()),
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: Default::default(),
+            current_branch: "feature".to_string(),
+            branch_status: ProjectBranchStatus::NotLeading,
+            path_missing: false,
+        };
+        let (worker_tx, worker_rx) = mpsc::channel();
+
+        run_checkout_project_default_branch_inspection_job(project, worker_tx);
+
+        match worker_rx.recv().expect("worker event") {
+            WorkerEvent::CheckoutProjectDefaultBranchInspected { result, .. } => {
+                let (current_branch, warning_kind) = result.expect("inspection");
+                assert_eq!(current_branch, "feature");
+                assert!(matches!(
+                    warning_kind,
+                    Some(BranchWarningKind::Known { default_branch }) if default_branch == "trunk"
+                ));
+            }
+            _ => panic!("expected checkout inspection event"),
+        }
     }
 
     #[test]

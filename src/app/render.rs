@@ -427,13 +427,8 @@ impl App {
             .buffer_mut()
             .set_style(frame_area, Style::default().bg(self.theme.app_bg));
 
-        let term_w = frame_area.width as usize;
-        let status_text_len = self.status.text().len() + 3; // " ● " prefix
-        let status_lines: u16 = if term_w > 0 && status_text_len > term_w {
-            2
-        } else {
-            1
-        };
+        let status_text = self.status.text();
+        let status_lines = status_footer_lines(&status_text, frame_area.width);
         let footer_h = 1 + status_lines; // 1 for hints + status lines
         let [header, body, footer] = Layout::default()
             .direction(Direction::Vertical)
@@ -3612,11 +3607,33 @@ impl App {
                 project_name,
                 input,
                 ..
+            }
+            | PromptState::ConfigureProjectEnv {
+                project_name,
+                input,
+                ..
+            }
+            | PromptState::ConfigureGlobalEnv {
+                project_name,
+                input,
+                ..
             } => {
+                let is_env = matches!(
+                    &self.prompt,
+                    PromptState::ConfigureProjectEnv { .. }
+                        | PromptState::ConfigureGlobalEnv { .. }
+                );
+                let is_global_env = matches!(&self.prompt, PromptState::ConfigureGlobalEnv { .. });
                 self.render_dim_overlay(frame);
-                let area = centered_rect_exact(76, 16, frame.area());
+                let area = centered_rect_exact(76, if is_env { 18 } else { 16 }, frame.area());
                 self.clear_overlay_area(frame, area);
-                let outer = self.themed_overlay_block("Configure Startup Command");
+                let outer = self.themed_overlay_block(if is_global_env {
+                    "Configure Global Environment"
+                } else if is_env {
+                    "Configure Project Environment"
+                } else {
+                    "Configure Startup Command"
+                });
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
                 let [label_area, input_area, hint_area] = Layout::default()
@@ -3629,14 +3646,25 @@ impl App {
                     .areas(inner);
                 Paragraph::new(vec![
                     Line::from(vec![
-                        Span::styled(" Project: ", Style::default().fg(self.theme.input_label_fg)),
+                        Span::styled(
+                            if is_global_env {
+                                " Scope: "
+                            } else {
+                                " Project: "
+                            },
+                            Style::default().fg(self.theme.input_label_fg),
+                        ),
                         Span::styled(
                             project_name.clone(),
                             Style::default().fg(self.theme.input_label_fg),
                         ),
                     ]),
                     Line::from(Span::styled(
-                        " Enter a command to run before the provider launches:",
+                        if is_env {
+                            " Enter one variable per line as KEY=value:"
+                        } else {
+                            " Enter a command to run before the provider launches:"
+                        },
                         Style::default().fg(self.theme.input_label_fg),
                     )),
                 ])
@@ -6999,12 +7027,8 @@ impl App {
     fn render_dim_overlay(&self, frame: &mut Frame) {
         let full = frame.area();
         // Keep the statusline (bottom rows) undimmed so errors stay visible.
-        let status_text_len = self.status.text().len() + 3;
-        let status_lines: u16 = if full.width > 0 && status_text_len > full.width as usize {
-            2
-        } else {
-            1
-        };
+        let status_text = self.status.text();
+        let status_lines = status_footer_lines(&status_text, full.width);
         let footer_h = 1 + status_lines; // hints bar + status line(s)
         let dim_h = full.height.saturating_sub(footer_h);
         let buf = frame.buffer_mut();
@@ -7514,12 +7538,31 @@ fn set_cell(buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, symbol: &str, sty
 /// trimmed. Using char-based counting avoids panics when the text contains
 /// multi-byte UTF-8 (e.g. box-drawing or block characters).
 fn truncate_status_text(text: &str, available: usize) -> String {
-    if text.chars().count() > available && available > 1 {
-        let mut truncated: String = text.chars().take(available - 1).collect();
-        truncated.push('…');
-        truncated
+    let char_count = text.chars().count();
+    if char_count <= available {
+        return text.to_owned();
+    }
+
+    match available {
+        0 => String::new(),
+        1 => "…".to_string(),
+        _ => {
+            let mut truncated: String = text.chars().take(available - 1).collect();
+            truncated.push('…');
+            truncated
+        }
+    }
+}
+
+fn status_footer_lines(status_text: &str, width: u16) -> u16 {
+    if width == 0 {
+        return 1;
+    }
+    let status_text_len = status_text.chars().count() + 3; // " ● " prefix
+    if status_text_len > width as usize {
+        2
     } else {
-        text.to_owned()
+        1
     }
 }
 
@@ -7902,18 +7945,23 @@ mod tests {
 
     #[test]
     fn truncate_status_text_available_zero() {
-        // Edge case: zero available should not panic.
-        assert_eq!(truncate_status_text("hello", 0), "hello");
+        assert_eq!(truncate_status_text("hello", 0), "");
     }
 
     #[test]
     fn truncate_status_text_available_one() {
-        // With only 1 char available, no room for truncation marker.
-        assert_eq!(truncate_status_text("hello", 1), "hello");
+        assert_eq!(truncate_status_text("hello", 1), "…");
     }
 
     #[test]
     fn truncate_status_text_empty_input() {
         assert_eq!(truncate_status_text("", 10), "");
+    }
+
+    #[test]
+    fn status_footer_lines_allows_at_most_two_status_rows() {
+        assert_eq!(status_footer_lines("short", 40), 1);
+        assert_eq!(status_footer_lines("this message is too wide", 10), 2);
+        assert_eq!(status_footer_lines("anything", 0), 1);
     }
 }

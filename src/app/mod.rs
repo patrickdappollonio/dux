@@ -722,6 +722,15 @@ pub(crate) enum PromptState {
         project_name: String,
         input: TextInput,
     },
+    ConfigureProjectEnv {
+        project_id: String,
+        project_name: String,
+        input: TextInput,
+    },
+    ConfigureGlobalEnv {
+        project_name: String,
+        input: TextInput,
+    },
     #[allow(dead_code)]
     StartupCommandLogs(StartupCommandLogPrompt),
     PickProjectWorktree(PickProjectWorktreePrompt),
@@ -1490,6 +1499,7 @@ pub(crate) enum AgentLaunchKind {
 pub(crate) struct AgentLaunchRequest {
     pub(crate) session: AgentSession,
     pub(crate) provider_config: ProviderCommandConfig,
+    pub(crate) env: Vec<(String, String)>,
     pub(crate) resume: bool,
     pub(crate) pty_size: (u16, u16),
     pub(crate) scrollback_lines: usize,
@@ -1628,6 +1638,10 @@ pub(crate) enum WorkerEvent {
         action: ProjectPersistenceAction,
         result: Result<(), String>,
     },
+    GlobalEnvPersistenceCompleted {
+        env: std::collections::BTreeMap<String, String>,
+        result: Result<(), String>,
+    },
     StartupCommandRerunCompleted(crate::startup::StartupCommandResult),
     StartupCommandLogsLoaded {
         scope_label: String,
@@ -1644,6 +1658,7 @@ pub(crate) enum PullTarget {
     Project {
         project_id: String,
         project_name: String,
+        leading_branch: Option<String>,
     },
     Session,
 }
@@ -1677,6 +1692,11 @@ pub(crate) enum ProjectPersistenceAction {
         project_id: String,
         project_name: String,
         startup_command: Option<String>,
+    },
+    UpdateEnv {
+        project_id: String,
+        project_name: String,
+        env: std::collections::BTreeMap<String, String>,
     },
 }
 
@@ -2736,6 +2756,8 @@ impl App {
             "toggle-project-auto-reopen-agents" => self.toggle_project_auto_reopen_agents(),
             "toggle-agent-auto-reopen" => self.toggle_agent_auto_reopen(),
             "configure-startup-command" => self.open_configure_startup_command(),
+            "configure-global-env" => self.open_configure_global_env(),
+            "configure-project-env" => self.open_configure_project_env(),
             "rerun-startup-command-on-agent" => self.rerun_startup_command_on_agent(),
             "read-startup-command-logs" => self.open_startup_command_logs(),
             "pull-project" => self.refresh_selected_project(),
@@ -3648,6 +3670,7 @@ pub(crate) fn load_projects(
             leading_branch,
             auto_reopen_agents: project.auto_reopen_agents,
             startup_command: project.startup_command.clone(),
+            env: project.env.clone(),
             current_branch,
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: missing,
@@ -3823,6 +3846,7 @@ fn merge_project_records(
         &mut merged_config.auto_reopen_agents,
         &mut merged_stored.auto_reopen_agents,
     );
+    merged_stored.env = merged_config.env.clone();
 
     Ok((merged_config, merged_stored))
 }
@@ -3897,6 +3921,7 @@ pub(crate) fn runtime_project_to_config(
         leading_branch: project.leading_branch.clone(),
         auto_reopen_agents: project.auto_reopen_agents,
         startup_command: project.startup_command.clone(),
+        env: project.env.clone(),
     }
 }
 
@@ -4037,6 +4062,7 @@ mod tests {
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
+            env: Default::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
@@ -4305,6 +4331,7 @@ leading_branch = "main"
                 leading_branch: Some("main".to_string()),
                 auto_reopen_agents: None,
                 startup_command: Some("npm install".to_string()),
+                env: Default::default(),
             })
             .expect("seed project");
 
@@ -4352,6 +4379,7 @@ leading_branch = "main"
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
+                env: Default::default(),
             })
             .expect("seed project");
 
@@ -4411,6 +4439,7 @@ leading_branch = "main"
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: None,
+                env: Default::default(),
             })
             .expect("seed project");
 
@@ -4468,6 +4497,7 @@ leading_branch = "main"
                 leading_branch: None,
                 auto_reopen_agents: None,
                 startup_command: Some("pnpm install".to_string()),
+                env: Default::default(),
             })
             .expect("seed project");
 
@@ -4616,6 +4646,7 @@ leading_branch = "main"
             leading_branch: Some("main".to_string()),
             auto_reopen_agents: None,
             startup_command: None,
+            env: Default::default(),
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Leading,
             path_missing: false,

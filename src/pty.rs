@@ -106,6 +106,7 @@ struct PendingIngest {
 
 impl PtyClient {
     /// Spawn a CLI command in a new PTY with the given size.
+    #[allow(dead_code)]
     pub fn spawn(
         command: &str,
         args: &[String],
@@ -113,6 +114,18 @@ impl PtyClient {
         rows: u16,
         cols: u16,
         scrollback_lines: usize,
+    ) -> Result<Self> {
+        Self::spawn_with_env(command, args, cwd, rows, cols, scrollback_lines, &[])
+    }
+
+    pub fn spawn_with_env(
+        command: &str,
+        args: &[String],
+        cwd: &Path,
+        rows: u16,
+        cols: u16,
+        scrollback_lines: usize,
+        env: &[(String, String)],
     ) -> Result<Self> {
         let pty_system = NativePtySystem::default();
         let pair = pty_system
@@ -130,6 +143,9 @@ impl PtyClient {
         }
         cmd.cwd(cwd);
         apply_terminal_env(&mut cmd);
+        for (name, value) in env {
+            cmd.env(name, value);
+        }
 
         let child = pair
             .slave
@@ -445,6 +461,14 @@ impl PtyClient {
             .unwrap_or(true)
     }
 
+    /// Returns a short plain-text excerpt from the visible terminal viewport.
+    pub fn visible_text_excerpt(&self, max_lines: usize) -> String {
+        self.terminal
+            .lock()
+            .map(|t| t.visible_text_excerpt(max_lines))
+            .unwrap_or_default()
+    }
+
     /// Returns `true` if the PTY received data since the last call, then
     /// clears the flag. Used to detect streaming activity for UI indicators
     /// without interfering with the snapshot dirty flag.
@@ -608,6 +632,29 @@ impl TerminalState {
     /// Used to detect failed `--continue` exits that print a short error message.
     fn has_minimal_output(&self, threshold: usize) -> bool {
         self.term.grid().history_size() == 0 && self.visible_line_count() <= threshold
+    }
+
+    fn visible_text_excerpt(&self, max_lines: usize) -> String {
+        let mut rows = vec![String::new(); usize::from(self.rows)];
+        for indexed in self.term.renderable_content().display_iter {
+            let Ok(row) = usize::try_from(indexed.point.line.0) else {
+                continue;
+            };
+            let Some(line) = rows.get_mut(row) else {
+                continue;
+            };
+            while line.chars().count() < indexed.point.column.0 {
+                line.push(' ');
+            }
+            line.push(indexed.cell.c);
+        }
+
+        rows.into_iter()
+            .map(|line| line.trim_end().to_string())
+            .filter(|line| !line.trim().is_empty())
+            .take(max_lines)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Whether the child process has enabled any mouse tracking mode
@@ -1174,6 +1221,39 @@ mod tests {
         assert_eq!(
             cmd.get_env("COLORTERM").and_then(|value| value.to_str()),
             Some("truecolor")
+        );
+    }
+
+    #[test]
+    fn spawn_with_env_passes_custom_environment() {
+        let args = vec!["-c".to_string(), "printf \"$DUX_TEST_PTY_ENV\"".to_string()];
+        let mut client = PtyClient::spawn_with_env(
+            "/bin/sh",
+            &args,
+            Path::new("."),
+            5,
+            40,
+            100,
+            &[("DUX_TEST_PTY_ENV".to_string(), "visible".to_string())],
+        )
+        .expect("spawn pty");
+
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let snapshot = client.snapshot();
+            if viewport_lines(&snapshot)
+                .iter()
+                .any(|line| line.contains("visible"))
+            {
+                let _ = client.try_wait();
+                return;
+            }
+        }
+
+        let snapshot = client.snapshot();
+        panic!(
+            "expected custom env output, got {:?}",
+            viewport_lines(&snapshot)
         );
     }
 

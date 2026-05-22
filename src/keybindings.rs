@@ -97,6 +97,8 @@ pub enum Action {
     ToggleProjectAutoReopenAgents,
     ToggleAgentAutoReopen,
     ConfigureStartupCommand,
+    ConfigureGlobalEnv,
+    ConfigureProjectEnv,
     RerunStartupCommandOnAgent,
     ReadStartupCommandLogs,
     ToggleRandomizedPetNameDefault,
@@ -287,6 +289,8 @@ impl Action {
             Action::ToggleProjectAutoReopenAgents => "toggle_project_auto_reopen_agents",
             Action::ToggleAgentAutoReopen => "toggle_agent_auto_reopen",
             Action::ConfigureStartupCommand => "configure_startup_command",
+            Action::ConfigureGlobalEnv => "configure_global_env",
+            Action::ConfigureProjectEnv => "configure_project_env",
             Action::RerunStartupCommandOnAgent => "rerun_startup_command_on_agent",
             Action::ReadStartupCommandLogs => "read_startup_command_logs",
             Action::ToggleRandomizedPetNameDefault => "toggle_randomized_pet_name_default",
@@ -406,6 +410,12 @@ impl Action {
             Action::ConfigureStartupCommand => {
                 "Configure the selected project's startup command for newly created agents."
             }
+            Action::ConfigureGlobalEnv => {
+                "Configure environment variables for every project's agents and terminals."
+            }
+            Action::ConfigureProjectEnv => {
+                "Configure the selected project's environment variables for agents and terminals."
+            }
             Action::RerunStartupCommandOnAgent => {
                 "Rerun the selected agent's project startup command."
             }
@@ -508,6 +518,8 @@ impl Action {
             | Action::ToggleProjectAutoReopenAgents
             | Action::ToggleAgentAutoReopen
             | Action::ConfigureStartupCommand
+            | Action::ConfigureGlobalEnv
+            | Action::ConfigureProjectEnv
             | Action::RerunStartupCommandOnAgent
             | Action::ReadStartupCommandLogs
             | Action::ToggleRandomizedPetNameDefault
@@ -744,6 +756,28 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         palette: Some(PaletteEntry {
             name: "configure-startup-command",
             description: "Configure the selected project's startup command",
+        }),
+    },
+    BindingDef {
+        action: Action::ConfigureGlobalEnv,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "configure-global-env",
+            description: "Configure environment variables inherited by every project",
+        }),
+    },
+    BindingDef {
+        action: Action::ConfigureProjectEnv,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "configure-project-env",
+            description: "Configure environment variables for the selected project's agents and terminals",
         }),
     },
     BindingDef {
@@ -1998,8 +2032,12 @@ impl RuntimeBindings {
     }
 
     /// All palette-visible bindings matching a filter string.
+    ///
+    /// Matching is case-insensitive and treats runs of whitespace and dashes
+    /// as interchangeable separators, so a query like `open current pr` still
+    /// matches the dashed command name `open-current-pr`.
     pub fn filtered_palette(&self, input: &str) -> Vec<&RuntimeBinding> {
-        let needle = input.trim().to_lowercase();
+        let needle = normalize_palette_match(input);
         if needle.is_empty() {
             return self
                 .bindings
@@ -2011,10 +2049,10 @@ impl RuntimeBindings {
         let mut desc_matches = Vec::new();
         for b in &self.bindings {
             if let Some(name) = b.palette_name {
-                if name.contains(&needle) {
+                if normalize_palette_match(name).contains(&needle) {
                     name_matches.push(b);
                 } else if let Some(desc) = b.palette_description
-                    && desc.to_lowercase().contains(&needle)
+                    && normalize_palette_match(desc).contains(&needle)
                 {
                     desc_matches.push(b);
                 }
@@ -2023,6 +2061,31 @@ impl RuntimeBindings {
         name_matches.extend(desc_matches);
         name_matches
     }
+}
+
+/// Lowercase `s` and collapse any run of whitespace or dash characters into a
+/// single `-`, with no leading or trailing separator. This lets the palette
+/// match natural-language queries like `open current pr` against dashed
+/// command names like `open-current-pr`.
+fn normalize_palette_match(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last_was_sep = false;
+    for c in s.chars() {
+        if c.is_whitespace() || c == '-' {
+            if !out.is_empty() {
+                last_was_sep = true;
+            }
+        } else {
+            if last_was_sep {
+                out.push('-');
+                last_was_sep = false;
+            }
+            for lc in c.to_lowercase() {
+                out.push(lc);
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -2431,6 +2494,78 @@ mod tests {
                     .to_lowercase()
                     .contains("toggle")
         }));
+    }
+
+    #[test]
+    fn normalize_palette_match_collapses_separators() {
+        assert_eq!(normalize_palette_match(""), "");
+        assert_eq!(normalize_palette_match("   "), "");
+        assert_eq!(normalize_palette_match("---"), "");
+        assert_eq!(
+            normalize_palette_match("open-current-pr"),
+            "open-current-pr"
+        );
+        assert_eq!(
+            normalize_palette_match("open current pr"),
+            "open-current-pr"
+        );
+        assert_eq!(
+            normalize_palette_match("  open   current\tpr  "),
+            "open-current-pr"
+        );
+        assert_eq!(normalize_palette_match("Fork Agent"), "fork-agent");
+        // Mixed dashes and spaces collapse to a single separator each.
+        assert_eq!(normalize_palette_match("a - b -- c"), "a-b-c");
+    }
+
+    #[test]
+    fn filtered_palette_treats_spaces_as_dashes_in_query() {
+        // Users often type natural-language queries with spaces (e.g. "open current pr")
+        // instead of typing the dashed command name verbatim. The palette should still
+        // match the underlying command name "open-current-pr".
+        let bindings = default_bindings();
+
+        let results = bindings.filtered_palette("open current pr");
+        let names: Vec<&str> = results
+            .iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect();
+        assert!(
+            names.contains(&"open-current-pr"),
+            "expected 'open-current-pr' in results, got {names:?}"
+        );
+
+        let results = bindings.filtered_palette("change agent provider");
+        let names: Vec<&str> = results
+            .iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect();
+        assert!(
+            names.contains(&"change-agent-provider"),
+            "expected 'change-agent-provider' in results, got {names:?}"
+        );
+
+        // Multiple/leading/trailing whitespace should not break matching.
+        let results = bindings.filtered_palette("  fork   agent  ");
+        let names: Vec<&str> = results
+            .iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect();
+        assert!(
+            names.contains(&"fork-agent"),
+            "expected 'fork-agent' in results, got {names:?}"
+        );
+
+        // Existing dashed-input behavior must still work.
+        let results = bindings.filtered_palette("open-current-pr");
+        let names: Vec<&str> = results
+            .iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect();
+        assert!(
+            names.contains(&"open-current-pr"),
+            "expected dashed query to still match, got {names:?}"
+        );
     }
 
     #[test]
