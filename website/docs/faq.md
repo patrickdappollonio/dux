@@ -90,7 +90,7 @@ dux injects `DUX_WORKTREE_PATH` and friends into every startup command. See
 ### What's a macro?
 
 A reusable snippet of text you fire into an agent or a terminal with one
-keystroke. See [Macros](/docs/macros).
+keystroke. See [Managing Macros](/docs/macros).
 
 ## Keybindings & themes
 

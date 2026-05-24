@@ -1,5 +1,5 @@
 ---
-title: Themes
+title: Managing Themes
 description: Switch the built-in themes, preview them live, or write your own from scratch.
 group: Guides
 order: 40

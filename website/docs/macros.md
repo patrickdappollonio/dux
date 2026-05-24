@@ -1,5 +1,5 @@
 ---
-title: Macros
+title: Managing Macros
 description: Define reusable text snippets in config and send them to an agent or terminal with a quick keystroke.
 group: Guides
 order: 20
