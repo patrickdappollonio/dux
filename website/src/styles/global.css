@@ -71,6 +71,18 @@
     cursor: not-allowed;
   }
 
+  /* External-link glyph appended by the link-hardening script. Sized relative
+     to the surrounding text and tinted to the link color via currentColor. */
+  .ext-icon {
+    display: inline-block;
+    width: 0.78em;
+    height: 0.78em;
+    margin-left: 0.18em;
+    vertical-align: -0.1em;
+    opacity: 0.6;
+    flex-shrink: 0;
+  }
+
   /* Inline code chips for paths/commands in prose. Scoped to NOT touch
      <pre><code> blocks (those keep their own styling). */
   :not(pre) > code {

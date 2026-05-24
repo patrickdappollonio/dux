@@ -82,6 +82,9 @@ jobs:
         working-directory: website
         env:
           NODE_ENV: production
+          # Enables analytics injection. Only set here, so local dev and local
+          # or PR builds never load the tracking script.
+          ENABLE_ANALYTICS: "true"
         run: npm run build
 
       - name: Verify install.sh was copied into the build output

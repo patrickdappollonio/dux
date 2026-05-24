@@ -18,6 +18,10 @@ const {
   emitStructuredData = true,
 } = Astro.props;
 
+// Analytics is opt-in via an env flag set only by the deploy workflow, so it
+// never loads during local dev or local/PR builds, only on the published site.
+const enableAnalytics = process.env.ENABLE_ANALYTICS === "true";
+
 const site = Astro.site ?? new URL("https://getdux.app");
 const canonical = new URL(Astro.url.pathname, site).toString();
 const ogImageURL = new URL(ogImage, site).toString();
@@ -162,15 +166,62 @@ const sd = {
       )
     }
 
-    {/* Privacy-friendly analytics (Umami). Loaded on every page. */}
-    <script
-      is:inline
-      defer
-      src="https://m.blogmetrics.fyi/script.js"
-      data-website-id="43bdb37d-104a-473d-b37d-143f390ccd4d"
-    />
+    {/* Privacy-friendly analytics (Umami). Only on the published site. */}
+    {
+      enableAnalytics && (
+        <script
+          is:inline
+          defer
+          src="https://m.blogmetrics.fyi/script.js"
+          data-website-id="43bdb37d-104a-473d-b37d-143f390ccd4d"
+        />
+      )
+    }
   </head>
   <body class="text-[color:var(--color-text)]">
     <slot />
+
+    {/* Mark every off-site link: open in a new tab, harden rel, and (for
+        inline links) append an external-link glyph. Runs once on load and
+        covers both hand-authored components and rendered Markdown. */}
+    <script is:inline>
+      (() => {
+        const ICON =
+          '<svg class="ext-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>';
+        const isExternal = (a) => {
+          try {
+            const u = new URL(a.href, location.href);
+            return (
+              (u.protocol === "http:" || u.protocol === "https:") &&
+              u.host !== location.host
+            );
+          } catch {
+            return false;
+          }
+        };
+        document.querySelectorAll("a[href]").forEach((a) => {
+          if (!isExternal(a) || a.dataset.external === "done") return;
+          a.target = "_blank";
+          const rel = new Set(
+            (a.getAttribute("rel") || "").split(/\s+/).filter(Boolean),
+          );
+          rel.add("noopener");
+          rel.add("noreferrer");
+          rel.add("nofollow");
+          a.setAttribute("rel", [...rel].join(" "));
+          const cardLike =
+            a.matches(".card, .btn-primary, .btn-ghost") ||
+            a.querySelector("div, p, h1, h2, h3, h4, h5, h6, img");
+          if (
+            !cardLike &&
+            a.dataset.noExtIcon === undefined &&
+            !a.querySelector(".ext-icon")
+          ) {
+            a.insertAdjacentHTML("beforeend", ICON);
+          }
+          a.dataset.external = "done";
+        });
+      })();
+    </script>
   </body>
 </html>
