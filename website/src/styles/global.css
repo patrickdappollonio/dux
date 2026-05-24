@@ -180,4 +180,147 @@
   .anchor-offset {
     scroll-margin-top: 5rem;
   }
+
+  /* Markdown docs prose. Styles bare elements emitted by the Markdown
+     renderer, scoped so anything inside a `.not-prose` subtree (e.g. the
+     card grid on the docs index) is left alone. */
+  .prose-docs {
+    color: var(--color-muted);
+    font-size: 0.95rem;
+    line-height: 1.75;
+  }
+  .prose-docs > :first-child {
+    margin-top: 0;
+  }
+  .prose-docs :where(h2):not(:where(.not-prose *)) {
+    font-family: var(--font-display);
+    letter-spacing: -0.02em;
+    color: var(--color-text);
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-top: 2.75rem;
+    margin-bottom: 1rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 1px solid var(--color-border-soft);
+    scroll-margin-top: 5rem;
+  }
+  .prose-docs :where(h3):not(:where(.not-prose *)) {
+    font-family: var(--font-display);
+    color: var(--color-text);
+    font-size: 1.2rem;
+    font-weight: 600;
+    margin-top: 2rem;
+    margin-bottom: 0.75rem;
+    scroll-margin-top: 5rem;
+  }
+  .prose-docs :where(h4):not(:where(.not-prose *)) {
+    color: var(--color-text);
+    font-weight: 600;
+    margin-top: 1.5rem;
+    margin-bottom: 0.5rem;
+    scroll-margin-top: 5rem;
+  }
+  .prose-docs :where(p):not(:where(.not-prose *)) {
+    margin: 1rem 0;
+  }
+  .prose-docs :where(a):not(:where(.not-prose *)) {
+    color: var(--color-accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    text-decoration-color: color-mix(in oklab, var(--color-accent) 40%, transparent);
+  }
+  .prose-docs :where(a):not(:where(.not-prose *)):hover {
+    text-decoration-color: var(--color-accent);
+  }
+  .prose-docs :where(strong):not(:where(.not-prose *)) {
+    color: var(--color-text);
+    font-weight: 600;
+  }
+  .prose-docs :where(ul, ol):not(:where(.not-prose *)) {
+    margin: 1rem 0;
+    padding-left: 1.5rem;
+  }
+  .prose-docs :where(ul):not(:where(.not-prose *)) {
+    list-style: disc;
+  }
+  .prose-docs :where(ol):not(:where(.not-prose *)) {
+    list-style: decimal;
+  }
+  .prose-docs :where(li):not(:where(.not-prose *)) {
+    margin: 0.4rem 0;
+  }
+  .prose-docs :where(li):not(:where(.not-prose *))::marker {
+    color: var(--color-dim);
+  }
+  /* Let long inline paths/commands wrap on narrow screens instead of
+     overflowing (the global chip style sets nowrap). */
+  .prose-docs :where(:not(pre) > code):not(:where(.not-prose *)) {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .prose-docs :where(pre):not(:where(.not-prose *)) {
+    margin: 1.25rem 0;
+    padding: 1rem 1.25rem;
+    border-radius: 0.6rem;
+    border: 1px solid var(--color-border);
+    overflow-x: auto;
+    font-size: 0.85rem;
+    line-height: 1.6;
+  }
+  .prose-docs :where(blockquote):not(:where(.not-prose *)) {
+    border-left: 3px solid var(--color-accent);
+    padding-left: 1rem;
+    margin: 1.25rem 0;
+    color: var(--color-muted);
+    font-style: italic;
+  }
+  .prose-docs :where(hr):not(:where(.not-prose *)) {
+    border: 0;
+    border-top: 1px solid var(--color-border-soft);
+    margin: 2.5rem 0;
+  }
+  .prose-docs :where(table):not(:where(.not-prose *)) {
+    display: block;
+    width: 100%;
+    border-collapse: collapse;
+    overflow-x: auto;
+    margin: 1.25rem 0;
+    font-size: 0.875rem;
+  }
+  .prose-docs :where(th, td):not(:where(.not-prose *)) {
+    border: 1px solid var(--color-border-soft);
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+  }
+  .prose-docs :where(th):not(:where(.not-prose *)) {
+    background: var(--color-panel-2);
+    color: var(--color-text);
+    font-weight: 600;
+  }
+  .prose-docs :where(img):not(:where(.not-prose *)) {
+    max-width: 100%;
+    height: auto;
+    border-radius: 0.5rem;
+    border: 1px solid var(--color-border);
+    margin: 1.25rem 0;
+  }
+  /* Clickable "#" appended to each heading by rehype-autolink-headings. The
+     anchor itself is empty; the glyph is drawn here so it stays out of the
+     heading text the table of contents is generated from. */
+  .prose-docs .heading-anchor {
+    color: var(--color-dim);
+    text-decoration: none;
+    opacity: 0;
+    transition: opacity 0.15s ease, color 0.15s ease;
+  }
+  .prose-docs .heading-anchor::after {
+    content: "#";
+    margin-left: 0.4rem;
+  }
+  .prose-docs :where(h2, h3, h4):hover .heading-anchor {
+    opacity: 1;
+  }
+  .prose-docs .heading-anchor:hover {
+    color: var(--color-accent);
+  }
 }

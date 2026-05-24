@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://getdux.app/sitemap.xml
+Sitemap: https://getdux.app/sitemap-index.xml

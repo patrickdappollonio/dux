@@ -11,8 +11,11 @@
     "astro": "astro"
   },
   "dependencies": {
-    "astro": "^6.3.7",
+    "@astrojs/sitemap": "^3.7.2",
     "@tailwindcss/postcss": "^4.3.0",
+    "astro": "^6.3.7",
+    "rehype-autolink-headings": "^7.1.0",
+    "rehype-slug": "^6.0.0",
     "tailwindcss": "^4.3.0"
   }
 }

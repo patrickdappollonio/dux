@@ -1,0 +1,63 @@
+---
+import { getCollection } from "astro:content";
+import DocsLayout from "../../layouts/DocsLayout.astro";
+
+const entries = (await getCollection("docs")).sort(
+  (a, b) =>
+    a.data.order - b.data.order || a.data.title.localeCompare(b.data.title),
+);
+
+interface Group {
+  name: string;
+  minOrder: number;
+  items: typeof entries;
+}
+const groups: Group[] = [];
+for (const entry of entries) {
+  let group = groups.find((g) => g.name === entry.data.group);
+  if (!group) {
+    group = { name: entry.data.group, minOrder: entry.data.order, items: [] };
+    groups.push(group);
+  }
+  group.items.push(entry);
+  group.minOrder = Math.min(group.minOrder, entry.data.order);
+}
+groups.sort((a, b) => a.minOrder - b.minOrder || a.name.localeCompare(b.name));
+---
+
+<DocsLayout
+  title="Documentation"
+  description="Guides for configuring, theming, and extending dux."
+>
+  <p>
+    Everything you need to bend dux to your will. Start with the basics, then dig
+    into themes and custom providers. Every page is a plain Markdown file — if
+    something's missing or wrong, the edit link at the bottom of each page takes
+    you straight to the source.
+  </p>
+
+  {
+    groups.map((group) => (
+      <section class="not-prose mt-10">
+        <h2 class="mono text-xs font-semibold uppercase tracking-wider text-[color:var(--color-dim)]">
+          {group.name}
+        </h2>
+        <div class="mt-4 grid gap-4 sm:grid-cols-2">
+          {group.items.map((entry) => (
+            <a
+              href={`/docs/${entry.id}`}
+              class="card p-5 transition-colors hover:border-[color:var(--color-accent)]/50"
+            >
+              <div class="heading font-semibold text-[color:var(--color-text)]">
+                {entry.data.title}
+              </div>
+              <p class="mt-1.5 text-sm text-[color:var(--color-muted)]">
+                {entry.data.description}
+              </p>
+            </a>
+          ))}
+        </div>
+      </section>
+    ))
+  }
+</DocsLayout>
