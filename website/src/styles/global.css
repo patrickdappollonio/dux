@@ -238,7 +238,10 @@
     display: inline-flex;
     align-items: center;
     white-space: nowrap;
-    padding: 0.05rem 0.4rem;
+    line-height: 1;
+    /* Slightly more top than bottom padding: uppercase has no descenders, so
+       symmetric padding reads top-heavy. This optically centers the caps. */
+    padding: 0.3em 0.55em 0.2em;
     border-radius: 999px;
     font-size: 0.6rem;
     font-weight: 600;
