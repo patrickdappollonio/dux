@@ -103,6 +103,7 @@ When making changes, edit only the relevant submodule. If you need to add a new 
 - When adding, removing, or changing keybindings, update `README.md` if it documents controls or shortcuts.
 - When changing features, pane layouts, config paths, or provider behavior, verify that `README.md` still accurately describes the application.
 - The README intentionally omits a full keybinding reference to avoid staleness. Do not add a section listing specific key combinations back to it. The in-app `?` help overlay is the authoritative reference for key combinations. Documenting how to configure keybindings (the `[keys]` config format, syntax, and examples) is acceptable — just avoid enumerating individual bindings that would go stale.
+- The marketing/documentation site lives in `website/` and is published to `getdux.app` (GitHub Pages). When a change affects anything the site describes or shows — features, command-palette actions, pane layout, install methods, config format, provider defaults, the resource footprint, screenshots, or the install script — update `website/` in the same change so the site stays accurate. Match the site's existing playful tone and never hardcode anything that drifts: avoid counting features/methods in headings and avoid enumerating specific keybindings (the in-app `?` overlay remains authoritative). New copy that references real values (paths, commands, version, RAM usage) should reflect what the app actually does.
 
 ## Recommendations For Debugging
 
