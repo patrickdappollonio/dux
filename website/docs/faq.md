@@ -62,7 +62,7 @@ agent-opened PRs; skip it and dux quietly disables anything GitHub.
 ### Any recommended tools or MCP servers?
 
 See [Recommended tools](/docs/recommended-tools) for providers, MCP servers,
-skills, and companion CLIs that pair well with dux.
+and skills that pair well with dux.
 
 ## Configuration
 

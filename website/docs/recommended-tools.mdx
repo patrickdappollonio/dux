@@ -1,0 +1,91 @@
+---
+title: Recommended tools
+description: A curated set of providers, MCP servers, and skills that work well with dux.
+group: Reference
+order: 90
+---
+
+import ToolGrid from "../src/components/ToolGrid.astro";
+import ToolCard from "../src/components/ToolCard.astro";
+
+dux runs your real CLI in a real terminal, with no protocol layer in between. So
+whatever providers, MCP servers, and skills you already use keep working inside a
+dux agent exactly as they do in your shell. Everything below is hand-picked to
+genuinely pair well with a multi-agent dux workflow.
+
+## Tools
+
+The CLIs that power agents, plus the tooling dux leans on. The four defaults ship
+preconfigured; any CLI with an interactive and a headless mode can be added (see
+[Custom CLI Agents](/docs/custom-agents)).
+
+<ToolGrid>
+  <ToolCard
+    name="Claude Code"
+    repo="anthropics/claude-code"
+    description="Anthropic's coding CLI, and dux's default provider."
+  />
+  <ToolCard
+    name="Codex"
+    repo="openai/codex"
+    description="OpenAI's coding agent for the terminal."
+  />
+  <ToolCard
+    name="OpenCode"
+    repo="anomalyco/opencode"
+    description="An open-source, provider-agnostic coding agent."
+  />
+  <ToolCard
+    name="Gemini CLI"
+    repo="google-gemini/gemini-cli"
+    description="Google's open-source coding agent for the terminal."
+  />
+  <ToolCard
+    name="GitHub CLI"
+    repo="cli/cli"
+    description="dux uses gh for PR tracking, creating agents from PRs, and agent-opened PRs."
+  />
+</ToolGrid>
+
+## MCP servers
+
+Model Context Protocol servers extend what an agent can reach: repositories,
+browsers, live docs, and more. Configure them in your CLI the way you normally
+would, and they work unchanged inside a dux agent.
+
+<ToolGrid>
+  <ToolCard
+    name="GitHub MCP Server"
+    repo="github/github-mcp-server"
+    description="The official GitHub MCP server: issues, PRs, and code search from inside the agent."
+  />
+  <ToolCard
+    name="Context7"
+    repo="upstash/context7"
+    description="Pulls up-to-date, version-accurate library docs into the agent's context."
+  />
+  <ToolCard
+    name="Playwright MCP"
+    repo="microsoft/playwright-mcp"
+    description="Lets agents drive a real browser to navigate, click, and verify the UI."
+  />
+</ToolGrid>
+
+## Skills
+
+Skills are reusable instructions and workflows your CLI loads on demand (for
+example, Claude Code's Agent Skills). Because dux launches the real CLI, your
+skills apply per agent and per worktree, exactly as they do elsewhere.
+
+<ToolGrid>
+  <ToolCard
+    name="Agent Skills"
+    repo="anthropics/skills"
+    description="Anthropic's public collection of Agent Skills you can drop into Claude Code."
+  />
+  <ToolCard
+    name="Superpowers"
+    repo="obra/superpowers"
+    description="A popular skills framework and development methodology for agentic coding."
+  />
+</ToolGrid>

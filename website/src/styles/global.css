@@ -193,6 +193,87 @@
     scroll-margin-top: 5rem;
   }
 
+  /* Recommendation blocks (Recommended tools page). */
+  .tool-grid {
+    display: grid;
+    gap: 1rem;
+    grid-template-columns: 1fr;
+    margin: 1.25rem 0;
+  }
+  @media (min-width: 640px) {
+    .tool-grid {
+      grid-template-columns: 1fr 1fr;
+    }
+  }
+  .tool-card {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--color-border);
+    background: color-mix(in oklab, var(--color-panel) 80%, transparent);
+    border-radius: 0.75rem;
+    padding: 1.1rem 1.15rem;
+  }
+  .tool-card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  .tool-card-title {
+    font-family: var(--font-display);
+    font-size: 1rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--color-text);
+    margin: 0;
+  }
+  .tool-card-desc {
+    flex: 1;
+    margin: 0.5rem 0 0.9rem;
+    font-size: 0.875rem;
+    line-height: 1.55;
+    color: var(--color-muted);
+  }
+  .gh-stars {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    flex-shrink: 0;
+    white-space: nowrap;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--color-warning);
+    background: color-mix(in oklab, var(--color-warning) 12%, transparent);
+    border: 1px solid color-mix(in oklab, var(--color-warning) 25%, transparent);
+  }
+  .gh-stars svg {
+    width: 0.8em;
+    height: 0.8em;
+  }
+  .tool-card-btn {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.5rem;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--color-muted);
+    transition:
+      color 0.15s ease,
+      border-color 0.15s ease,
+      background-color 0.15s ease;
+  }
+  .tool-card-btn:hover {
+    color: var(--color-accent);
+    border-color: color-mix(in oklab, var(--color-accent) 50%, transparent);
+    background: color-mix(in oklab, var(--color-accent) 6%, transparent);
+  }
+
   /* Markdown docs prose. Styles bare elements emitted by the Markdown
      renderer, scoped so anything inside a `.not-prose` subtree (e.g. the
      card grid on the docs index) is left alone. */

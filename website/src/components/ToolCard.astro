@@ -1,0 +1,31 @@
+---
+// A recommendation block: title, optional GitHub stars, a description, and a
+// button to the tool's site. Pass `repo` ("org/name") for stars and a default
+// GitHub link; pass `href` to point the button somewhere other than the repo.
+import GhStars from "./GhStars.astro";
+
+interface Props {
+  name: string;
+  description: string;
+  repo?: string;
+  href?: string;
+}
+const { name, description, repo, href } = Astro.props;
+const url = href ?? (repo ? `https://github.com/${repo}` : undefined);
+const label = url && !url.includes("github.com") ? "Visit site" : "View on GitHub";
+---
+
+<div class="tool-card">
+  <div class="tool-card-head">
+    <h3 class="tool-card-title">{name}</h3>
+    {repo && <GhStars repo={repo} />}
+  </div>
+  <p class="tool-card-desc">{description}</p>
+  {
+    url && (
+      <a href={url} class="tool-card-btn">
+        {label}
+      </a>
+    )
+  }
+</div>

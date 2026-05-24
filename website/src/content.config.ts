@@ -6,7 +6,7 @@ import { glob } from "astro/loaders";
 // `/docs/<filename>` automatically. The sidebar, anchors, and table of
 // contents are all generated from the file and its headings.
 const docs = defineCollection({
-  loader: glob({ pattern: "**/*.md", base: "./docs" }),
+  loader: glob({ pattern: "**/*.{md,mdx}", base: "./docs" }),
   schema: z.object({
     // Page title. Shown as the <h1>, the browser tab, and the sidebar label.
     title: z.string(),

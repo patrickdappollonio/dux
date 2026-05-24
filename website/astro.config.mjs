@@ -1,5 +1,6 @@
 import { defineConfig } from "astro/config";
 import sitemap from "@astrojs/sitemap";
+import mdx from "@astrojs/mdx";
 import rehypeSlug from "rehype-slug";
 import rehypeAutolinkHeadings from "rehype-autolink-headings";
 
@@ -7,7 +8,9 @@ export default defineConfig({
   site: "https://getdux.app",
   output: "static",
   trailingSlash: "ignore",
-  integrations: [sitemap()],
+  // mdx() inherits the markdown config below (heading anchors, Shiki) so .mdx
+  // docs get the same treatment as .md, plus inline components.
+  integrations: [mdx(), sitemap()],
   build: {
     inlineStylesheets: "auto",
   },

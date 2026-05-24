@@ -85,6 +85,9 @@ jobs:
           # Enables analytics injection. Only set here, so local dev and local
           # or PR builds never load the tracking script.
           ENABLE_ANALYTICS: "true"
+          # Lifts the GitHub API rate limit for build-time star counts on the
+          # Recommended tools page. Falls back to unauthenticated if unset.
+          GH_TOKEN: ${{ github.token }}
         run: npm run build
 
       - name: Verify install.sh was copied into the build output
