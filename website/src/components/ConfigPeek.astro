@@ -1,0 +1,107 @@
+---
+// A taste of what the config file feels like. Reinforces "config IS the docs".
+// The TOML snippet is hand-tokenized to HTML so we can colorize without a
+// syntax-highlight runtime and without fighting Astro's JSX brace parser
+// over literal "${...}" sequences inside the config text.
+
+const dim = (s: string) => `<span style="color:var(--color-dim)">${s}</span>`;
+const accent = (s: string) => `<span style="color:var(--color-accent)">${s}</span>`;
+const str = (s: string) => `<span style="color:var(--color-success)">${s}</span>`;
+const key = (s: string) => `<span style="color:var(--color-pink)">${s}</span>`;
+const bool = (s: string) => `<span style="color:var(--color-pink)">${s}</span>`;
+const txt = (s: string) => `<span style="color:var(--color-text)">${s}</span>`;
+
+const configHTML = [
+  dim("# Where projects live. Supports $HOME, ${HOME}, and ~ so you can"),
+  dim("# share this file between machines without leaking your username."),
+  "[[projects]]",
+  `${accent("id")}   = ${str('"a4f3..."')}`,
+  `${accent("path")} = ${str('"$HOME/projects/web-app"')}`,
+  `${accent("name")} = ${str('"web-app"')}`,
+  `${accent("env")}  = { EDITOR = ${str('"true"')}, API_KEY = ${str('"${FOO_KEY}"')} }`,
+  "",
+  dim("# Some projects need a little ceremony before an agent is useful."),
+  dim("# Suffering builds character, but so does automating the ritual."),
+  `${accent("startup_command")} = ${str('"""')}`,
+  `${txt("npm install")}`,
+  `${txt('ln -sfn "$DUX_WORKTREE_PATH/.env.local" .env')}`,
+  `${str('"""')}`,
+  "",
+  "[providers.claude]",
+  `${accent("command")}     = ${str('"claude"')}`,
+  `${accent("resume_args")} = [${str('"--continue"')}]`,
+  "",
+  "[macros]",
+  `${key('"Review"')}  = { text = ${str('"review this for bugs"')}, surface = ${str('"agent"')} }`,
+  `${key('"Build"')}   = { text = ${str('"cargo build --release"')}, surface = ${str('"terminal"')} }`,
+  `${key('"Ship it"')} = { text = ${str('"run tests, fix, commit"')}, surface = ${str('"agent"')} }`,
+  "",
+  "[ui]",
+  `${accent("theme")}              = ${str('"dux_dark"')}   ${dim("# or catppuccin_mocha, nord, dracula...")}`,
+  `${accent("auto_reopen_agents")} = ${bool("true")}         ${dim("# pick up where you left off")}`,
+  "",
+  "[keys]",
+  `${accent("quit")}          = [${str('"q"')}, ${str('"ctrl-c"')}]`,
+  `${accent("open_palette")}  = [${str('"ctrl-p"')}]`,
+].join("\n");
+---
+
+<section class="anchor-offset py-16 sm:py-24">
+  <div class="container-app">
+    <div class="grid items-start gap-10 lg:grid-cols-[0.95fr_1.05fr] lg:gap-14">
+      <div>
+        <span class="pill">▸ configuration</span>
+        <h2 class="heading mt-3 text-3xl font-bold tracking-tight sm:text-4xl">
+          The config file <span class="text-[color:var(--color-pink)]">is</span> the documentation.
+        </h2>
+        <p class="mt-4 text-[color:var(--color-muted)] leading-relaxed">
+          Every setting is configurable. Every setting is commented inline. You should never have to leave the file to figure out what an option does. dux writes a fully annotated <span class="mono text-[color:var(--color-text)]">config.toml</span> the first time it launches — themes preselected, keybindings ready to remap, providers wired in.
+        </p>
+
+        <div class="mt-6 grid grid-cols-2 gap-3 text-sm">
+          <div class="card p-3">
+            <div class="mono text-[10px] uppercase tracking-wider text-[color:var(--color-dim)]">linux</div>
+            <div class="mt-1 mono text-[color:var(--color-text)] text-[12px]">~/.config/dux/config.toml</div>
+          </div>
+          <div class="card p-3">
+            <div class="mono text-[10px] uppercase tracking-wider text-[color:var(--color-dim)]">macOS</div>
+            <div class="mt-1 mono text-[color:var(--color-text)] text-[12px]">~/.dux/config.toml</div>
+          </div>
+        </div>
+
+        <div class="mt-6 space-y-2 text-sm">
+          <div class="flex gap-3">
+            <span class="mono text-[color:var(--color-accent)]">dux config path</span>
+            <span class="text-[color:var(--color-muted)]">— print where it lives</span>
+          </div>
+          <div class="flex gap-3">
+            <span class="mono text-[color:var(--color-accent)]">dux config diff</span>
+            <span class="text-[color:var(--color-muted)]">— what you've changed from defaults</span>
+          </div>
+          <div class="flex gap-3">
+            <span class="mono text-[color:var(--color-accent)]">dux config regenerate</span>
+            <span class="text-[color:var(--color-muted)]">— preview the latest default config</span>
+          </div>
+        </div>
+
+        <div class="mt-6 rounded-lg border border-dashed border-[color:var(--color-border)] bg-[color:var(--color-panel-2)]/50 p-4">
+          <p class="text-sm text-[color:var(--color-muted)]">
+            <strong class="text-[color:var(--color-text)]">Safe to commit to git.</strong>
+            Project paths take <code>$HOME</code>, <code>{"${HOME}"}</code>, or <code>~</code>, and env values expand <code>{"${VAR}"}</code> from your shell — so secrets stay as references, never hardcoded. The file holds portable intent (projects, providers, themes, keybindings), not runtime state. Drop it in your dotfiles and it travels between machines without leaking your username.
+          </p>
+        </div>
+      </div>
+
+      <div class="term">
+        <div class="term-bar">
+          <span class="term-dot" style="background:#ff5f56"></span>
+          <span class="term-dot" style="background:#febc2e"></span>
+          <span class="term-dot" style="background:#28c840"></span>
+          <span class="ml-3 mono text-[11px] text-[color:var(--color-dim)]">config.toml</span>
+          <span class="ml-auto mono text-[10px] text-[color:var(--color-success)]">syntax: ok</span>
+        </div>
+        <pre class="mono text-[12px] leading-relaxed p-5 overflow-x-auto bg-[color:var(--color-ink)]"><code set:html={configHTML} /></pre>
+      </div>
+    </div>
+  </div>
+</section>

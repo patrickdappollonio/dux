@@ -1,0 +1,183 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink: #07070d;
+  --color-panel: #11111d;
+  --color-panel-2: #161628;
+  --color-highlight: #1f2138;
+  --color-active: #2a2c4a;
+  --color-border: #2a2e4c;
+  --color-border-soft: #1c1f36;
+  --color-text: #f4f7ff;
+  --color-muted: #aab2d5;
+  --color-dim: #828bac;
+  --color-accent: #00d4ff;
+  --color-accent-soft: #38bdf8;
+  --color-pink: #ff4fd8;
+  --color-purple: #8b5cf6;
+  --color-success: #4ade80;
+  --color-warning: #facc15;
+  --color-error: #fb7185;
+
+  --font-display: "JetBrains Mono", "Fira Code", "SF Mono", ui-monospace,
+    SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace;
+  --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", ui-monospace,
+    SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace;
+  --font-sans: "Inter", system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html {
+    background: var(--color-ink);
+    color: var(--color-text);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background:
+      radial-gradient(1100px 600px at 12% -10%, color-mix(in oklab, var(--color-accent) 8%, transparent), transparent 70%),
+      radial-gradient(900px 500px at 95% 8%, color-mix(in oklab, var(--color-pink) 8%, transparent), transparent 60%),
+      radial-gradient(900px 700px at 60% 110%, color-mix(in oklab, var(--color-purple) 10%, transparent), transparent 70%),
+      var(--color-ink);
+    background-attachment: fixed;
+    min-height: 100dvh;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--color-accent) 35%, transparent);
+    color: white;
+  }
+
+  /* Anything clickable gets a pointer. Native buttons default to the arrow
+     cursor, so make every interactive control consistent. */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  summary,
+  label[for],
+  a[href] {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  [aria-disabled="true"] {
+    cursor: not-allowed;
+  }
+
+  /* Inline code chips for paths/commands in prose. Scoped to NOT touch
+     <pre><code> blocks (those keep their own styling). */
+  :not(pre) > code {
+    font-family: var(--font-mono);
+    font-size: 0.85em;
+    background: color-mix(in oklab, var(--color-panel-2) 88%, var(--color-accent) 12%);
+    border: 1px solid var(--color-border-soft);
+    border-radius: 0.35em;
+    padding: 0.08em 0.4em;
+    color: var(--color-text);
+    white-space: nowrap;
+  }
+}
+
+@layer components {
+  .container-app {
+    @apply mx-auto w-full max-w-6xl px-5 sm:px-8;
+  }
+
+  .grid-bg {
+    background-image:
+      linear-gradient(to right, color-mix(in oklab, var(--color-border-soft) 60%, transparent) 1px, transparent 1px),
+      linear-gradient(to bottom, color-mix(in oklab, var(--color-border-soft) 60%, transparent) 1px, transparent 1px);
+    background-size: 44px 44px;
+    background-position: -1px -1px;
+    mask-image: radial-gradient(ellipse at top, black 30%, transparent 75%);
+  }
+
+  .pill {
+    @apply inline-flex items-center gap-2 rounded-full border border-[color:var(--color-border)] bg-[color:var(--color-panel)]/70 px-3 py-1 text-xs font-medium text-[color:var(--color-muted)] backdrop-blur;
+  }
+
+  .btn-primary,
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-md border px-4 py-2.5 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--color-ink)];
+  }
+
+  .btn-primary {
+    @apply border-[color:var(--color-accent)]/60 bg-[color:var(--color-accent)]/15 text-[color:var(--color-accent)] hover:bg-[color:var(--color-accent)]/25 hover:border-[color:var(--color-accent)];
+  }
+
+  .btn-ghost {
+    @apply border-[color:var(--color-border)] bg-[color:var(--color-panel)]/60 text-[color:var(--color-text)] hover:bg-[color:var(--color-panel-2)] hover:border-[color:var(--color-accent)]/50;
+  }
+
+  .card {
+    @apply rounded-xl border border-[color:var(--color-border)] bg-[color:var(--color-panel)]/80 backdrop-blur;
+  }
+
+  .heading {
+    font-family: var(--font-display);
+    letter-spacing: -0.025em;
+  }
+
+  .mono {
+    font-family: var(--font-mono);
+  }
+
+  .term {
+    @apply rounded-xl border border-[color:var(--color-border)] bg-[color:var(--color-panel)]/80 backdrop-blur overflow-hidden;
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--color-accent) 8%, transparent),
+      0 20px 60px -20px color-mix(in oklab, var(--color-accent) 25%, transparent),
+      0 40px 120px -40px color-mix(in oklab, var(--color-pink) 20%, transparent);
+  }
+
+  .term-bar {
+    @apply flex items-center gap-2 border-b border-[color:var(--color-border-soft)] bg-[color:var(--color-panel-2)] px-3 py-2;
+  }
+
+  .term-dot {
+    width: 11px;
+    height: 11px;
+    border-radius: 999px;
+    display: inline-block;
+  }
+
+  .scanlines::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent 2px,
+      color-mix(in oklab, white 2%, transparent) 3px
+    );
+    mix-blend-mode: overlay;
+  }
+
+  .blink::after {
+    content: "▌";
+    color: var(--color-accent);
+    animation: blink 1s steps(1) infinite;
+    margin-left: 1px;
+  }
+
+  @keyframes blink {
+    50% { opacity: 0; }
+  }
+
+  .glow-text {
+    text-shadow: 0 0 18px color-mix(in oklab, var(--color-accent) 50%, transparent);
+  }
+
+  .anchor-offset {
+    scroll-margin-top: 5rem;
+  }
+}

@@ -1,0 +1,104 @@
+---
+interface Props {
+  castId?: string;
+  title?: string;
+}
+
+const { castId = "1005426", title = "dux in action" } = Astro.props;
+const link = `https://asciinema.org/a/${castId}`;
+const scriptSrc = `https://asciinema.org/a/${castId}.js`;
+const scriptId = `asciicast-${castId}`;
+---
+
+<section id="demo" class="anchor-offset py-16 sm:py-24">
+  <div class="container-app">
+    <div class="mb-8 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+      <div>
+        <span class="pill">▶ demo</span>
+        <h2 class="heading mt-3 text-3xl font-bold tracking-tight sm:text-4xl">
+          See it before you <span class="text-[color:var(--color-pink)]">trust</span> it.
+        </h2>
+      </div>
+      <a
+        href={link}
+        target="_blank"
+        rel="noopener"
+        class="text-sm text-[color:var(--color-muted)] hover:text-[color:var(--color-accent)] inline-flex items-center gap-1.5"
+      >
+        open on asciinema.org
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+          <polyline points="15 3 21 3 21 9"></polyline>
+          <line x1="10" y1="14" x2="21" y2="3"></line>
+        </svg>
+      </a>
+    </div>
+
+    <div class="term relative">
+      <div class="term-bar">
+        <span class="term-dot" style="background:#ff5f56"></span>
+        <span class="term-dot" style="background:#febc2e"></span>
+        <span class="term-dot" style="background:#28c840"></span>
+        <span class="ml-3 mono text-[11px] text-[color:var(--color-dim)]">{title}</span>
+        <span class="ml-auto pill text-[10px] !py-0.5">live recording</span>
+      </div>
+      <div class="bg-black p-2 sm:p-3">
+        <div class="asciinema-embed relative [&_.asciinema-player]:!mx-auto">
+          {/* Local fallback: a real dux frame + play CTA. Shown by default and
+              hidden once the official asciinema embed injects its player. This
+              keeps the demo from rendering an empty box when asciinema.org is
+              unreachable (or blocked by a content blocker). */}
+          <a
+            id="dux-demo-fallback"
+            href={link}
+            target="_blank"
+            rel="noopener"
+            class="group relative block overflow-hidden rounded-md"
+          >
+            <img
+              src="/dux-screenshot.svg"
+              alt={`${title} — watch the recording on asciinema.org`}
+              width="1609"
+              height="784"
+              loading="lazy"
+              class="block w-full opacity-70 transition-opacity group-hover:opacity-90"
+            />
+            <span class="pointer-events-none absolute inset-0 grid place-items-center">
+              <span class="inline-flex items-center gap-2 rounded-full border border-[color:var(--color-accent)]/60 bg-[color:var(--color-ink)]/80 px-5 py-2.5 text-sm font-semibold text-[color:var(--color-accent)] backdrop-blur">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                Watch the recording
+              </span>
+            </span>
+          </a>
+
+          {/* Official asciinema embed (provided by the cast owner). When
+              asciinema.org is reachable, this injects the animated player. */}
+          <script is:inline src={scriptSrc} id={scriptId} async></script>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script is:inline>
+    (function () {
+      var box = document.querySelector(".asciinema-embed");
+      var fb = document.getElementById("dux-demo-fallback");
+      if (!box || !fb) return;
+      var tries = 0;
+      var poll = setInterval(function () {
+        tries++;
+        var injected = Array.prototype.slice
+          .call(box.querySelectorAll("img, iframe, canvas, asciinema-player, .asciinema-player"))
+          .some(function (el) {
+            return el !== fb && !fb.contains(el);
+          });
+        if (injected) {
+          fb.style.display = "none";
+          clearInterval(poll);
+        } else if (tries > 30) {
+          clearInterval(poll); // asciinema unreachable — keep the fallback poster
+        }
+      }, 200);
+    })();
+  </script>
+</section>

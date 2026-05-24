@@ -1,0 +1,299 @@
+---
+// Each feature is a CSS-mocked terminal screenshot + copy.
+// The mockups are static — what you see is HTML and Tailwind, no JS.
+---
+
+<section id="features" class="anchor-offset py-16 sm:py-24">
+  <div class="container-app">
+    <div class="mb-14 max-w-2xl">
+      <span class="pill">▸ what's in the box</span>
+      <h2 class="heading mt-3 text-3xl font-bold tracking-tight sm:text-4xl">
+        The stuff that makes you wonder how you tolerated <span class="text-[color:var(--color-pink)]">one</span> agent at a time.
+      </h2>
+      <p class="mt-3 text-[color:var(--color-muted)]">
+        Every dux feature exists because someone (read: me) got tired of doing it the dumb way. Hover over any tile for a closer look.
+      </p>
+    </div>
+
+    <div class="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+      <!-- 1. Bring Any CLI -->
+      <article class="card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+        <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
+          <div class="text-[color:var(--color-dim)]">[providers.my-agent]</div>
+          <div><span class="text-[color:var(--color-accent)]">command</span> = <span class="text-[color:var(--color-success)]">"my-cool-agent"</span></div>
+          <div><span class="text-[color:var(--color-accent)]">args</span> = [<span class="text-[color:var(--color-success)]">"--some-flag"</span>]</div>
+          <div><span class="text-[color:var(--color-accent)]">resume_args</span> = [<span class="text-[color:var(--color-success)]">"--continue"</span>]</div>
+        </div>
+        <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Bring any CLI</h3>
+        <p class="mt-1 text-sm text-[color:var(--color-muted)]">
+          Claude, Codex, Gemini, OpenCode ship as defaults. Anything else is a TOML block away. No adapters, no JSON-RPC, no protocol layer.
+        </p>
+      </article>
+
+      <!-- 2. Themes -->
+      <article class="card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+        <div class="mb-4 flex gap-1.5">
+          <div class="flex-1 rounded-md border border-[color:var(--color-border-soft)] p-2 mono text-[10px]" style="background:#101018;color:#f4f7ff">
+            <div style="color:#00d4ff">●</div>
+            <div class="mt-0.5">dux_dark</div>
+          </div>
+          <div class="flex-1 rounded-md border border-[color:var(--color-border-soft)] p-2 mono text-[10px]" style="background:#1e1e2e;color:#cdd6f4">
+            <div style="color:#f5c2e7">●</div>
+            <div class="mt-0.5">catppuccin</div>
+          </div>
+          <div class="flex-1 rounded-md border border-[color:var(--color-border-soft)] p-2 mono text-[10px]" style="background:#2e3440;color:#eceff4">
+            <div style="color:#88c0d0">●</div>
+            <div class="mt-0.5">nord</div>
+          </div>
+          <div class="flex-1 rounded-md border border-[color:var(--color-border-soft)] p-2 mono text-[10px]" style="background:#282a36;color:#f8f8f2">
+            <div style="color:#ff79c6">●</div>
+            <div class="mt-0.5">dracula</div>
+          </div>
+        </div>
+        <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Themes that actually theme</h3>
+        <p class="mt-1 text-sm text-[color:var(--color-muted)]">
+          Opaline TOML format. Bundled <span class="mono text-[color:var(--color-accent)]">dux_dark</span>, catppuccin, nord, dracula, gruvbox, tokyo night, and more — or define your own with eight colors. <span class="mono text-[color:var(--color-accent)]">change-theme</span> live-previews before you commit.
+        </p>
+      </article>
+
+      <!-- 3. Macros -->
+      <article class="card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+        <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
+          <div class="text-[color:var(--color-dim)]">[macros]</div>
+          <div><span class="text-[color:var(--color-pink)]">"Review"</span> = "review for bugs"</div>
+          <div><span class="text-[color:var(--color-pink)]">"Build"</span> = "cargo build --release"</div>
+          <div><span class="text-[color:var(--color-pink)]">"Ship it"</span> = "test, fix, commit"</div>
+        </div>
+        <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Macros, but make them fun</h3>
+        <p class="mt-1 text-sm text-[color:var(--color-muted)]">
+          Stop typing the same prompt over and over. Save it as a macro, fuzzy-find it from a quick-select bar, fire it into the agent or the companion terminal — multi-line prompts land as one piece, not confetti.
+        </p>
+      </article>
+
+      <!-- 4. Command palette -->
+      <article class="card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+        <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
+          <div class="flex items-center gap-2">
+            <span class="text-[color:var(--color-accent)]">›</span>
+            <span class="text-[color:var(--color-text)]">change-th<span class="blink"></span></span>
+          </div>
+          <div class="mt-2 space-y-0.5 text-[color:var(--color-muted)]">
+            <div class="rounded bg-[color:var(--color-accent)]/15 px-1.5 text-[color:var(--color-accent)]">change-theme</div>
+            <div class="px-1.5">change-default-provider</div>
+            <div class="px-1.5">change-agent-provider</div>
+          </div>
+        </div>
+        <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">A palette that knows your tricks</h3>
+        <p class="mt-1 text-sm text-[color:var(--color-muted)]">
+          Fuzzy-searchable access to every action in dux, including ones with no keybinding. Forget a shortcut? Just open the palette.
+        </p>
+      </article>
+
+      <!-- 5. Companion terminals -->
+      <article class="card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+        <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
+          <div class="text-[color:var(--color-dim)]">$ cargo test --lib pty</div>
+          <div class="text-[color:var(--color-muted)]">running 4 tests</div>
+          <div class="text-[color:var(--color-success)]">test pty::tests::shutdown ... ok</div>
+          <div class="text-[color:var(--color-success)]">test pty::tests::write_race ... ok</div>
+          <div class="text-[color:var(--color-success)]">test result: ok. 4 passed</div>
+        </div>
+        <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Companion terminals</h3>
+        <p class="mt-1 text-sm text-[color:var(--color-muted)]">
+          Every agent gets its own shell session in the same worktree. Build, test, grep, poke around — without leaving dux. Spawn as many as you want.
+        </p>
+      </article>
+
+      <!-- 6. Startup commands -->
+      <article class="card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+        <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
+          <div class="text-[color:var(--color-dim)]">startup_command = """</div>
+          <div class="text-[color:var(--color-text)]">npm install</div>
+          <div class="text-[color:var(--color-text)]">ln -sfn $DUX_WORKTREE_PATH/.env .env</div>
+          <div class="text-[color:var(--color-dim)]">"""</div>
+        </div>
+        <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Startup ceremonies, automated</h3>
+        <p class="mt-1 text-sm text-[color:var(--color-muted)]">
+          Some repos demand a ritual before they're useful: install deps, warm caches, link env files, whatever goblin dance your project needs. dux runs your startup script in the new worktree before the agent even boots.
+        </p>
+      </article>
+
+      <!-- 7. Agent from a PR -->
+      <article class="card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+        <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
+          <div class="flex items-center gap-2">
+            <span class="text-[color:var(--color-accent)]">›</span>
+            <span class="text-[color:var(--color-text)]">new-agent-from-pr</span>
+          </div>
+          <div class="mt-1.5 text-[color:var(--color-muted)]">PR: <span class="text-[color:var(--color-text)]">#246</span></div>
+          <div class="text-[color:var(--color-success)]">✓ fetched origin/match-palette-cmds</div>
+          <div class="text-[color:var(--color-success)]">✓ worktree + agent ready</div>
+        </div>
+        <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Spin up an agent from a PR</h3>
+        <p class="mt-1 text-sm text-[color:var(--color-muted)]">
+          Paste a PR number or URL. dux resolves it, fetches the head branch, and drops you into a fresh worktree with an agent ready to review or push back. GitHub Enterprise remotes are invited too — no sitting outside with the weird remotes.
+        </p>
+      </article>
+
+      <!-- 8. gh CLI integration -->
+      <article class="card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+        <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
+          <div class="flex items-center justify-between"><span class="text-[color:var(--color-text)]">refactor-pty</span><span class="rounded-full px-1.5 text-[10px]" style="background:rgba(74,222,128,.15);color:#4ade80">● open #243</span></div>
+          <div class="flex items-center justify-between"><span class="text-[color:var(--color-text)]">add-themes</span><span class="rounded-full px-1.5 text-[10px]" style="background:rgba(139,92,246,.18);color:#a78bfa">✦ merged #238</span></div>
+          <div class="flex items-center justify-between"><span class="text-[color:var(--color-text)]">bench-startup</span><span class="rounded-full px-1.5 text-[10px]" style="background:rgba(251,113,133,.15);color:#fb7185">✕ closed #210</span></div>
+        </div>
+        <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Befriend the <span class="mono">gh</span> CLI</h3>
+        <p class="mt-1 text-sm text-[color:var(--color-muted)]">
+          Authenticate <span class="mono text-[color:var(--color-accent)]">gh</span> and dux tracks your PRs with open / merged / closed pills right in the pane, opens them in your browser, and lets your agents cut commits and pull requests without leaving the worktree.
+        </p>
+      </article>
+
+      <!-- 9. Featherweight footprint -->
+      <article class="card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+        <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
+          <div class="flex items-center justify-between text-[color:var(--color-dim)]"><span>resource-monitor</span><span>CPU · RSS</span></div>
+          <div class="mt-1 flex items-center justify-between"><span class="text-[color:var(--color-accent)]">dux</span><span class="text-[color:var(--color-success)]">0.2% · 41 MB</span></div>
+          <div class="flex items-center justify-between text-[color:var(--color-muted)]"><span>├ claude · refactor-pty</span><span>3.1% · 214 MB</span></div>
+          <div class="flex items-center justify-between text-[color:var(--color-muted)]"><span>└ codex · add-themes</span><span>1.8% · 180 MB</span></div>
+        </div>
+        <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Featherweight footprint</h3>
+        <p class="mt-1 text-sm text-[color:var(--color-muted)]">
+          It's Rust. Idle, dux sits <strong class="text-[color:var(--color-text)]">under 50 MB of RAM</strong> — leaving the memory for the agents that actually need it. The <span class="mono text-[color:var(--color-accent)]">resource-monitor</span> command shows live CPU and memory for dux and every agent it runs.
+        </p>
+      </article>
+
+      <!-- 10. Mouse support -->
+      <article class="card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+        <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed space-y-0.5">
+          <div><span class="text-[color:var(--color-accent)]">⌖</span> <span class="text-[color:var(--color-text)]">click pane</span> <span class="text-[color:var(--color-dim)]">→ focus it</span></div>
+          <div><span class="text-[color:var(--color-accent)]">⇿</span> <span class="text-[color:var(--color-text)]">drag border</span> <span class="text-[color:var(--color-dim)]">→ resize panes</span></div>
+          <div><span class="text-[color:var(--color-accent)]">⇕</span> <span class="text-[color:var(--color-text)]">wheel</span> <span class="text-[color:var(--color-dim)]">→ scroll back</span></div>
+          <div><span class="text-[color:var(--color-accent)]">▭</span> <span class="text-[color:var(--color-text)]">drag in terminal</span> <span class="text-[color:var(--color-dim)]">→ select text</span></div>
+        </div>
+        <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Yes, the mouse works</h3>
+        <p class="mt-1 text-sm text-[color:var(--color-muted)]">
+          A TUI that doesn't punish you for reaching for the mouse. Click a pane to focus it, click a file to open its diff, drag the borders to resize, wheel through scrollback, and drag across the terminal to select text. Keyboard-first, mouse-friendly.
+        </p>
+      </article>
+
+      <!-- 11. Crash recovery / auto-reopen -->
+      <article class="card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+        <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
+          <div class="text-[color:var(--color-dim)]">$ dux</div>
+          <div class="text-[color:var(--color-accent)]">↺ reopening 2 agents…</div>
+          <div class="text-[color:var(--color-success)]">✓ claude · refactor-pty <span class="text-[color:var(--color-dim)]">(resumed)</span></div>
+          <div class="text-[color:var(--color-success)]">✓ codex · add-themes <span class="text-[color:var(--color-dim)]">(resumed)</span></div>
+        </div>
+        <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Crash recovery, opt-in</h3>
+        <p class="mt-1 text-sm text-[color:var(--color-muted)]">
+          Closed your laptop mid-thought? Flip on auto-reopen and agents still running when dux exited come back on next launch, resumed where they left off. Clean exits stay closed — not every zombie deserves resurrection.
+        </p>
+      </article>
+
+      <!-- 12. Hot-reload config -->
+      <article class="card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+        <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
+          <div class="flex items-center gap-2">
+            <span class="text-[color:var(--color-accent)]">›</span>
+            <span class="text-[color:var(--color-text)]">reload-config</span>
+          </div>
+          <div class="mt-1.5 text-[color:var(--color-success)]">✓ config.toml valid</div>
+          <div class="text-[color:var(--color-success)]">✓ applied — no restart needed</div>
+          <div class="text-[color:var(--color-dim)]">invalid? keeps the last good config</div>
+        </div>
+        <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Hot-reload your config</h3>
+        <p class="mt-1 text-sm text-[color:var(--color-muted)]">
+          Edit <span class="mono text-[color:var(--color-text)]">config.toml</span>, run <span class="mono text-[color:var(--color-accent)]">reload-config</span>, keep working. dux validates first and applies changes live; fat-finger the TOML and it keeps the last good config and shows you the error. No restart pilgrimage.
+        </p>
+      </article>
+
+      <!-- 13. Provider hot-swap -->
+      <article class="card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+        <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
+          <div class="flex items-center gap-2">
+            <span class="text-[color:var(--color-accent)]">›</span>
+            <span class="text-[color:var(--color-text)]">change-agent-provider</span>
+          </div>
+          <div class="mt-1.5 text-[color:var(--color-muted)]"><span class="text-[color:var(--color-purple)]">claude</span> → <span class="text-[color:var(--color-accent)]">codex</span></div>
+          <div class="text-[color:var(--color-success)]">✓ resuming previous session</div>
+        </div>
+        <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Swap brains mid-session</h3>
+        <p class="mt-1 text-sm text-[color:var(--color-muted)]">
+          Change the CLI on a worktree on the fly — Claude to Codex and back. Used that provider here before? dux passes its resume args so you pick up the prior conversation instead of starting cold.
+        </p>
+      </article>
+
+      <!-- 14. Adopt an existing worktree -->
+      <article class="card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+        <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
+          <div class="flex items-center gap-2">
+            <span class="text-[color:var(--color-accent)]">›</span>
+            <span class="text-[color:var(--color-text)]">new-agent-from-worktree</span>
+          </div>
+          <div class="mt-1.5 text-[color:var(--color-muted)]">~/code/feature-wip <span class="text-[color:var(--color-dim)]">(external)</span></div>
+          <div class="text-[color:var(--color-success)]">✓ copied into a managed worktree</div>
+          <div class="text-[color:var(--color-dim)]">dirty + untracked preserved</div>
+        </div>
+        <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Adopt an existing worktree</h3>
+        <p class="mt-1 text-sm text-[color:var(--color-muted)]">
+          Already have a worktree lying around? dux adopts it. Managed ones reconnect as continuable sessions; external ones get copied in — dirty and untracked files intact — leaving your original checkout alone. Bring that "temporary" worktree in without admitting how long it's been temporary.
+        </p>
+      </article>
+
+      <!-- 15. Jump to your editor -->
+      <article class="card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+        <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
+          <div><span class="text-[color:var(--color-dim)]">press</span> <span class="text-[color:var(--color-accent)]">o</span></div>
+          <div class="text-[color:var(--color-text)]">↗ cursor ~/dux/worktrees/refactor-pty</div>
+          <div class="mt-1.5 text-[color:var(--color-dim)]">detected: cursor · code · zed · antigravity</div>
+        </div>
+        <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Jump straight to your editor</h3>
+        <p class="mt-1 text-sm text-[color:var(--color-muted)]">
+          One key and the agent's worktree opens in your editor — Cursor, VS Code, Zed, Antigravity — auto-detected on your <span class="mono text-[color:var(--color-accent)]">PATH</span>. <span class="mono text-[color:var(--color-accent)]">open-worktree-with</span> lets you pick which one, per open.
+        </p>
+      </article>
+
+      <!-- 16. Git staging area -->
+      <article class="card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+        <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
+          <div class="flex items-center justify-between text-[color:var(--color-dim)]"><span>Changes (3)</span><span>2 staged</span></div>
+          <div class="flex items-center gap-2 text-[color:var(--color-success)]"><span>M</span><span class="flex-1 truncate text-[color:var(--color-text)]">src/pty.rs</span><span>+18</span></div>
+          <div class="mt-1.5 text-[color:var(--color-error)]">- write_buf.extend(chunk);</div>
+          <div class="text-[color:var(--color-success)]">+ self.write_buf.lock()…</div>
+        </div>
+        <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">A real git staging area</h3>
+        <p class="mt-1 text-sm text-[color:var(--color-muted)]">
+          The right pane is the full git dance: stage and unstage files, read syntax-highlighted diffs (computed in-process with <span class="mono text-[color:var(--color-accent)]">similar</span> + <span class="mono text-[color:var(--color-accent)]">syntect</span>, not shelled out), write a commit, push, and pull — without leaving dux.
+        </p>
+      </article>
+
+      <!-- 17. Conservative git -->
+      <article class="card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+        <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
+          <div class="text-[color:var(--color-dim)]">$ refresh checkout</div>
+          <div class="text-[color:var(--color-text)]">git pull --ff-only</div>
+          <div class="text-[color:var(--color-success)]">✓ fast-forwarded — no surprise merges</div>
+          <div class="text-[color:var(--color-dim)]">new agents branch from: <span class="text-[color:var(--color-muted)]">main</span></div>
+        </div>
+        <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Conservative git, on purpose</h3>
+        <p class="mt-1 text-sm text-[color:var(--color-muted)]">
+          Your worktrees are user data, so dux handles git with care: source refresh is <span class="mono text-[color:var(--color-accent)]">--ff-only</span> (never a surprise merge or rebase), new agents branch from the project's leading branch, and destructive actions always ask first.
+        </p>
+      </article>
+
+      <!-- 18. Per-project env -->
+      <article class="card p-5 transition-all hover:border-[color:var(--color-accent)]/50 hover:bg-[color:var(--color-panel-2)]">
+        <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
+          <div class="text-[color:var(--color-dim)]">[env] <span class="text-[color:var(--color-dim)]"># every project</span></div>
+          <div><span class="text-[color:var(--color-accent)]">API_KEY</span> = <span class="text-[color:var(--color-success)]">{'"${PROD_KEY}"'}</span></div>
+          <div class="mt-1.5 text-[color:var(--color-dim)]">[[projects]].env <span># overrides</span></div>
+          <div><span class="text-[color:var(--color-accent)]">API_KEY</span> = <span class="text-[color:var(--color-success)]">{'"${STAGING_KEY}"'}</span></div>
+        </div>
+        <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Environment, per project</h3>
+        <p class="mt-1 text-sm text-[color:var(--color-muted)]">
+          Inject env vars into agent terminals, companion shells, and startup commands — globally or per-project, with <span class="mono text-[color:var(--color-accent)]">{'${VAR}'}</span> expansion so secrets come from the parent environment, not the config file. Project values win over global.
+        </p>
+      </article>
+    </div>
+  </div>
+</section>
