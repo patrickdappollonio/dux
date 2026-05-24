@@ -1,0 +1,74 @@
+name: Website CI
+
+# Sanity-check that the getdux.app site still builds before it can be merged or
+# deployed. Runs only when site-relevant files change so unrelated PRs aren't
+# slowed down. The deploy itself lives in pages.yml and happens on release.
+on:
+  pull_request:
+    paths:
+      - "website/**"
+      - "install.sh"
+      - "assets/dux-logo.png"
+      - "assets/dux-screenshot.svg"
+      - ".github/workflows/website-ci.yml"
+      - ".github/workflows/pages.yml"
+  push:
+    branches: [main]
+    paths:
+      - "website/**"
+      - "install.sh"
+      - "assets/dux-logo.png"
+      - "assets/dux-screenshot.svg"
+      - ".github/workflows/website-ci.yml"
+      - ".github/workflows/pages.yml"
+
+concurrency:
+  group: website-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify canonical assets the build copies are present
+        run: |
+          missing=0
+          for f in install.sh assets/dux-logo.png assets/dux-screenshot.svg; do
+            if [ ! -f "$f" ]; then
+              echo "::error::$f is missing at the repo root; the website build copies it."
+              missing=1
+            fi
+          done
+          [ "$missing" = 0 ]
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install dependencies
+        working-directory: website
+        run: npm ci
+
+      - name: Build
+        working-directory: website
+        env:
+          NODE_ENV: production
+        run: npm run build
+
+      - name: Verify build output
+        run: |
+          for f in index.html CNAME install.sh dux-logo.png dux-screenshot.svg; do
+            if [ ! -f "website/dist/$f" ]; then
+              echo "::error::website/dist/$f missing from build output."
+              exit 1
+            fi
+          done
+          echo "Site built successfully."
