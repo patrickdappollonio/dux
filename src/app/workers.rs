@@ -644,12 +644,12 @@ impl App {
             let exit_success = provider.try_wait().map(|status| status.success());
             if exit_success.is_some() || provider.is_exited() {
                 let is_minimal = provider.has_minimal_output(5);
-                let excerpt = if is_minimal {
-                    provider.visible_text_excerpt(3)
+                let output = if is_minimal {
+                    provider.visible_text_excerpt(usize::MAX)
                 } else {
                     String::new()
                 };
-                exited.push((session_id.clone(), exit_success, is_minimal, excerpt));
+                exited.push((session_id.clone(), exit_success, is_minimal, output));
             }
         }
 
@@ -719,6 +719,13 @@ impl App {
             {
                 let key = self.bindings.label_for(Action::ReconnectAgent);
                 if self.session_surface == SessionSurface::Agent {
+                    if *is_minimal && !excerpt.trim().is_empty() {
+                        let provider = self.running_provider_for(current).as_str().to_string();
+                        logger::error(&format!(
+                            "Agent CLI process for agent \"{}\" ({provider}) exited. Full captured output:\n{}",
+                            current.branch_name, excerpt
+                        ));
+                    }
                     let status =
                         agent_exit_status_message(*exit_success, *is_minimal, excerpt, &key);
                     self.input_target = InputTarget::None;
@@ -1694,7 +1701,7 @@ fn agent_exit_status_message(
     if is_minimal {
         let output = truncate_status_output(&output, MAX_EXIT_OUTPUT_CHARS);
         let more = if output.truncated {
-            " Full output is visible in the agent pane."
+            " Full output was written to the logs."
         } else {
             ""
         };
@@ -2941,7 +2948,7 @@ mod tests {
 
         assert!(message.contains("Output: "));
         assert!(message.contains("…"));
-        assert!(message.contains("Full output is visible in the agent pane."));
+        assert!(message.contains("Full output was written to the logs."));
         assert!(
             !message.contains(&long_output),
             "status should not embed the full provider output"
@@ -2954,7 +2961,7 @@ mod tests {
 
         assert!(message.contains("Output: first second."));
         assert!(!message.contains('|'));
-        assert!(!message.contains("Full output is visible"));
+        assert!(!message.contains("Full output was written"));
     }
 
     #[test]
