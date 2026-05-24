@@ -1999,8 +1999,12 @@ impl RuntimeBindings {
     }
 
     /// All palette-visible bindings matching a filter string.
+    ///
+    /// Matching is case-insensitive and treats runs of whitespace and dashes
+    /// as interchangeable separators, so a query like `open current pr` still
+    /// matches the dashed command name `open-current-pr`.
     pub fn filtered_palette(&self, input: &str) -> Vec<&RuntimeBinding> {
-        let needle = input.trim().to_lowercase();
+        let needle = normalize_palette_match(input);
         if needle.is_empty() {
             return self
                 .bindings
@@ -2012,10 +2016,10 @@ impl RuntimeBindings {
         let mut desc_matches = Vec::new();
         for b in &self.bindings {
             if let Some(name) = b.palette_name {
-                if name.contains(&needle) {
+                if normalize_palette_match(name).contains(&needle) {
                     name_matches.push(b);
                 } else if let Some(desc) = b.palette_description
-                    && desc.to_lowercase().contains(&needle)
+                    && normalize_palette_match(desc).contains(&needle)
                 {
                     desc_matches.push(b);
                 }
@@ -2024,6 +2028,31 @@ impl RuntimeBindings {
         name_matches.extend(desc_matches);
         name_matches
     }
+}
+
+/// Lowercase `s` and collapse any run of whitespace or dash characters into a
+/// single `-`, with no leading or trailing separator. This lets the palette
+/// match natural-language queries like `open current pr` against dashed
+/// command names like `open-current-pr`.
+fn normalize_palette_match(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last_was_sep = false;
+    for c in s.chars() {
+        if c.is_whitespace() || c == '-' {
+            if !out.is_empty() {
+                last_was_sep = true;
+            }
+        } else {
+            if last_was_sep {
+                out.push('-');
+                last_was_sep = false;
+            }
+            for lc in c.to_lowercase() {
+                out.push(lc);
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -2432,6 +2461,78 @@ mod tests {
                     .to_lowercase()
                     .contains("toggle")
         }));
+    }
+
+    #[test]
+    fn normalize_palette_match_collapses_separators() {
+        assert_eq!(normalize_palette_match(""), "");
+        assert_eq!(normalize_palette_match("   "), "");
+        assert_eq!(normalize_palette_match("---"), "");
+        assert_eq!(
+            normalize_palette_match("open-current-pr"),
+            "open-current-pr"
+        );
+        assert_eq!(
+            normalize_palette_match("open current pr"),
+            "open-current-pr"
+        );
+        assert_eq!(
+            normalize_palette_match("  open   current\tpr  "),
+            "open-current-pr"
+        );
+        assert_eq!(normalize_palette_match("Fork Agent"), "fork-agent");
+        // Mixed dashes and spaces collapse to a single separator each.
+        assert_eq!(normalize_palette_match("a - b -- c"), "a-b-c");
+    }
+
+    #[test]
+    fn filtered_palette_treats_spaces_as_dashes_in_query() {
+        // Users often type natural-language queries with spaces (e.g. "open current pr")
+        // instead of typing the dashed command name verbatim. The palette should still
+        // match the underlying command name "open-current-pr".
+        let bindings = default_bindings();
+
+        let results = bindings.filtered_palette("open current pr");
+        let names: Vec<&str> = results
+            .iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect();
+        assert!(
+            names.contains(&"open-current-pr"),
+            "expected 'open-current-pr' in results, got {names:?}"
+        );
+
+        let results = bindings.filtered_palette("change agent provider");
+        let names: Vec<&str> = results
+            .iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect();
+        assert!(
+            names.contains(&"change-agent-provider"),
+            "expected 'change-agent-provider' in results, got {names:?}"
+        );
+
+        // Multiple/leading/trailing whitespace should not break matching.
+        let results = bindings.filtered_palette("  fork   agent  ");
+        let names: Vec<&str> = results
+            .iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect();
+        assert!(
+            names.contains(&"fork-agent"),
+            "expected 'fork-agent' in results, got {names:?}"
+        );
+
+        // Existing dashed-input behavior must still work.
+        let results = bindings.filtered_palette("open-current-pr");
+        let names: Vec<&str> = results
+            .iter()
+            .filter_map(|binding| binding.palette_name)
+            .collect();
+        assert!(
+            names.contains(&"open-current-pr"),
+            "expected dashed query to still match, got {names:?}"
+        );
     }
 
     #[test]
