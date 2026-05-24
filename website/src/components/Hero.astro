@@ -7,7 +7,7 @@ import InstallTabs from "./InstallTabs.astro";
 
   <div class="container-app relative">
     <div class="grid items-center gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:gap-14">
-      <div>
+      <div class="min-w-0">
         <div class="mb-5 flex items-center gap-3">
           <img
             src="/dux-logo.png"
@@ -37,7 +37,7 @@ import InstallTabs from "./InstallTabs.astro";
         <p class="mt-6 max-w-xl text-base leading-relaxed text-[color:var(--color-muted)] sm:text-lg">
           <strong class="text-[color:var(--color-text)]">dux</strong>
           <span class="text-[color:var(--color-dim)]">(pronounced "dooks")</span>
-          is a terminal UI for orchestrating multiple AI coding agents in parallel, each in its own git worktree. No protocol layers. No adapters. Just real CLIs in real terminals.
+          is a terminal UI for orchestrating multiple AI coding agents in parallel, each in its own git worktree. No protocol layers. No adapters. Just real CLIs in real terminals. And it's all yours to tune: every setting — down to every keybinding dux controls — is <strong class="text-[color:var(--color-text)]">configurable</strong> and documented inline in the config file.
         </p>
 
         <div class="mt-8 flex flex-wrap items-center gap-3">
@@ -74,7 +74,7 @@ import InstallTabs from "./InstallTabs.astro";
         </ul>
       </div>
 
-      <div class="relative">
+      <div class="relative min-w-0">
         <InstallTabs />
         <div class="absolute -inset-x-8 -bottom-16 -z-10 h-40 rounded-full bg-[color:var(--color-accent)]/10 blur-3xl"></div>
       </div>
