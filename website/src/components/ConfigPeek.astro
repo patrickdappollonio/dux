@@ -55,7 +55,7 @@ const configHTML = [
           The config file <span class="text-[color:var(--color-pink)]">is</span> the documentation.
         </h2>
         <p class="mt-4 text-[color:var(--color-muted)] leading-relaxed">
-          Every setting is configurable. Every setting is commented inline. You should never have to leave the file to figure out what an option does. dux writes a fully annotated <span class="mono text-[color:var(--color-text)]">config.toml</span> the first time it launches — themes preselected, keybindings ready to remap, providers wired in.
+          Every setting is configurable. Every setting is commented inline. You should never have to leave the file to figure out what an option does. dux writes a fully annotated <span class="mono text-[color:var(--color-text)]">config.toml</span> the first time it launches: themes preselected, keybindings ready to remap, providers wired in.
         </p>
 
         <div class="mt-6 grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
@@ -72,22 +72,22 @@ const configHTML = [
         <div class="mt-6 space-y-2 text-sm">
           <div class="flex gap-3">
             <span class="mono text-[color:var(--color-accent)]">dux config path</span>
-            <span class="text-[color:var(--color-muted)]">— print where it lives</span>
+            <span class="text-[color:var(--color-muted)]">prints where it lives</span>
           </div>
           <div class="flex gap-3">
             <span class="mono text-[color:var(--color-accent)]">dux config diff</span>
-            <span class="text-[color:var(--color-muted)]">— what you've changed from defaults</span>
+            <span class="text-[color:var(--color-muted)]">shows what you've changed from defaults</span>
           </div>
           <div class="flex gap-3">
             <span class="mono text-[color:var(--color-accent)]">dux config regenerate</span>
-            <span class="text-[color:var(--color-muted)]">— preview the latest default config</span>
+            <span class="text-[color:var(--color-muted)]">previews the latest default config</span>
           </div>
         </div>
 
         <div class="mt-6 rounded-lg border border-dashed border-[color:var(--color-border)] bg-[color:var(--color-panel-2)]/50 p-4">
           <p class="text-sm text-[color:var(--color-muted)]">
             <strong class="text-[color:var(--color-text)]">Safe to commit to git.</strong>
-            Project paths take <code>$HOME</code>, <code>{"${HOME}"}</code>, or <code>~</code>, and env values expand <code>{"${VAR}"}</code> from your shell — so secrets stay as references, never hardcoded. The file holds portable intent (projects, providers, themes, keybindings), not runtime state. Drop it in your dotfiles and it travels between machines without leaking your username.
+            Project paths take <code>$HOME</code>, <code>{"${HOME}"}</code>, or <code>~</code>, and env values expand <code>{"${VAR}"}</code> from your shell, so secrets stay as references, never hardcoded. The file holds portable intent (projects, providers, themes, keybindings), not runtime state. Drop it in your dotfiles and it travels between machines without leaking your username.
           </p>
         </div>
       </div>

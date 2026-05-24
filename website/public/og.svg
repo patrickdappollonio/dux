@@ -37,7 +37,7 @@
 
   <!-- subtitle -->
   <text x="80" y="370" font-family="'Inter', sans-serif" font-size="26" fill="#aab2d5">
-    Run multiple Claude Code, Codex, and Gemini agents in parallel —
+    Run multiple Claude Code, Codex, and Gemini agents in parallel,
   </text>
   <text x="80" y="405" font-family="'Inter', sans-serif" font-size="26" fill="#aab2d5">
     one git worktree each. Real CLIs in real terminals.

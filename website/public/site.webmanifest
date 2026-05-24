@@ -1,5 +1,5 @@
 {
-  "name": "dux — getdux.app",
+  "name": "dux · getdux.app",
   "short_name": "dux",
   "description": "A terminal UI for running multiple AI coding agents in parallel across git worktrees.",
   "start_url": "/",

@@ -57,7 +57,7 @@ const scriptId = `asciicast-${castId}`;
           >
             <img
               src="/dux-screenshot.svg"
-              alt={`${title} — watch the recording on asciinema.org`}
+              alt={`${title}: watch the recording on asciinema.org`}
               width="1609"
               height="784"
               loading="lazy"
@@ -96,7 +96,7 @@ const scriptId = `asciicast-${castId}`;
           fb.style.display = "none";
           clearInterval(poll);
         } else if (tries > 30) {
-          clearInterval(poll); // asciinema unreachable — keep the fallback poster
+          clearInterval(poll); // asciinema unreachable; keep the fallback poster
         }
       }, 200);
     })();

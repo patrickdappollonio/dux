@@ -1,6 +1,6 @@
 ---
 // Each feature is a CSS-mocked terminal screenshot + copy.
-// The mockups are static — what you see is HTML and Tailwind, no JS.
+// The mockups are static: what you see is HTML and Tailwind, no JS.
 ---
 
 <section id="features" class="anchor-offset py-16 sm:py-24">
@@ -52,7 +52,7 @@
         </div>
         <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Themes that actually theme</h3>
         <p class="mt-1 text-sm text-[color:var(--color-muted)]">
-          Opaline TOML format. Bundled <span class="mono text-[color:var(--color-accent)]">dux_dark</span>, catppuccin, nord, dracula, gruvbox, tokyo night, and more — or define your own with eight colors. <span class="mono text-[color:var(--color-accent)]">change-theme</span> live-previews before you commit.
+          Opaline TOML format. Bundled <span class="mono text-[color:var(--color-accent)]">dux_dark</span>, catppuccin, nord, dracula, gruvbox, tokyo night, and more, or define your own with eight colors. <span class="mono text-[color:var(--color-accent)]">change-theme</span> live-previews before you commit.
         </p>
         <a
           href="https://asciinema.org/a/1005426"
@@ -75,7 +75,7 @@
         </div>
         <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Macros, but make them fun</h3>
         <p class="mt-1 text-sm text-[color:var(--color-muted)]">
-          Stop typing the same prompt over and over. Save it as a macro, fuzzy-find it from a quick-select bar, fire it into the agent or the companion terminal — multi-line prompts land as one piece, not confetti.
+          Stop typing the same prompt over and over. Save it as a macro, fuzzy-find it from a quick-select bar, fire it into the agent or the companion terminal. Multi-line prompts land as one piece, not confetti.
         </p>
       </article>
 
@@ -109,7 +109,7 @@
         </div>
         <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Companion terminals</h3>
         <p class="mt-1 text-sm text-[color:var(--color-muted)]">
-          Every agent gets its own shell session in the same worktree. Build, test, grep, poke around — without leaving dux. Spawn as many as you want.
+          Every agent gets its own shell session in the same worktree. Build, test, grep, poke around, all without leaving dux. Spawn as many as you want.
         </p>
       </article>
 
@@ -140,7 +140,7 @@
         </div>
         <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Spin up an agent from a PR</h3>
         <p class="mt-1 text-sm text-[color:var(--color-muted)]">
-          Paste a PR number or URL. dux resolves it, fetches the head branch, and drops you into a fresh worktree with an agent ready to review or push back. GitHub Enterprise remotes are invited too — no sitting outside with the weird remotes.
+          Paste a PR number or URL. dux resolves it, fetches the head branch, and drops you into a fresh worktree with an agent ready to review or push back. GitHub Enterprise remotes are invited too. No sitting outside with the weird remotes.
         </p>
       </article>
 
@@ -167,7 +167,7 @@
         </div>
         <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Featherweight footprint</h3>
         <p class="mt-1 text-sm text-[color:var(--color-muted)]">
-          It's Rust. Idle, dux sits <strong class="text-[color:var(--color-text)]">under 50 MB of RAM</strong> — leaving the memory for the agents that actually need it. The <span class="mono text-[color:var(--color-accent)]">resource-monitor</span> command shows live CPU and memory for dux and every agent it runs.
+          It's Rust. Idle, dux sits <strong class="text-[color:var(--color-text)]">under 50 MB of RAM</strong>, leaving the memory for the agents that actually need it. The <span class="mono text-[color:var(--color-accent)]">resource-monitor</span> command shows live CPU and memory for dux and every agent it runs.
         </p>
       </article>
 
@@ -195,7 +195,7 @@
         </div>
         <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Crash recovery, opt-in</h3>
         <p class="mt-1 text-sm text-[color:var(--color-muted)]">
-          Closed your laptop mid-thought? Flip on auto-reopen and agents still running when dux exited come back on next launch, resumed where they left off. Clean exits stay closed — not every zombie deserves resurrection.
+          Closed your laptop mid-thought? Flip on auto-reopen and agents still running when dux exited come back on next launch, resumed where they left off. Clean exits stay closed. Not every zombie deserves resurrection.
         </p>
       </article>
 
@@ -207,7 +207,7 @@
             <span class="text-[color:var(--color-text)]">reload-config</span>
           </div>
           <div class="mt-1.5 text-[color:var(--color-success)]">✓ config.toml valid</div>
-          <div class="text-[color:var(--color-success)]">✓ applied — no restart needed</div>
+          <div class="text-[color:var(--color-success)]">✓ applied, no restart needed</div>
           <div class="text-[color:var(--color-dim)]">invalid? keeps the last good config</div>
         </div>
         <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Hot-reload your config</h3>
@@ -228,7 +228,7 @@
         </div>
         <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Swap brains mid-session</h3>
         <p class="mt-1 text-sm text-[color:var(--color-muted)]">
-          Change the CLI on a worktree on the fly — Claude to Codex and back. Used that provider here before? dux passes its resume args so you pick up the prior conversation instead of starting cold.
+          Change the CLI on a worktree on the fly, Claude to Codex and back. Used that provider here before? dux passes its resume args so you pick up the prior conversation instead of starting cold.
         </p>
       </article>
 
@@ -245,7 +245,7 @@
         </div>
         <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Adopt an existing worktree</h3>
         <p class="mt-1 text-sm text-[color:var(--color-muted)]">
-          Already have a worktree lying around? dux adopts it. Managed ones reconnect as continuable sessions; external ones get copied in — dirty and untracked files intact — leaving your original checkout alone. Bring that "temporary" worktree in without admitting how long it's been temporary.
+          Already have a worktree lying around? dux adopts it. Managed ones reconnect as continuable sessions; external ones get copied in (dirty and untracked files intact), leaving your original checkout alone. Bring that "temporary" worktree in without admitting how long it's been temporary.
         </p>
       </article>
 
@@ -258,7 +258,7 @@
         </div>
         <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Jump straight to your editor</h3>
         <p class="mt-1 text-sm text-[color:var(--color-muted)]">
-          One key and the agent's worktree opens in your editor — Cursor, VS Code, Zed, Antigravity — auto-detected on your <span class="mono text-[color:var(--color-accent)]">PATH</span>. <span class="mono text-[color:var(--color-accent)]">open-worktree-with</span> lets you pick which one, per open.
+          One key and the agent's worktree opens in your editor (Cursor, VS Code, Zed, Antigravity), auto-detected on your <span class="mono text-[color:var(--color-accent)]">PATH</span>. <span class="mono text-[color:var(--color-accent)]">open-worktree-with</span> lets you pick which one, per open.
         </p>
       </article>
 
@@ -272,7 +272,7 @@
         </div>
         <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">A real git staging area</h3>
         <p class="mt-1 text-sm text-[color:var(--color-muted)]">
-          The right pane is the full git dance: stage and unstage files, read syntax-highlighted diffs (computed in-process with <span class="mono text-[color:var(--color-accent)]">similar</span> + <span class="mono text-[color:var(--color-accent)]">syntect</span>, not shelled out), write a commit, push, and pull — without leaving dux.
+          The right pane is the full git dance: stage and unstage files, read syntax-highlighted diffs (computed in-process with <span class="mono text-[color:var(--color-accent)]">similar</span> + <span class="mono text-[color:var(--color-accent)]">syntect</span>, not shelled out), write a commit, push, and pull, all without leaving dux.
         </p>
       </article>
 
@@ -281,7 +281,7 @@
         <div class="mb-4 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)] p-3 mono text-[11px] leading-relaxed">
           <div class="text-[color:var(--color-dim)]">$ refresh checkout</div>
           <div class="text-[color:var(--color-text)]">git pull --ff-only</div>
-          <div class="text-[color:var(--color-success)]">✓ fast-forwarded — no surprise merges</div>
+          <div class="text-[color:var(--color-success)]">✓ fast-forwarded, no surprise merges</div>
           <div class="text-[color:var(--color-dim)]">new agents branch from: <span class="text-[color:var(--color-muted)]">main</span></div>
         </div>
         <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Conservative git, on purpose</h3>
@@ -300,7 +300,7 @@
         </div>
         <h3 class="heading text-base font-semibold text-[color:var(--color-text)]">Environment, per project</h3>
         <p class="mt-1 text-sm text-[color:var(--color-muted)]">
-          Inject env vars into agent terminals, companion shells, and startup commands — globally or per-project, with <span class="mono text-[color:var(--color-accent)]">{'${VAR}'}</span> expansion so secrets come from the parent environment, not the config file. Project values win over global.
+          Inject env vars into agent terminals, companion shells, and startup commands, globally or per-project, with <span class="mono text-[color:var(--color-accent)]">{'${VAR}'}</span> expansion so secrets come from the parent environment, not the config file. Project values win over global.
         </p>
       </article>
     </div>

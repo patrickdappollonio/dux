@@ -172,7 +172,7 @@ const uid = "tabs-" + Math.random().toString(36).slice(2, 8);
             }, 1400);
           }
         } catch {
-          /* clipboard blocked — nothing graceful to do */
+          /* clipboard blocked; nothing graceful to do */
         }
       };
       btn.addEventListener("click", handler);
