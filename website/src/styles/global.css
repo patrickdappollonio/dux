@@ -219,6 +219,13 @@
     justify-content: space-between;
     gap: 0.5rem;
   }
+  .tool-card-title-wrap {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+  }
   .tool-card-title {
     font-family: var(--font-display);
     font-size: 1rem;
@@ -226,6 +233,20 @@
     letter-spacing: -0.01em;
     color: var(--color-text);
     margin: 0;
+  }
+  .tool-card-tag {
+    display: inline-flex;
+    align-items: center;
+    white-space: nowrap;
+    padding: 0.05rem 0.4rem;
+    border-radius: 999px;
+    font-size: 0.6rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-pink);
+    background: color-mix(in oklab, var(--color-pink) 14%, transparent);
+    border: 1px solid color-mix(in oklab, var(--color-pink) 30%, transparent);
   }
   .tool-card-desc {
     flex: 1;

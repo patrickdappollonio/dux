@@ -1,7 +1,8 @@
 ---
-// A recommendation block: title, optional GitHub stars, a description, and a
-// button to the tool's site. Pass `repo` ("org/name") for stars and a default
-// GitHub link; pass `href` to point the button somewhere other than the repo.
+// A recommendation block: title, optional tag and GitHub stars, a description,
+// and a button to the tool's site. Pass `repo` ("org/name") for stars and a
+// default GitHub link; pass `href` to point the button elsewhere; pass `tag`
+// for a small badge (e.g. "same dev as dux").
 import GhStars from "./GhStars.astro";
 
 interface Props {
@@ -9,15 +10,19 @@ interface Props {
   description: string;
   repo?: string;
   href?: string;
+  tag?: string;
 }
-const { name, description, repo, href } = Astro.props;
+const { name, description, repo, href, tag } = Astro.props;
 const url = href ?? (repo ? `https://github.com/${repo}` : undefined);
 const label = url && !url.includes("github.com") ? "Visit site" : "View on GitHub";
 ---
 
 <div class="tool-card">
   <div class="tool-card-head">
-    <h3 class="tool-card-title">{name}</h3>
+    <div class="tool-card-title-wrap">
+      <h3 class="tool-card-title">{name}</h3>
+      {tag && <span class="tool-card-tag">{tag}</span>}
+    </div>
     {repo && <GhStars repo={repo} />}
   </div>
   <p class="tool-card-desc">{description}</p>
