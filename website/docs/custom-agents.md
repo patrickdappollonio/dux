@@ -2,7 +2,7 @@
 title: Custom CLI Agents
 description: Configure any CLI as a dux provider — no adapters, no protocol layer, just config.
 group: Guides
-order: 2
+order: 50
 ---
 
 A provider is the CLI behind an agent. Claude Code, Codex, OpenCode, and Gemini are

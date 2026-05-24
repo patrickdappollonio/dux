@@ -86,4 +86,7 @@ ln -sfn "$DUX_WORKTREE_PATH/.env.local" .env
 ```
 
 The shell used to run startup commands is itself configurable under
-`[startup_command_terminal]`, so the behavior stays portable and reviewable.
+`[startup_command_terminal]`, so the behavior stays portable and reviewable. For
+the full treatment — per-project and global `env`, the `DUX_*` variables dux
+injects, and the startup shell — see
+[Startup commands & environment variables](/docs/startup-commands).

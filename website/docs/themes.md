@@ -2,7 +2,7 @@
 title: Themes
 description: Switch the built-in themes, preview them live, or write your own from scratch.
 group: Guides
-order: 1
+order: 40
 ---
 
 dux ships with a generous set of built-in themes and lets you write your own. Color
