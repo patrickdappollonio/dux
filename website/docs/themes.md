@@ -18,7 +18,7 @@ The theme lives under the `[ui]` section of `config.toml`:
 theme = "dux_dark"   # the default
 ```
 
-Set it to any built-in name and restart, or — easier — open the **theme picker**
+Set it to any built-in name and restart, or (easier) open the **theme picker**
 from the command palette and arrow through the options with a live preview. No
 config editing, no guessing what a palette looks like.
 
@@ -32,7 +32,7 @@ theme = "tokyo_night"
 theme = "gruvbox_dark"
 ```
 
-There are far more than these — Catppuccin's four flavors, Tokyo Night's variants,
+There are far more than these: Catppuccin's four flavors, Tokyo Night's variants,
 Solarized, Rose Pine, Everforest, Kanagawa, One Dark, and others. Rather than
 memorize a list that drifts over time, open the theme picker: it discovers every
 built-in plus anything you've authored, and labels where each one came from.
@@ -41,7 +41,7 @@ built-in plus anything you've authored, and labels where each one came from.
 
 When you set `theme = "<name>"`, dux looks in this order:
 
-1. A user theme at `<config dir>/themes/<name>.toml` — your own themes win first.
+1. A user theme at `<config dir>/themes/<name>.toml` (your own themes win first).
 2. The bundled `dux_dark` theme, embedded in the binary.
 3. An [Opaline](https://github.com/hyperb1iss/opaline) built-in (Catppuccin, Nord,
    Dracula, and friends).
@@ -114,6 +114,6 @@ You have two ways to define colors:
 
 ### Preview as you go
 
-After saving a theme file, open the theme picker from the command palette — your
+After saving a theme file, open the theme picker from the command palette. Your
 theme shows up alongside the built-ins, labeled as user-authored, with the same
 live preview. Tweak, save, re-pick, repeat until it feels right.

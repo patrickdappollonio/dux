@@ -28,7 +28,7 @@ Three subcommands handle the file without you having to hunt for it:
 - `dux config regenerate` previews the latest canonical template, so you can see
   new options after an upgrade.
 
-Hand-edits are preserved across saves — dux rewrites the file with `toml_edit`, so
+Hand-edits are preserved across saves: dux rewrites the file with `toml_edit`, so
 your comments and ordering survive.
 
 ## Environment variables and portable paths
@@ -45,7 +45,7 @@ name = "web-app"
 env  = { EDITOR = "true", API_KEY = "${FOO_KEY}" }
 ```
 
-Because the file holds portable intent — projects, providers, themes, keybindings —
+Because the file holds portable intent (projects, providers, themes, keybindings)
 rather than runtime state, it's **safe to commit to git.** Drop it in your dotfiles
 and it travels between machines without leaking your username or your secrets.
 
@@ -70,7 +70,7 @@ palette (`Ctrl-P` by default). It's the fastest way to discover what dux can do.
 
 ## Per-project startup commands
 
-Some projects need a little ceremony before an agent is useful — installing
+Some projects need a little ceremony before an agent is useful: installing
 dependencies, linking an env file, and so on. A project's `startup_command` runs
 that ritual for you when an agent's worktree is created:
 
@@ -87,6 +87,6 @@ ln -sfn "$DUX_WORKTREE_PATH/.env.local" .env
 
 The shell used to run startup commands is itself configurable under
 `[startup_command_terminal]`, so the behavior stays portable and reviewable. For
-the full treatment — per-project and global `env`, the `DUX_*` variables dux
-injects, and the startup shell — see
+the full treatment (per-project and global `env`, the `DUX_*` variables dux
+injects, and the startup shell), see
 [Startup commands & environment variables](/docs/startup-commands).

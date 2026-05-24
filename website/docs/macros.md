@@ -7,7 +7,7 @@ order: 20
 
 Macros are named text snippets stored in your config. When you open the macro
 bar, dux shows only the macros that make sense for whatever is currently focused
-— agent pane or terminal pane — and writes the selected text directly into the
+(agent pane or terminal pane) and writes the selected text directly into the
 PTY as if you had typed it yourself. Good for prompts you repeat constantly,
 long build commands you never want to mistype, or anything you find yourself
 copy-pasting.
@@ -29,7 +29,7 @@ mapped to an inline table with two fields:
 "Lint"   = { text = "cargo clippy",              surface = "both" }
 ```
 
-Names are arbitrary strings — use whatever is memorable and scannable in the
+Names are arbitrary strings: use whatever is memorable and scannable in the
 picker list. Declaration order in the file is preserved in the UI.
 
 ### Surface values
@@ -37,11 +37,11 @@ picker list. Declaration order in the file is preserved in the UI.
 The `surface` field controls which pane the macro appears in when you open the
 macro bar:
 
-- `"agent"` — shown only when the agent pane is focused. Use this for prompts
+- `"agent"`: shown only when the agent pane is focused. Use this for prompts
   you send to the AI (review requests, refactoring instructions, etc.).
-- `"terminal"` — shown only when the terminal pane is focused. Use this for
+- `"terminal"`: shown only when the terminal pane is focused. Use this for
   shell commands you'd rather not retype.
-- `"both"` — shown on either pane. Useful for text that makes sense in either
+- `"both"`: shown on either pane. Useful for text that makes sense in either
   context.
 
 Macros that don't match the current surface are filtered out automatically, so
@@ -52,7 +52,7 @@ the picker stays short.
 You can write multi-line text by including `\n` in a quoted string or by using
 a TOML multi-line basic string. dux translates every newline to Alt+Enter
 (ESC + CR) before writing to the PTY. That means the whole macro arrives as a
-single composed prompt rather than submitting at each line break — you still
+single composed prompt rather than submitting at each line break; you still
 press Enter yourself to send.
 
 ```toml
@@ -85,7 +85,7 @@ dux writes the macro bytes directly to the active PTY client and shows
 
 The `edit-macros` command palette action opens the macros editor overlay. You
 can reach it through the command palette (open with **Ctrl-P** by default and
-search for `edit-macros`). The `EditMacros` action has no default key binding —
+search for `edit-macros`). The `EditMacros` action has no default key binding;
 the palette is the intended entry point.
 
 Inside the editor:
@@ -100,7 +100,7 @@ Inside the editor:
   the entry (provided the text is non-empty).
 - **Esc** in the list view closes the overlay.
 
-All changes — additions, edits, and deletions — are persisted immediately to
+All changes (additions, edits, and deletions) are persisted immediately to
 `config.toml`. Hand-edits to the file are also respected: dux rewrites with
 `toml_edit`, so your formatting and ordering survive.
 
@@ -108,7 +108,7 @@ All changes — additions, edits, and deletions — are persisted immediately to
 
 You can also manage macros entirely by hand. Open `config.toml` (use
 `dux config path` to locate it), add entries under `[macros]`, and save. The
-changes take effect the next time dux reads its config — no restart needed for
+changes take effect the next time dux reads its config; no restart needed for
 new sessions.
 
 - **Linux:** `~/.config/dux/config.toml`

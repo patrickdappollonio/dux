@@ -1,6 +1,6 @@
 ---
 title: FAQ
-description: Quick answers to the small questions — platforms, providers, config, themes, and keybindings.
+description: Quick answers to the small questions about platforms, providers, config, themes, and keybindings.
 group: Reference
 order: 100
 ---
@@ -12,7 +12,7 @@ the page that covers it in full.
 
 ### Does dux run on Windows?
 
-Through WSL2, which is Linux. dux targets macOS and Linux only — there is no
+Through WSL2, which is Linux. dux targets macOS and Linux only; there is no
 native Windows build, and WSL2 is the supported way to run it on Windows.
 
 ### What does dux cost?
@@ -22,7 +22,7 @@ whatever accounts they need.
 
 ### Does dux phone home?
 
-dux itself sends no telemetry. It launches local CLIs in local terminals — no
+dux itself sends no telemetry. It launches local CLIs in local terminals: no
 analytics, no JSON-RPC, no background uploads.
 
 ## Agents & providers
@@ -35,7 +35,7 @@ be added. See [Custom CLI Agents](/docs/custom-agents).
 
 ### How do I add my own CLI as an agent?
 
-Add a `[providers.<name>]` block to your config — no adapters, no protocol layer.
+Add a `[providers.<name>]` block to your config; no adapters, no protocol layer.
 See [Custom CLI Agents](/docs/custom-agents).
 
 ### Can I start an agent from a GitHub PR?
@@ -50,7 +50,7 @@ same project run in complete isolation. See [Creating agents](/docs/creating-age
 
 ### Can I branch off a running agent?
 
-Yes — fork it. dux makes a fresh worktree from the agent's current state,
+Yes: fork it. dux makes a fresh worktree from the agent's current state,
 uncommitted edits included. See
 [Forking an existing agent](/docs/creating-agents#forking-an-existing-agent).
 
@@ -68,7 +68,7 @@ agent-opened PRs; skip it and dux quietly disables anything GitHub.
 
 ### Is it safe to commit my config to git?
 
-Yes. It stores portable intent, not secrets — env values stay as `${VAR}`
+Yes. It stores portable intent, not secrets; env values stay as `${VAR}`
 references. See
 [environment variables and portable paths](/docs/configuration#environment-variables-and-portable-paths).
 
@@ -96,7 +96,7 @@ keystroke. See [Managing Macros](/docs/macros).
 
 ### How do I see every keyboard shortcut?
 
-Press `?` in the app — the help overlay is the authoritative reference. Every
+Press `?` in the app: the help overlay is the authoritative reference. Every
 binding is configurable under `[keys]`. See
 [keybindings](/docs/configuration#keybindings).
 

@@ -1,13 +1,13 @@
 ---
 title: Custom CLI Agents
-description: Configure any CLI as a dux provider — no adapters, no protocol layer, just config.
+description: Configure any CLI as a dux provider, no adapters or protocol layer, just config.
 group: Guides
 order: 50
 ---
 
 A provider is the CLI behind an agent. Claude Code, Codex, OpenCode, and Gemini are
 configured out of the box, but the whole point of dux's design is that **any CLI can
-be a provider.** Adding one is a config change, not a code change — there are no
+be a provider.** Adding one is a config change, not a code change. There are no
 adapters and no protocol layer to implement. dux runs the command exactly as it
 would in a normal terminal.
 
@@ -15,9 +15,9 @@ would in a normal terminal.
 
 A tool can be a provider if and only if it supports two modes:
 
-- **PTY mode** — an interactive session dux can embed in a pseudo-terminal. This is
+- **PTY mode:** an interactive session dux can embed in a pseudo-terminal. This is
   how you actually work with the agent.
-- **Oneshot mode** — headless: hand it a prompt, get one response back. dux uses
+- **Oneshot mode** (headless): hand it a prompt, get one response back. dux uses
   this for automated tasks like generating commit messages.
 
 If your CLI can do both, dux can drive it.
@@ -55,14 +55,14 @@ forward_scroll = false
 
 `oneshot_args` is a template. dux substitutes two placeholders before running it:
 
-- `{prompt}` — the prompt text, inserted as a single argument.
-- `{tempfile}` — the path to a temp file dux creates for the run.
+- `{prompt}`: the prompt text, inserted as a single argument.
+- `{tempfile}`: the path to a temp file dux creates for the run.
 
 How you read the result depends on the CLI:
 
-- `oneshot_output = "stdout"` — dux captures the command's standard output. Use this
+- `oneshot_output = "stdout"`: dux captures the command's standard output. Use this
   when the CLI prints its answer.
-- `oneshot_output = "tempfile"` — dux reads the file at `{tempfile}` after the
+- `oneshot_output = "tempfile"`: dux reads the file at `{tempfile}` after the
   command exits. Use this when the CLI writes its answer to a file you pass it.
 
 ## A worked example
@@ -97,13 +97,13 @@ name = "web-app"
 default_provider = "myagent"
 ```
 
-You can still pick a different provider when you create an individual agent — this
+You can still pick a different provider when you create an individual agent; this
 just sets the default.
 
 ## Why no adapters?
 
 Because the CLI runs as-is. dux embeds a real terminal emulator and spawns the
 command in a pseudo-terminal, so the tool behaves exactly like it does in your
-shell — same prompts, same colors, same login flow, same everything. Keeping it
+shell: same prompts, same colors, same login flow, same everything. Keeping it
 generic is what lets any future CLI become a provider with nothing more than a few
 lines of TOML.

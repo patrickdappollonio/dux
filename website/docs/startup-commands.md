@@ -5,7 +5,7 @@ group: Guides
 order: 30
 ---
 
-Some projects need a little ceremony before an agent is actually useful — pulling
+Some projects need a little ceremony before an agent is actually useful: pulling
 in dependencies, symlinking secrets files, or warming a cache. dux handles this
 with two complementary config features: per-project **environment variables** and
 **startup commands**. Both live inside `[[projects]]` entries in `config.toml`
@@ -15,7 +15,7 @@ from the same clean slate.
 ## Per-project environment variables
 
 The `env` field on a project is an inline TOML table of `KEY = "value"` pairs.
-dux passes these variables to every PTY it spawns for that project — agent
+dux passes these variables to every PTY it spawns for that project: agent
 sessions, companion terminals, and the startup command itself.
 
 ```toml
@@ -27,7 +27,7 @@ env  = { NODE_ENV = "development", API_KEY = "${MY_API_KEY}" }
 ```
 
 Values expand `$VAR` and `${VAR}` from your shell environment at the moment dux
-starts. That means secrets stay as references — never hardcoded in the file —
+starts. That means secrets stay as references (never hardcoded in the file),
 which makes `config.toml` safe to commit to your dotfiles.
 
 ### Global environment variables
@@ -53,7 +53,7 @@ env  = { LOG_LEVEL = "debug" }   # overrides the global LOG_LEVEL for this proje
 `startup_command` is a string (or multiline TOML string) that runs inside the
 agent's worktree immediately after that worktree is created, **before** the
 provider launches. It is the right place for anything the agent needs already
-done when it first opens — installing packages, symlinking config files, running
+done when it first opens: installing packages, symlinking config files, running
 code generators.
 
 ```toml
@@ -73,7 +73,7 @@ A few things to know:
   (i.e. `$DUX_WORKTREE_PATH`), not the source checkout.
 - dux waits for the command to complete before launching the provider. If the
   command exits non-zero, dux records the failure in the startup log and still
-  launches the agent — it does not block you.
+  launches the agent; it does not block you.
 - Every run produces a timestamped log file under the dux config directory:
   `startup-command-logs/<project-id>/<session-id>/`. You can browse these from
   the command palette.
@@ -119,7 +119,7 @@ profile, `$PATH` extensions, and tool version managers (e.g. `nvm`, `rbenv`,
 $SHELL -l -c "<your startup_command>"
 ```
 
-Because `[startup_command_terminal]` is global config — not project state — the
+Because `[startup_command_terminal]` is global config (not project state), the
 shell behavior is the same for every project and every machine you sync the
 config to. Change it once and all startup commands pick it up.
 
@@ -180,5 +180,5 @@ startup_command = "cargo build -q 2>&1 | tail -5"
 ```
 
 Builds the workspace quietly so the agent's first edit-compile-test loop is
-faster. The `2>&1 | tail -5` keeps the log compact — only the last five lines
+faster. The `2>&1 | tail -5` keeps the log compact: only the last five lines
 of build output are captured.

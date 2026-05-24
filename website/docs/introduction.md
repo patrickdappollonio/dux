@@ -6,8 +6,8 @@ order: 1
 ---
 
 `dux` is a terminal UI for running multiple AI coding agents in parallel, one git
-worktree each. It spawns the real CLI for each agent — Claude Code, Codex, Gemini,
-OpenCode, or anything else you can run in a terminal — inside an embedded
+worktree each. It spawns the real CLI for each agent (Claude Code, Codex, Gemini,
+OpenCode, or anything else you can run in a terminal) inside an embedded
 pseudo-terminal. No protocol layer, no adapters, no JSON-RPC. Just the tools you
 already use, side by side, each in its own branch.
 
@@ -36,7 +36,7 @@ The window is split into three panes:
   view when you want to review changes.
 - The **right pane** shows the files an agent has changed, with diffs.
 
-`Tab` and `Shift-Tab` move between panes — that's the primary way you get around.
+`Tab` and `Shift-Tab` move between panes, and that's the primary way you get around.
 Every pane has its own local key combinations, and the authoritative list of every
 binding lives in the in-app help overlay (press `?`). Everything is rebindable; see
 [Configuration](/docs/configuration) for how.
@@ -54,7 +54,7 @@ state), `dux.log` (logs, the first place to look when something misbehaves), and
 
 ## Where to go next
 
-- [Configuration](/docs/configuration) — the config file, where it lives, and how
+- [Configuration](/docs/configuration): the config file, where it lives, and how
   it expands environment variables.
-- [Managing Themes](/docs/themes) — switch the look, or build your own.
-- [Custom CLI Agents](/docs/custom-agents) — teach dux to drive any CLI you like.
+- [Managing Themes](/docs/themes): switch the look, or build your own.
+- [Custom CLI Agents](/docs/custom-agents): teach dux to drive any CLI you like.

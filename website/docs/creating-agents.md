@@ -1,6 +1,6 @@
 ---
 title: Creating agents
-description: The four ways to spin up an agent in dux — fresh branch, GitHub PR, existing worktree, or fork — and how provider selection works at creation time.
+description: The four ways to spin up an agent in dux (fresh branch, GitHub PR, existing worktree, or fork) and how provider selection works at creation time.
 group: Guides
 order: 10
 ---
@@ -12,7 +12,7 @@ keystroke. Before you can create agents, you need at least one project added to
 dux (see the project browser, accessible via the `add-project` palette command).
 
 Every action below is reachable from the command palette. Each also has a
-default keybinding you can view — and rebind — in the in-app help overlay (`?`),
+default keybinding you can view (and rebind) in the in-app help overlay (`?`),
 so this guide names the stable palette commands rather than keys that you might
 have remapped.
 
@@ -36,7 +36,7 @@ hooks, and local config all behave exactly as they do in the main checkout.
 ## Naming an agent
 
 Every creation path ends at a naming prompt. dux uses the branch name as the
-agent name — it becomes a git branch, so only ASCII letters, digits, `-`, `_`,
+agent name: it becomes a git branch, so only ASCII letters, digits, `-`, `_`,
 and `/` are accepted. Spaces are transparently converted to dashes.
 
 If you leave the field empty and the `enable_randomized_pet_name_by_default`
@@ -58,7 +58,7 @@ prompt.
 On confirmation, dux runs `git worktree add -b <name> <path> <leading-branch>`,
 branching from the project's leading branch. If the name you entered matches an
 existing local branch, dux asks whether to attach to that branch instead of
-creating a new one — which is useful when you want to continue work that already
+creating a new one, which is useful when you want to continue work that already
 started.
 
 ### Pulling before create
@@ -97,7 +97,7 @@ URL or type a PR number. After you confirm, dux:
 2. Creates a worktree on that branch.
 3. Opens the naming prompt (pre-filled with the PR's head branch name).
 
-If the branch already exists locally — for example from a previous fetch — dux
+If the branch already exists locally (for example, from a previous fetch), dux
 attaches to it without fetching again.
 
 ## Creating an agent from an existing worktree
@@ -106,16 +106,16 @@ Select a project and run the `new-agent-from-worktree` palette command. dux open
 a picker that lists every git worktree it finds for that project's repository.
 Worktrees are grouped into two categories:
 
-- **Managed worktrees** — worktrees already under dux's `worktrees/` directory.
+- **Managed worktrees**: worktrees already under dux's `worktrees/` directory.
   If one has no agent yet, dux attaches a new session to it without touching the
   branch or files.
-- **External worktrees** — worktrees that exist in the repository but live
+- **External worktrees**: worktrees that exist in the repository but live
   outside dux's managed directory (for example, one you created with
   `git worktree add` yourself). dux forks these: it creates a new managed
   worktree branched from the external worktree's current `HEAD` commit and copies
   any dirty and untracked files across so you don't lose in-progress work.
 
-The main checkout itself is not selectable — dux keeps that for you to work in
+The main checkout itself is not selectable; dux keeps that for you to work in
 outside of agent sessions.
 
 Worktrees that already have an active agent are shown in the picker but cannot be
@@ -126,7 +126,7 @@ selected; the error "That worktree already has an agent." is shown if you try.
 Select an agent in the left pane and run the `fork-agent` palette command.
 Forking creates a brand-new worktree branched from the source agent's current
 `HEAD` commit, then copies the entire
-working tree across — including uncommitted edits — so the fork starts in the
+working tree across (including uncommitted edits) so the fork starts in the
 exact same state the original agent is in right now.
 
 This is useful for exploring two different approaches to the same problem: fork
@@ -164,7 +164,7 @@ Agents are persistent. When you quit dux and reopen it, agents can resume
 automatically if `auto_reopen_agents` is enabled. The setting lives at two levels:
 
 ```toml
-# Global default — applies to all projects unless overridden
+# Global default: applies to all projects unless overridden
 [ui]
 auto_reopen_agents = false
 
@@ -180,5 +180,5 @@ project's setting, or `toggle-agent-auto-reopen` to flip a single agent's
 behaviour. Changes take effect the next time dux starts.
 
 If an agent's provider command is not found when dux tries to reopen it, the
-worktree is left intact and the error is shown in the status bar — the agent
+worktree is left intact and the error is shown in the status bar; the agent
 appears in the list and you can reconnect it manually once the CLI is available.
