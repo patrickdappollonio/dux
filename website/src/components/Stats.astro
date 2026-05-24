@@ -1,0 +1,63 @@
+---
+// A thin social-proof band of live, build-time download counters. Any counter
+// whose lookup fails is dropped; if all fail, the whole band is omitted.
+import { getReleaseDownloads, getNpmLastMonth, formatCount } from "../lib/stats";
+
+const repo = "patrickdappollonio/dux";
+const pkg = "@patrickdappollonio/dux";
+
+const [downloads, npm] = await Promise.all([
+  getReleaseDownloads(repo),
+  getNpmLastMonth(pkg),
+]);
+
+interface Stat {
+  value: string;
+  label: string;
+  note: string;
+}
+const stats: Stat[] = [];
+if (downloads !== null) {
+  stats.push({
+    value: formatCount(downloads),
+    label: "Release downloads",
+    note: "GitHub + Homebrew",
+  });
+}
+if (npm !== null) {
+  stats.push({
+    value: formatCount(npm),
+    label: "npm installs / month",
+    note: "last 30 days",
+  });
+}
+---
+
+{
+  stats.length > 0 && (
+    <section class="border-y border-[color:var(--color-border-soft)] bg-[color:var(--color-panel)]/30">
+      <div class="container-app py-8">
+        <dl class="flex flex-wrap items-start justify-center gap-x-14 gap-y-6 text-center sm:gap-x-24">
+          {stats.map((s, i) => (
+            <>
+              {i > 0 && (
+                <div class="hidden h-12 w-px self-center bg-[color:var(--color-border)] sm:block" />
+              )}
+              <div>
+                <dt class="heading text-3xl font-bold tracking-tight text-[color:var(--color-accent)] sm:text-4xl">
+                  {s.value}
+                </dt>
+                <dd class="mt-1 text-xs font-medium uppercase tracking-wider text-[color:var(--color-muted)]">
+                  {s.label}
+                </dd>
+                <dd class="mt-0.5 text-[10px] text-[color:var(--color-dim)]">
+                  {s.note}
+                </dd>
+              </div>
+            </>
+          ))}
+        </dl>
+      </div>
+    </section>
+  )
+}
