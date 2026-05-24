@@ -59,6 +59,11 @@ uncommitted edits included. See
 It's optional. Install `gh` for PR tracking, creating agents from PRs, and
 agent-opened PRs; skip it and dux quietly disables anything GitHub.
 
+### Any recommended tools or MCP servers?
+
+See [Recommended tools](/docs/recommended-tools) for providers, MCP servers,
+skills, and companion CLIs that pair well with dux.
+
 ## Configuration
 
 ### Where does dux keep its config and data?
