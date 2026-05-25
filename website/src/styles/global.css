@@ -227,7 +227,7 @@
   }
   .tool-card-repo {
     display: block;
-    margin-top: 0.05rem;
+    margin-top: 0.2rem;
     font-family: var(--font-mono);
     font-size: 0.7rem;
     line-height: 1.2;
