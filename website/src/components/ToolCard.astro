@@ -19,9 +19,12 @@ const label = url && !url.includes("github.com") ? "Visit site" : "View on GitHu
 
 <div class="tool-card">
   <div class="tool-card-head">
-    <div class="tool-card-title-wrap">
-      <h3 class="tool-card-title">{name}</h3>
-      {tag && <span class="tool-card-tag">{tag}</span>}
+    <div class="tool-card-head-text">
+      <div class="tool-card-title-wrap">
+        <h3 class="tool-card-title">{name}</h3>
+        {tag && <span class="tool-card-tag">{tag}</span>}
+      </div>
+      {repo && <span class="tool-card-repo">{repo}</span>}
     </div>
     {repo && <GhStars repo={repo} />}
   </div>
