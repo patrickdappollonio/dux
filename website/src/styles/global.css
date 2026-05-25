@@ -208,6 +208,9 @@
   .tool-card {
     display: flex;
     flex-direction: column;
+    /* Reset the inherited prose line-height (1.75); the description sets its
+       own below, and the title/subtitle are tightened individually. */
+    line-height: 1.4;
     border: 1px solid var(--color-border);
     background: color-mix(in oklab, var(--color-panel) 80%, transparent);
     border-radius: 0.75rem;
@@ -227,8 +230,14 @@
     margin-top: 0.05rem;
     font-family: var(--font-mono);
     font-size: 0.7rem;
+    line-height: 1.2;
     color: var(--color-dim);
     word-break: break-word;
+  }
+  /* No repo subtitle (e.g. a non-GitHub link): keep a fair gap between the
+     title and the description instead of letting them sit too close. */
+  .tool-card-head:not(:has(.tool-card-repo)) {
+    margin-bottom: 0.35rem;
   }
   .tool-card-title-wrap {
     display: flex;
@@ -241,6 +250,7 @@
     font-family: var(--font-display);
     font-size: 1rem;
     font-weight: 600;
+    line-height: 1.2;
     letter-spacing: -0.01em;
     color: var(--color-text);
     margin: 0;
