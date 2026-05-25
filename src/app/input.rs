@@ -8359,9 +8359,10 @@ not_a_real_action = ["x"]
         app.clipboard = Clipboard::from_fn(clipboard_ok);
 
         app.copy_selected_path().unwrap();
-        // Result arrives via WorkerEvent; drain it.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        app.drain_events();
+        // Result arrives via WorkerEvent; wait for it.
+        drain_until(&mut app, |app| {
+            app.status.text() == "Agent's path copied to clipboard."
+        });
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
         assert_eq!(app.status.text(), "Agent's path copied to clipboard.");
@@ -8374,8 +8375,9 @@ not_a_real_action = ["x"]
         app.clipboard = Clipboard::from_fn(clipboard_ok);
 
         app.copy_selected_path().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        app.drain_events();
+        drain_until(&mut app, |app| {
+            app.status.text() == "Agent's path copied to clipboard."
+        });
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
         assert_eq!(app.status.text(), "Agent's path copied to clipboard.");
@@ -8403,8 +8405,9 @@ not_a_real_action = ["x"]
         app.clipboard = Clipboard::from_fn(clipboard_fail);
 
         app.copy_selected_path().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        app.drain_events();
+        drain_until(&mut app, |app| {
+            app.status.text().contains("Clipboard copy failed")
+        });
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
         assert!(app.status.text().contains("Clipboard copy failed"));
@@ -11518,8 +11521,9 @@ cyan = "#00ffff"
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 44, 5));
         app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 52, 5));
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 52, 5));
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        app.drain_events();
+        drain_until(&mut app, |app| {
+            app.status.text() == "Startup command log text copied to clipboard."
+        });
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
         assert_eq!(
@@ -11632,8 +11636,7 @@ cyan = "#00ffff"
         std::fs::write(log_dir.join("20260515T020000Z-new.log"), "new log").expect("new log");
 
         app.open_startup_command_logs().expect("open logs");
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        app.drain_events();
+        drain_until(&mut app, |app| app.startup_log_viewer.is_some());
 
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::StartupLog);
         let viewer = app.startup_log_viewer.as_ref().expect("log viewer");
@@ -11721,8 +11724,9 @@ cyan = "#00ffff"
             body.x + 4,
             body.y,
         ));
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        app.drain_events();
+        drain_until(&mut app, |app| {
+            app.status.text() == "Startup command log text copied to clipboard."
+        });
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
         assert_eq!(
@@ -11923,7 +11927,9 @@ cyan = "#00ffff"
 
         // Wait for the process to produce output and exit.
         std::thread::sleep(std::time::Duration::from_millis(200));
-        app.drain_events();
+        drain_until(&mut app, |app| {
+            app.sessions[0].status == SessionStatus::Detached
+        });
 
         // Since the PTY had substantial output (>5 lines), the fallback
         // should NOT have triggered. The session should be detached.
@@ -12002,7 +12008,7 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
 
         std::thread::sleep(std::time::Duration::from_millis(200));
-        app.drain_events();
+        drain_until(&mut app, |app| !app.providers.contains_key(&session_id));
 
         // Without being a candidate, the session should just go to detached.
         assert!(
@@ -12025,7 +12031,7 @@ cyan = "#00ffff"
         app.mark_session_status(&session_id, SessionStatus::Active);
 
         std::thread::sleep(std::time::Duration::from_millis(200));
-        app.drain_events();
+        drain_until(&mut app, |app| !app.providers.contains_key(&session_id));
 
         assert!(!app.sessions[0].desired_running);
         let loaded = app.session_store.load_sessions().expect("load sessions");
@@ -12045,7 +12051,7 @@ cyan = "#00ffff"
         app.mark_session_status(&session_id, SessionStatus::Active);
 
         std::thread::sleep(std::time::Duration::from_millis(200));
-        app.drain_events();
+        drain_until(&mut app, |app| !app.providers.contains_key(&session_id));
 
         assert!(app.sessions[0].desired_running);
         let loaded = app.session_store.load_sessions().expect("load sessions");
@@ -12070,7 +12076,9 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
 
         std::thread::sleep(std::time::Duration::from_millis(200));
-        app.drain_events();
+        drain_until(&mut app, |app| {
+            app.status.text().contains("custom provider failed")
+        });
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
         assert!(
@@ -13867,8 +13875,9 @@ cyan = "#00ffff"
 
         app.apply_change_project_default_provider()
             .expect("apply project provider");
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        app.drain_events();
+        drain_until(&mut app, |app| {
+            app.status.text().contains("changed to claude")
+        });
 
         assert_eq!(app.config.defaults.provider, "codex");
         let persisted = app.session_store.load_projects().expect("load projects");
@@ -13923,8 +13932,11 @@ cyan = "#00ffff"
 
         app.apply_change_project_default_provider()
             .expect("apply inherit global");
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        app.drain_events();
+        drain_until(&mut app, |app| {
+            app.status
+                .text()
+                .contains("now inherits the global default provider")
+        });
 
         let persisted = app.session_store.load_projects().expect("load projects");
         let config = persisted
