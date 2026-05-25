@@ -222,29 +222,39 @@
     justify-content: space-between;
     gap: 0.5rem;
   }
+  /* Title, tag, and subtitle share one wrapping flex row. The subtitle takes a
+     full line of its own; the tag sits next to the title when there's room and
+     drops below the subtitle when there isn't (see the container query). */
   .tool-card-head-text {
+    flex: 1;
     min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 0.4rem;
+    row-gap: 0.2rem;
+    container-type: inline-size;
   }
   .tool-card-repo {
-    display: block;
-    margin-top: 0.2rem;
+    flex-basis: 100%;
+    order: 1;
     font-family: var(--font-mono);
     font-size: 0.7rem;
     line-height: 1.2;
     color: var(--color-dim);
     word-break: break-word;
   }
+  /* Too narrow to fit the tag beside the title: move it below the subtitle
+     rather than wedging it between the title and subtitle. */
+  @container (max-width: 400px) {
+    .tool-card-tag {
+      order: 2;
+    }
+  }
   /* No repo subtitle (e.g. a non-GitHub link): keep a fair gap between the
      title and the description instead of letting them sit too close. */
   .tool-card-head:not(:has(.tool-card-repo)) {
     margin-bottom: 0.35rem;
-  }
-  .tool-card-title-wrap {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.4rem;
-    min-width: 0;
   }
   .tool-card-title {
     font-family: var(--font-display);
