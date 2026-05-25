@@ -1,0 +1,85 @@
+---
+import InstallTabs from "./InstallTabs.astro";
+import Stats from "./Stats.astro";
+---
+
+<section class="relative overflow-hidden pt-12 pb-20 sm:pt-20 sm:pb-28">
+  <div class="absolute inset-0 grid-bg pointer-events-none opacity-60"></div>
+
+  <div class="container-app relative">
+    <div class="grid items-center gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:gap-14">
+      <div class="min-w-0">
+        <div class="mb-5 flex items-center gap-3">
+          <img
+            src="/dux-logo.png"
+            alt="dux: a duck conductor with a baton"
+            width="56"
+            height="56"
+            class="h-14 w-14 object-contain drop-shadow-[0_0_24px_rgba(0,212,255,0.25)]"
+          />
+          <span class="pill">
+            <span class="h-1.5 w-1.5 rounded-full bg-[color:var(--color-success)] animate-pulse"></span>
+            v0.5 · macOS + Linux + WSL
+          </span>
+        </div>
+
+        <h1 class="heading mt-5 text-4xl font-bold leading-[1.05] tracking-tight sm:text-5xl lg:text-6xl">
+          Your AI agents
+          <br class="hidden sm:block" />
+          deserve a
+          <span class="relative inline-block"
+            ><span class="relative z-10 text-[color:var(--color-accent)] glow-text">proper office</span
+            ><span
+              aria-hidden="true"
+              class="absolute -bottom-1 left-0 right-0 h-2 bg-[color:var(--color-accent)]/20 -skew-x-12 -z-0"
+            ></span></span>.
+        </h1>
+
+        <p class="mt-6 max-w-xl text-base leading-relaxed text-[color:var(--color-muted)] sm:text-lg">
+          <strong class="text-[color:var(--color-text)]">dux</strong>
+          <span class="text-[color:var(--color-dim)]">(pronounced "<em>dooks</em>")</span>
+          is a terminal UI for orchestrating multiple AI coding agents in parallel, each in its own git worktree. No protocol layers. No adapters. Just real CLIs in real terminals. And it's all yours to tune: every setting, down to every keybinding dux controls, is <strong class="text-[color:var(--color-text)]">configurable</strong> and documented inline in the config file.
+        </p>
+
+        <div class="mt-8 flex flex-wrap items-center gap-3">
+          <a href="#install" class="btn-primary">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="8 17 12 21 16 17"></polyline>
+              <line x1="12" y1="12" x2="12" y2="21"></line>
+              <path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"></path>
+            </svg>
+            Install dux
+          </a>
+          <a
+            href="https://github.com/patrickdappollonio/dux"
+            target="_blank"
+            rel="noopener"
+            class="btn-ghost"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.8 10.9.6.1.8-.2.8-.5v-2c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.6-1.3-1.6-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.4 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2.9-.3 1.9-.4 2.9-.4s2 .1 2.9.4c2.2-1.5 3.2-1.2 3.2-1.2.6 1.6.2 2.8.1 3.1.7.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.3-5.3 5.6.4.3.8 1 .8 2.1v3.1c0 .3.2.7.8.5C20.2 21.4 23.5 17.1 23.5 12 23.5 5.7 18.3.5 12 .5z"/>
+            </svg>
+            Star on GitHub
+          </a>
+          <a href="#demo" class="text-sm text-[color:var(--color-muted)] hover:text-[color:var(--color-accent)] inline-flex items-center gap-1">
+            watch the demo
+            <span aria-hidden="true">↓</span>
+          </a>
+        </div>
+
+        <ul class="mt-8 grid grid-cols-2 gap-x-6 gap-y-2 text-xs text-[color:var(--color-dim)] sm:text-sm">
+          <li class="flex items-center gap-2"><span class="text-[color:var(--color-success)]">✓</span> Claude, Codex, Gemini, OpenCode</li>
+          <li class="flex items-center gap-2"><span class="text-[color:var(--color-success)]">✓</span> Any CLI as a provider</li>
+          <li class="flex items-center gap-2"><span class="text-[color:var(--color-success)]">✓</span> Git worktree per agent</li>
+          <li class="flex items-center gap-2"><span class="text-[color:var(--color-success)]">✓</span> AI commit messages</li>
+        </ul>
+      </div>
+
+      <div class="relative min-w-0">
+        <InstallTabs />
+        <Stats />
+        <div class="absolute -inset-x-8 -bottom-16 -z-10 h-40 rounded-full bg-[color:var(--color-accent)]/10 blur-3xl"></div>
+      </div>
+    </div>
+  </div>
+</section>

@@ -1,0 +1,474 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink: #07070d;
+  --color-panel: #11111d;
+  --color-panel-2: #161628;
+  --color-highlight: #1f2138;
+  --color-active: #2a2c4a;
+  --color-border: #2a2e4c;
+  --color-border-soft: #1c1f36;
+  --color-text: #f4f7ff;
+  --color-muted: #aab2d5;
+  --color-dim: #828bac;
+  --color-accent: #00d4ff;
+  --color-accent-soft: #38bdf8;
+  --color-pink: #ff4fd8;
+  --color-purple: #8b5cf6;
+  --color-success: #4ade80;
+  --color-warning: #facc15;
+  --color-error: #fb7185;
+
+  --font-display: "JetBrains Mono", "Fira Code", "SF Mono", ui-monospace,
+    SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace;
+  --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", ui-monospace,
+    SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace;
+  --font-sans: "Inter", system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html {
+    background: var(--color-ink);
+    color: var(--color-text);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background:
+      radial-gradient(1100px 600px at 12% -10%, color-mix(in oklab, var(--color-accent) 8%, transparent), transparent 70%),
+      radial-gradient(900px 500px at 95% 8%, color-mix(in oklab, var(--color-pink) 8%, transparent), transparent 60%),
+      radial-gradient(900px 700px at 60% 110%, color-mix(in oklab, var(--color-purple) 10%, transparent), transparent 70%),
+      var(--color-ink);
+    background-attachment: fixed;
+    min-height: 100dvh;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--color-accent) 35%, transparent);
+    color: white;
+  }
+
+  /* Anything clickable gets a pointer. Native buttons default to the arrow
+     cursor, so make every interactive control consistent. */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  summary,
+  label[for],
+  a[href] {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  [aria-disabled="true"] {
+    cursor: not-allowed;
+  }
+
+  /* External-link glyph appended by the link-hardening script. Sized relative
+     to the surrounding text and tinted to the link color via currentColor. */
+  .ext-icon {
+    display: inline-block;
+    width: 0.78em;
+    height: 0.78em;
+    margin-left: 0.18em;
+    vertical-align: -0.1em;
+    opacity: 0.6;
+    flex-shrink: 0;
+  }
+
+  /* Inline code chips for paths/commands in prose. Scoped to NOT touch
+     <pre><code> blocks (those keep their own styling). */
+  :not(pre) > code {
+    font-family: var(--font-mono);
+    font-size: 0.85em;
+    background: color-mix(in oklab, var(--color-panel-2) 88%, var(--color-accent) 12%);
+    border: 1px solid var(--color-border-soft);
+    border-radius: 0.35em;
+    padding: 0.08em 0.4em;
+    color: var(--color-text);
+    white-space: nowrap;
+  }
+}
+
+@layer components {
+  .container-app {
+    @apply mx-auto w-full max-w-6xl px-5 sm:px-8;
+  }
+
+  .grid-bg {
+    background-image:
+      linear-gradient(to right, color-mix(in oklab, var(--color-border-soft) 60%, transparent) 1px, transparent 1px),
+      linear-gradient(to bottom, color-mix(in oklab, var(--color-border-soft) 60%, transparent) 1px, transparent 1px);
+    background-size: 44px 44px;
+    background-position: -1px -1px;
+    mask-image: radial-gradient(ellipse at top, black 30%, transparent 75%);
+  }
+
+  .pill {
+    @apply inline-flex items-center gap-2 rounded-full border border-[color:var(--color-border)] bg-[color:var(--color-panel)]/70 px-3 py-1 text-xs font-medium text-[color:var(--color-muted)] backdrop-blur;
+  }
+
+  .btn-primary,
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-md border px-4 py-2.5 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--color-ink)];
+  }
+
+  .btn-primary {
+    @apply border-[color:var(--color-accent)]/60 bg-[color:var(--color-accent)]/15 text-[color:var(--color-accent)] hover:bg-[color:var(--color-accent)]/25 hover:border-[color:var(--color-accent)];
+  }
+
+  .btn-ghost {
+    @apply border-[color:var(--color-border)] bg-[color:var(--color-panel)]/60 text-[color:var(--color-text)] hover:bg-[color:var(--color-panel-2)] hover:border-[color:var(--color-accent)]/50;
+  }
+
+  .card {
+    @apply rounded-xl border border-[color:var(--color-border)] bg-[color:var(--color-panel)]/80 backdrop-blur;
+  }
+
+  .heading {
+    font-family: var(--font-display);
+    letter-spacing: -0.025em;
+  }
+
+  .mono {
+    font-family: var(--font-mono);
+  }
+
+  .term {
+    @apply rounded-xl border border-[color:var(--color-border)] bg-[color:var(--color-panel)]/80 backdrop-blur overflow-hidden;
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--color-accent) 8%, transparent),
+      0 20px 60px -20px color-mix(in oklab, var(--color-accent) 25%, transparent),
+      0 40px 120px -40px color-mix(in oklab, var(--color-pink) 20%, transparent);
+  }
+
+  .term-bar {
+    @apply flex flex-wrap items-center gap-2 border-b border-[color:var(--color-border-soft)] bg-[color:var(--color-panel-2)] px-3 py-2;
+  }
+
+  .term-dot {
+    width: 11px;
+    height: 11px;
+    border-radius: 999px;
+    display: inline-block;
+  }
+
+  .scanlines::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent 2px,
+      color-mix(in oklab, white 2%, transparent) 3px
+    );
+    mix-blend-mode: overlay;
+  }
+
+  .blink::after {
+    content: "▌";
+    color: var(--color-accent);
+    animation: blink 1s steps(1) infinite;
+    margin-left: 1px;
+  }
+
+  @keyframes blink {
+    50% { opacity: 0; }
+  }
+
+  .glow-text {
+    text-shadow: 0 0 18px color-mix(in oklab, var(--color-accent) 50%, transparent);
+  }
+
+  .anchor-offset {
+    scroll-margin-top: 5rem;
+  }
+
+  /* Recommendation blocks (Recommended tools page). */
+  .tool-grid {
+    display: grid;
+    gap: 1rem;
+    grid-template-columns: 1fr;
+    margin: 1.25rem 0;
+  }
+  @media (min-width: 640px) {
+    .tool-grid {
+      grid-template-columns: 1fr 1fr;
+    }
+  }
+  .tool-card {
+    display: flex;
+    flex-direction: column;
+    /* Reset the inherited prose line-height (1.75); the description sets its
+       own below, and the title/subtitle are tightened individually. */
+    line-height: 1.4;
+    border: 1px solid var(--color-border);
+    background: color-mix(in oklab, var(--color-panel) 80%, transparent);
+    border-radius: 0.75rem;
+    padding: 1.1rem 1.15rem;
+  }
+  .tool-card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  /* Title, tag, and subtitle share one wrapping flex row. The subtitle takes a
+     full line of its own; the tag sits next to the title when there's room and
+     drops below the subtitle when there isn't (see the container query). */
+  .tool-card-head-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 0.4rem;
+    row-gap: 0.2rem;
+    container-type: inline-size;
+  }
+  .tool-card-repo {
+    flex-basis: 100%;
+    order: 1;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    line-height: 1.2;
+    color: var(--color-dim);
+    word-break: break-word;
+  }
+  /* Too narrow to fit the tag beside the title: move it below the subtitle
+     rather than wedging it between the title and subtitle. */
+  @container (max-width: 400px) {
+    .tool-card-tag {
+      order: 2;
+    }
+  }
+  /* No repo subtitle (e.g. a non-GitHub link): keep a fair gap between the
+     title and the description instead of letting them sit too close. */
+  .tool-card-head:not(:has(.tool-card-repo)) {
+    margin-bottom: 0.35rem;
+  }
+  .tool-card-title {
+    font-family: var(--font-display);
+    font-size: 1rem;
+    font-weight: 600;
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+    color: var(--color-text);
+    margin: 0;
+  }
+  .tool-card-tag {
+    display: inline-flex;
+    align-items: center;
+    white-space: nowrap;
+    line-height: 1;
+    /* Slightly more top than bottom padding: uppercase has no descenders, so
+       symmetric padding reads top-heavy. This optically centers the caps. */
+    padding: 0.3em 0.55em 0.2em;
+    border-radius: 999px;
+    font-size: 0.6rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-pink);
+    background: color-mix(in oklab, var(--color-pink) 14%, transparent);
+    border: 1px solid color-mix(in oklab, var(--color-pink) 30%, transparent);
+  }
+  .tool-card-desc {
+    flex: 1;
+    margin: 0.5rem 0 0.9rem;
+    font-size: 0.875rem;
+    line-height: 1.55;
+    color: var(--color-muted);
+  }
+  .gh-stars {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    flex-shrink: 0;
+    white-space: nowrap;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--color-warning);
+    background: color-mix(in oklab, var(--color-warning) 12%, transparent);
+    border: 1px solid color-mix(in oklab, var(--color-warning) 25%, transparent);
+  }
+  .gh-stars svg {
+    width: 0.8em;
+    height: 0.8em;
+  }
+  .tool-card-btn {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.5rem;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--color-muted);
+    transition:
+      color 0.15s ease,
+      border-color 0.15s ease,
+      background-color 0.15s ease;
+  }
+  .tool-card-btn:hover {
+    color: var(--color-accent);
+    border-color: color-mix(in oklab, var(--color-accent) 50%, transparent);
+    background: color-mix(in oklab, var(--color-accent) 6%, transparent);
+  }
+
+  /* Markdown docs prose. Styles bare elements emitted by the Markdown
+     renderer, scoped so anything inside a `.not-prose` subtree (e.g. the
+     card grid on the docs index) is left alone. */
+  .prose-docs {
+    color: var(--color-muted);
+    font-size: 0.95rem;
+    line-height: 1.75;
+  }
+  .prose-docs > :first-child {
+    margin-top: 0;
+  }
+  .prose-docs :where(h2):not(:where(.not-prose *)) {
+    font-family: var(--font-sans);
+    letter-spacing: -0.02em;
+    color: var(--color-text);
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-top: 2.75rem;
+    margin-bottom: 1rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 1px solid var(--color-border-soft);
+    scroll-margin-top: 5rem;
+  }
+  .prose-docs :where(h3):not(:where(.not-prose *)) {
+    font-family: var(--font-sans);
+    color: var(--color-text);
+    font-size: 1.2rem;
+    font-weight: 600;
+    margin-top: 2rem;
+    margin-bottom: 0.75rem;
+    scroll-margin-top: 5rem;
+  }
+  .prose-docs :where(h4):not(:where(.not-prose *)) {
+    color: var(--color-text);
+    font-weight: 600;
+    margin-top: 1.5rem;
+    margin-bottom: 0.5rem;
+    scroll-margin-top: 5rem;
+  }
+  .prose-docs :where(p):not(:where(.not-prose *)) {
+    margin: 1rem 0;
+  }
+  .prose-docs :where(a):not(:where(.not-prose *)) {
+    color: var(--color-accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    text-decoration-color: color-mix(in oklab, var(--color-accent) 40%, transparent);
+  }
+  .prose-docs :where(a):not(:where(.not-prose *)):hover {
+    text-decoration-color: var(--color-accent);
+  }
+  .prose-docs :where(strong):not(:where(.not-prose *)) {
+    color: var(--color-text);
+    font-weight: 600;
+  }
+  .prose-docs :where(ul, ol):not(:where(.not-prose *)) {
+    margin: 1rem 0;
+    padding-left: 1.5rem;
+  }
+  .prose-docs :where(ul):not(:where(.not-prose *)) {
+    list-style: disc;
+  }
+  .prose-docs :where(ol):not(:where(.not-prose *)) {
+    list-style: decimal;
+  }
+  .prose-docs :where(li):not(:where(.not-prose *)) {
+    margin: 0.4rem 0;
+  }
+  .prose-docs :where(li):not(:where(.not-prose *))::marker {
+    color: var(--color-dim);
+  }
+  /* Let long inline paths/commands wrap on narrow screens instead of
+     overflowing (the global chip style sets nowrap). */
+  .prose-docs :where(:not(pre) > code):not(:where(.not-prose *)) {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .prose-docs :where(pre):not(:where(.not-prose *)) {
+    margin: 1.25rem 0;
+    padding: 1rem 1.25rem;
+    border-radius: 0.6rem;
+    border: 1px solid var(--color-border);
+    overflow-x: auto;
+    font-size: 0.85rem;
+    line-height: 1.6;
+  }
+  .prose-docs :where(blockquote):not(:where(.not-prose *)) {
+    border-left: 3px solid var(--color-accent);
+    padding-left: 1rem;
+    margin: 1.25rem 0;
+    color: var(--color-muted);
+    font-style: italic;
+  }
+  .prose-docs :where(hr):not(:where(.not-prose *)) {
+    border: 0;
+    border-top: 1px solid var(--color-border-soft);
+    margin: 2.5rem 0;
+  }
+  .prose-docs :where(table):not(:where(.not-prose *)) {
+    display: block;
+    width: 100%;
+    border-collapse: collapse;
+    overflow-x: auto;
+    margin: 1.25rem 0;
+    font-size: 0.875rem;
+  }
+  .prose-docs :where(th, td):not(:where(.not-prose *)) {
+    border: 1px solid var(--color-border-soft);
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+  }
+  .prose-docs :where(th):not(:where(.not-prose *)) {
+    background: var(--color-panel-2);
+    color: var(--color-text);
+    font-weight: 600;
+  }
+  .prose-docs :where(img):not(:where(.not-prose *)) {
+    max-width: 100%;
+    height: auto;
+    border-radius: 0.5rem;
+    border: 1px solid var(--color-border);
+    margin: 1.25rem 0;
+  }
+  /* Clickable "#" appended to each heading by rehype-autolink-headings. The
+     anchor itself is empty; the glyph is drawn here so it stays out of the
+     heading text the table of contents is generated from. */
+  .prose-docs .heading-anchor {
+    color: var(--color-dim);
+    text-decoration: none;
+    opacity: 0;
+    transition: opacity 0.15s ease, color 0.15s ease;
+  }
+  .prose-docs .heading-anchor::after {
+    content: "#";
+    margin-left: 0.4rem;
+  }
+  .prose-docs :where(h2, h3, h4):hover .heading-anchor {
+    opacity: 1;
+  }
+  .prose-docs .heading-anchor:hover {
+    color: var(--color-accent);
+  }
+}

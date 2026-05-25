@@ -1,0 +1,22 @@
+---
+// Renders a "★ count" badge for a GitHub repo, fetched at build time.
+// Omits itself entirely when the count can't be resolved.
+import { getStars, formatStars } from "../lib/github-stars";
+
+interface Props {
+  repo: string;
+}
+const { repo } = Astro.props;
+const stars = await getStars(repo);
+---
+
+{
+  stars !== null && (
+    <span class="gh-stars" title={`${stars.toLocaleString()} GitHub stars`}>
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M12 .587l3.668 7.431 8.2 1.192-5.934 5.784 1.401 8.166L12 18.896l-7.335 3.864 1.401-8.166L.132 9.21l8.2-1.192z" />
+      </svg>
+      {formatStars(stars)}
+    </span>
+  )
+}

@@ -1,0 +1,46 @@
+---
+const nav = [
+  { href: "/#demo", label: "Demo" },
+  { href: "/#features", label: "Features" },
+  { href: "/docs", label: "Docs" },
+  { href: "/#install", label: "Install" },
+  { href: "https://github.com/patrickdappollonio/dux", label: "GitHub", external: true },
+];
+---
+
+<header class="sticky top-0 z-50 border-b border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)]/70 backdrop-blur-xl">
+  <div class="container-app flex h-14 items-center justify-between">
+    <a href="/" class="flex items-center gap-2.5 group">
+      <img
+        src="/dux-logo.png"
+        alt="dux"
+        width="28"
+        height="28"
+        class="h-7 w-7 object-contain transition-transform group-hover:-rotate-6"
+      />
+      <span class="heading text-[15px] font-semibold tracking-tight">
+        dux<span class="text-[color:var(--color-dim)]"> · getdux.app</span>
+      </span>
+    </a>
+
+    <nav class="hidden items-center gap-1 sm:flex">
+      {
+        nav.map((n) => (
+          <a
+            href={n.href}
+            class="rounded-md px-3 py-1.5 text-sm text-[color:var(--color-muted)] hover:text-[color:var(--color-text)] hover:bg-[color:var(--color-panel-2)] transition-colors"
+            {...(n.external ? { target: "_blank", rel: "noopener" } : {})}
+          >
+            {n.label}
+          </a>
+        ))
+      }
+      <a
+        href="/#install"
+        class="ml-2 inline-flex items-center gap-1.5 rounded-md border border-[color:var(--color-accent)]/50 bg-[color:var(--color-accent)]/10 px-3 py-1.5 text-sm font-medium text-[color:var(--color-accent)] hover:bg-[color:var(--color-accent)]/20 transition-colors"
+      >
+        <span class="mono">$</span> install
+      </a>
+    </nav>
+  </div>
+</header>

@@ -1,0 +1,184 @@
+---
+interface Tab {
+  id: string;
+  label: string;
+  badge?: string;
+  cmd: string;
+  hint?: string;
+}
+
+interface Props {
+  tabs?: Tab[];
+  defaultId?: string;
+  compact?: boolean;
+}
+
+const defaultTabs: Tab[] = [
+  {
+    id: "shell",
+    label: "Shell",
+    badge: "any unix",
+    cmd: "curl -sSfL https://getdux.app/install.sh | bash",
+    hint: "Sniffs your OS + arch, drops dux in <code>~/.local/bin</code> (or <code>/usr/local/bin</code>).",
+  },
+  {
+    id: "brew",
+    label: "Homebrew",
+    badge: "mac · linux",
+    cmd: "brew install patrickdappollonio/tap/dux",
+    hint: "Tap and install in one shot. Life's too short for two-command installs.",
+  },
+  {
+    id: "npm",
+    label: "npm",
+    badge: "global",
+    cmd: "npm install -g @patrickdappollonio/dux",
+    hint: "Yes, a terminal app on npm. It travels well, don't @ me.",
+  },
+  {
+    id: "npx",
+    label: "npx",
+    badge: "one-off",
+    cmd: "npx -y @patrickdappollonio/dux",
+    hint: "Run it once, forget it ever existed. Astonishingly low commitment.",
+  },
+  {
+    id: "binary",
+    label: "Binary",
+    badge: "manual",
+    cmd: "curl -sSfL https://github.com/patrickdappollonio/dux/releases/latest/download/dux-<os>-<arch>.tar.gz | tar xz && mv dux ~/.local/bin/",
+    hint: 'The hands-on route: swap <code>&lt;os&gt;-&lt;arch&gt;</code> for your platform (macOS/Linux · amd64/arm64), or just browse the <a href="https://github.com/patrickdappollonio/dux/releases/latest" target="_blank" rel="noopener" class="text-[color:var(--color-accent)] hover:underline">Releases</a> page. Then drop <code>dux</code> wherever you want on your <code>PATH</code>.',
+  },
+];
+
+const { tabs = defaultTabs, defaultId = "shell", compact = false } = Astro.props;
+const uid = "tabs-" + Math.random().toString(36).slice(2, 8);
+---
+
+<div
+  class:list={["term relative", compact ? "" : "p-0"]}
+  data-install-tabs
+  data-default={defaultId}
+  id={uid}
+>
+  <div class="term-bar">
+    <span class="term-dot" style="background:#ff5f56"></span>
+    <span class="term-dot" style="background:#febc2e"></span>
+    <span class="term-dot" style="background:#28c840"></span>
+    <span class="ml-3 mono text-[11px] text-[color:var(--color-dim)]">~ install dux</span>
+    <div class="ml-auto flex flex-wrap items-center justify-end gap-1" role="tablist" aria-label="Install methods">
+      {
+        tabs.map((t) => (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={t.id === defaultId ? "true" : "false"}
+            data-tab-id={t.id}
+            class="rounded-md border border-transparent px-2 py-0.5 text-[11px] font-medium text-[color:var(--color-muted)] hover:text-[color:var(--color-text)] hover:bg-[color:var(--color-panel)] data-[active=true]:border-[color:var(--color-accent)]/40 data-[active=true]:bg-[color:var(--color-accent)]/10 data-[active=true]:text-[color:var(--color-accent)] transition-colors"
+            data-active={t.id === defaultId ? "true" : "false"}
+          >
+            {t.label}
+          </button>
+        ))
+      }
+    </div>
+  </div>
+
+  <div class="relative">
+    {
+      tabs.map((t) => (
+        <div
+          role="tabpanel"
+          data-tab-panel={t.id}
+          hidden={t.id !== defaultId}
+          class="p-5 sm:p-6"
+        >
+          <div class="flex items-center justify-between gap-3">
+            <div class="flex items-center gap-2">
+              <span class="mono text-[11px] uppercase tracking-wider text-[color:var(--color-dim)]">
+                {t.label}
+              </span>
+              {t.badge && (
+                <span class="rounded-full border border-[color:var(--color-border)] px-2 py-0.5 text-[10px] uppercase tracking-wider text-[color:var(--color-muted)]">
+                  {t.badge}
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              data-copy={t.cmd}
+              class="copy-btn inline-flex items-center gap-1.5 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-panel-2)] px-2.5 py-1 text-[11px] text-[color:var(--color-muted)] hover:text-[color:var(--color-accent)] hover:border-[color:var(--color-accent)]/60 transition-colors"
+              aria-label="Copy command"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+              <span data-copy-label>copy</span>
+            </button>
+          </div>
+
+          <div class="mt-3 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)]/70 p-4">
+            <pre class="mono text-sm leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]"><span class="text-[color:var(--color-accent)] select-none">$ </span><span class="text-[color:var(--color-text)]">{t.cmd}</span></pre>
+          </div>
+
+          {t.hint && (
+            <p class="mt-3 text-xs text-[color:var(--color-dim)]" set:html={t.hint} />
+          )}
+        </div>
+      ))
+    }
+  </div>
+</div>
+
+<script>
+  type CleanupFn = () => void;
+  const cleanups: CleanupFn[] = [];
+
+  function setup(root: HTMLElement) {
+    const tabs = Array.from(root.querySelectorAll<HTMLButtonElement>("[data-tab-id]"));
+    const panels = Array.from(root.querySelectorAll<HTMLElement>("[data-tab-panel]"));
+
+    const select = (id: string) => {
+      tabs.forEach((t) => {
+        const active = t.dataset.tabId === id;
+        t.dataset.active = active ? "true" : "false";
+        t.setAttribute("aria-selected", active ? "true" : "false");
+      });
+      panels.forEach((p) => {
+        p.hidden = p.dataset.tabPanel !== id;
+      });
+    };
+
+    tabs.forEach((t) => {
+      const handler = () => t.dataset.tabId && select(t.dataset.tabId);
+      t.addEventListener("click", handler);
+      cleanups.push(() => t.removeEventListener("click", handler));
+    });
+
+    root.querySelectorAll<HTMLButtonElement>(".copy-btn").forEach((btn) => {
+      const handler = async () => {
+        const cmd = btn.dataset.copy ?? "";
+        try {
+          await navigator.clipboard.writeText(cmd);
+          const label = btn.querySelector<HTMLElement>("[data-copy-label]");
+          if (label) {
+            const prev = label.textContent;
+            label.textContent = "copied!";
+            btn.classList.add("!text-[color:var(--color-success)]");
+            setTimeout(() => {
+              label.textContent = prev ?? "copy";
+              btn.classList.remove("!text-[color:var(--color-success)]");
+            }, 1400);
+          }
+        } catch {
+          /* clipboard blocked; nothing graceful to do */
+        }
+      };
+      btn.addEventListener("click", handler);
+      cleanups.push(() => btn.removeEventListener("click", handler));
+    });
+  }
+
+  document.querySelectorAll<HTMLElement>("[data-install-tabs]").forEach(setup);
+</script>

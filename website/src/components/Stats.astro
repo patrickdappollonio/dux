@@ -1,0 +1,77 @@
+---
+// A compact, build-time strip of live download counters, sized to sit directly
+// under the install widget in the hero. Any counter whose lookup fails is
+// dropped; if all fail, nothing renders.
+import { getReleaseDownloads, getNpmLastMonth, formatCount } from "../lib/stats";
+
+const repo = "patrickdappollonio/dux";
+const pkg = "@patrickdappollonio/dux";
+
+const [downloads, npm] = await Promise.all([
+  getReleaseDownloads(repo),
+  getNpmLastMonth(pkg),
+]);
+
+interface Stat {
+  value: string;
+  label: string;
+  note: string;
+  total?: boolean;
+}
+const stats: Stat[] = [];
+if (downloads !== null) {
+  stats.push({
+    value: formatCount(downloads),
+    label: "Downloads",
+    note: "GitHub + Homebrew",
+  });
+}
+if (npm !== null) {
+  stats.push({
+    value: formatCount(npm),
+    label: "npm / month",
+    note: "last 30 days",
+  });
+}
+// Combined total, shown only when both sources are present. The "=" beside it
+// acts as the separator. formatCount keeps it friendly (e.g. 1.2k).
+if (downloads !== null && npm !== null) {
+  stats.push({
+    value: formatCount(downloads + npm),
+    label: "Total",
+    note: "downloads + npm",
+    total: true,
+  });
+}
+---
+
+{
+  stats.length > 0 && (
+    <dl class="mt-4 flex flex-wrap items-stretch justify-center gap-x-4 gap-y-3 rounded-lg border border-[color:var(--color-border-soft)] bg-[color:var(--color-panel)]/40 px-4 py-3 backdrop-blur">
+      {stats.map((s, i) => (
+        <>
+          {i > 0 &&
+            (s.total ? (
+              <div
+                aria-hidden="true"
+                class="heading self-start text-xl font-bold leading-none text-[color:var(--color-border)] sm:text-2xl"
+              >
+                =
+              </div>
+            ) : (
+              <div class="w-px self-stretch bg-[color:var(--color-border)]" />
+            ))}
+          <div class="text-center">
+            <dt class="heading text-xl font-bold leading-none tracking-tight text-[color:var(--color-accent)] sm:text-2xl">
+              {s.value}
+            </dt>
+            <dd class="mt-1 text-[10px] font-medium uppercase tracking-wider text-[color:var(--color-muted)]">
+              {s.label}
+            </dd>
+            <dd class="text-[9px] text-[color:var(--color-dim)]">{s.note}</dd>
+          </div>
+        </>
+      ))}
+    </dl>
+  )
+}

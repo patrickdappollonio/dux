@@ -1,0 +1,94 @@
+---
+title: Recommended tools
+description: A curated set of providers, MCP servers, and skills that work well with dux.
+group: Reference
+order: 90
+---
+
+import ToolGrid from "../src/components/ToolGrid.astro";
+import ToolCard from "../src/components/ToolCard.astro";
+
+dux runs your real CLI in a real terminal, with no protocol layer in between. So
+whatever providers, MCP servers, and skills you already use keep working inside a
+dux agent exactly as they do in your shell. Everything below is hand-picked to
+genuinely pair well with a multi-agent dux workflow.
+
+## Tools
+
+Extra tooling that makes your agents faster and sharper. The default providers
+ship bundled with dux, and any CLI can be added as one too (see
+[Custom CLI Agents](/docs/custom-agents)).
+
+<ToolGrid>
+  <ToolCard
+    name="rtk"
+    repo="rtk-ai/rtk"
+    description="A CLI proxy that intercepts the commands your agents run and rewrites the output to use far fewer tokens, cutting consumption on common dev commands by 60-90%."
+  />
+  <ToolCard
+    name="Superpowers"
+    repo="obra/superpowers"
+    description="More than a skill set: a framework of skills, hooks, and tooling, plus a development methodology, for agentic coding."
+  />
+</ToolGrid>
+
+## MCP servers
+
+Model Context Protocol servers extend what an agent can reach: repositories,
+browsers, live docs, and more. Configure them in your CLI the way you normally
+would, and they work unchanged inside a dux agent.
+
+<ToolGrid>
+  <ToolCard
+    name="Context7"
+    repo="upstash/context7"
+    description="Pulls up-to-date, version-accurate library docs into the agent's context."
+  />
+  <ToolCard
+    name="Playwright MCP"
+    repo="microsoft/playwright-mcp"
+    description="Lets agents drive a real browser to navigate, click, and verify the UI."
+  />
+  <ToolCard
+    name="Chrome DevTools MCP"
+    repo="ChromeDevTools/chrome-devtools-mcp"
+    description="Gives agents Chrome DevTools to navigate, inspect, and debug pages, read the console, and watch the network. It can drive a browser you already have installed instead of downloading its own."
+  />
+  <ToolCard
+    name="Network Debugging MCP"
+    repo="patrickdappollonio/mcp-netutils"
+    tag="same dev as dux"
+    description="DNS lookups, WHOIS, connectivity tests, TLS inspection, and HTTP endpoint checks, all from the agent."
+  />
+  <ToolCard
+    name="Kubernetes Read-Only MCP"
+    repo="patrickdappollonio/mcp-kubernetes-ro"
+    tag="same dev as dux"
+    description="Read-only Kubernetes access: list resources, read details, and pull pod logs with no risk of mutating the cluster."
+  />
+</ToolGrid>
+
+## Skills
+
+Skills are reusable instructions and workflows your CLI loads on demand (for
+example, Claude Code's Agent Skills). Because dux launches the real CLI, your
+skills apply per agent and per worktree, exactly as they do elsewhere.
+
+<ToolGrid>
+  <ToolCard
+    name="Agent Skills"
+    repo="anthropics/skills"
+    description="Anthropic's public collection of Agent Skills you can drop into Claude Code."
+  />
+  <ToolCard
+    name="Karpathy skills"
+    repo="multica-ai/andrej-karpathy-skills"
+    description="A collection distilling Andrej Karpathy's notes on common LLM coding pitfalls, nudging your agent to reason carefully and think before it acts."
+  />
+  <ToolCard
+    name="Frontend design"
+    repo="anthropics/skills"
+    href="https://github.com/anthropics/skills/tree/main/skills/frontend-design"
+    description="Anthropic's Agent Skill for sharper frontend work: layout, spacing, hierarchy, and visual polish."
+  />
+</ToolGrid>

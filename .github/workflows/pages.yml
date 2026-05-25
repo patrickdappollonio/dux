@@ -1,0 +1,123 @@
+name: Deploy website
+
+on:
+  # Deploy when a new release of dux is published. This ties the live site to
+  # actually-shipped versions: anything in `website/` only goes live alongside
+  # a real release, so half-finished homepage edits never reach getdux.app on
+  # their own.
+  release:
+    types: [published]
+
+  # Break-glass: manually deploy whatever is on `main` right now. Useful when
+  # the site needs a fix (typo, broken link, new screenshot) without cutting a
+  # full app release.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag, or SHA to deploy (defaults to the workflow ref)."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment. Don't cancel in-progress production
+# deploys — let them finish to avoid leaving Pages in a half-published state.
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine checkout ref
+        id: ref
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [ "$EVENT_NAME" = "release" ]; then
+            echo "value=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+            echo "Deploying release tag: $RELEASE_TAG"
+          elif [ -n "$INPUT_REF" ]; then
+            echo "value=$INPUT_REF" >> "$GITHUB_OUTPUT"
+            echo "Deploying user-supplied ref: $INPUT_REF"
+          else
+            echo "value=${{ github.ref }}" >> "$GITHUB_OUTPUT"
+            echo "Deploying workflow ref: ${{ github.ref }}"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.value }}
+
+      - name: Verify install.sh is present at repo root
+        run: |
+          if [ ! -f install.sh ]; then
+            echo "::error::install.sh missing at repo root; the website build expects it."
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install dependencies
+        working-directory: website
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Build
+        working-directory: website
+        env:
+          NODE_ENV: production
+          # Enables analytics injection. Only set here, so local dev and local
+          # or PR builds never load the tracking script.
+          ENABLE_ANALYTICS: "true"
+          # Lifts the GitHub API rate limit for build-time star counts on the
+          # Recommended tools page. Falls back to unauthenticated if unset.
+          GH_TOKEN: ${{ github.token }}
+        run: npm run build
+
+      - name: Verify install.sh was copied into the build output
+        run: |
+          if [ ! -f website/dist/install.sh ]; then
+            echo "::error::install.sh missing from build output; copy-install step failed."
+            exit 1
+          fi
+          if [ ! -f website/dist/CNAME ]; then
+            echo "::error::CNAME missing from build output."
+            exit 1
+          fi
+          if [ ! -f website/dist/index.html ]; then
+            echo "::error::index.html missing from build output."
+            exit 1
+          fi
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website/dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

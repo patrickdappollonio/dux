@@ -1,0 +1,31 @@
+---
+import Layout from "../layouts/Layout.astro";
+import Header from "../components/Header.astro";
+import Hero from "../components/Hero.astro";
+import Asciinema from "../components/Asciinema.astro";
+import Manifesto from "../components/Manifesto.astro";
+import RealCLI from "../components/RealCLI.astro";
+import FeatureGrid from "../components/FeatureGrid.astro";
+import ConfigPeek from "../components/ConfigPeek.astro";
+import InstallSection from "../components/InstallSection.astro";
+import Footer from "../components/Footer.astro";
+
+const title =
+  "dux: run multiple Claude Code, Codex & Gemini agents in parallel | getdux.app";
+const description =
+  "dux is a fast terminal UI that runs multiple AI coding agents (Claude Code, Codex, Gemini, OpenCode, or any CLI) in parallel across git worktrees. Real CLIs, real PTYs, no protocol layers. Maximum throughput, minimum context switching.";
+---
+
+<Layout title={title} description={description}>
+  <Header />
+  <main>
+    <Hero />
+    <Asciinema />
+    <Manifesto />
+    <RealCLI />
+    <FeatureGrid />
+    <ConfigPeek />
+    <InstallSection />
+  </main>
+  <Footer />
+</Layout>

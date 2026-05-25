@@ -1,0 +1,91 @@
+---
+// Builds the docs navigation from the `docs` collection. Pages are grouped by
+// their `group` frontmatter and sorted by `order`; group order follows the
+// lowest `order` found inside each group, so nothing is hardcoded.
+import { getCollection } from "astro:content";
+
+interface Props {
+  currentSlug?: string;
+}
+const { currentSlug } = Astro.props;
+
+const entries = (await getCollection("docs")).sort(
+  (a, b) =>
+    a.data.order - b.data.order || a.data.title.localeCompare(b.data.title),
+);
+
+interface Group {
+  name: string;
+  minOrder: number;
+  items: typeof entries;
+}
+const groups: Group[] = [];
+for (const entry of entries) {
+  let group = groups.find((g) => g.name === entry.data.group);
+  if (!group) {
+    group = { name: entry.data.group, minOrder: entry.data.order, items: [] };
+    groups.push(group);
+  }
+  group.items.push(entry);
+  group.minOrder = Math.min(group.minOrder, entry.data.order);
+}
+groups.sort((a, b) => a.minOrder - b.minOrder || a.name.localeCompare(b.name));
+---
+
+<nav class="space-y-6 text-sm" aria-label="Documentation">
+  <a
+    href="/docs"
+    class:list={[
+      "flex items-center gap-2 rounded-md px-3 py-1.5 font-medium transition-colors",
+      currentSlug === undefined
+        ? "bg-[color:var(--color-accent)]/10 text-[color:var(--color-accent)]"
+        : "text-[color:var(--color-muted)] hover:text-[color:var(--color-text)] hover:bg-[color:var(--color-panel-2)]",
+    ]}
+  >
+    <svg
+      class="h-4 w-4 shrink-0"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+      <polyline points="9 22 9 12 15 12 15 22" />
+    </svg>
+    Overview
+  </a>
+
+  {
+    groups.map((group) => (
+      <div>
+        <div class="mono px-3 text-[10px] font-semibold uppercase tracking-wider text-[color:var(--color-dim)]">
+          {group.name}
+        </div>
+        <ul class="mt-2 space-y-0.5">
+          {group.items.map((entry) => {
+            const active = entry.id === currentSlug;
+            return (
+              <li>
+                <a
+                  href={`/docs/${entry.id}`}
+                  aria-current={active ? "page" : undefined}
+                  class:list={[
+                    "block rounded-md px-3 py-1.5 transition-colors",
+                    active
+                      ? "bg-[color:var(--color-accent)]/10 font-medium text-[color:var(--color-accent)]"
+                      : "text-[color:var(--color-muted)] hover:text-[color:var(--color-text)] hover:bg-[color:var(--color-panel-2)]",
+                  ]}
+                >
+                  {entry.data.title}
+                </a>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    ))
+  }
+</nav>
