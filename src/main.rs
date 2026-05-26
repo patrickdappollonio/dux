@@ -1,23 +1,22 @@
 mod app;
-mod browser;
 mod cli;
 mod clipboard;
 mod config;
 mod diff;
-mod editor;
 mod git;
-mod io_retry;
 mod keybindings;
 mod lockfile;
 mod logger;
-mod model;
 mod provider;
 mod pty;
 mod raw_input;
 mod startup;
-mod statusline;
 mod storage;
 mod theme;
+
+// Domain modules now live in dux-core. Re-export them at the crate root so
+// existing `crate::<mod>::…` paths across the binary keep resolving unchanged.
+pub(crate) use dux_core::{browser, editor, io_retry, model, statusline};
 
 use std::path::Path;
 

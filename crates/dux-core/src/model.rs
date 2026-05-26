@@ -47,6 +47,7 @@ impl ProviderKind {
         &self.0
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Self {
         Self(value.to_string())
     }
@@ -91,6 +92,7 @@ impl SessionStatus {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Self {
         match value {
             "active" => Self::Active,

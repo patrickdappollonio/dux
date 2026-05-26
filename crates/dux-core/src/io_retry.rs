@@ -1,6 +1,6 @@
 use std::io::{self, ErrorKind};
 
-pub(crate) fn retry_on_interrupt<T, F>(mut op: F) -> io::Result<T>
+pub fn retry_on_interrupt<T, F>(mut op: F) -> io::Result<T>
 where
     F: FnMut() -> io::Result<T>,
 {
@@ -12,7 +12,7 @@ where
     }
 }
 
-pub(crate) fn retry_on_interrupt_errno<T, F>(mut op: F) -> rustix::io::Result<T>
+pub fn retry_on_interrupt_errno<T, F>(mut op: F) -> rustix::io::Result<T>
 where
     F: FnMut() -> rustix::io::Result<T>,
 {
