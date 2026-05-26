@@ -1,3 +1,7 @@
+[workspace]
+members = ["crates/dux-core"]
+resolver = "3"
+
 [package]
 name = "dux"
 version = "0.1.0"
