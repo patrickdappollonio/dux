@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use toml_edit::{Array, DocumentMut, Formatted, InlineTable, Item, Table, Value};
 use uuid::Uuid;
 
+use dux_core::theme::DEFAULT_THEME_NAME;
+
 use crate::keybindings;
 use crate::model::ProviderKind;
 
@@ -248,7 +250,7 @@ impl Default for Config {
                 github_integration: true,
                 auto_reopen_agents: false,
                 pr_banner_position: "bottom".to_string(),
-                theme: dux_core::theme::DEFAULT_THEME_NAME.to_string(),
+                theme: DEFAULT_THEME_NAME.to_string(),
             },
             editor: EditorConfig::default(),
             keys: KeysConfig::default(),
@@ -386,7 +388,7 @@ impl Default for UiConfig {
             github_integration: true,
             auto_reopen_agents: false,
             pr_banner_position: "bottom".to_string(),
-            theme: dux_core::theme::DEFAULT_THEME_NAME.to_string(),
+            theme: DEFAULT_THEME_NAME.to_string(),
         }
     }
 }
