@@ -1,9 +1,11 @@
 //! The `Action` enum: dux's transport-agnostic command vocabulary.
 //!
-//! Every bindable/invokable action is an `Action`. `config_name` is the stable
-//! snake_case identifier used both as the `[keys]` config key and as the command
-//! id surfaces send. The TUI's key-parsing, default key tables, and runtime
-//! binding lookup live in the binary's `keybindings` module, not here.
+//! Every bindable/invokable action is an `Action`. `config_name` returns the
+//! stable snake_case identifier used as the `[keys]` config key; it is also the
+//! intended command id for future surfaces (web, server mode) per the design,
+//! but no surface dispatch exists yet. The TUI's key-parsing, default key
+//! tables, and runtime binding lookup live in the binary's `keybindings`
+//! module, not here.
 
 /// Unique identifier for every bindable action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
