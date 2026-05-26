@@ -546,6 +546,7 @@ dependencies = [
  "content_inspector",
  "crokey",
  "crossterm",
+ "dux-core",
  "home",
  "indexmap",
  "notify",
@@ -570,6 +571,11 @@ dependencies = [
 [[package]]
 name = "dux-core"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "rustix",
+]
 
 [[package]]
 name = "either"
