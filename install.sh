@@ -7,9 +7,13 @@ BINARY="dux"
 # Allow overriding the version and install directory via environment variables.
 VERSION="${DUX_VERSION:-}"
 INSTALL_DIR="${DUX_INSTALL_DIR:-}"
+DUX_TMPDIR=""
 
-log() { printf '%s\n' "$@"; }
-err() { log "$@" >&2; exit 1; }
+log() { printf '%s\n' "$@" >&2; }
+err() { log "$@"; exit 1; }
+cleanup() {
+    [ -n "$DUX_TMPDIR" ] && rm -rf "$DUX_TMPDIR"
+}
 
 detect_os() {
     local os
@@ -97,7 +101,7 @@ resolve_install_dir() {
 }
 
 main() {
-    local os arch version install_dir archive url tmpdir
+    local os arch version install_dir archive url
 
     os="$(detect_os)"
     arch="$(detect_arch)"
@@ -108,20 +112,20 @@ main() {
 
     log "Installing ${BINARY} ${version} (${os}/${arch}) to ${install_dir}"
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' EXIT
+    DUX_TMPDIR="$(mktemp -d)"
+    trap cleanup EXIT
 
     log "Downloading ${url}..."
-    http_download "$url" "${tmpdir}/${archive}"
+    http_download "$url" "${DUX_TMPDIR}/${archive}"
 
-    tar xzf "${tmpdir}/${archive}" -C "$tmpdir"
+    tar xzf "${DUX_TMPDIR}/${archive}" -C "$DUX_TMPDIR"
 
     # Install the binary — use sudo only if the target directory is not writable.
     if [ -w "$install_dir" ]; then
-        install -m 755 "${tmpdir}/${BINARY}" "${install_dir}/${BINARY}"
+        install -m 755 "${DUX_TMPDIR}/${BINARY}" "${install_dir}/${BINARY}"
     else
         log "Installation directory ${install_dir} is not writable, using sudo..."
-        sudo install -m 755 "${tmpdir}/${BINARY}" "${install_dir}/${BINARY}"
+        sudo install -m 755 "${DUX_TMPDIR}/${BINARY}" "${install_dir}/${BINARY}"
     fi
 
     log ""
