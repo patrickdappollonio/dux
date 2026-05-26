@@ -248,7 +248,7 @@ impl Default for Config {
                 github_integration: true,
                 auto_reopen_agents: false,
                 pr_banner_position: "bottom".to_string(),
-                theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
+                theme: dux_core::theme::DEFAULT_THEME_NAME.to_string(),
             },
             editor: EditorConfig::default(),
             keys: KeysConfig::default(),
@@ -386,7 +386,7 @@ impl Default for UiConfig {
             github_integration: true,
             auto_reopen_agents: false,
             pr_banner_position: "bottom".to_string(),
-            theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
+            theme: dux_core::theme::DEFAULT_THEME_NAME.to_string(),
         }
     }
 }

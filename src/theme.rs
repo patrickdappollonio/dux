@@ -8,14 +8,11 @@ use ratatui::prelude::{Color, Modifier, Style};
 use ratatui::text::Span;
 
 use crate::config::DuxPaths;
+use dux_core::theme::DEFAULT_THEME_NAME;
 
 /// Braille dot-pattern frames for spinner animations. Shared by the loading
 /// card, status line, and left-pane streaming indicator.
 pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-
-/// Name of the bundled default theme — also the value that ships in the
-/// generated `config.toml` on first boot.
-pub const DEFAULT_THEME_NAME: &str = "dux_dark";
 
 /// The bundled `dux_dark` theme TOML, embedded at compile time so the default
 /// path never depends on a file on disk.

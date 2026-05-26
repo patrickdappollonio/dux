@@ -8,3 +8,4 @@ pub mod editor;
 pub mod io_retry;
 pub mod model;
 pub mod statusline;
+pub mod theme;
