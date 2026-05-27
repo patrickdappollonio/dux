@@ -11,6 +11,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 indexmap = { version = "2.13.0", features = ["serde"] }
 uuid = { version = "1.17.0", features = ["v4"] }
+home = "0.5.11"
 
 [package]
 name = "dux"
@@ -24,7 +25,7 @@ arboard = "3.4.1"
 chrono.workspace = true
 content_inspector = "0.2.4"
 crossterm = "0.29.0"
-home = "0.5.11"
+home.workspace = true
 ratatui = "0.30.0"
 rusqlite = { version = "0.39.0", features = ["bundled", "chrono"] }
 serde.workspace = true

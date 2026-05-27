@@ -10,4 +10,4 @@ rustix.workspace = true
 serde.workspace = true
 indexmap.workspace = true
 uuid.workspace = true
-home = "0.5.11"
+home.workspace = true
