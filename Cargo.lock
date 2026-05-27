@@ -542,7 +542,6 @@ dependencies = [
  "anyhow",
  "arboard",
  "chrono",
- "compact_str",
  "content_inspector",
  "crokey",
  "crossterm",
@@ -570,12 +569,15 @@ dependencies = [
 name = "dux-core"
 version = "0.1.0"
 dependencies = [
+ "alacritty_terminal",
  "anyhow",
  "chrono",
+ "compact_str",
  "content_inspector",
  "home",
  "indexmap",
  "petname",
+ "portable-pty",
  "rusqlite",
  "rustix",
  "serde",

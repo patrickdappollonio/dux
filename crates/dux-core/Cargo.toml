@@ -4,10 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+alacritty_terminal = "0.26.0"
 anyhow.workspace = true
 chrono.workspace = true
+compact_str = "0.9"
 content_inspector.workspace = true
 petname = { version = "3.0.0", default-features = false, features = ["default-rng", "default-words"] }
+portable-pty = "0.9"
 rusqlite = { version = "0.39.0", features = ["bundled", "chrono"] }
 rustix.workspace = true
 serde.workspace = true
