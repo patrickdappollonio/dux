@@ -5,11 +5,112 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 use toml_edit::{Array, DocumentMut, Formatted, InlineTable, Item, Table, Value};
 
 use crate::keybindings;
+use crate::model::ProviderKind;
 
 pub use dux_core::config::*;
+
+use dux_core::theme::DEFAULT_THEME_NAME;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    pub defaults: Defaults,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    pub providers: ProvidersConfig,
+    pub terminal: TerminalConfig,
+    pub startup_command_terminal: StartupCommandTerminalConfig,
+    pub logging: LoggingConfig,
+    pub projects: Vec<ProjectConfig>,
+    pub ui: UiConfig,
+    pub editor: EditorConfig,
+    pub keys: KeysConfig,
+    pub macros: MacrosConfig,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KeysConfig {
+    pub show_terminal_keys: bool,
+    #[serde(flatten)]
+    pub bindings: BTreeMap<String, Vec<String>>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            defaults: Defaults::default(),
+            env: BTreeMap::new(),
+            providers: ProvidersConfig::default(),
+            terminal: TerminalConfig::default(),
+            startup_command_terminal: StartupCommandTerminalConfig::default(),
+            logging: LoggingConfig {
+                level: "info".to_string(),
+                path: "dux.log".to_string(),
+            },
+            projects: Vec::new(),
+            ui: UiConfig {
+                left_width_pct: 20,
+                right_width_pct: 23,
+                terminal_pane_height_pct: 35,
+                empty_project_separator_min_projects: 5,
+                staged_pane_height_pct: 50,
+                commit_pane_height_pct: 40,
+                agent_scrollback_lines: 10_000,
+                branch_sync_interval: 30,
+                show_diff_line_numbers: false,
+                diff_tab_width: 4,
+                github_integration: true,
+                auto_reopen_agents: false,
+                pr_banner_position: "bottom".to_string(),
+                theme: DEFAULT_THEME_NAME.to_string(),
+            },
+            editor: EditorConfig::default(),
+            keys: KeysConfig::default(),
+            macros: MacrosConfig::default(),
+        }
+    }
+}
+
+impl Default for KeysConfig {
+    fn default() -> Self {
+        let mut bindings = BTreeMap::new();
+        for def in keybindings::BINDING_DEFS {
+            if def.default_keys.is_empty() {
+                continue;
+            }
+            let keys: Vec<String> = def
+                .default_keys
+                .iter()
+                .map(|k| keybindings::format_key_for_config(*k))
+                .collect();
+            bindings.insert(def.action.config_name().to_string(), keys);
+        }
+        Self {
+            show_terminal_keys: true,
+            bindings,
+        }
+    }
+}
+
+impl Config {
+    pub fn default_provider(&self) -> ProviderKind {
+        ProviderKind::from_str(&self.defaults.provider)
+    }
+
+    pub fn default_commit_prompt(&self) -> String {
+        self.defaults
+            .commit_prompt
+            .as_ref()
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_COMMIT_PROMPT.to_string())
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct DuxPaths {

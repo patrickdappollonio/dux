@@ -2,6 +2,10 @@
 //! their defaults, and value helpers. The keybinding-aware *renderer* of the
 //! documented config, plus `ensure_config`/`save_config` orchestration and the
 //! toml_edit patching, live in the binary's `config` module — not here.
+//!
+//! Note: `Config` and `KeysConfig` live in the binary's `config` module rather
+//! than here because their `Default` impls depend on `keybindings::BINDING_DEFS`,
+//! a binary-only symbol.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -9,8 +13,6 @@ use std::env;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-use crate::model::ProviderKind;
 
 pub const DEFAULT_COMMIT_PROMPT: &str = "\
 Write a commit message for the following staged diff.
@@ -23,31 +25,6 @@ Rules:
 - This is a plain text commit message, not markdown. NEVER use backticks, asterisks, code fences, or any markdown syntax. Refer to functions and files by name without formatting.
 - Focus on intent and impact, not mechanical description of lines added/removed.
 - Output ONLY the raw commit message. No preamble, no quotes, no explanation.";
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Config {
-    pub defaults: Defaults,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
-    pub providers: ProvidersConfig,
-    pub terminal: TerminalConfig,
-    pub startup_command_terminal: StartupCommandTerminalConfig,
-    pub logging: LoggingConfig,
-    pub projects: Vec<ProjectConfig>,
-    pub ui: UiConfig,
-    pub editor: EditorConfig,
-    pub keys: KeysConfig,
-    pub macros: MacrosConfig,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct KeysConfig {
-    pub show_terminal_keys: bool,
-    #[serde(flatten)]
-    pub bindings: BTreeMap<String, Vec<String>>,
-}
 
 /// Which surface(s) a macro is available on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,51 +197,6 @@ pub struct UiConfig {
     pub theme: String,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            defaults: Defaults::default(),
-            env: BTreeMap::new(),
-            providers: ProvidersConfig::default(),
-            terminal: TerminalConfig::default(),
-            startup_command_terminal: StartupCommandTerminalConfig::default(),
-            logging: LoggingConfig {
-                level: "info".to_string(),
-                path: "dux.log".to_string(),
-            },
-            projects: Vec::new(),
-            ui: UiConfig {
-                left_width_pct: 20,
-                right_width_pct: 23,
-                terminal_pane_height_pct: 35,
-                empty_project_separator_min_projects: 5,
-                staged_pane_height_pct: 50,
-                commit_pane_height_pct: 40,
-                agent_scrollback_lines: 10_000,
-                branch_sync_interval: 30,
-                show_diff_line_numbers: false,
-                diff_tab_width: 4,
-                github_integration: true,
-                auto_reopen_agents: false,
-                pr_banner_position: "bottom".to_string(),
-                theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
-            },
-            editor: EditorConfig::default(),
-            keys: KeysConfig::default(),
-            macros: MacrosConfig::default(),
-        }
-    }
-}
-
-impl Default for KeysConfig {
-    fn default() -> Self {
-        Self {
-            show_terminal_keys: true,
-            bindings: BTreeMap::new(),
-        }
-    }
-}
-
 impl Default for Defaults {
     fn default() -> Self {
         let start_directory = home::home_dir().map(|p| p.to_string_lossy().to_string());
@@ -375,21 +307,6 @@ impl Default for UiConfig {
             pr_banner_position: "bottom".to_string(),
             theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
         }
-    }
-}
-
-impl Config {
-    pub fn default_provider(&self) -> ProviderKind {
-        ProviderKind::from_str(&self.defaults.provider)
-    }
-
-    pub fn default_commit_prompt(&self) -> String {
-        self.defaults
-            .commit_prompt
-            .as_ref()
-            .filter(|s| !s.is_empty())
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_COMMIT_PROMPT.to_string())
     }
 }
 
