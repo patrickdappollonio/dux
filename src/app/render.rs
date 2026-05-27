@@ -1365,8 +1365,8 @@ impl App {
                     }
                     let x = term_area.x + cell.col;
                     let y = term_area.y + cell.row;
-                    let (fg, bg) = pty_cell_colors(cell.fg, cell.bg, is_input, &self.theme);
-                    let mut style = Style::default().fg(fg).add_modifier(cell.modifier);
+                    let (fg, bg) = pty_cell_colors(crate::tui_color::to_ratatui_color(cell.fg), crate::tui_color::to_ratatui_color(cell.bg), is_input, &self.theme);
+                    let mut style = Style::default().fg(fg).add_modifier(crate::tui_color::to_ratatui_modifier(cell.modifier));
                     if let Some(bg) = bg {
                         style = style.bg(bg);
                     }

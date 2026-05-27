@@ -13,6 +13,7 @@ pub mod lockfile;
 pub mod logger;
 pub mod model;
 pub mod provider;
+pub mod pty;
 pub mod startup;
 pub mod statusline;
 pub mod storage;

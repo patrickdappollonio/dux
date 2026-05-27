@@ -17,7 +17,7 @@ use alacritty_terminal::vte::ansi::{
 use anyhow::{Context, Result};
 use compact_str::CompactString;
 use portable_pty::{Child, CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
-use ratatui::style::{Color, Modifier};
+use dux_core::pty::{CellColor, CellModifier};
 
 use crate::logger;
 
@@ -32,9 +32,9 @@ pub struct SnapshotCell {
     pub row: u16,
     pub col: u16,
     pub symbol: CompactString,
-    pub fg: Color,
-    pub bg: Color,
-    pub modifier: Modifier,
+    pub fg: CellColor,
+    pub bg: CellColor,
+    pub modifier: CellModifier,
 }
 
 #[derive(Clone, Debug)]
@@ -716,24 +716,24 @@ impl TerminalState {
                 }
             }
 
-            let mut modifier = Modifier::empty();
+            let mut modifier = CellModifier::default();
             if cell.flags.contains(Flags::BOLD) {
-                modifier |= Modifier::BOLD;
+                modifier.bold = true;
             }
             if cell.flags.contains(Flags::ITALIC) {
-                modifier |= Modifier::ITALIC;
+                modifier.italic = true;
             }
             if cell.flags.intersects(Flags::ALL_UNDERLINES) {
-                modifier |= Modifier::UNDERLINED;
+                modifier.underlined = true;
             }
             if cell.flags.contains(Flags::INVERSE) {
-                modifier |= Modifier::REVERSED;
+                modifier.reversed = true;
             }
             if cell.flags.contains(Flags::DIM) {
-                modifier |= Modifier::DIM;
+                modifier.dim = true;
             }
             if cell.flags.contains(Flags::STRIKEOUT) {
-                modifier |= Modifier::CROSSED_OUT;
+                modifier.crossed_out = true;
             }
 
             target.cells.push(SnapshotCell {
@@ -883,49 +883,49 @@ impl Dimensions for TerminalDimensions {
 fn convert_terminal_color(
     color: TermColor,
     palette: &alacritty_terminal::term::color::Colors,
-) -> Color {
+) -> CellColor {
     match color {
-        TermColor::Spec(Rgb { r, g, b }) => Color::Rgb(r, g, b),
+        TermColor::Spec(Rgb { r, g, b }) => CellColor::Rgb(r, g, b),
         TermColor::Indexed(index) => palette[index as usize]
-            .map(|rgb| Color::Rgb(rgb.r, rgb.g, rgb.b))
-            .unwrap_or(Color::Indexed(index)),
+            .map(|rgb| CellColor::Rgb(rgb.r, rgb.g, rgb.b))
+            .unwrap_or(CellColor::Indexed(index)),
         TermColor::Named(named) => palette[named]
-            .map(|rgb| Color::Rgb(rgb.r, rgb.g, rgb.b))
+            .map(|rgb| CellColor::Rgb(rgb.r, rgb.g, rgb.b))
             .unwrap_or_else(|| named_color_to_tui(named)),
     }
 }
 
-fn named_color_to_tui(color: NamedColor) -> Color {
+fn named_color_to_tui(color: NamedColor) -> CellColor {
     match color {
-        NamedColor::Black => Color::Indexed(0),
-        NamedColor::Red => Color::Indexed(1),
-        NamedColor::Green => Color::Indexed(2),
-        NamedColor::Yellow => Color::Indexed(3),
-        NamedColor::Blue => Color::Indexed(4),
-        NamedColor::Magenta => Color::Indexed(5),
-        NamedColor::Cyan => Color::Indexed(6),
-        NamedColor::White => Color::Indexed(7),
-        NamedColor::BrightBlack => Color::Indexed(8),
-        NamedColor::BrightRed => Color::Indexed(9),
-        NamedColor::BrightGreen => Color::Indexed(10),
-        NamedColor::BrightYellow => Color::Indexed(11),
-        NamedColor::BrightBlue => Color::Indexed(12),
-        NamedColor::BrightMagenta => Color::Indexed(13),
-        NamedColor::BrightCyan => Color::Indexed(14),
-        NamedColor::BrightWhite => Color::Indexed(15),
-        NamedColor::DimBlack => Color::Indexed(0),
-        NamedColor::DimRed => Color::Indexed(1),
-        NamedColor::DimGreen => Color::Indexed(2),
-        NamedColor::DimYellow => Color::Indexed(3),
-        NamedColor::DimBlue => Color::Indexed(4),
-        NamedColor::DimMagenta => Color::Indexed(5),
-        NamedColor::DimCyan => Color::Indexed(6),
-        NamedColor::DimWhite => Color::Indexed(7),
+        NamedColor::Black => CellColor::Indexed(0),
+        NamedColor::Red => CellColor::Indexed(1),
+        NamedColor::Green => CellColor::Indexed(2),
+        NamedColor::Yellow => CellColor::Indexed(3),
+        NamedColor::Blue => CellColor::Indexed(4),
+        NamedColor::Magenta => CellColor::Indexed(5),
+        NamedColor::Cyan => CellColor::Indexed(6),
+        NamedColor::White => CellColor::Indexed(7),
+        NamedColor::BrightBlack => CellColor::Indexed(8),
+        NamedColor::BrightRed => CellColor::Indexed(9),
+        NamedColor::BrightGreen => CellColor::Indexed(10),
+        NamedColor::BrightYellow => CellColor::Indexed(11),
+        NamedColor::BrightBlue => CellColor::Indexed(12),
+        NamedColor::BrightMagenta => CellColor::Indexed(13),
+        NamedColor::BrightCyan => CellColor::Indexed(14),
+        NamedColor::BrightWhite => CellColor::Indexed(15),
+        NamedColor::DimBlack => CellColor::Indexed(0),
+        NamedColor::DimRed => CellColor::Indexed(1),
+        NamedColor::DimGreen => CellColor::Indexed(2),
+        NamedColor::DimYellow => CellColor::Indexed(3),
+        NamedColor::DimBlue => CellColor::Indexed(4),
+        NamedColor::DimMagenta => CellColor::Indexed(5),
+        NamedColor::DimCyan => CellColor::Indexed(6),
+        NamedColor::DimWhite => CellColor::Indexed(7),
         NamedColor::Foreground
         | NamedColor::Background
         | NamedColor::Cursor
         | NamedColor::BrightForeground
-        | NamedColor::DimForeground => Color::Reset,
+        | NamedColor::DimForeground => CellColor::Reset,
     }
 }
 
@@ -1172,8 +1172,8 @@ mod tests {
             .find(|cell| cell.symbol == "Y")
             .expect("expected cell for Y");
 
-        assert_eq!(x.bg, Color::Indexed(238));
-        assert_eq!(y.bg, Color::Rgb(10, 20, 30));
+        assert_eq!(x.bg, CellColor::Indexed(238));
+        assert_eq!(y.bg, CellColor::Rgb(10, 20, 30));
     }
 
     #[test]
