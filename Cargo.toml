@@ -12,6 +12,8 @@ serde_json = "1.0.140"
 indexmap = { version = "2.13.0", features = ["serde"] }
 uuid = { version = "1.17.0", features = ["v4"] }
 home = "0.5.11"
+content_inspector = "0.2.4"
+tempfile = "3.20.0"
 
 [package]
 name = "dux"
@@ -23,7 +25,7 @@ dux-core.workspace = true
 anyhow.workspace = true
 arboard = "3.4.1"
 chrono.workspace = true
-content_inspector = "0.2.4"
+content_inspector.workspace = true
 crossterm = "0.29.0"
 home.workspace = true
 ratatui = "0.30.0"
@@ -37,7 +39,6 @@ portable-pty = "0.9"
 rustix.workspace = true
 signal-hook = "0.4"
 alacritty_terminal = "0.26.0"
-petname = { version = "3.0.0", default-features = false, features = ["default-rng", "default-words"] }
 similar = "3"
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }
 crokey = "1.4.0"
@@ -48,7 +49,7 @@ notify = "7"
 opaline = { version = "0.4", features = ["ratatui", "builtin-themes"] }
 
 [dev-dependencies]
-tempfile = "3.20.0"
+tempfile.workspace = true
 
 [profile.release]
 opt-level = "z"   # Optimize for size.

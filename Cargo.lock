@@ -551,7 +551,6 @@ dependencies = [
  "indexmap",
  "notify",
  "opaline",
- "petname",
  "portable-pty",
  "ratatui",
  "rusqlite",
