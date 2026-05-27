@@ -9,7 +9,10 @@
 
 use std::collections::BTreeMap;
 use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result, anyhow, bail};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -441,4 +444,495 @@ pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 5]
             },
         ),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// DuxPaths: canonical locations for runtime files
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct DuxPaths {
+    pub root: PathBuf,
+    pub config_path: PathBuf,
+    pub sessions_db_path: PathBuf,
+    pub worktrees_root: PathBuf,
+    /// Path to the lockfile that enforces a single dux instance per
+    /// config directory. Contains the PID of the holder.
+    pub lock_path: PathBuf,
+}
+
+impl DuxPaths {
+    pub fn discover() -> Result<Self> {
+        let root = resolve_root(
+            env::var_os("DUX_HOME"),
+            home::home_dir(),
+            env::var_os("XDG_CONFIG_HOME"),
+        )?;
+        Ok(Self {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root,
+        })
+    }
+
+    pub fn ensure_dirs(&self) -> Result<()> {
+        fs::create_dir_all(&self.root)
+            .with_context(|| format!("failed to create {}", self.root.display()))?;
+        fs::create_dir_all(&self.worktrees_root)
+            .with_context(|| format!("failed to create {}", self.worktrees_root.display()))?;
+        Ok(())
+    }
+}
+
+pub fn resolve_root(
+    dux_home: Option<std::ffi::OsString>,
+    home: Option<PathBuf>,
+    xdg_config_home: Option<std::ffi::OsString>,
+) -> Result<PathBuf> {
+    if let Some(dux_home) = dux_home.map(PathBuf::from) {
+        if dux_home.is_absolute() {
+            return Ok(dux_home);
+        }
+        bail!(
+            "DUX_HOME must be an absolute path, got: {}",
+            dux_home.display()
+        );
+    }
+
+    let home = home.ok_or_else(|| anyhow!("failed to determine user home directory"))?;
+    Ok(discover_root(&home, xdg_config_home))
+}
+
+pub fn discover_root(home: &Path, xdg_config_home: Option<std::ffi::OsString>) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = xdg_config_home;
+        home.join(".dux")
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(xdg) = xdg_config_home.map(PathBuf::from)
+            && xdg.is_absolute()
+        {
+            return xdg.join("dux");
+        }
+        home.join(".config").join("dux")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Env/path helpers
+// ---------------------------------------------------------------------------
+
+/// Expand environment variables (`$VAR`, `${VAR}`) in a config string.
+/// Returns `None` when variable syntax is invalid.
+pub fn expand_env_vars(raw: &str) -> Option<String> {
+    let mut result = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '$' {
+            let braced = chars.peek() == Some(&'{');
+            if braced {
+                chars.next();
+            }
+            let mut var_name = String::new();
+            while let Some(&c) = chars.peek() {
+                if braced {
+                    if c == '}' {
+                        chars.next();
+                        break;
+                    }
+                } else if !c.is_ascii_alphanumeric() && c != '_' {
+                    break;
+                }
+                var_name.push(c);
+                chars.next();
+            }
+            if var_name.is_empty() || !is_valid_var_name(&var_name) {
+                return None;
+            }
+            match std::env::var(&var_name) {
+                Ok(value) => result.push_str(&value),
+                Err(_) => {
+                    result.push('$');
+                    if braced {
+                        result.push('{');
+                    }
+                    result.push_str(&var_name);
+                    if braced {
+                        result.push('}');
+                    }
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    Some(result)
+}
+
+pub fn resolve_project_env(env: &BTreeMap<String, String>) -> Result<Vec<(String, String)>> {
+    let mut resolved = Vec::with_capacity(env.len());
+    for (name, value) in env {
+        validate_project_env_name(name)?;
+        let expanded = expand_env_vars(value)
+            .ok_or_else(|| anyhow!("environment variable {name} has invalid expansion syntax"))?;
+        if expanded.contains('\0') {
+            bail!("environment variable {name} contains a NUL byte");
+        }
+        resolved.push((name.clone(), expanded));
+    }
+    Ok(resolved)
+}
+
+pub fn resolve_agent_env(
+    global_env: &BTreeMap<String, String>,
+    project_env: &BTreeMap<String, String>,
+) -> Result<Vec<(String, String)>> {
+    let mut merged = global_env.clone();
+    merged.extend(project_env.clone());
+    resolve_project_env(&merged)
+}
+
+pub fn project_env_to_lines(env: &BTreeMap<String, String>) -> String {
+    env.iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn parse_project_env_lines(raw: &str) -> Result<BTreeMap<String, String>> {
+    let mut env = BTreeMap::new();
+    for (index, line) in raw.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = trimmed.split_once('=') else {
+            bail!("line {} must use KEY=value syntax", index + 1);
+        };
+        let name = name.trim();
+        validate_project_env_name(name)
+            .with_context(|| format!("line {} has an invalid variable name", index + 1))?;
+        if value.contains('\0') {
+            bail!("line {} contains a NUL byte", index + 1);
+        }
+        expand_env_vars(value).ok_or_else(|| {
+            anyhow!(
+                "line {} has invalid environment variable expansion syntax",
+                index + 1
+            )
+        })?;
+        env.insert(name.to_string(), value.to_string());
+    }
+    Ok(env)
+}
+
+fn validate_project_env_name(name: &str) -> Result<()> {
+    if is_valid_var_name(name) {
+        Ok(())
+    } else {
+        bail!("expected [A-Za-z_][A-Za-z0-9_]*")
+    }
+}
+
+/// Expand environment variables (`$VAR`, `${VAR}`) and tilde (`~`) in a path
+/// string.  Returns `None` when the result is unsafe (relative path, directory
+/// traversal via `..`, or invalid variable names).
+pub fn expand_path(raw: &str) -> Option<String> {
+    let mut result = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+
+    // Handle leading tilde.
+    if chars.peek() == Some(&'~') {
+        chars.next(); // consume '~'
+        let home = home::home_dir()?;
+        result.push_str(&home.to_string_lossy());
+        // Allow `~/...` but also bare `~`.
+        if chars.peek() == Some(&'/') {
+            // keep the slash – the next iteration will push it
+        } else if chars.peek().is_some() {
+            // `~user` style – not supported, reject.
+            return None;
+        }
+    }
+
+    while let Some(ch) = chars.next() {
+        if ch == '$' {
+            // Try `${VAR}` or `$VAR`.
+            let braced = chars.peek() == Some(&'{');
+            if braced {
+                chars.next(); // consume '{'
+            }
+            let mut var_name = String::new();
+            while let Some(&c) = chars.peek() {
+                if braced {
+                    if c == '}' {
+                        chars.next(); // consume '}'
+                        break;
+                    }
+                } else if !c.is_ascii_alphanumeric() && c != '_' {
+                    break;
+                }
+                var_name.push(c);
+                chars.next();
+            }
+            // Validate variable name: [A-Za-z_][A-Za-z0-9_]*
+            if var_name.is_empty() || !is_valid_var_name(&var_name) {
+                return None;
+            }
+            match std::env::var(&var_name) {
+                Ok(value) => result.push_str(&value),
+                Err(_) => {
+                    // Unresolved variable – keep the literal token so the user
+                    // can see which variable failed in the warning message.
+                    result.push('$');
+                    if braced {
+                        result.push('{');
+                    }
+                    result.push_str(&var_name);
+                    if braced {
+                        result.push('}');
+                    }
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    let path = std::path::Path::new(&result);
+
+    // Must be absolute.
+    if !path.is_absolute() {
+        return None;
+    }
+
+    // Reject directory traversal (`..`).
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+
+    Some(result)
+}
+
+/// Returns `true` when `name` matches `[A-Za-z_][A-Za-z0-9_]*`.
+fn is_valid_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn config_root_uses_hidden_home_dir_on_macos() {
+        let root = discover_root(Path::new("/example/home"), Some("/tmp/ignored".into()));
+        assert_eq!(root, PathBuf::from("/example/home/.dux"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn config_root_uses_xdg_config_home_when_absolute() {
+        let root = discover_root(Path::new("/example/home"), Some("/tmp/xdg".into()));
+        assert_eq!(root, PathBuf::from("/tmp/xdg/dux"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn config_root_falls_back_to_dot_config_when_xdg_missing() {
+        let root = discover_root(Path::new("/example/home"), None);
+        assert_eq!(root, PathBuf::from("/example/home/.config/dux"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn config_root_ignores_relative_xdg_config_home() {
+        let root = discover_root(Path::new("/example/home"), Some("relative/path".into()));
+        assert_eq!(root, PathBuf::from("/example/home/.config/dux"));
+    }
+
+    #[test]
+    fn resolve_root_uses_dux_home_when_absolute() {
+        let root = resolve_root(Some("/custom/dux".into()), None, None).unwrap();
+        assert_eq!(root, PathBuf::from("/custom/dux"));
+    }
+
+    #[test]
+    fn resolve_root_errors_on_relative_dux_home() {
+        let err = resolve_root(
+            Some("relative/path".into()),
+            Some(PathBuf::from("/home")),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("DUX_HOME must be an absolute path"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("relative/path"),
+            "error should contain the bad path: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_root_errors_on_empty_dux_home() {
+        let err = resolve_root(Some("".into()), Some(PathBuf::from("/home")), None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("DUX_HOME must be an absolute path"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_root_falls_through_when_dux_home_unset() {
+        let root = resolve_root(None, Some(PathBuf::from("/example/home")), None).unwrap();
+        // Should delegate to discover_root with platform defaults
+        #[cfg(target_os = "macos")]
+        assert_eq!(root, PathBuf::from("/example/home/.dux"));
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(root, PathBuf::from("/example/home/.config/dux"));
+    }
+
+    // ── expand_path tests ────────────────────────────────────────────────
+
+    #[test]
+    fn expand_path_absolute_unchanged() {
+        assert_eq!(
+            expand_path("/absolute/path").as_deref(),
+            Some("/absolute/path")
+        );
+    }
+
+    #[test]
+    fn expand_path_tilde() {
+        let home = home::home_dir().expect("home dir");
+        let result = expand_path("~/projects/foo").unwrap();
+        assert_eq!(result, format!("{}/projects/foo", home.display()));
+    }
+
+    #[test]
+    fn expand_path_bare_tilde() {
+        let home = home::home_dir().expect("home dir");
+        assert_eq!(expand_path("~").unwrap(), home.to_string_lossy());
+    }
+
+    #[test]
+    fn expand_path_dollar_var() {
+        // SAFETY: test-only env manipulation; tests are run with --test-threads=1
+        // or use unique variable names to avoid races.
+        unsafe { std::env::set_var("DUX_TEST_VAR_1", "/test/value") };
+        let result = expand_path("$DUX_TEST_VAR_1/subdir").unwrap();
+        assert_eq!(result, "/test/value/subdir");
+        unsafe { std::env::remove_var("DUX_TEST_VAR_1") };
+    }
+
+    #[test]
+    fn expand_path_braced_var() {
+        unsafe { std::env::set_var("DUX_TEST_VAR_2", "/braced") };
+        let result = expand_path("${DUX_TEST_VAR_2}/sub").unwrap();
+        assert_eq!(result, "/braced/sub");
+        unsafe { std::env::remove_var("DUX_TEST_VAR_2") };
+    }
+
+    #[test]
+    fn expand_path_unresolved_var_kept_literal() {
+        // Unresolved var is preserved literally; if the overall path is still
+        // absolute the function succeeds (the path just won't exist on disk).
+        let result = expand_path("/prefix/$NONEXISTENT_DUX_VAR_999/suffix");
+        assert_eq!(
+            result.as_deref(),
+            Some("/prefix/$NONEXISTENT_DUX_VAR_999/suffix")
+        );
+    }
+
+    #[test]
+    fn expand_path_rejects_relative() {
+        assert!(expand_path("relative/path").is_none());
+    }
+
+    #[test]
+    fn expand_path_rejects_dotdot_relative() {
+        assert!(expand_path("../relative/path").is_none());
+    }
+
+    #[test]
+    fn expand_path_rejects_traversal() {
+        unsafe { std::env::set_var("DUX_TEST_VAR_3", "/safe") };
+        assert!(expand_path("$DUX_TEST_VAR_3/../etc/passwd").is_none());
+        unsafe { std::env::remove_var("DUX_TEST_VAR_3") };
+    }
+
+    #[test]
+    fn expand_path_rejects_command_substitution() {
+        assert!(expand_path("$(whoami)/foo").is_none());
+    }
+
+    #[test]
+    fn expand_path_rejects_tilde_user() {
+        // `~otheruser/foo` is not supported.
+        assert!(expand_path("~otheruser/foo").is_none());
+    }
+
+    #[test]
+    fn expand_path_rejects_empty_var_name() {
+        assert!(expand_path("$/foo").is_none());
+    }
+
+    #[test]
+    fn expand_path_rejects_empty_braced_var_name() {
+        assert!(expand_path("${}/foo").is_none());
+    }
+
+    #[test]
+    fn project_env_lines_parse_and_expand() {
+        unsafe { std::env::set_var("DUX_TEST_PROJECT_ENV_SOURCE", "secret") };
+        let env = parse_project_env_lines("EDITOR=true\nAPI_KEY=${DUX_TEST_PROJECT_ENV_SOURCE}")
+            .expect("parse env");
+        let resolved = resolve_project_env(&env).expect("resolve env");
+        assert!(resolved.contains(&("EDITOR".to_string(), "true".to_string())));
+        assert!(resolved.contains(&("API_KEY".to_string(), "secret".to_string())));
+        unsafe { std::env::remove_var("DUX_TEST_PROJECT_ENV_SOURCE") };
+    }
+
+    #[test]
+    fn project_env_lines_reject_invalid_names_and_expansions() {
+        assert!(parse_project_env_lines("1BAD=value").is_err());
+        assert!(parse_project_env_lines("GOOD=${}").is_err());
+        assert!(parse_project_env_lines("MISSING_EQUALS").is_err());
+    }
+
+    #[test]
+    fn agent_env_merges_global_and_project_with_project_override() {
+        let global = BTreeMap::from([
+            ("EDITOR".to_string(), "true".to_string()),
+            ("API_KEY".to_string(), "global".to_string()),
+        ]);
+        let project = BTreeMap::from([("API_KEY".to_string(), "project".to_string())]);
+
+        let resolved = resolve_agent_env(&global, &project).expect("resolve env");
+
+        assert!(resolved.contains(&("EDITOR".to_string(), "true".to_string())));
+        assert!(resolved.contains(&("API_KEY".to_string(), "project".to_string())));
+        assert!(!resolved.contains(&("API_KEY".to_string(), "global".to_string())));
+    }
 }
