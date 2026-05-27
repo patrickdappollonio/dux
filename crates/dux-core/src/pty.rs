@@ -5,7 +5,7 @@
 /// Mirrors the variant set of `ratatui::style::Color` so the PTY snapshot can
 /// describe any cell color without depending on a UI toolkit. The TUI converts
 /// 1:1 to `ratatui::Color`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CellColor {
     Reset,
     Black,

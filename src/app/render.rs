@@ -3,6 +3,7 @@ use super::components::{
     shared_button_width,
 };
 use super::*;
+use crate::tui_color::{to_ratatui_color, to_ratatui_modifier};
 use std::path::Path;
 
 /// ASCII art logo displayed in the agent pane when no content is active.
@@ -1365,8 +1366,15 @@ impl App {
                     }
                     let x = term_area.x + cell.col;
                     let y = term_area.y + cell.row;
-                    let (fg, bg) = pty_cell_colors(crate::tui_color::to_ratatui_color(cell.fg), crate::tui_color::to_ratatui_color(cell.bg), is_input, &self.theme);
-                    let mut style = Style::default().fg(fg).add_modifier(crate::tui_color::to_ratatui_modifier(cell.modifier));
+                    let (fg, bg) = pty_cell_colors(
+                        to_ratatui_color(cell.fg),
+                        to_ratatui_color(cell.bg),
+                        is_input,
+                        &self.theme,
+                    );
+                    let mut style = Style::default()
+                        .fg(fg)
+                        .add_modifier(to_ratatui_modifier(cell.modifier));
                     if let Some(bg) = bg {
                         style = style.bg(bg);
                     }

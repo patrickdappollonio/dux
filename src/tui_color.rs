@@ -1,7 +1,7 @@
 use dux_core::pty::{CellColor, CellModifier};
 use ratatui::style::{Color, Modifier};
 
-pub fn to_ratatui_color(c: CellColor) -> Color {
+pub(crate) fn to_ratatui_color(c: CellColor) -> Color {
     match c {
         CellColor::Reset => Color::Reset,
         CellColor::Black => Color::Black,
@@ -25,7 +25,7 @@ pub fn to_ratatui_color(c: CellColor) -> Color {
     }
 }
 
-pub fn to_ratatui_modifier(m: CellModifier) -> Modifier {
+pub(crate) fn to_ratatui_modifier(m: CellModifier) -> Modifier {
     let mut out = Modifier::empty();
     if m.bold { out.insert(Modifier::BOLD); }
     if m.dim { out.insert(Modifier::DIM); }
