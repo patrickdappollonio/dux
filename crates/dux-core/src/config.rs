@@ -1,7 +1,9 @@
-//! dux configuration data model: the serde structs persisted in `config.toml`,
-//! their defaults, and value helpers. The keybinding-aware *renderer* of the
-//! documented config, plus `ensure_config`/`save_config` orchestration and the
-//! toml_edit patching, live in the binary's `config` module — not here.
+//! dux configuration data model: the serde structs persisted in `config.toml`
+//! and their defaults, plus `DuxPaths` and path resolution (`resolve_root`,
+//! `discover_root`) and the env-expansion helpers (`expand_env_vars`,
+//! `expand_path`, `resolve_project_env`, …). The keybinding-aware *renderer* of
+//! the documented config, plus `ensure_config`/`save_config` orchestration and
+//! the toml_edit patching, live in the binary's `config` module — not here.
 //!
 //! Note: `Config` and `KeysConfig` live in the binary's `config` module rather
 //! than here because their `Default` impls depend on `keybindings::BINDING_DEFS`,
