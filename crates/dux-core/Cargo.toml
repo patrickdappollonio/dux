@@ -7,3 +7,7 @@ edition = "2024"
 anyhow.workspace = true
 chrono.workspace = true
 rustix.workspace = true
+serde.workspace = true
+indexmap.workspace = true
+uuid.workspace = true
+home = "0.5.11"

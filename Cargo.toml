@@ -7,6 +7,10 @@ anyhow = "1.0.98"
 chrono = { version = "0.4.41", features = ["serde"] }
 rustix = { version = "1.1", features = ["termios", "process", "event", "stdio", "fs"] }
 dux-core = { path = "crates/dux-core" }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+indexmap = { version = "2.13.0", features = ["serde"] }
+uuid = { version = "1.17.0", features = ["v4"] }
 
 [package]
 name = "dux"
@@ -23,11 +27,11 @@ crossterm = "0.29.0"
 home = "0.5.11"
 ratatui = "0.30.0"
 rusqlite = { version = "0.39.0", features = ["bundled", "chrono"] }
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
+serde.workspace = true
+serde_json.workspace = true
 toml = { version = "1.1.2", features = ["preserve_order"] }
 toml_edit = "0.25"
-uuid = { version = "1.17.0", features = ["v4"] }
+uuid.workspace = true
 portable-pty = "0.9"
 rustix.workspace = true
 signal-hook = "0.4"
@@ -36,7 +40,7 @@ petname = { version = "3.0.0", default-features = false, features = ["default-rn
 similar = "3"
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }
 crokey = "1.4.0"
-indexmap = { version = "2.13.0", features = ["serde"] }
+indexmap.workspace = true
 compact_str = "0.9"
 sysinfo = "0.35"
 notify = "7"

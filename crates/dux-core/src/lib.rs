@@ -5,6 +5,7 @@
 
 pub mod action;
 pub mod browser;
+pub mod config;
 pub mod editor;
 pub mod io_retry;
 pub mod model;

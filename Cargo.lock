@@ -574,7 +574,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "home",
+ "indexmap",
  "rustix",
+ "serde",
+ "uuid",
 ]
 
 [[package]]
