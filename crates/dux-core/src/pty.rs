@@ -1,6 +1,30 @@
-//! Surface-agnostic terminal cell color and style, produced by the PTY
-//! terminal-grid snapshot. Each surface converts these to its own medium
-//! (the TUI to `ratatui` types; the web to CSS) at its render boundary.
+//! PTY-based terminal client plus the surface-agnostic cell types for its
+//! terminal-grid snapshot. The client spawns a CLI in a pseudo-terminal and
+//! keeps a full terminal grid (via `alacritty_terminal`); the snapshot's
+//! `CellColor`/`CellModifier` let each surface convert to its own medium (the
+//! TUI to `ratatui` types; the web to CSS) at its render boundary.
+
+use std::env;
+use std::ffi::OsStr;
+use std::io::Write;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Instant;
+
+use alacritty_terminal::event::{Event, EventListener, WindowSize};
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::{self, Config, Term, TermMode};
+use alacritty_terminal::vte::ansi::{
+    Color as TermColor, CursorShape, NamedColor, Processor, Rgb, StdSyncHandler,
+};
+use anyhow::{Context, Result};
+use compact_str::CompactString;
+use portable_pty::{Child, CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
+
+use crate::logger;
 
 /// Mirrors the variant set of `ratatui::style::Color` so the PTY snapshot can
 /// describe any cell color without depending on a UI toolkit. The TUI converts
@@ -39,28 +63,6 @@ pub struct CellModifier {
     pub reversed: bool,
     pub crossed_out: bool,
 }
-
-use std::env;
-use std::ffi::OsStr;
-use std::io::Write;
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Instant;
-
-use alacritty_terminal::event::{Event, EventListener, WindowSize};
-use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{self, Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{
-    Color as TermColor, CursorShape, NamedColor, Processor, Rgb, StdSyncHandler,
-};
-use anyhow::{Context, Result};
-use compact_str::CompactString;
-use portable_pty::{Child, CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
-
-use crate::logger;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SnapshotCursor {
