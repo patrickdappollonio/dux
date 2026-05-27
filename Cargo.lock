@@ -553,7 +553,6 @@ dependencies = [
  "opaline",
  "portable-pty",
  "ratatui",
- "rusqlite",
  "rustix",
  "serde",
  "serde_json",
@@ -577,8 +576,10 @@ dependencies = [
  "home",
  "indexmap",
  "petname",
+ "rusqlite",
  "rustix",
  "serde",
+ "serde_json",
  "tempfile",
  "uuid",
 ]
