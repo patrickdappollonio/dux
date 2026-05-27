@@ -3,10 +3,8 @@ mod cli;
 mod clipboard;
 mod config;
 mod diff;
-mod git;
 mod keybindings;
 mod lockfile;
-mod logger;
 mod provider;
 mod pty;
 mod raw_input;
@@ -16,7 +14,7 @@ mod theme;
 
 // Domain modules now live in dux-core. Re-export them at the crate root so
 // existing `crate::<mod>::…` paths across the binary keep resolving unchanged.
-pub(crate) use dux_core::{browser, editor, io_retry, model, statusline};
+pub(crate) use dux_core::{browser, editor, git, io_retry, logger, model, statusline};
 
 use std::path::Path;
 

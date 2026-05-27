@@ -6,8 +6,13 @@ edition = "2024"
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+content_inspector = "0.2.4"
+petname = { version = "3.0.0", default-features = false, features = ["default-rng", "default-words"] }
 rustix.workspace = true
 serde.workspace = true
 indexmap.workspace = true
 uuid.workspace = true
 home.workspace = true
+
+[dev-dependencies]
+tempfile = "3.20.0"

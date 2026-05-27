@@ -574,10 +574,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "content_inspector",
  "home",
  "indexmap",
+ "petname",
  "rustix",
  "serde",
+ "tempfile",
  "uuid",
 ]
 
