@@ -762,6 +762,14 @@ pub struct KeysConfig {
 }
 
 impl Default for KeysConfig {
+    /// Returns a `KeysConfig` with no explicit bindings.
+    ///
+    /// The empty `bindings` map is intentional: default key assignments are
+    /// resolved at runtime by `RuntimeBindings::from_keys_config` (in the TUI
+    /// crate), which falls back to `BINDING_DEFS` for any action not present
+    /// here. `dux-core` cannot reference `BINDING_DEFS` (it is `crokey`/
+    /// `crossterm`-coupled, binary-only), so the defaults are deliberately
+    /// omitted from this impl rather than duplicated.
     fn default() -> Self {
         Self {
             show_terminal_keys: true,
