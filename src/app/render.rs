@@ -539,7 +539,7 @@ impl App {
                     Style::default().fg(label_fg).bg(bg),
                 ));
                 spans.push(Span::styled(
-                    self.config.default_provider().as_str().to_string(),
+                    self.engine.config.default_provider().as_str().to_string(),
                     Style::default().fg(self.theme.branch_fg).bg(bg),
                 ));
             }
@@ -586,15 +586,18 @@ impl App {
                 .enumerate()
                 .map(|(i, item)| match item {
                     LeftItem::Project(index) => {
-                        let project = &self.projects[*index];
+                        let project = &self.engine.projects[*index];
                         if project.path_missing {
                             ListItem::new(Line::from(Span::styled(
                                 "⚠",
                                 Style::default().fg(self.theme.project_missing_fg),
                             )))
                         } else {
-                            let has_sessions =
-                                self.sessions.iter().any(|s| s.project_id == project.id);
+                            let has_sessions = self
+                                .engine
+                                .sessions
+                                .iter()
+                                .any(|s| s.project_id == project.id);
                             let icon =
                                 if !has_sessions || self.collapsed_projects.contains(&project.id) {
                                     "▸"
@@ -608,7 +611,7 @@ impl App {
                         }
                     }
                     LeftItem::Session(index) => {
-                        let session = &self.sessions[*index];
+                        let session = &self.engine.sessions[*index];
                         let (dot, dot_color) = self.theme.session_dot(&session.status);
                         let is_last = !collapsed_left_items
                             .get(i + 1)
@@ -666,14 +669,14 @@ impl App {
 
         let session_counts: HashMap<String, usize> = {
             let mut counts = HashMap::new();
-            for session in &self.sessions {
+            for session in &self.engine.sessions {
                 *counts.entry(session.project_id.clone()).or_insert(0) += 1;
             }
             counts
         };
         let left_items = self.left_items();
         let projects_focused = focused && self.left_section == LeftSection::Projects;
-        let title = format!("Projects ({})", self.projects.len());
+        let title = format!("Projects ({})", self.engine.projects.len());
         let projects_inner_width = self
             .themed_block(&title, projects_focused)
             .inner(projects_area)
@@ -685,7 +688,7 @@ impl App {
             .map(|(i, item)| match item {
                 LeftItem::Project(index) => {
                     let is_below_empty_projects_separator = after_empty_projects_separator;
-                    let project = &self.projects[*index];
+                    let project = &self.engine.projects[*index];
                     if project.path_missing {
                         let spans = vec![
                             Span::styled("⚠ ", Style::default().fg(self.theme.project_missing_fg)),
@@ -731,7 +734,7 @@ impl App {
                 }
                 LeftItem::EmptyProjectsSpacer => ListItem::new(Line::from("")),
                 LeftItem::Session(index) => {
-                    let session = &self.sessions[*index];
+                    let session = &self.engine.sessions[*index];
                     let is_last = !left_items
                         .get(i + 1)
                         .is_some_and(|next| matches!(next, LeftItem::Session(_)));
@@ -1233,12 +1236,13 @@ impl App {
                 .selected_session()
                 .map(|s| self.running_provider_for(s).as_str().to_owned()),
             SessionSurface::Terminal => Some(
-                self.config
+                self.engine
+                    .config
                     .terminal
                     .command
                     .rsplit(std::path::MAIN_SEPARATOR)
                     .next()
-                    .unwrap_or(self.config.terminal.command.as_str())
+                    .unwrap_or(self.engine.config.terminal.command.as_str())
                     .to_string(),
             ),
         };
@@ -1579,9 +1583,10 @@ impl App {
         if self.right_collapsed {
             let focused = self.focus == FocusPane::Files;
             let all_files: Vec<(&str, Color)> = self
+                .engine
                 .unstaged_files
                 .iter()
-                .chain(self.staged_files.iter())
+                .chain(self.engine.staged_files.iter())
                 .map(|f| (f.status.as_str(), self.theme.file_status_fg))
                 .collect();
             let items: Vec<ListItem> = all_files
@@ -1605,7 +1610,7 @@ impl App {
             return;
         }
 
-        let has_staged = !self.staged_files.is_empty();
+        let has_staged = !self.engine.staged_files.is_empty();
         let focused = self.focus == FocusPane::Files;
 
         if has_staged {
@@ -1622,7 +1627,7 @@ impl App {
                 frame,
                 chunks[0],
                 "Changes",
-                &self.unstaged_files,
+                &self.engine.unstaged_files,
                 RightSection::Unstaged,
                 true,
             );
@@ -1633,7 +1638,7 @@ impl App {
                 frame,
                 area,
                 "Changes",
-                &self.unstaged_files,
+                &self.engine.unstaged_files,
                 RightSection::Unstaged,
                 true,
             );
@@ -1659,7 +1664,7 @@ impl App {
             frame,
             files_area,
             "Staged Changes",
-            &self.staged_files,
+            &self.engine.staged_files,
             RightSection::Staged,
             false,
         );
@@ -2094,7 +2099,7 @@ impl App {
                 body_style,
             ),
             Span::styled(
-                self.paths.config_path.display().to_string(),
+                self.engine.paths.config_path.display().to_string(),
                 Style::default()
                     .fg(self.theme.hint_key_fg)
                     .add_modifier(Modifier::BOLD),
@@ -2231,7 +2236,7 @@ impl App {
         )));
         {
             use crate::model::GhStatus;
-            let (icon, desc) = if !self.github_integration_enabled {
+            let (icon, desc) = if !self.engine.github_integration_enabled {
                 (
                     "○",
                     "Disabled — enable via command palette (toggle-github-integration)".to_string(),
@@ -2255,8 +2260,10 @@ impl App {
                 }
             };
             let icon_color = match self.gh_status {
-                GhStatus::Available if self.github_integration_enabled => self.theme.session_active,
-                _ if !self.github_integration_enabled => self.theme.session_exited,
+                GhStatus::Available if self.engine.github_integration_enabled => {
+                    self.theme.session_active
+                }
+                _ if !self.engine.github_integration_enabled => self.theme.session_exited,
                 _ => self.theme.warning_fg,
             };
             lines.push(Line::from(vec![
@@ -3815,7 +3822,7 @@ impl App {
                     )
                     .render(details_area, frame.buffer_mut());
 
-                let configured_default = self.config.editor.default.trim();
+                let configured_default = self.engine.config.editor.default.trim();
                 let items = editors
                     .iter()
                     .map(|editor| {

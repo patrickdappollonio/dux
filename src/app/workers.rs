@@ -16,8 +16,8 @@ impl App {
                     self.handle_agent_launch_failed(*boxed);
                 }
                 WorkerEvent::ChangedFilesReady { staged, unstaged } => {
-                    self.staged_files = staged;
-                    self.unstaged_files = unstaged;
+                    self.engine.staged_files = staged;
+                    self.engine.unstaged_files = unstaged;
                     self.clamp_files_cursor();
                 }
                 WorkerEvent::CommitMessageGenerated(msg) => {
@@ -62,7 +62,7 @@ impl App {
                         } => match result {
                             Ok(branch_name) => {
                                 if let Some(existing) = self
-                                    .projects
+                                    .engine.projects
                                     .iter_mut()
                                     .find(|candidate| candidate.id == project_id)
                                     && let Some(branch_name) = branch_name
@@ -114,11 +114,11 @@ impl App {
                 } => match result {
                     Ok(()) => {
                         if let Some(session) =
-                            self.sessions.iter_mut().find(|s| s.id == session_id)
+                            self.engine.sessions.iter_mut().find(|s| s.id == session_id)
                         {
                             session.branch_name = new_branch.clone();
                             session.updated_at = Utc::now();
-                            let _ = self.session_store.upsert_session(session);
+                            let _ = self.engine.session_store.upsert_session(session);
                         }
                         self.update_branch_sync_sessions();
                         self.rebuild_left_items();
@@ -131,11 +131,11 @@ impl App {
                         // mixed state where the display name changed but the
                         // branch didn't.
                         if let Some(session) =
-                            self.sessions.iter_mut().find(|s| s.id == session_id)
+                            self.engine.sessions.iter_mut().find(|s| s.id == session_id)
                         {
                             session.title = previous_title;
                             session.updated_at = Utc::now();
-                            let _ = self.session_store.upsert_session(session);
+                            let _ = self.engine.session_store.upsert_session(session);
                         }
                         self.rebuild_left_items();
                         self.set_error(format!(
@@ -147,7 +147,7 @@ impl App {
                     let mut changed = false;
                     for (session_id, actual_branch) in updates {
                         if let Some(session) =
-                            self.sessions.iter_mut().find(|s| s.id == session_id)
+                            self.engine.sessions.iter_mut().find(|s| s.id == session_id)
                             && session.branch_name != actual_branch {
                                 logger::info(&format!(
                                     "branch sync: session {} branch changed {} -> {}",
@@ -155,7 +155,7 @@ impl App {
                                 ));
                                 session.branch_name = actual_branch;
                                 session.updated_at = Utc::now();
-                                let _ = self.session_store.upsert_session(session);
+                                let _ = self.engine.session_store.upsert_session(session);
                                 changed = true;
                             }
                     }
@@ -167,7 +167,7 @@ impl App {
                 WorkerEvent::GhStatusChecked(status) => {
                     self.gh_status = status;
                     if matches!(status, crate::model::GhStatus::Available)
-                        && self.github_integration_enabled
+                        && self.engine.github_integration_enabled
                     {
                         logger::info("[gh-integration] gh CLI is available and authenticated");
                         self.update_pr_sync_sessions();
@@ -177,7 +177,7 @@ impl App {
                     } else {
                         logger::info(&format!(
                             "[gh-integration] gh status: {:?}, integration enabled: {}",
-                            status, self.github_integration_enabled,
+                            status, self.engine.github_integration_enabled,
                         ));
                     }
                 }
@@ -195,7 +195,7 @@ impl App {
                                     crate::model::PrState::Merged => "MERGED",
                                     crate::model::PrState::Closed => "CLOSED",
                                 };
-                                let _ = self.session_store.upsert_pr(&crate::storage::StoredPr {
+                                let _ = self.engine.session_store.upsert_pr(&crate::storage::StoredPr {
                                     session_id: session_id.clone(),
                                     pr_number: pr.number,
                                     host: pr.host.clone(),
@@ -333,7 +333,7 @@ impl App {
                                         && self.status.message() == msg.as_str()
                                 });
 
-                            if self.sessions.iter().any(|s| s.id == session_id) {
+                            if self.engine.sessions.iter().any(|s| s.id == session_id) {
                                 if let Err(e) = self.finish_delete_session(
                                     &session_id,
                                     true,
@@ -358,7 +358,7 @@ impl App {
                             // deletes can be in flight concurrently, and a
                             // bare error would be ambiguous.
                             if let Some(session) =
-                                self.sessions.iter().find(|s| s.id == session_id)
+                                self.engine.sessions.iter().find(|s| s.id == session_id)
                             {
                                 let name = session
                                     .title
@@ -433,7 +433,7 @@ impl App {
                         }
                         NonDefaultBranchAction::CheckoutProjectDefault { project } => {
                             if let Some(existing) =
-                                self.projects.iter_mut().find(|p| p.id == project.id)
+                                self.engine.projects.iter_mut().find(|p| p.id == project.id)
                             {
                                 existing.current_branch = target_branch.clone();
                                 existing.branch_status = ProjectBranchStatus::Leading;
@@ -461,7 +461,7 @@ impl App {
                     Ok(inspection) => {
                         let project_name = project.name.clone();
                         if let Some(existing) =
-                            self.projects.iter_mut().find(|p| p.id == project.id)
+                            self.engine.projects.iter_mut().find(|p| p.id == project.id)
                         {
                             existing.current_branch = inspection.current_branch.clone();
                             existing.leading_branch = Some(inspection.leading_branch.clone());
@@ -494,7 +494,7 @@ impl App {
                 WorkerEvent::ProjectBranchStatusReady { project_id, result } => match result {
                     Ok((current_branch, branch_status)) => {
                         if let Some(project) =
-                            self.projects.iter_mut().find(|p| p.id == project_id)
+                            self.engine.projects.iter_mut().find(|p| p.id == project_id)
                         {
                             project.current_branch = current_branch;
                             project.branch_status = branch_status;
@@ -526,7 +526,7 @@ impl App {
                             }
                             None => {
                                 if let Some(existing) =
-                                    self.projects.iter_mut().find(|p| p.id == project.id)
+                                    self.engine.projects.iter_mut().find(|p| p.id == project.id)
                                 {
                                     existing.current_branch = current_branch.clone();
                                     existing.branch_status = ProjectBranchStatus::Leading;
@@ -579,13 +579,13 @@ impl App {
                 }
                 WorkerEvent::GlobalEnvPersistenceCompleted { env, result } => match result {
                     Ok(()) => {
-                        self.config.env = env;
-                        if self.config.env.is_empty() {
+                        self.engine.config.env = env;
+                        if self.engine.config.env.is_empty() {
                             self.set_info("Global environment variables cleared.");
                         } else {
                             self.set_info(format!(
                                 "Saved {} global environment variable(s). New agents and terminals will receive them unless a project overrides the same key.",
-                                self.config.env.len()
+                                self.engine.config.env.len()
                             ));
                         }
                     }
@@ -668,7 +668,13 @@ impl App {
             if !is_minimal {
                 continue;
             }
-            let Some(session) = self.sessions.iter().find(|s| s.id == *session_id).cloned() else {
+            let Some(session) = self
+                .engine
+                .sessions
+                .iter()
+                .find(|s| s.id == *session_id)
+                .cloned()
+            else {
                 continue;
             };
             self.providers.remove(session_id);
@@ -851,10 +857,10 @@ impl App {
                 status_message,
             } => {
                 let project_id = project.id.clone();
-                self.projects.push(project);
+                self.engine.projects.push(project);
                 self.rebuild_left_items();
                 if let Some(index) = self.left_items().iter().position(|item| {
-                    matches!(item, LeftItem::Project(project_index) if self.projects[*project_index].id == project_id)
+                    matches!(item, LeftItem::Project(project_index) if self.engine.projects[*project_index].id == project_id)
                 }) {
                     self.selected_left = index;
                 }
@@ -870,7 +876,9 @@ impl App {
                 project_id,
                 project_name,
             } => {
-                self.projects.retain(|project| project.id != project_id);
+                self.engine
+                    .projects
+                    .retain(|project| project.id != project_id);
                 self.rebuild_left_items();
                 self.selected_left = self.selected_left.saturating_sub(1);
                 if let Err(err) = self.persist_config_projects_from_runtime() {
@@ -885,7 +893,9 @@ impl App {
                 project_id,
                 project_name,
             } => {
-                self.projects.retain(|project| project.id != project_id);
+                self.engine
+                    .projects
+                    .retain(|project| project.id != project_id);
                 self.rebuild_left_items();
                 self.selected_left = self.selected_left.saturating_sub(1);
                 self.reload_changed_files();
@@ -906,13 +916,14 @@ impl App {
                 global_default,
             } => {
                 if let Some(project) = self
+                    .engine
                     .projects
                     .iter_mut()
                     .find(|project| project.id == project_id)
                 {
                     project.explicit_default_provider = provider.clone();
                 }
-                refresh_project_defaults(&mut self.projects, &self.config);
+                refresh_project_defaults(&mut self.engine.projects, &self.engine.config);
                 self.rebuild_left_items();
                 if let Err(err) = self.persist_config_projects_from_runtime() {
                     self.set_error(format!(
@@ -940,6 +951,7 @@ impl App {
                 auto_reopen_agents,
             } => {
                 if let Some(project) = self
+                    .engine
                     .projects
                     .iter_mut()
                     .find(|project| project.id == project_id)
@@ -965,6 +977,7 @@ impl App {
                 startup_command,
             } => {
                 if let Some(project) = self
+                    .engine
                     .projects
                     .iter_mut()
                     .find(|project| project.id == project_id)
@@ -992,6 +1005,7 @@ impl App {
                 env,
             } => {
                 if let Some(project) = self
+                    .engine
                     .projects
                     .iter_mut()
                     .find(|project| project.id == project_id)
@@ -1019,7 +1033,7 @@ impl App {
     }
 
     pub(crate) fn spawn_project_persistence(&self, action: ProjectPersistenceAction) {
-        let db_path = self.paths.sessions_db_path.clone();
+        let db_path = self.engine.paths.sessions_db_path.clone();
         let tx = self.worker_tx.clone();
         thread::spawn(move || {
             let result = (|| -> Result<()> {
@@ -1088,9 +1102,9 @@ impl App {
         &self,
         env: std::collections::BTreeMap<String, String>,
     ) {
-        let mut config = self.config.clone();
+        let mut config = self.engine.config.clone();
         config.env = env.clone();
-        let config_path = self.paths.config_path.clone();
+        let config_path = self.engine.paths.config_path.clone();
         let tx = self.worker_tx.clone();
         thread::spawn(move || {
             let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
@@ -1109,7 +1123,7 @@ impl App {
 
         if matches!(request.kind, AgentLaunchKind::Create { .. }) {
             self.create_agent_in_flight = false;
-            if let Err(err) = self.session_store.upsert_session(&session) {
+            if let Err(err) = self.engine.session_store.upsert_session(&session) {
                 logger::error(&format!(
                     "session store upsert failed for {}: {err}",
                     session.id
@@ -1119,7 +1133,7 @@ impl App {
             }
             self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
             self.providers.insert(session.id.clone(), client);
-            self.sessions.insert(0, session.clone());
+            self.engine.sessions.insert(0, session.clone());
             self.mark_session_provider_started(&session.id);
             if request.resume {
                 self.resume_fallback_candidates
@@ -1130,7 +1144,7 @@ impl App {
             self.selected_left = self
                 .left_items()
                 .iter()
-                .position(|item| matches!(item, LeftItem::Session(index) if self.sessions.get(*index).map(|candidate| candidate.id.as_str()) == Some(session.id.as_str())))
+                .position(|item| matches!(item, LeftItem::Session(index) if self.engine.sessions.get(*index).map(|candidate| candidate.id.as_str()) == Some(session.id.as_str())))
                 .unwrap_or(0);
             self.reload_changed_files();
             self.show_agent_surface();
@@ -1156,7 +1170,7 @@ impl App {
             return;
         }
 
-        if !self.sessions.iter().any(|s| s.id == session.id) {
+        if !self.engine.sessions.iter().any(|s| s.id == session.id) {
             logger::info(&format!(
                 "dropping launched PTY for missing session {}",
                 session.id
@@ -1258,8 +1272,8 @@ impl App {
 
     pub(crate) fn spawn_project_worktrees_worker(&self, project: Project) {
         let tx = self.worker_tx.clone();
-        let paths = self.paths.clone();
-        let sessions = self.sessions.clone();
+        let paths = self.engine.paths.clone();
+        let sessions = self.engine.sessions.clone();
         thread::spawn(move || {
             let result = git::list_worktrees(Path::new(&project.path))
                 .map(|worktrees| classify_project_worktrees(&project, &paths, &sessions, worktrees))
@@ -1272,7 +1286,7 @@ impl App {
     }
 
     pub(crate) fn spawn_branch_sync_worker(&self) {
-        let interval_secs = self.config.ui.branch_sync_interval;
+        let interval_secs = self.engine.config.ui.branch_sync_interval;
         if interval_secs == 0 {
             return; // disabled by config
         }
@@ -1302,7 +1316,12 @@ impl App {
     }
 
     pub(crate) fn spawn_project_branch_status_checks(&self) {
-        for project in self.projects.iter().filter(|project| !project.path_missing) {
+        for project in self
+            .engine
+            .projects
+            .iter()
+            .filter(|project| !project.path_missing)
+        {
             let project = project.clone();
             let worker_tx = self.worker_tx.clone();
             thread::spawn(move || {
@@ -1371,7 +1390,7 @@ impl App {
                 self.refs_watch_paths.clear();
                 // Populate the path map and start watching existing sessions.
                 let mut paths = HashMap::new();
-                for session in &self.sessions {
+                for session in &self.engine.sessions {
                     let refs_dir = PathBuf::from(&session.worktree_path)
                         .join(".git")
                         .join("refs")
@@ -1421,7 +1440,7 @@ impl App {
     // -- GitHub PR integration workers --
 
     pub(crate) fn spawn_gh_status_check(&self) {
-        if !self.github_integration_enabled {
+        if !self.engine.github_integration_enabled {
             return;
         }
         let tx = self.worker_tx.clone();
@@ -1461,7 +1480,11 @@ impl App {
     pub(crate) fn update_pr_sync_sessions(&self) {
         // Load known PRs from the database so the worker can use `gh pr view`
         // for sessions that already have a persisted PR association.
-        let known_prs = self.session_store.load_all_latest_prs().unwrap_or_default();
+        let known_prs = self
+            .engine
+            .session_store
+            .load_all_latest_prs()
+            .unwrap_or_default();
         let known_map: HashMap<String, crate::storage::StoredPr> = known_prs
             .into_iter()
             .map(|pr| (pr.session_id.clone(), pr))
@@ -1469,6 +1492,7 @@ impl App {
 
         if let Ok(mut guard) = self.pr_sync_sessions.lock() {
             *guard = self
+                .engine
                 .sessions
                 .iter()
                 .map(|s| PrSyncEntry {
@@ -1516,7 +1540,7 @@ impl App {
     /// Trigger a one-shot PR check for a single session, unless it was checked
     /// recently (within 10 seconds).
     pub(crate) fn spawn_pr_check_for_session(&mut self, session_id: &str) {
-        if !self.github_integration_enabled
+        if !self.engine.github_integration_enabled
             || !matches!(self.gh_status, crate::model::GhStatus::Available)
         {
             return;
@@ -1527,10 +1551,11 @@ impl App {
         {
             return;
         }
-        let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
+        let Some(session) = self.engine.sessions.iter().find(|s| s.id == session_id) else {
             return;
         };
         let known_pr = self
+            .engine
             .session_store
             .load_prs(session_id)
             .ok()
@@ -1576,7 +1601,7 @@ impl App {
 
     pub(crate) fn spawn_config_reload_worker(&self) {
         let tx = self.worker_tx.clone();
-        let paths = self.paths.clone();
+        let paths = self.engine.paths.clone();
         thread::spawn(move || {
             let result = crate::config::ensure_config(&paths)
                 .map_err(|err| format!("{err:#}"))
@@ -1611,8 +1636,8 @@ impl App {
 
     pub(crate) fn spawn_config_recover_worker(&self) {
         let tx = self.worker_tx.clone();
-        let config_path = self.paths.config_path.clone();
-        let config = self.config.clone();
+        let config_path = self.engine.paths.config_path.clone();
+        let config = self.engine.config.clone();
         thread::spawn(move || {
             let bindings = RuntimeBindings::from_keys_config(&config.keys);
             let rendered = crate::config::render_config_with(&config, &bindings);
@@ -1626,10 +1651,10 @@ impl App {
         let mut hung = Vec::new();
 
         for (session_id, started_at) in &self.resume_fallback_candidates {
-            let Some(session) = self.sessions.iter().find(|s| s.id == *session_id) else {
+            let Some(session) = self.engine.sessions.iter().find(|s| s.id == *session_id) else {
                 continue;
             };
-            let cfg = provider_config(&self.config, &session.provider);
+            let cfg = provider_config(&self.engine.config, &session.provider);
             let Some(timeout_ms) = cfg.resume_wait_timeout_ms.filter(|timeout| *timeout > 0) else {
                 continue;
             };
@@ -1647,7 +1672,13 @@ impl App {
 
         for session_id in hung {
             self.resume_fallback_candidates.remove(&session_id);
-            let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
+            let Some(session) = self
+                .engine
+                .sessions
+                .iter()
+                .find(|s| s.id == session_id)
+                .cloned()
+            else {
                 continue;
             };
             self.providers.remove(&session_id);

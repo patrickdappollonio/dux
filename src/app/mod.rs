@@ -49,6 +49,7 @@ use crate::pty::TerminalSnapshot;
 use crate::statusline::{StatusLine, StatusTone};
 use crate::storage::SessionStore;
 use crate::theme::Theme;
+use dux_core::engine::Engine;
 pub(crate) use dux_core::model::CompanionTerminal;
 
 use text_input::TextInput;
@@ -61,14 +62,8 @@ pub(crate) use dux_core::worker::{
 };
 
 pub struct App {
-    pub(crate) config: Config,
-    pub(crate) paths: DuxPaths,
+    pub(crate) engine: Engine,
     pub(crate) bindings: RuntimeBindings,
-    pub(crate) session_store: SessionStore,
-    pub(crate) projects: Vec<Project>,
-    pub(crate) sessions: Vec<AgentSession>,
-    pub(crate) staged_files: Vec<ChangedFile>,
-    pub(crate) unstaged_files: Vec<ChangedFile>,
     pub(crate) selected_left: usize,
     pub(crate) left_section: LeftSection,
     pub(crate) selected_terminal_index: usize,
@@ -109,7 +104,6 @@ pub struct App {
     pub(crate) companion_terminals: HashMap<String, CompanionTerminal>,
     pub(crate) active_terminal_id: Option<String>,
     pub(crate) terminal_return_to_list: bool,
-    pub(crate) terminal_counter: usize,
     pub(crate) create_agent_in_flight: bool,
     pub(crate) agent_launches_in_flight: HashSet<String>,
     pub(crate) pulls_in_flight: HashSet<String>,
@@ -166,7 +160,6 @@ pub struct App {
     pub(crate) welcome_logo_alt: bool,
     pub(crate) branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,
     pub(crate) gh_status: crate::model::GhStatus,
-    pub(crate) github_integration_enabled: bool,
     pub(crate) pr_banner_at_bottom: bool,
     pub(crate) pr_statuses: HashMap<String, crate::model::PrInfo>,
     pub(crate) pr_sync_sessions: Arc<Mutex<Vec<PrSyncEntry>>>,
@@ -207,11 +200,6 @@ pub struct App {
     pub(crate) terminal_selection: Option<TerminalSelection>,
     /// Active text selection in the startup command log output pane, if any.
     pub(crate) startup_log_selection: Option<TerminalSelection>,
-    /// Exclusive lock held for the lifetime of this `App` so only one dux
-    /// instance runs against a given config directory. Released
-    /// automatically on drop (including crashes), so there is nothing to
-    /// clean up on exit.
-    _single_instance_lock: SingleInstanceLock,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1378,14 +1366,13 @@ impl App {
         }
         let gh_integration_val = config.ui.github_integration;
         let pr_banner_at_bottom = config.ui.pr_banner_position == "bottom";
-        let mut app = Self {
-            show_diff_line_numbers: config.ui.show_diff_line_numbers,
-            left_width_pct: config.ui.left_width_pct,
-            right_width_pct: config.ui.right_width_pct,
-            terminal_pane_height_pct: config.ui.terminal_pane_height_pct,
-            staged_pane_height_pct: config.ui.staged_pane_height_pct,
-            commit_pane_height_pct: config.ui.commit_pane_height_pct,
-            bindings,
+        let show_diff_line_numbers = config.ui.show_diff_line_numbers;
+        let left_width_pct = config.ui.left_width_pct;
+        let right_width_pct = config.ui.right_width_pct;
+        let terminal_pane_height_pct = config.ui.terminal_pane_height_pct;
+        let staged_pane_height_pct = config.ui.staged_pane_height_pct;
+        let commit_pane_height_pct = config.ui.commit_pane_height_pct;
+        let engine = Engine {
             config,
             paths,
             session_store,
@@ -1393,6 +1380,19 @@ impl App {
             sessions,
             staged_files: Vec::new(),
             unstaged_files: Vec::new(),
+            terminal_counter: 0,
+            github_integration_enabled: gh_integration_val,
+            single_instance_lock,
+        };
+        let mut app = Self {
+            show_diff_line_numbers,
+            left_width_pct,
+            right_width_pct,
+            terminal_pane_height_pct,
+            staged_pane_height_pct,
+            commit_pane_height_pct,
+            bindings,
+            engine,
             selected_left: 0,
             left_section: LeftSection::Projects,
             selected_terminal_index: 0,
@@ -1426,7 +1426,6 @@ impl App {
             companion_terminals: HashMap::new(),
             active_terminal_id: None,
             terminal_return_to_list: false,
-            terminal_counter: 0,
             create_agent_in_flight: false,
             agent_launches_in_flight: HashSet::new(),
             pulls_in_flight: HashSet::new(),
@@ -1466,7 +1465,6 @@ impl App {
             welcome_tip_selection: usize::MAX,
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             gh_status: crate::model::GhStatus::Unknown,
-            github_integration_enabled: gh_integration_val,
             pr_banner_at_bottom,
             pr_statuses: HashMap::new(),
             pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
@@ -1482,7 +1480,6 @@ impl App {
             last_snapshot_id: None,
             terminal_selection: None,
             startup_log_selection: None,
-            _single_instance_lock: single_instance_lock,
         };
         app.restore_sessions();
         app.seed_pr_statuses_from_db();
@@ -1649,9 +1646,10 @@ impl App {
     fn restore_sessions(&mut self) {
         logger::info(&format!(
             "restoring {} persisted sessions",
-            self.sessions.len()
+            self.engine.sessions.len()
         ));
         let ids: Vec<(String, bool)> = self
+            .engine
             .sessions
             .iter()
             .map(|s| (s.id.clone(), Path::new(&s.worktree_path).exists()))
@@ -1667,11 +1665,11 @@ impl App {
     }
 
     fn auto_reopen_eligible_sessions(&mut self) {
-        if !self.config.ui.auto_reopen_agents {
+        if !self.engine.config.ui.auto_reopen_agents {
             return;
         }
 
-        let sessions = self.sessions.clone();
+        let sessions = self.engine.sessions.clone();
         for session in sessions {
             if !session.desired_running
                 || !session.auto_reopen_enabled
@@ -1681,7 +1679,7 @@ impl App {
                 continue;
             }
 
-            let cfg = provider_config(&self.config, &session.provider);
+            let cfg = provider_config(&self.engine.config, &session.provider);
             if !cfg.supports_session_resume() {
                 continue;
             }
@@ -1695,10 +1693,14 @@ impl App {
     /// Populate the in-memory PR status map from the database so the UI shows
     /// PR state immediately on startup, before the first background poll.
     fn seed_pr_statuses_from_db(&mut self) {
-        if !self.github_integration_enabled {
+        if !self.engine.github_integration_enabled {
             return;
         }
-        let stored = self.session_store.load_all_latest_prs().unwrap_or_default();
+        let stored = self
+            .engine
+            .session_store
+            .load_all_latest_prs()
+            .unwrap_or_default();
         for pr in stored {
             use crate::model::{PrInfo, PrState};
             let state = match pr.state.as_str() {
@@ -1834,7 +1836,7 @@ impl App {
             .copied()
             .and_then(|item| match item {
                 LeftItem::Project(idx) => {
-                    let p = self.projects.get(idx)?;
+                    let p = self.engine.projects.get(idx)?;
                     p.path_missing.then(|| p.path.clone())
                 }
                 _ => None,
@@ -1885,7 +1887,7 @@ impl App {
     /// full process tree under each root.
     fn resource_monitor_targets(&self) -> Vec<(String, u32)> {
         let mut targets = Vec::new();
-        for session in &self.sessions {
+        for session in &self.engine.sessions {
             if let Some(pty) = self.providers.get(&session.id)
                 && let Some(pid) = pty.child_process_id()
             {
@@ -1920,27 +1922,32 @@ impl App {
     }
 
     pub(crate) fn github_pr_agent_command_available(&self) -> bool {
-        self.github_integration_enabled
+        self.engine.github_integration_enabled
             && matches!(self.gh_status, crate::model::GhStatus::Available)
     }
 
     pub(crate) fn persist_config_projects_from_runtime(&mut self) -> Result<()> {
-        let existing_projects = self.config.projects.clone();
-        self.config.projects = self
+        let existing_projects = self.engine.config.projects.clone();
+        self.engine.config.projects = self
+            .engine
             .projects
             .iter()
             .map(|project| runtime_project_to_config(project, &existing_projects))
             .collect();
-        save_config(&self.paths.config_path, &self.config, &self.bindings)
+        save_config(
+            &self.engine.paths.config_path,
+            &self.engine.config,
+            &self.bindings,
+        )
     }
 
     pub(crate) fn persist_projects_to_config_and_store(&mut self) -> Result<()> {
         persist_runtime_projects_to_config_and_store(
-            &self.projects,
-            &mut self.config,
-            &self.paths,
+            &self.engine.projects,
+            &mut self.engine.config,
+            &self.engine.paths,
             &self.bindings,
-            &self.session_store,
+            &self.engine.session_store,
         )
     }
 
@@ -2049,9 +2056,12 @@ impl App {
             }
             "toggle-diff-line-numbers" => {
                 self.show_diff_line_numbers = !self.show_diff_line_numbers;
-                self.config.ui.show_diff_line_numbers = self.show_diff_line_numbers;
-                let save_result =
-                    save_config(&self.paths.config_path, &self.config, &self.bindings);
+                self.engine.config.ui.show_diff_line_numbers = self.show_diff_line_numbers;
+                let save_result = save_config(
+                    &self.engine.paths.config_path,
+                    &self.engine.config,
+                    &self.bindings,
+                );
                 let _ = self.refresh_current_diff();
                 let state = if self.show_diff_line_numbers {
                     "enabled"
@@ -2071,22 +2081,25 @@ impl App {
                 Ok(())
             }
             "toggle-github-integration" => {
-                self.github_integration_enabled = !self.github_integration_enabled;
-                self.config.ui.github_integration = self.github_integration_enabled;
-                let save_result =
-                    save_config(&self.paths.config_path, &self.config, &self.bindings);
-                if self.github_integration_enabled
+                self.engine.github_integration_enabled = !self.engine.github_integration_enabled;
+                self.engine.config.ui.github_integration = self.engine.github_integration_enabled;
+                let save_result = save_config(
+                    &self.engine.paths.config_path,
+                    &self.engine.config,
+                    &self.bindings,
+                );
+                if self.engine.github_integration_enabled
                     && matches!(self.gh_status, crate::model::GhStatus::Available)
                 {
                     self.update_pr_sync_sessions();
                     self.spawn_initial_pr_refresh();
                     self.pr_sync_enabled.store(true, Ordering::Relaxed);
-                } else if !self.github_integration_enabled {
+                } else if !self.engine.github_integration_enabled {
                     self.pr_statuses.clear();
                     self.pr_sync_enabled.store(false, Ordering::Relaxed);
                     self.rebuild_left_items();
                 }
-                let state = if self.github_integration_enabled {
+                let state = if self.engine.github_integration_enabled {
                     "enabled"
                 } else {
                     "disabled"
@@ -2101,11 +2114,25 @@ impl App {
                 Ok(())
             }
             "toggle-randomized-pet-name-default" => {
-                self.config.defaults.enable_randomized_pet_name_by_default =
-                    !self.config.defaults.enable_randomized_pet_name_by_default;
-                let save_result =
-                    save_config(&self.paths.config_path, &self.config, &self.bindings);
-                let state = if self.config.defaults.enable_randomized_pet_name_by_default {
+                self.engine
+                    .config
+                    .defaults
+                    .enable_randomized_pet_name_by_default = !self
+                    .engine
+                    .config
+                    .defaults
+                    .enable_randomized_pet_name_by_default;
+                let save_result = save_config(
+                    &self.engine.paths.config_path,
+                    &self.engine.config,
+                    &self.bindings,
+                );
+                let state = if self
+                    .engine
+                    .config
+                    .defaults
+                    .enable_randomized_pet_name_by_default
+                {
                     "enabled — new agent prompts start with a random pet name"
                 } else {
                     "disabled — new agent prompts start empty"
@@ -2129,9 +2156,12 @@ impl App {
                 } else {
                     "top"
                 };
-                self.config.ui.pr_banner_position = pos.to_string();
-                if let Err(err) = save_config(&self.paths.config_path, &self.config, &self.bindings)
-                {
+                self.engine.config.ui.pr_banner_position = pos.to_string();
+                if let Err(err) = save_config(
+                    &self.engine.paths.config_path,
+                    &self.engine.config,
+                    &self.bindings,
+                ) {
                     self.set_error(format!(
                         "PR banner moved to {pos} for this session, but couldn't persist the change to config: {err:#}"
                     ));
@@ -2172,7 +2202,8 @@ impl App {
         self.interactive_patterns = bindings.interactive_byte_patterns();
         self.bindings = bindings;
 
-        let (theme, theme_warning) = crate::theme::load_or_fallback(&config.ui.theme, &self.paths);
+        let (theme, theme_warning) =
+            crate::theme::load_or_fallback(&config.ui.theme, &self.engine.paths);
         self.theme = theme;
         self.show_diff_line_numbers = config.ui.show_diff_line_numbers;
         self.left_width_pct = config.ui.left_width_pct;
@@ -2180,28 +2211,28 @@ impl App {
         self.terminal_pane_height_pct = config.ui.terminal_pane_height_pct;
         self.staged_pane_height_pct = config.ui.staged_pane_height_pct;
         self.commit_pane_height_pct = config.ui.commit_pane_height_pct;
-        self.github_integration_enabled = config.ui.github_integration;
+        self.engine.github_integration_enabled = config.ui.github_integration;
         self.pr_banner_at_bottom = config.ui.pr_banner_position == "bottom";
-        self.projects = load_projects(&self.session_store.load_projects()?, &config);
+        self.engine.projects = load_projects(&self.engine.session_store.load_projects()?, &config);
         persist_runtime_projects_to_config_and_store(
-            &self.projects,
+            &self.engine.projects,
             &mut config,
-            &self.paths,
+            &self.engine.paths,
             &self.bindings,
-            &self.session_store,
+            &self.engine.session_store,
         )?;
-        self.config = config;
+        self.engine.config = config;
 
-        refresh_project_defaults(&mut self.projects, &self.config);
+        refresh_project_defaults(&mut self.engine.projects, &self.engine.config);
         self.selected_left = self
             .selected_left
-            .min(self.projects.len().saturating_sub(1));
+            .min(self.engine.projects.len().saturating_sub(1));
         self.rebuild_left_items();
         if self.selected_left >= self.left_items_cache.len() {
             self.selected_left = self.left_items_cache.len().saturating_sub(1);
         }
         self.update_branch_sync_sessions();
-        if self.github_integration_enabled
+        if self.engine.github_integration_enabled
             && matches!(self.gh_status, crate::model::GhStatus::Available)
         {
             self.update_pr_sync_sessions();
@@ -2221,6 +2252,7 @@ impl App {
 
     pub(crate) fn open_edit_macros(&mut self) {
         let entries: Vec<(String, String, MacroSurface)> = self
+            .engine
             .config
             .macros
             .entries
@@ -2244,6 +2276,7 @@ impl App {
         let needle = query.trim().to_lowercase();
         if needle.is_empty() {
             return self
+                .engine
                 .config
                 .macros
                 .entries
@@ -2254,7 +2287,7 @@ impl App {
         }
         let mut name_matches = Vec::new();
         let mut text_matches = Vec::new();
-        for (name, entry) in &self.config.macros.entries {
+        for (name, entry) in &self.engine.config.macros.entries {
             if !entry.surface.matches(surface) {
                 continue;
             }
@@ -2274,10 +2307,10 @@ impl App {
 
     pub(crate) fn rebuild_left_items(&mut self) {
         self.left_items_cache = build_left_items(
-            &self.projects,
-            &self.sessions,
+            &self.engine.projects,
+            &self.engine.sessions,
             &self.collapsed_projects,
-            self.config.ui.empty_project_separator_min_projects,
+            self.engine.config.ui.empty_project_separator_min_projects,
         );
         self.ensure_selectable_left_item();
     }
@@ -2324,21 +2357,23 @@ impl App {
     }
 
     pub(crate) fn sort_sessions_by_updated(&mut self) {
-        self.sessions
+        self.engine
+            .sessions
             .sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         self.rebuild_left_items();
         self.set_info("Agents sorted by most recently updated.");
     }
 
     pub(crate) fn sort_sessions_by_created(&mut self) {
-        self.sessions
+        self.engine
+            .sessions
             .sort_by_key(|b| std::cmp::Reverse(b.created_at));
         self.rebuild_left_items();
         self.set_info("Agents sorted by creation date (newest first).");
     }
 
     pub(crate) fn sort_sessions_by_name(&mut self) {
-        self.sessions.sort_by(|a, b| {
+        self.engine.sessions.sort_by(|a, b| {
             let name_a = a.title.as_deref().unwrap_or(&a.branch_name);
             let name_b = b.title.as_deref().unwrap_or(&b.branch_name);
             name_a.to_lowercase().cmp(&name_b.to_lowercase())
@@ -2350,7 +2385,7 @@ impl App {
     pub(crate) fn toggle_collapse_selected_project(&mut self) {
         if let Some(project) = self.selected_project() {
             let id = project.id.clone();
-            let has_sessions = self.sessions.iter().any(|s| s.project_id == id);
+            let has_sessions = self.engine.sessions.iter().any(|s| s.project_id == id);
             if !has_sessions {
                 return;
             }
@@ -2364,7 +2399,7 @@ impl App {
             // Move selection to the toggled project so collapsing from a
             // child session leaves the cursor on the parent header.
             if let Some(new_index) = self.left_items().iter().position(
-                |item| matches!(item, LeftItem::Project(pi) if self.projects[*pi].id == id),
+                |item| matches!(item, LeftItem::Project(pi) if self.engine.projects[*pi].id == id),
             ) {
                 self.selected_left = new_index;
             }
@@ -2373,12 +2408,15 @@ impl App {
 
     pub(crate) fn selected_project(&self) -> Option<&Project> {
         match self.left_items().get(self.selected_left) {
-            Some(LeftItem::Project(index)) => self.projects.get(*index),
-            Some(LeftItem::Session(index)) => self.sessions.get(*index).and_then(|session| {
-                self.projects
-                    .iter()
-                    .find(|project| project.id == session.project_id)
-            }),
+            Some(LeftItem::Project(index)) => self.engine.projects.get(*index),
+            Some(LeftItem::Session(index)) => {
+                self.engine.sessions.get(*index).and_then(|session| {
+                    self.engine
+                        .projects
+                        .iter()
+                        .find(|project| project.id == session.project_id)
+                })
+            }
             Some(LeftItem::EmptyProjectsSpacer) => None,
             Some(LeftItem::EmptyProjectsSeparator) => None,
             None => None,
@@ -2389,7 +2427,8 @@ impl App {
         &self,
         project_id: &str,
     ) -> Option<ProviderKind> {
-        self.projects
+        self.engine
+            .projects
             .iter()
             .find(|project| project.id == project_id)
             .and_then(|project| project.explicit_default_provider.clone())
@@ -2400,7 +2439,8 @@ impl App {
     }
 
     pub(crate) fn project_allows_auto_reopen(&self, project_id: &str) -> bool {
-        self.projects
+        self.engine
+            .projects
             .iter()
             .find(|project| project.id == project_id)
             .and_then(|project| project.auto_reopen_agents)
@@ -2409,13 +2449,14 @@ impl App {
 
     pub(crate) fn selected_session(&self) -> Option<&AgentSession> {
         match self.left_items().get(self.selected_left) {
-            Some(LeftItem::Session(index)) => self.sessions.get(*index),
+            Some(LeftItem::Session(index)) => self.engine.sessions.get(*index),
             _ => None,
         }
     }
 
     pub(crate) fn project_name_for_session(&self, session: &AgentSession) -> String {
-        self.projects
+        self.engine
+            .projects
             .iter()
             .find(|p| p.id == session.project_id)
             .map(|p| p.name.clone())
@@ -2445,8 +2486,8 @@ impl App {
         let (staged, unstaged) = worktree
             .and_then(|p| git::changed_files(&p).ok())
             .unwrap_or_default();
-        self.staged_files = staged;
-        self.unstaged_files = unstaged;
+        self.engine.staged_files = staged;
+        self.engine.unstaged_files = unstaged;
         self.clamp_files_cursor();
         // Opportunistically check PR status for the newly-selected session.
         if let Some(sid) = session_id {
@@ -2456,16 +2497,16 @@ impl App {
 
     pub(crate) fn selected_changed_file(&self) -> Option<&ChangedFile> {
         match self.right_section {
-            RightSection::Staged => self.staged_files.get(self.files_index),
-            RightSection::Unstaged => self.unstaged_files.get(self.files_index),
+            RightSection::Staged => self.engine.staged_files.get(self.files_index),
+            RightSection::Unstaged => self.engine.unstaged_files.get(self.files_index),
             RightSection::CommitInput => None,
         }
     }
 
     pub(crate) fn current_files_len(&self) -> usize {
         match self.right_section {
-            RightSection::Staged => self.staged_files.len(),
-            RightSection::Unstaged => self.unstaged_files.len(),
+            RightSection::Staged => self.engine.staged_files.len(),
+            RightSection::Unstaged => self.engine.unstaged_files.len(),
             RightSection::CommitInput => 0,
         }
     }
@@ -2541,14 +2582,16 @@ impl App {
         let needle = self.files_search.text.to_lowercase();
         let mut matches = Vec::new();
         matches.extend(
-            self.unstaged_files
+            self.engine
+                .unstaged_files
                 .iter()
                 .enumerate()
                 .filter(|(_, file)| file.path.to_lowercase().contains(&needle))
                 .map(|(index, _)| (RightSection::Unstaged, index)),
         );
         matches.extend(
-            self.staged_files
+            self.engine
+                .staged_files
                 .iter()
                 .enumerate()
                 .filter(|(_, file)| file.path.to_lowercase().contains(&needle))
@@ -2596,24 +2639,25 @@ impl App {
         // Capture the previous title before mutating, in case we need to
         // revert on a failed branch rename.
         let previous_title = self
+            .engine
             .sessions
             .iter()
             .find(|s| s.id == session_id)
             .and_then(|s| s.title.clone());
 
         // Always update the display title immediately.
-        if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+        if let Some(session) = self.engine.sessions.iter_mut().find(|s| s.id == session_id) {
             session.title = Some(name.clone());
             session.updated_at = Utc::now();
         }
-        if let Some(session) = self.sessions.iter().find(|s| s.id == session_id) {
-            let _ = self.session_store.upsert_session(session);
+        if let Some(session) = self.engine.sessions.iter().find(|s| s.id == session_id) {
+            let _ = self.engine.session_store.upsert_session(session);
         }
         self.rebuild_left_items();
 
         // Optionally rename the git branch in a background worker.
         if rename_branch {
-            let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
+            let Some(session) = self.engine.sessions.iter().find(|s| s.id == session_id) else {
                 return;
             };
             let old_branch = session.branch_name.clone();
@@ -2644,6 +2688,7 @@ impl App {
 
     pub(crate) fn mark_session_status(&mut self, session_id: &str, status: SessionStatus) {
         if let Some(session) = self
+            .engine
             .sessions
             .iter_mut()
             .find(|candidate| candidate.id == session_id)
@@ -2653,12 +2698,13 @@ impl App {
             }
             session.status = status;
             session.updated_at = Utc::now();
-            let _ = self.session_store.upsert_session(session);
+            let _ = self.engine.session_store.upsert_session(session);
         }
     }
 
     pub(crate) fn mark_session_desired_running(&mut self, session_id: &str, desired: bool) {
         if let Some(session) = self
+            .engine
             .sessions
             .iter_mut()
             .find(|candidate| candidate.id == session_id)
@@ -2668,14 +2714,18 @@ impl App {
             }
             session.desired_running = desired;
             session.updated_at = Utc::now();
-            let _ = self.session_store.upsert_session(session);
+            let _ = self.engine.session_store.upsert_session(session);
         } else {
-            let _ = self.session_store.set_desired_running(session_id, desired);
+            let _ = self
+                .engine
+                .session_store
+                .set_desired_running(session_id, desired);
         }
     }
 
     pub(crate) fn mark_session_provider_started(&mut self, session_id: &str) {
         let Some(session) = self
+            .engine
             .sessions
             .iter_mut()
             .find(|candidate| candidate.id == session_id)
@@ -2689,13 +2739,14 @@ impl App {
         }
 
         session.updated_at = Utc::now();
-        let _ = self.session_store.upsert_session(session);
+        let _ = self.engine.session_store.upsert_session(session);
     }
 
     /// Refreshes the shared session snapshot used by the branch-sync worker.
     pub(crate) fn update_branch_sync_sessions(&self) {
         if let Ok(mut guard) = self.branch_sync_sessions.lock() {
             *guard = self
+                .engine
                 .sessions
                 .iter()
                 .map(|s| BranchSyncEntry {
@@ -2766,8 +2817,8 @@ impl App {
     }
 
     pub(crate) fn next_terminal_id(&mut self) -> String {
-        self.terminal_counter += 1;
-        format!("term-{}", self.terminal_counter)
+        self.engine.terminal_counter += 1;
+        format!("term-{}", self.engine.terminal_counter)
     }
 
     /// Returns the number of running companion terminals for a given session.

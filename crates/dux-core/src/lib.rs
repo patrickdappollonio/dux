@@ -7,6 +7,7 @@ pub mod action;
 pub mod browser;
 pub mod config;
 pub mod editor;
+pub mod engine;
 pub mod git;
 pub mod io_retry;
 pub mod lockfile;

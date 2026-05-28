@@ -5,6 +5,7 @@ use crate::editor;
 impl App {
     pub(crate) fn open_project_browser(&mut self) -> Result<()> {
         let start_dir = self
+            .engine
             .config
             .defaults
             .start_directory
@@ -91,7 +92,7 @@ impl App {
             logger::error(&format!("add project rejected for {}", path.display()));
             return Err(format!("\"{}\" is not a git repository.", path.display()));
         }
-        if self.projects.iter().any(|project| {
+        if self.engine.projects.iter().any(|project| {
             PathBuf::from(&project.path)
                 .canonicalize()
                 .unwrap_or_else(|_| PathBuf::from(&project.path))
@@ -154,7 +155,7 @@ impl App {
             name: display_name.clone(),
             path: path.clone(),
             explicit_default_provider: None,
-            default_provider: self.config.default_provider(),
+            default_provider: self.engine.config.default_provider(),
             leading_branch: Some(leading_branch),
             auto_reopen_agents: None,
             startup_command: None,
@@ -203,7 +204,11 @@ impl App {
             project,
             custom_name: None,
             use_existing_branch: false,
-            pull_before_create: self.config.defaults.pull_before_creating_agent_by_default,
+            pull_before_create: self
+                .engine
+                .config
+                .defaults
+                .pull_before_creating_agent_by_default,
         })
     }
 
@@ -314,8 +319,12 @@ impl App {
                     .map(str::to_string)
             }),
         };
-        let randomize_name =
-            initial_name.is_none() && self.config.defaults.enable_randomized_pet_name_by_default;
+        let randomize_name = initial_name.is_none()
+            && self
+                .engine
+                .config
+                .defaults
+                .enable_randomized_pet_name_by_default;
         let mut input = TextInput::new().with_char_map(crate::git::agent_name_char_map);
         let mut randomized_name = None;
         if let Some(name) = initial_name {
@@ -412,8 +421,8 @@ impl App {
         }
         self.create_agent_in_flight = true;
         self.set_busy(busy_message);
-        let paths = self.paths.clone();
-        let config = self.config.clone();
+        let paths = self.engine.paths.clone();
+        let config = self.engine.config.clone();
         let worker_tx = self.worker_tx.clone();
         let term_size = crossterm::terminal::size().unwrap_or((80, 24));
         thread::spawn(move || {
@@ -436,13 +445,14 @@ impl App {
         resume: bool,
         kind: AgentLaunchKind,
     ) -> AgentLaunchRequest {
-        let cfg = provider_config(&self.config, &session.provider);
+        let cfg = provider_config(&self.engine.config, &session.provider);
         let env = self
+            .engine
             .projects
             .iter()
             .find(|project| project.id == session.project_id)
             .and_then(|project| {
-                crate::config::resolve_agent_env(&self.config.env, &project.env).ok()
+                crate::config::resolve_agent_env(&self.engine.config.env, &project.env).ok()
             })
             .unwrap_or_default();
         AgentLaunchRequest {
@@ -451,7 +461,7 @@ impl App {
             env,
             resume,
             pty_size: self.pty_size_for_launch(),
-            scrollback_lines: self.config.ui.agent_scrollback_lines,
+            scrollback_lines: self.engine.config.ui.agent_scrollback_lines,
             kind,
         }
     }
@@ -473,7 +483,7 @@ impl App {
     }
 
     pub(crate) fn should_resume_session(&self, session: &AgentSession) -> bool {
-        let cfg = provider_config(&self.config, &session.provider);
+        let cfg = provider_config(&self.engine.config, &session.provider);
         cfg.supports_session_resume() && session.has_started_provider(&session.provider)
     }
 
@@ -488,27 +498,28 @@ impl App {
         };
         logger::debug(&format!(
             "spawning companion terminal {:?} {:?} in {} ({}x{})",
-            self.config.terminal.command,
-            self.config.terminal.args,
+            self.engine.config.terminal.command,
+            self.engine.config.terminal.args,
             session.worktree_path,
             cols,
             rows,
         ));
         let env = self
+            .engine
             .projects
             .iter()
             .find(|project| project.id == session.project_id)
             .and_then(|project| {
-                crate::config::resolve_agent_env(&self.config.env, &project.env).ok()
+                crate::config::resolve_agent_env(&self.engine.config.env, &project.env).ok()
             })
             .unwrap_or_default();
         PtyClient::spawn_with_env(
-            &self.config.terminal.command,
-            &self.config.terminal.args,
+            &self.engine.config.terminal.command,
+            &self.engine.config.terminal.args,
             Path::new(&session.worktree_path),
             rows,
             cols,
-            self.config.ui.agent_scrollback_lines,
+            self.engine.config.ui.agent_scrollback_lines,
             &env,
         )
     }
@@ -609,7 +620,13 @@ impl App {
         let session_id = terminal.session_id.clone();
         drop(items);
 
-        let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
+        let Some(session) = self
+            .engine
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .cloned()
+        else {
             self.set_warning("The parent agent session no longer exists.");
             return Ok(());
         };
@@ -671,7 +688,7 @@ impl App {
         if let Some(pos) = self
             .left_items()
             .iter()
-            .position(|item| matches!(item, LeftItem::Session(idx) if self.sessions.get(*idx).map(|s| s.id.as_str()) == Some(session_id.as_str())))
+            .position(|item| matches!(item, LeftItem::Session(idx) if self.engine.sessions.get(*idx).map(|s| s.id.as_str()) == Some(session_id.as_str())))
         {
             self.selected_left = pos;
         }
@@ -720,6 +737,7 @@ impl App {
             return Ok(());
         };
         let worktree_shared = self
+            .engine
             .sessions
             .iter()
             .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
@@ -749,7 +767,13 @@ impl App {
         session_id: &str,
         delete_worktree: bool,
     ) -> Result<()> {
-        let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
+        let Some(session) = self
+            .engine
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .cloned()
+        else {
             return Ok(());
         };
         logger::info(&format!(
@@ -757,6 +781,7 @@ impl App {
             session.id, session.worktree_path, delete_worktree
         ));
         let Some(project) = self
+            .engine
             .projects
             .iter()
             .find(|project| project.id == session.project_id)
@@ -765,6 +790,7 @@ impl App {
             return Ok(());
         };
         let other_sessions_on_worktree = self
+            .engine
             .sessions
             .iter()
             .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
@@ -820,10 +846,17 @@ impl App {
             return;
         }
 
-        let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
+        let Some(session) = self
+            .engine
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .cloned()
+        else {
             return;
         };
         let Some(project) = self
+            .engine
             .projects
             .iter()
             .find(|project| project.id == session.project_id)
@@ -832,6 +865,7 @@ impl App {
             return;
         };
         let other_sessions_on_worktree = self
+            .engine
             .sessions
             .iter()
             .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
@@ -902,15 +936,23 @@ impl App {
         remove_outcome: Option<bool>,
         update_status: bool,
     ) -> Result<()> {
-        let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
+        let Some(session) = self
+            .engine
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .cloned()
+        else {
             return Ok(());
         };
         let project = self
+            .engine
             .projects
             .iter()
             .find(|project| project.id == session.project_id)
             .cloned();
         let other_sessions_on_worktree = self
+            .engine
             .sessions
             .iter()
             .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
@@ -919,9 +961,9 @@ impl App {
         // untouched and the session remains visible in the UI. If we cleared
         // in-memory state first and the DB call then failed, the session
         // would vanish from the UI but reappear on restart.
-        self.session_store.delete_session(&session.id)?;
+        self.engine.session_store.delete_session(&session.id)?;
         Self::spawn_delete_startup_command_logs(
-            self.paths.clone(),
+            self.engine.paths.clone(),
             session.project_id.clone(),
             session.id.clone(),
         );
@@ -931,9 +973,12 @@ impl App {
         self.last_pty_activity.remove(&session.id);
         self.resume_fallback_candidates.remove(&session.id);
         self.clear_companion_terminals_for_session(&session.id);
-        self.sessions.retain(|candidate| candidate.id != session.id);
+        self.engine
+            .sessions
+            .retain(|candidate| candidate.id != session.id);
         self.update_branch_sync_sessions();
         let project_still_has_sessions = self
+            .engine
             .sessions
             .iter()
             .any(|candidate| candidate.project_id == session.project_id);
@@ -942,7 +987,7 @@ impl App {
             self.selected_left = self.selected_left.saturating_sub(1);
             self.ensure_selectable_left_item();
         } else if let Some(project_index) = self.left_items().iter().position(|item| {
-            matches!(item, LeftItem::Project(index) if self.projects[*index].id == session.project_id)
+            matches!(item, LeftItem::Project(index) if self.engine.projects[*index].id == session.project_id)
         }) {
             self.selected_left = project_index;
         }
@@ -1046,13 +1091,14 @@ impl App {
         &self,
         session: &AgentSession,
     ) -> Vec<ChangeAgentProviderOption> {
-        self.config
+        self.engine
+            .config
             .providers
             .commands
             .keys()
             .map(|name| {
                 let provider = ProviderKind::new(name.clone());
-                let cfg = provider_config(&self.config, &provider);
+                let cfg = provider_config(&self.engine.config, &provider);
                 let supports_resume = cfg.supports_session_resume();
                 let resume_available = supports_resume && session.has_started_provider(&provider);
                 ChangeAgentProviderOption {
@@ -1070,7 +1116,7 @@ impl App {
             self.set_error("Select an agent session first.");
             return Ok(());
         };
-        if self.config.providers.commands.is_empty() {
+        if self.engine.config.providers.commands.is_empty() {
             self.set_error("No providers are configured.");
             return Ok(());
         }
@@ -1101,6 +1147,7 @@ impl App {
             return Ok(());
         };
         let Some(session_index) = self
+            .engine
             .sessions
             .iter()
             .position(|session| session.id == prompt.session_id)
@@ -1122,15 +1169,15 @@ impl App {
 
         self.prompt = PromptState::None;
 
-        let session_id = self.sessions[session_index].id.clone();
+        let session_id = self.engine.sessions[session_index].id.clone();
         let running = self.providers.contains_key(&session_id);
-        let previous_provider = self.sessions[session_index].provider.clone();
+        let previous_provider = self.engine.sessions[session_index].provider.clone();
 
-        let session = &mut self.sessions[session_index];
+        let session = &mut self.engine.sessions[session_index];
         session.provider = selected.provider.clone();
         session.updated_at = Utc::now();
         let updated = session.clone();
-        self.session_store.upsert_session(&updated)?;
+        self.engine.session_store.upsert_session(&updated)?;
 
         // Pin the still-running provider so UI labels stay truthful until
         // the user exits and relaunches the agent. Only set on the first
@@ -1170,8 +1217,9 @@ impl App {
     }
 
     fn change_default_provider_options(&self) -> Vec<ChangeDefaultProviderOption> {
-        let current = self.config.default_provider();
-        self.config
+        let current = self.engine.config.default_provider();
+        self.engine
+            .config
             .providers
             .commands
             .keys()
@@ -1189,13 +1237,13 @@ impl App {
         &self,
         project_id: &str,
     ) -> Vec<ChangeProjectDefaultProviderOption> {
-        let global_default = self.config.default_provider();
+        let global_default = self.engine.config.default_provider();
         let explicit = self.project_explicit_default_provider(project_id);
         let mut options = vec![ChangeProjectDefaultProviderOption {
             provider: None,
             is_current: explicit.is_none(),
         }];
-        options.extend(self.config.providers.commands.keys().map(|name| {
+        options.extend(self.engine.config.providers.commands.keys().map(|name| {
             let provider = ProviderKind::new(name.clone());
             ChangeProjectDefaultProviderOption {
                 is_current: explicit.as_ref() == Some(&provider),
@@ -1216,7 +1264,7 @@ impl App {
     }
 
     pub(crate) fn open_change_default_provider_prompt(&mut self) -> Result<()> {
-        if self.config.providers.commands.is_empty() {
+        if self.engine.config.providers.commands.is_empty() {
             self.set_error("No providers are configured.");
             return Ok(());
         }
@@ -1225,7 +1273,7 @@ impl App {
             .iter()
             .position(|option| option.is_current)
             .unwrap_or(0);
-        let current = self.config.default_provider();
+        let current = self.engine.config.default_provider();
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.prompt = PromptState::ChangeDefaultProvider(ChangeDefaultProviderPrompt {
@@ -1241,7 +1289,7 @@ impl App {
     }
 
     pub(crate) fn open_change_project_default_provider_prompt(&mut self) -> Result<()> {
-        if self.config.providers.commands.is_empty() {
+        if self.engine.config.providers.commands.is_empty() {
             self.set_error("No providers are configured.");
             return Ok(());
         }
@@ -1254,7 +1302,7 @@ impl App {
             .iter()
             .position(|option| option.is_current)
             .unwrap_or(0);
-        let global_default = self.config.default_provider();
+        let global_default = self.engine.config.default_provider();
         let inherits_global_default = !self.project_uses_explicit_default_provider(&project.id);
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
@@ -1293,16 +1341,20 @@ impl App {
             ));
             return Ok(());
         }
-        let previous = self.config.defaults.provider.clone();
-        self.config.defaults.provider = selected.provider.as_str().to_string();
-        if let Err(err) = save_config(&self.paths.config_path, &self.config, &self.bindings) {
-            self.config.defaults.provider = previous;
+        let previous = self.engine.config.defaults.provider.clone();
+        self.engine.config.defaults.provider = selected.provider.as_str().to_string();
+        if let Err(err) = save_config(
+            &self.engine.paths.config_path,
+            &self.engine.config,
+            &self.bindings,
+        ) {
+            self.engine.config.defaults.provider = previous;
             self.set_error(format!(
                 "Couldn't persist the global default provider change: {err:#}"
             ));
             return Ok(());
         }
-        refresh_project_defaults(&mut self.projects, &self.config);
+        refresh_project_defaults(&mut self.engine.projects, &self.engine.config);
         self.rebuild_left_items();
         self.set_info(format!(
             "Global default provider changed to {}. New agents in projects without a project-specific override will use it; existing agents keep their current provider. Use \"change-project-default-provider\" to override one project or \"change-agent-provider\" to switch an existing worktree.",
@@ -1340,6 +1392,7 @@ impl App {
         }
 
         if !self
+            .engine
             .projects
             .iter()
             .any(|project| project.id == prompt.project_id)
@@ -1389,15 +1442,17 @@ impl App {
         };
         let enabled = !session.auto_reopen_enabled;
         if let Some(current) = self
+            .engine
             .sessions
             .iter_mut()
             .find(|candidate| candidate.id == session.id)
         {
             current.auto_reopen_enabled = enabled;
             current.updated_at = Utc::now();
-            self.session_store.upsert_session(current)?;
+            self.engine.session_store.upsert_session(current)?;
         } else {
-            self.session_store
+            self.engine
+                .session_store
                 .set_auto_reopen_enabled(&session.id, enabled)?;
         }
         self.set_info(format!(
@@ -1442,7 +1497,12 @@ impl App {
         };
         self.prompt = PromptState::None;
         self.input_target = InputTarget::None;
-        if !self.projects.iter().any(|project| project.id == project_id) {
+        if !self
+            .engine
+            .projects
+            .iter()
+            .any(|project| project.id == project_id)
+        {
             self.set_error(format!("Could not find project \"{project_name}\"."));
             return Ok(());
         }
@@ -1480,9 +1540,11 @@ impl App {
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.prompt = PromptState::ConfigureGlobalEnv {
             project_name: "All projects".to_string(),
-            input: TextInput::with_text(crate::config::project_env_to_lines(&self.config.env))
-                .with_multiline(8)
-                .with_placeholder("KEY=value"),
+            input: TextInput::with_text(crate::config::project_env_to_lines(
+                &self.engine.config.env,
+            ))
+            .with_multiline(8)
+            .with_placeholder("KEY=value"),
         };
         self.set_info("Enter global environment variables as KEY=value. Empty clears them.");
         Ok(())
@@ -1532,7 +1594,12 @@ impl App {
         };
         self.prompt = PromptState::None;
         self.input_target = InputTarget::None;
-        if !self.projects.iter().any(|project| project.id == project_id) {
+        if !self
+            .engine
+            .projects
+            .iter()
+            .any(|project| project.id == project_id)
+        {
             self.set_error(format!("Could not find project \"{project_name}\"."));
             return Ok(());
         }
@@ -1553,6 +1620,7 @@ impl App {
             return Ok(());
         };
         let Some(project) = self
+            .engine
             .projects
             .iter()
             .find(|project| project.id == session.project_id)
@@ -1574,12 +1642,12 @@ impl App {
             ));
             return Ok(());
         };
-        let paths = self.paths.clone();
+        let paths = self.engine.paths.clone();
         let tx = self.worker_tx.clone();
         let branch = session.branch_name.clone();
-        let terminal = self.config.startup_command_terminal.clone();
-        let env =
-            crate::config::resolve_agent_env(&self.config.env, &project.env).unwrap_or_default();
+        let terminal = self.engine.config.startup_command_terminal.clone();
+        let env = crate::config::resolve_agent_env(&self.engine.config.env, &project.env)
+            .unwrap_or_default();
         std::thread::spawn(move || {
             let result = crate::startup::run_startup_command(
                 &paths,
@@ -1729,7 +1797,7 @@ impl App {
         scope_label: String,
         scope: crate::startup::StartupCommandLogScope,
     ) {
-        let paths = self.paths.clone();
+        let paths = self.engine.paths.clone();
         let tx = self.worker_tx.clone();
         let status_label = scope_label.clone();
         std::thread::spawn(move || {
@@ -1756,12 +1824,12 @@ impl App {
     }
 
     pub(crate) fn open_change_theme_prompt(&mut self) -> Result<()> {
-        let options = crate::theme::discover_available(&self.paths);
+        let options = crate::theme::discover_available(&self.engine.paths);
         if options.is_empty() {
             self.set_error("No themes available.");
             return Ok(());
         }
-        let current = self.config.ui.theme.clone();
+        let current = self.engine.config.ui.theme.clone();
         let selected = options
             .iter()
             .position(|opt| opt.id == current)
@@ -1794,7 +1862,7 @@ impl App {
             _ => None,
         };
         let Some(id) = id else { return };
-        if let Ok(theme) = crate::theme::load(&id, &self.paths) {
+        if let Ok(theme) = crate::theme::load(&id, &self.engine.paths) {
             self.theme = theme;
         }
     }
@@ -1808,7 +1876,7 @@ impl App {
         };
         self.prompt = PromptState::None;
         if let Some(original) = original
-            && let Ok(theme) = crate::theme::load(&original, &self.paths)
+            && let Ok(theme) = crate::theme::load(&original, &self.engine.paths)
         {
             self.theme = theme;
         }
@@ -1832,7 +1900,7 @@ impl App {
             ));
             return Ok(());
         }
-        let theme = match crate::theme::load(&selected.id, &self.paths) {
+        let theme = match crate::theme::load(&selected.id, &self.engine.paths) {
             Ok(theme) => theme,
             Err(err) => {
                 self.set_error(format!(
@@ -1842,10 +1910,14 @@ impl App {
                 return Ok(());
             }
         };
-        let previous = self.config.ui.theme.clone();
-        self.config.ui.theme = selected.id.clone();
-        if let Err(err) = save_config(&self.paths.config_path, &self.config, &self.bindings) {
-            self.config.ui.theme = previous;
+        let previous = self.engine.config.ui.theme.clone();
+        self.engine.config.ui.theme = selected.id.clone();
+        if let Err(err) = save_config(
+            &self.engine.paths.config_path,
+            &self.engine.config,
+            &self.bindings,
+        ) {
+            self.engine.config.ui.theme = previous;
             self.set_error(format!(
                 "Couldn't persist the theme change: {err:#}. The new theme is loaded for this session only."
             ));
@@ -1868,7 +1940,11 @@ impl App {
             self.set_error("Select a project first.");
             return Ok(());
         };
-        let has_sessions = self.sessions.iter().any(|s| s.project_id == project.id);
+        let has_sessions = self
+            .engine
+            .sessions
+            .iter()
+            .any(|s| s.project_id == project.id);
         if has_sessions {
             self.set_error("Delete all agents in this project first.");
             return Ok(());
@@ -1896,6 +1972,7 @@ impl App {
         // half-finished. The user must wait for the worker to complete (or
         // fail) before retrying.
         let pending_in_project = self
+            .engine
             .sessions
             .iter()
             .any(|s| s.project_id == project.id && self.pending_deletions.contains(&s.id));
@@ -1909,6 +1986,7 @@ impl App {
 
         logger::info(&format!("deleting project {}", project.path));
         let session_ids = self
+            .engine
             .sessions
             .iter()
             .filter(|session| session.project_id == project.id)
@@ -1916,6 +1994,7 @@ impl App {
             .collect::<Vec<_>>();
         for session_id in session_ids {
             if let Some(index) = self
+                .engine
                 .sessions
                 .iter()
                 .position(|session| session.id == session_id)
@@ -1984,7 +2063,11 @@ impl App {
                 detached,
             ));
         }
-        if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
+        if let Some(project) = self
+            .engine
+            .projects
+            .iter()
+            .find(|p| p.id == session.project_id)
             && project.default_provider != session.provider
         {
             let provider_label = if self.project_uses_explicit_default_provider(&project.id) {
@@ -2058,7 +2141,11 @@ impl App {
                 detached,
             ));
         }
-        if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
+        if let Some(project) = self
+            .engine
+            .projects
+            .iter()
+            .find(|p| p.id == session.project_id)
             && project.default_provider != session.provider
         {
             let provider_label = if self.project_uses_explicit_default_provider(&project.id) {
@@ -2102,7 +2189,7 @@ impl App {
             &self.theme,
             &self.syntax_cache,
             self.show_diff_line_numbers,
-            self.config.ui.diff_tab_width,
+            self.engine.config.ui.diff_tab_width,
         )?;
         self.center_mode = CenterMode::Diff {
             lines: Arc::new(output.lines),
@@ -2132,7 +2219,7 @@ impl App {
             &self.theme,
             &self.syntax_cache,
             self.show_diff_line_numbers,
-            self.config.ui.diff_tab_width,
+            self.engine.config.ui.diff_tab_width,
         )?;
         self.center_mode = CenterMode::Diff {
             lines: Arc::new(output.lines),
@@ -2146,10 +2233,14 @@ impl App {
 
     pub(crate) fn copy_selected_path(&mut self) -> Result<()> {
         let path = match self.left_items().get(self.selected_left) {
-            Some(LeftItem::Session(index)) => {
-                self.sessions.get(*index).map(|s| s.worktree_path.clone())
+            Some(LeftItem::Session(index)) => self
+                .engine
+                .sessions
+                .get(*index)
+                .map(|s| s.worktree_path.clone()),
+            Some(LeftItem::Project(index)) => {
+                self.engine.projects.get(*index).map(|p| p.path.clone())
             }
-            Some(LeftItem::Project(index)) => self.projects.get(*index).map(|p| p.path.clone()),
             Some(LeftItem::EmptyProjectsSpacer) => None,
             Some(LeftItem::EmptyProjectsSeparator) => None,
             None => None,
@@ -2179,7 +2270,8 @@ impl App {
             return Ok(());
         };
         let editors = editor::detect_installed_editors();
-        let Some(selected_editor) = editor::preferred_editor(&editors, &self.config.editor.default)
+        let Some(selected_editor) =
+            editor::preferred_editor(&editors, &self.engine.config.editor.default)
         else {
             self.set_error(
                 "No supported editor CLI found on PATH. Install cursor, code, zed, or antigravity.",
@@ -2188,7 +2280,7 @@ impl App {
         };
 
         let session_label = self.session_label(&session);
-        let configured_default = self.config.editor.default.trim().to_string();
+        let configured_default = self.engine.config.editor.default.trim().to_string();
         self.open_worktree_in_editor(&session.worktree_path, &session_label, &selected_editor)?;
 
         if !configured_default.is_empty()
@@ -2216,7 +2308,7 @@ impl App {
             return Ok(());
         }
 
-        let selected = editor::preferred_editor(&editors, &self.config.editor.default)
+        let selected = editor::preferred_editor(&editors, &self.engine.config.editor.default)
             .and_then(|preferred| {
                 editors
                     .iter()
@@ -2302,7 +2394,7 @@ impl App {
     pub(crate) fn running_runtime_snapshot(&self) -> Vec<KillableRuntime> {
         let mut runtimes = Vec::new();
 
-        for session in &self.sessions {
+        for session in &self.engine.sessions {
             if !self.providers.contains_key(&session.id) {
                 continue;
             }
@@ -2330,6 +2422,7 @@ impl App {
 
         for (terminal_id, terminal) in self.terminal_items() {
             let (project_name, session_label) = self
+                .engine
                 .sessions
                 .iter()
                 .find(|session| session.id == terminal.session_id)
@@ -2545,6 +2638,7 @@ impl App {
         exclude_id: &str,
     ) -> Option<String> {
         let conflicting = self
+            .engine
             .sessions
             .iter()
             .find(|s| {
@@ -2676,15 +2770,21 @@ mod tests {
         let (worker_tx, worker_rx) = mpsc::channel();
         let single_instance_lock = crate::lockfile::SingleInstanceLock::acquire(&paths.lock_path)
             .expect("single-instance lock for test App");
-        let mut app = App {
+        let engine = dux_core::engine::Engine {
             config: Config::default(),
             paths,
-            bindings,
             session_store,
             projects,
             sessions,
             staged_files: Vec::new(),
             unstaged_files: Vec::new(),
+            terminal_counter: 0,
+            github_integration_enabled: false,
+            single_instance_lock,
+        };
+        let mut app = App {
+            engine,
+            bindings,
             selected_left: 0,
             left_section: crate::app::LeftSection::Projects,
             selected_terminal_index: 0,
@@ -2724,7 +2824,6 @@ mod tests {
             companion_terminals: std::collections::HashMap::new(),
             active_terminal_id: None,
             terminal_return_to_list: false,
-            terminal_counter: 0,
             create_agent_in_flight: false,
             agent_launches_in_flight: std::collections::HashSet::new(),
             pulls_in_flight: std::collections::HashSet::new(),
@@ -2763,7 +2862,6 @@ mod tests {
             welcome_tip_selection: usize::MAX,
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             gh_status: crate::model::GhStatus::Unknown,
-            github_integration_enabled: false,
             pr_banner_at_bottom: true,
             pr_statuses: std::collections::HashMap::new(),
             pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
@@ -2779,7 +2877,6 @@ mod tests {
             last_snapshot_id: None,
             terminal_selection: None,
             startup_log_selection: None,
-            _single_instance_lock: single_instance_lock,
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();
@@ -2881,7 +2978,7 @@ mod tests {
         let label = app.detach_conflicting_worktree_session("/tmp/wt/a", "s2");
         assert!(label.is_some());
         assert!(!app.providers.contains_key("s1"));
-        let s1_session = app.sessions.iter().find(|s| s.id == "s1").unwrap();
+        let s1_session = app.engine.sessions.iter().find(|s| s.id == "s1").unwrap();
         assert_eq!(s1_session.status, SessionStatus::Detached);
     }
 
@@ -2906,6 +3003,7 @@ mod tests {
         // We can't call do_delete_session directly because git::remove_worktree
         // would fail on a non-existent repo, but we can verify the guard logic.
         let has_sibling = app
+            .engine
             .sessions
             .iter()
             .any(|s| s.id != "s1" && s.worktree_path == "/tmp/wt/a");
@@ -2919,6 +3017,7 @@ mod tests {
         let app = test_app_with_sessions(vec![s1], vec![project]);
 
         let has_sibling = app
+            .engine
             .sessions
             .iter()
             .any(|s| s.id != "s1" && s.worktree_path == "/tmp/wt/a");
@@ -2934,12 +3033,14 @@ mod tests {
 
         assert!(app.should_resume_session(&session));
 
-        app.sessions[0].provider = ProviderKind::from_str("codex");
-        let session = app.sessions[0].clone();
+        app.engine.sessions[0].provider = ProviderKind::from_str("codex");
+        let session = app.engine.sessions[0].clone();
         assert!(!app.should_resume_session(&session));
 
-        app.sessions[0].started_providers.push("codex".to_string());
-        let session = app.sessions[0].clone();
+        app.engine.sessions[0]
+            .started_providers
+            .push("codex".to_string());
+        let session = app.engine.sessions[0].clone();
         assert!(app.should_resume_session(&session));
     }
 
@@ -2952,10 +3053,14 @@ mod tests {
         app.mark_session_provider_started("s1");
 
         assert_eq!(
-            app.sessions[0].started_providers,
+            app.engine.sessions[0].started_providers,
             vec!["claude".to_string()]
         );
-        let persisted = app.session_store.load_sessions().expect("load sessions");
+        let persisted = app
+            .engine
+            .session_store
+            .load_sessions()
+            .expect("load sessions");
         assert_eq!(persisted[0].started_providers, vec!["claude".to_string()]);
     }
 
@@ -2997,7 +3102,7 @@ mod tests {
             .expect("delete should succeed without touching git");
 
         assert!(
-            app.sessions.iter().all(|s| s.id != "s1"),
+            app.engine.sessions.iter().all(|s| s.id != "s1"),
             "session should be removed"
         );
         assert!(
@@ -3026,11 +3131,11 @@ mod tests {
             .expect("delete should succeed without touching git for shared worktree");
 
         assert!(
-            app.sessions.iter().all(|s| s.id != "s1"),
+            app.engine.sessions.iter().all(|s| s.id != "s1"),
             "s1 should be removed"
         );
         assert!(
-            app.sessions.iter().any(|s| s.id == "s2"),
+            app.engine.sessions.iter().any(|s| s.id == "s2"),
             "s2 should remain"
         );
         assert!(
@@ -3066,7 +3171,7 @@ mod tests {
         );
 
         assert!(
-            app.sessions.iter().any(|s| s.id == "s1"),
+            app.engine.sessions.iter().any(|s| s.id == "s1"),
             "session must be preserved when git fails so user can retry",
         );
         assert!(
@@ -3096,7 +3201,7 @@ mod tests {
         // Session must still be present: the worker thread has been spawned
         // but hasn't (at most) completed the cleanup on our thread yet.
         assert!(
-            app.sessions.iter().any(|s| s.id == "s1"),
+            app.engine.sessions.iter().any(|s| s.id == "s1"),
             "session must remain until the worker reports success",
         );
     }
@@ -3118,7 +3223,7 @@ mod tests {
         app.begin_delete_session("s1", false);
 
         assert!(
-            app.sessions.iter().all(|s| s.id != "s1"),
+            app.engine.sessions.iter().all(|s| s.id != "s1"),
             "no-git path should complete immediately",
         );
         assert!(
@@ -3149,13 +3254,13 @@ mod tests {
                 already_empty_project,
             ],
         );
-        app.config.ui.empty_project_separator_min_projects = 3;
+        app.engine.config.ui.empty_project_separator_min_projects = 3;
         app.rebuild_left_items();
         app.selected_left = app
             .left_items()
             .iter()
             .position(
-                |item| matches!(item, LeftItem::Session(index) if app.sessions[*index].id == "s1"),
+                |item| matches!(item, LeftItem::Session(index) if app.engine.sessions[*index].id == "s1"),
             )
             .expect("deleted session row");
 
@@ -3291,7 +3396,7 @@ mod tests {
             .insert("s1".to_string(), busy_msg.to_string());
 
         // Another code path removes the session before the worker replies.
-        app.sessions.retain(|s| s.id != "s1");
+        app.engine.sessions.retain(|s| s.id != "s1");
 
         // The worker then reports success.
         app.worker_tx
@@ -3331,7 +3436,7 @@ mod tests {
         app.pending_deletions.insert("s1".to_string());
         app.deletion_busy_messages
             .insert("s1".to_string(), "Removing worktree\u{2026}".to_string());
-        app.sessions.retain(|s| s.id != "s1");
+        app.engine.sessions.retain(|s| s.id != "s1");
 
         // Another action already set a non-Busy status.
         app.set_info("Deleted project \"demo\" and all its agents");
@@ -3376,7 +3481,7 @@ mod tests {
             "s1".to_string(),
             "Removing worktree for agent \"branch-s1\"\u{2026}".to_string(),
         );
-        app.sessions.retain(|s| s.id != "s1");
+        app.engine.sessions.retain(|s| s.id != "s1");
 
         // An unrelated operation set its own Busy message.
         app.set_busy("Pushing to remote\u{2026}");
@@ -3430,11 +3535,11 @@ mod tests {
 
         // Session must still be present — deletion was refused.
         assert!(
-            app.sessions.iter().any(|s| s.id == "s1"),
+            app.engine.sessions.iter().any(|s| s.id == "s1"),
             "session must not be removed when deletion is blocked",
         );
         assert!(
-            app.projects.iter().any(|p| p.id == "project-1"),
+            app.engine.projects.iter().any(|p| p.id == "project-1"),
             "project must not be removed when deletion is blocked",
         );
         assert_eq!(

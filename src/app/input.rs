@@ -483,7 +483,7 @@ impl App {
                     self.set_info("Command palette opened.");
                 }
                 Action::FocusNext => {
-                    let has_staged = !self.staged_files.is_empty();
+                    let has_staged = !self.engine.staged_files.is_empty();
                     if self.focus == FocusPane::Left
                         && self.left_section == LeftSection::Projects
                         && self.has_terminal_items()
@@ -522,7 +522,7 @@ impl App {
                     self.fullscreen_overlay = FullscreenOverlay::None;
                 }
                 Action::FocusPrev => {
-                    let has_staged = !self.staged_files.is_empty();
+                    let has_staged = !self.engine.staged_files.is_empty();
                     if self.focus == FocusPane::Left && self.left_section == LeftSection::Terminals
                     {
                         self.left_section = LeftSection::Projects;
@@ -1027,12 +1027,12 @@ impl App {
                 Action::StageUnstage if self.right_section != RightSection::CommitInput => {
                     self.toggle_stage_selected_file()?;
                 }
-                Action::CommitChanges if !self.staged_files.is_empty() => {
+                Action::CommitChanges if !self.engine.staged_files.is_empty() => {
                     self.execute_commit()?;
                 }
                 Action::OpenDiff => {
                     if self.right_section == RightSection::CommitInput {
-                        if !self.staged_files.is_empty() {
+                        if !self.engine.staged_files.is_empty() {
                             self.input_target = InputTarget::CommitMessage;
                         }
                     } else {
@@ -1045,7 +1045,7 @@ impl App {
                 Action::GenerateCommitMessage => {
                     self.trigger_ai_commit_message()?;
                 }
-                Action::EngageCommitInput if !self.staged_files.is_empty() => {
+                Action::EngageCommitInput if !self.engine.staged_files.is_empty() => {
                     self.input_target = InputTarget::CommitMessage;
                 }
                 Action::PushToRemote => {
@@ -1181,8 +1181,8 @@ impl App {
         };
         let worktree = PathBuf::from(&session.worktree_path);
         let file = match self.right_section {
-            RightSection::Staged => self.staged_files.get(self.files_index),
-            RightSection::Unstaged => self.unstaged_files.get(self.files_index),
+            RightSection::Staged => self.engine.staged_files.get(self.files_index),
+            RightSection::Unstaged => self.engine.unstaged_files.get(self.files_index),
             RightSection::CommitInput => return Ok(()),
         };
         let Some(file) = file else { return Ok(()) };
@@ -1198,10 +1198,12 @@ impl App {
         }
         self.reload_changed_files();
         // If the section we were in is now empty, move to the other one.
-        if self.right_section == RightSection::Staged && self.staged_files.is_empty() {
+        if self.right_section == RightSection::Staged && self.engine.staged_files.is_empty() {
             self.right_section = RightSection::Unstaged;
             self.clamp_files_cursor();
-        } else if self.right_section == RightSection::Unstaged && self.unstaged_files.is_empty() {
+        } else if self.right_section == RightSection::Unstaged
+            && self.engine.unstaged_files.is_empty()
+        {
             self.right_section = RightSection::Staged;
             self.clamp_files_cursor();
         }
@@ -1210,7 +1212,7 @@ impl App {
 
     fn confirm_discard_selected_file(&mut self) -> Result<()> {
         let file = match self.right_section {
-            RightSection::Unstaged => self.unstaged_files.get(self.files_index),
+            RightSection::Unstaged => self.engine.unstaged_files.get(self.files_index),
             RightSection::Staged => {
                 self.set_error("Unstage the file first to discard changes.");
                 return Ok(());
@@ -1227,7 +1229,7 @@ impl App {
     }
 
     fn trigger_ai_commit_message(&mut self) -> Result<()> {
-        if self.staged_files.is_empty() {
+        if self.engine.staged_files.is_empty() {
             self.set_error("Stage files first.");
             return Ok(());
         }
@@ -1239,7 +1241,7 @@ impl App {
             return Ok(());
         };
         let worktree = PathBuf::from(&session.worktree_path);
-        let base_prompt = self.config.default_commit_prompt();
+        let base_prompt = self.engine.config.default_commit_prompt();
 
         // Capture the staged diff up-front so the provider does not need tool
         // access to inspect it. The diff is appended after the prompt text.
@@ -1256,7 +1258,7 @@ impl App {
         };
         let prompt = format!("{base_prompt}\n\n{diff_text}");
 
-        let cfg = provider_config(&self.config, &session.provider);
+        let cfg = provider_config(&self.engine.config, &session.provider);
         let prov = provider::create_provider(session.provider.as_str(), cfg);
         let tx = self.worker_tx.clone();
         self.commit_input
@@ -1274,7 +1276,7 @@ impl App {
     }
 
     fn execute_commit(&mut self) -> Result<()> {
-        if self.staged_files.is_empty() {
+        if self.engine.staged_files.is_empty() {
             self.set_error("No staged changes to commit.");
             return Ok(());
         }
@@ -1822,7 +1824,9 @@ impl App {
                         let forward = matches!(self.input_target, InputTarget::Agent)
                             && self
                                 .selected_session()
-                                .map(|s| provider_config(&self.config, &s.provider).forward_scroll)
+                                .map(|s| {
+                                    provider_config(&self.engine.config, &s.provider).forward_scroll
+                                })
                                 .unwrap_or(false);
                         if forward {
                             if let Some(provider) = self.selected_terminal_surface_client() {
@@ -3370,11 +3374,11 @@ impl App {
                         if let Some(ref old_name) = old_id
                             && *old_name != name
                         {
-                            self.config.macros.entries.shift_remove(old_name);
+                            self.engine.config.macros.entries.shift_remove(old_name);
                         }
 
                         // Update config
-                        self.config.macros.entries.insert(
+                        self.engine.config.macros.entries.insert(
                             name.clone(),
                             crate::config::MacroEntry {
                                 text: text.clone(),
@@ -3409,8 +3413,8 @@ impl App {
 
                         // Persist
                         if let Err(err) = crate::config::save_config(
-                            &self.paths.config_path,
-                            &self.config,
+                            &self.engine.paths.config_path,
+                            &self.engine.config,
                             &self.bindings,
                         ) {
                             self.set_error(format!(
@@ -3528,7 +3532,7 @@ impl App {
         }
 
         let name = pending.name;
-        self.config.macros.entries.shift_remove(&name);
+        self.engine.config.macros.entries.shift_remove(&name);
 
         let PromptState::EditMacros {
             entries, selected, ..
@@ -3541,9 +3545,11 @@ impl App {
             *selected = entries.len().saturating_sub(1);
         }
 
-        if let Err(err) =
-            crate::config::save_config(&self.paths.config_path, &self.config, &self.bindings)
-        {
+        if let Err(err) = crate::config::save_config(
+            &self.engine.paths.config_path,
+            &self.engine.config,
+            &self.bindings,
+        ) {
             self.set_error(format!(
                 "Couldn't persist deletion of macro \"{name}\" to config: {err:#}"
             ));
@@ -3934,7 +3940,7 @@ impl App {
             && contains_point(area, column, row)
         {
             let index = usize::from(row.saturating_sub(area.y));
-            let file_index = (index < self.unstaged_files.len()).then_some(index);
+            let file_index = (index < self.engine.unstaged_files.len()).then_some(index);
             return Some(MouseTarget::UnstagedFile(file_index));
         }
 
@@ -3942,7 +3948,7 @@ impl App {
             && contains_point(area, column, row)
         {
             let index = usize::from(row.saturating_sub(area.y));
-            let file_index = (index < self.staged_files.len()).then_some(index);
+            let file_index = (index < self.engine.staged_files.len()).then_some(index);
             return Some(MouseTarget::StagedFile(file_index));
         }
 
@@ -4546,7 +4552,7 @@ impl App {
                 custom_name: Some(entry.display_name()),
             }
         } else {
-            let managed_root = self.paths.worktrees_root.join(&project.name);
+            let managed_root = self.engine.paths.worktrees_root.join(&project.name);
             let default_name = entry
                 .path
                 .strip_prefix(&managed_root)
@@ -5476,20 +5482,24 @@ impl App {
     fn activate_selected_left_item(&mut self) -> Result<()> {
         match self.left_items().get(self.selected_left) {
             Some(LeftItem::Project(project_index)) => {
-                let project = &self.projects[*project_index];
+                let project = &self.engine.projects[*project_index];
                 if project.path_missing {
                     self.set_warning(format!("Project path not found: {}", project.path));
                     return Ok(());
                 }
                 let project_id = project.id.clone();
-                let has_sessions = self.sessions.iter().any(|s| s.project_id == project_id);
+                let has_sessions = self
+                    .engine
+                    .sessions
+                    .iter()
+                    .any(|s| s.project_id == project_id);
                 if has_sessions {
                     if self.collapsed_projects.contains(&project_id) {
                         self.collapsed_projects.remove(&project_id);
                         self.rebuild_left_items();
                     }
                     if let Some(pos) = self.left_items().iter().position(|item| {
-                        matches!(item, LeftItem::Session(si) if self.sessions[*si].project_id == project_id)
+                        matches!(item, LeftItem::Session(si) if self.engine.sessions[*si].project_id == project_id)
                     }) {
                         self.selected_left = pos;
                         self.center_mode = CenterMode::Agent;
@@ -5750,18 +5760,22 @@ impl App {
     }
 
     fn persist_pane_widths(&mut self) {
-        if self.config.ui.left_width_pct != self.left_width_pct
-            || self.config.ui.right_width_pct != self.right_width_pct
-            || self.config.ui.terminal_pane_height_pct != self.terminal_pane_height_pct
-            || self.config.ui.staged_pane_height_pct != self.staged_pane_height_pct
-            || self.config.ui.commit_pane_height_pct != self.commit_pane_height_pct
+        if self.engine.config.ui.left_width_pct != self.left_width_pct
+            || self.engine.config.ui.right_width_pct != self.right_width_pct
+            || self.engine.config.ui.terminal_pane_height_pct != self.terminal_pane_height_pct
+            || self.engine.config.ui.staged_pane_height_pct != self.staged_pane_height_pct
+            || self.engine.config.ui.commit_pane_height_pct != self.commit_pane_height_pct
         {
-            self.config.ui.left_width_pct = self.left_width_pct;
-            self.config.ui.right_width_pct = self.right_width_pct;
-            self.config.ui.terminal_pane_height_pct = self.terminal_pane_height_pct;
-            self.config.ui.staged_pane_height_pct = self.staged_pane_height_pct;
-            self.config.ui.commit_pane_height_pct = self.commit_pane_height_pct;
-            if let Err(err) = save_config(&self.paths.config_path, &self.config, &self.bindings) {
+            self.engine.config.ui.left_width_pct = self.left_width_pct;
+            self.engine.config.ui.right_width_pct = self.right_width_pct;
+            self.engine.config.ui.terminal_pane_height_pct = self.terminal_pane_height_pct;
+            self.engine.config.ui.staged_pane_height_pct = self.staged_pane_height_pct;
+            self.engine.config.ui.commit_pane_height_pct = self.commit_pane_height_pct;
+            if let Err(err) = save_config(
+                &self.engine.paths.config_path,
+                &self.engine.config,
+                &self.bindings,
+            ) {
                 self.set_error(format!("Couldn't persist pane sizes to config: {err:#}"));
             }
         }
@@ -6415,7 +6429,7 @@ mod tests {
     }
 
     fn complete_create_agent_branch_inspection(app: &mut App, branch: &str, leading_branch: &str) {
-        let project = app.projects[0].clone();
+        let project = app.engine.projects[0].clone();
         app.worker_tx
             .send(WorkerEvent::CreateAgentBranchInspected {
                 project,
@@ -6489,15 +6503,21 @@ mod tests {
         let (worker_tx, worker_rx) = mpsc::channel();
         let single_instance_lock = crate::lockfile::SingleInstanceLock::acquire(&paths.lock_path)
             .expect("single-instance lock for test App");
-        let mut app = App {
+        let engine = dux_core::engine::Engine {
             config: Config::default(),
             paths,
-            bindings,
             session_store,
             projects: vec![project],
             sessions: vec![session],
             staged_files: Vec::new(),
             unstaged_files: Vec::new(),
+            terminal_counter: 0,
+            github_integration_enabled: false,
+            single_instance_lock,
+        };
+        let mut app = App {
+            engine,
+            bindings,
             selected_left: 0,
             left_section: crate::app::LeftSection::Projects,
             selected_terminal_index: 0,
@@ -6537,7 +6557,6 @@ mod tests {
             companion_terminals: std::collections::HashMap::new(),
             active_terminal_id: None,
             terminal_return_to_list: false,
-            terminal_counter: 0,
             create_agent_in_flight: false,
             agent_launches_in_flight: std::collections::HashSet::new(),
             pulls_in_flight: std::collections::HashSet::new(),
@@ -6576,7 +6595,6 @@ mod tests {
             welcome_tip_selection: usize::MAX,
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             gh_status: crate::model::GhStatus::Unknown,
-            github_integration_enabled: false,
             pr_banner_at_bottom: true,
             pr_statuses: std::collections::HashMap::new(),
             pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
@@ -6592,7 +6610,6 @@ mod tests {
             last_snapshot_id: None,
             terminal_selection: None,
             startup_log_selection: None,
-            _single_instance_lock: single_instance_lock,
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();
@@ -6684,7 +6701,7 @@ mod tests {
         config.ui.show_diff_line_numbers = true;
         let bindings = RuntimeBindings::from_keys_config(&config.keys);
         std::fs::write(
-            &app.paths.config_path,
+            &app.engine.paths.config_path,
             crate::config::render_config_with(&config, &bindings),
         )
         .expect("write valid config");
@@ -6694,7 +6711,7 @@ mod tests {
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
         assert_eq!(app.status.message(), "Reloading config.toml.");
 
-        drain_until(&mut app, |app| app.config.ui.right_width_pct == 37);
+        drain_until(&mut app, |app| app.engine.config.ui.right_width_pct == 37);
 
         assert_eq!(app.right_width_pct, 37);
         assert!(app.show_diff_line_numbers);
@@ -6708,9 +6725,9 @@ mod tests {
     #[test]
     fn reload_config_command_keeps_current_config_and_opens_modal_on_validation_error() {
         let mut app = test_app(default_bindings());
-        app.config.ui.right_width_pct = 41;
+        app.engine.config.ui.right_width_pct = 41;
         std::fs::write(
-            &app.paths.config_path,
+            &app.engine.paths.config_path,
             r#"
 [keys]
 show_terminal_keys = true
@@ -6727,7 +6744,7 @@ not_a_real_action = ["x"]
             matches!(app.prompt, PromptState::ConfigReloadFailed { .. })
         });
 
-        assert_eq!(app.config.ui.right_width_pct, 41);
+        assert_eq!(app.engine.config.ui.right_width_pct, 41);
         assert_eq!(
             app.status.message(),
             "Config reload failed. Review the modal before retrying."
@@ -6749,8 +6766,8 @@ not_a_real_action = ["x"]
     #[test]
     fn reload_config_failure_can_recover_last_working_config_file_async() {
         let mut app = test_app(default_bindings());
-        app.config.ui.right_width_pct = 42;
-        std::fs::write(&app.paths.config_path, "this is not valid toml")
+        app.engine.config.ui.right_width_pct = 42;
+        std::fs::write(&app.engine.paths.config_path, "this is not valid toml")
             .expect("write broken config");
         app.prompt = PromptState::ConfigReloadFailed {
             error: "broken".to_string(),
@@ -6770,7 +6787,8 @@ not_a_real_action = ["x"]
         });
 
         assert!(matches!(app.prompt, PromptState::None));
-        let recovered = std::fs::read_to_string(&app.paths.config_path).expect("read recovered");
+        let recovered =
+            std::fs::read_to_string(&app.engine.paths.config_path).expect("read recovered");
         let parsed: Config = toml::from_str(&recovered).expect("parse recovered config");
         assert_eq!(parsed.ui.right_width_pct, 42);
     }
@@ -6936,7 +6954,7 @@ not_a_real_action = ["x"]
         original: &str,
         updated: &str,
     ) {
-        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
         std::fs::create_dir_all(worktree).expect("worktree dir");
 
         Command::new("git")
@@ -6984,7 +7002,7 @@ not_a_real_action = ["x"]
         app.refresh_selected_project()
             .expect("repeat refresh should not error");
 
-        let repo_path = app.projects[0].path.clone();
+        let repo_path = app.engine.projects[0].path.clone();
         assert!(app.pulls_in_flight.contains(&repo_path));
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
         assert!(app.status.text().contains("already in progress"));
@@ -6993,16 +7011,16 @@ not_a_real_action = ["x"]
     #[test]
     fn project_pull_completion_clears_in_flight_guard() {
         let mut app = test_app(default_bindings());
-        let repo_path = app.projects[0].path.clone();
+        let repo_path = app.engine.projects[0].path.clone();
         app.pulls_in_flight.insert(repo_path.clone());
 
         app.worker_tx
             .send(WorkerEvent::PullCompleted {
                 repo_path,
                 target: PullTarget::Project {
-                    project_id: app.projects[0].id.clone(),
-                    project_name: app.projects[0].name.clone(),
-                    leading_branch: app.projects[0].leading_branch.clone(),
+                    project_id: app.engine.projects[0].id.clone(),
+                    project_name: app.engine.projects[0].name.clone(),
+                    leading_branch: app.engine.projects[0].leading_branch.clone(),
                 },
                 result: Ok(Some("feature/demo".to_string())),
             })
@@ -7011,9 +7029,9 @@ not_a_real_action = ["x"]
         app.drain_events();
 
         assert!(app.pulls_in_flight.is_empty());
-        assert_eq!(app.projects[0].current_branch, "feature/demo");
+        assert_eq!(app.engine.projects[0].current_branch, "feature/demo");
         assert_eq!(
-            app.projects[0].branch_status,
+            app.engine.projects[0].branch_status,
             ProjectBranchStatus::NotLeading
         );
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
@@ -7028,7 +7046,7 @@ not_a_real_action = ["x"]
         app.pull_from_remote()
             .expect("repeat pull should not error");
 
-        let repo_path = app.sessions[0].worktree_path.clone();
+        let repo_path = app.engine.sessions[0].worktree_path.clone();
         assert!(app.pulls_in_flight.contains(&repo_path));
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
         assert!(app.status.text().contains("already in progress"));
@@ -7091,7 +7109,7 @@ not_a_real_action = ["x"]
 
         assert!(matches!(app.prompt, PromptState::None));
         assert_eq!(
-            app.sessions[0].title.as_deref(),
+            app.engine.sessions[0].title.as_deref(),
             Some("agent-branch"),
             "custom confirm binding should apply the rename"
         );
@@ -7244,17 +7262,17 @@ not_a_real_action = ["x"]
     #[test]
     fn rename_title_only_does_not_change_branch_name() {
         let mut app = test_app(default_bindings());
-        let original_branch = app.sessions[0].branch_name.clone();
+        let original_branch = app.engine.sessions[0].branch_name.clone();
 
         app.apply_rename_session("session-1", "new-title".to_string(), false);
 
         assert_eq!(
-            app.sessions[0].title.as_deref(),
+            app.engine.sessions[0].title.as_deref(),
             Some("new-title"),
             "title should be updated"
         );
         assert_eq!(
-            app.sessions[0].branch_name, original_branch,
+            app.engine.sessions[0].branch_name, original_branch,
             "branch_name should remain unchanged when rename_branch is false"
         );
     }
@@ -7345,17 +7363,17 @@ not_a_real_action = ["x"]
     #[test]
     fn open_kill_running_snapshots_agents_and_terminals() {
         let mut app = test_app(default_bindings());
-        let worktree_path = app.sessions[0].worktree_path.clone();
+        let worktree_path = app.engine.sessions[0].worktree_path.clone();
         let worktree = std::path::Path::new(&worktree_path);
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         app.providers.insert(
-            app.sessions[0].id.clone(),
+            app.engine.sessions[0].id.clone(),
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn agent"),
         );
         app.companion_terminals.insert(
             "term-1".to_string(),
             crate::app::CompanionTerminal {
-                session_id: app.sessions[0].id.clone(),
+                session_id: app.engine.sessions[0].id.clone(),
                 label: "shell".to_string(),
                 foreground_cmd: Some("python".to_string()),
                 client: PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
@@ -7397,13 +7415,13 @@ not_a_real_action = ["x"]
     #[test]
     fn kill_running_terminal_label_deduplicates_term_prefix() {
         let mut app = test_app(default_bindings());
-        let worktree_path = app.sessions[0].worktree_path.clone();
+        let worktree_path = app.engine.sessions[0].worktree_path.clone();
         let worktree = std::path::Path::new(&worktree_path);
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         app.companion_terminals.insert(
             "term-1".to_string(),
             crate::app::CompanionTerminal {
-                session_id: app.sessions[0].id.clone(),
+                session_id: app.engine.sessions[0].id.clone(),
                 label: "shell".to_string(),
                 foreground_cmd: Some("TERM sleep".to_string()),
                 client: PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
@@ -7570,18 +7588,25 @@ not_a_real_action = ["x"]
     #[test]
     fn kill_visible_only_kills_filtered_rows() {
         let mut app = test_app(default_bindings());
-        let worktree_path = app.sessions[0].worktree_path.clone();
+        let worktree_path = app.engine.sessions[0].worktree_path.clone();
         let worktree = std::path::Path::new(&worktree_path);
-        std::fs::create_dir_all(app.paths.worktrees_root.join("other")).expect("other worktree");
+        std::fs::create_dir_all(app.engine.paths.worktrees_root.join("other"))
+            .expect("other worktree");
         let now = Utc::now();
-        app.sessions.push(AgentSession {
+        app.engine.sessions.push(AgentSession {
             id: "session-2".to_string(),
-            project_id: app.projects[0].id.clone(),
-            project_path: Some(app.projects[0].path.clone()),
+            project_id: app.engine.projects[0].id.clone(),
+            project_path: Some(app.engine.projects[0].path.clone()),
             provider: ProviderKind::from_str("claude"),
             source_branch: "main".to_string(),
             branch_name: "beta-agent".to_string(),
-            worktree_path: app.paths.worktrees_root.join("other").display().to_string(),
+            worktree_path: app
+                .engine
+                .paths
+                .worktrees_root
+                .join("other")
+                .display()
+                .to_string(),
             title: None,
             started_providers: Vec::new(),
             desired_running: false,
@@ -7621,7 +7646,7 @@ not_a_real_action = ["x"]
     #[test]
     fn kill_selected_removes_running_targets_and_resets_terminal_surface() {
         let mut app = test_app(default_bindings());
-        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         app.providers.insert(
             "session-1".to_string(),
@@ -7630,7 +7655,7 @@ not_a_real_action = ["x"]
         app.companion_terminals.insert(
             "term-1".to_string(),
             crate::app::CompanionTerminal {
-                session_id: app.sessions[0].id.clone(),
+                session_id: app.engine.sessions[0].id.clone(),
                 label: "shell".to_string(),
                 foreground_cmd: None,
                 client: PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
@@ -7753,7 +7778,7 @@ not_a_real_action = ["x"]
     #[test]
     fn create_agent_known_non_default_branch_opens_name_prompt_with_leading_branch() {
         let mut app = test_app(default_bindings());
-        let repo_path = PathBuf::from(&app.projects[0].path);
+        let repo_path = PathBuf::from(&app.engine.projects[0].path);
         set_remote_default(&repo_path, "main");
         run_git(&repo_path, &["switch", "-c", "feature"]);
 
@@ -7775,7 +7800,7 @@ not_a_real_action = ["x"]
     #[test]
     fn create_agent_heuristic_feature_opens_name_prompt_with_stored_branch() {
         let mut app = test_app(default_bindings());
-        let repo_path = PathBuf::from(&app.projects[0].path);
+        let repo_path = PathBuf::from(&app.engine.projects[0].path);
         run_git(&repo_path, &["switch", "-c", "feature"]);
 
         app.create_agent_for_selected_project().unwrap();
@@ -7797,12 +7822,12 @@ not_a_real_action = ["x"]
     #[test]
     fn new_project_agent_existing_branch_opens_use_existing_prompt() {
         let mut app = test_app(default_bindings());
-        let repo_path = PathBuf::from(&app.projects[0].path);
+        let repo_path = PathBuf::from(&app.engine.projects[0].path);
         run_git(&repo_path, &["branch", "reuse-me"]);
 
         app.prompt = PromptState::NameNewAgent {
             request: CreateAgentRequest::NewProject {
-                project: app.projects[0].clone(),
+                project: app.engine.projects[0].clone(),
                 custom_name: None,
                 use_existing_branch: false,
                 pull_before_create: false,
@@ -7835,13 +7860,13 @@ not_a_real_action = ["x"]
     #[test]
     fn pull_request_agent_existing_branch_skips_use_existing_prompt() {
         let mut app = test_app(default_bindings());
-        let repo_path = PathBuf::from(&app.projects[0].path);
+        let repo_path = PathBuf::from(&app.engine.projects[0].path);
         run_git(&repo_path, &["branch", "feature/pr-42"]);
         app.create_agent_in_flight = true;
 
         app.prompt = PromptState::NameNewAgent {
             request: CreateAgentRequest::PullRequest {
-                project: app.projects[0].clone(),
+                project: app.engine.projects[0].clone(),
                 host: "github.com".to_string(),
                 owner_repo: "octocat/Hello-World".to_string(),
                 number: 42,
@@ -7872,7 +7897,7 @@ not_a_real_action = ["x"]
     #[test]
     fn create_agent_missing_leading_branch_sets_error_without_name_prompt() {
         let mut app = test_app(default_bindings());
-        app.projects[0].leading_branch = Some("missing-main".to_string());
+        app.engine.projects[0].leading_branch = Some("missing-main".to_string());
 
         app.create_agent_for_selected_project().unwrap();
         drain_until(&mut app, |app| {
@@ -7896,16 +7921,16 @@ not_a_real_action = ["x"]
 
         app.worker_tx
             .send(WorkerEvent::ProjectBranchStatusReady {
-                project_id: app.projects[0].id.clone(),
+                project_id: app.engine.projects[0].id.clone(),
                 result: Ok(("feature".to_string(), ProjectBranchStatus::NotLeading)),
             })
             .unwrap();
 
         app.drain_events();
 
-        assert_eq!(app.projects[0].current_branch, "feature");
+        assert_eq!(app.engine.projects[0].current_branch, "feature");
         assert_eq!(
-            app.projects[0].branch_status,
+            app.engine.projects[0].branch_status,
             ProjectBranchStatus::NotLeading
         );
     }
@@ -7913,10 +7938,10 @@ not_a_real_action = ["x"]
     #[test]
     fn checkout_project_default_success_marks_project_leading() {
         let mut app = test_app(default_bindings());
-        let mut project = app.projects[0].clone();
+        let mut project = app.engine.projects[0].clone();
         project.current_branch = "feature".to_string();
         project.branch_status = ProjectBranchStatus::NotLeading;
-        app.projects[0] = project.clone();
+        app.engine.projects[0] = project.clone();
 
         app.worker_tx
             .send(WorkerEvent::NonDefaultBranchCheckoutCompleted {
@@ -7928,15 +7953,21 @@ not_a_real_action = ["x"]
 
         app.drain_events();
 
-        assert_eq!(app.projects[0].current_branch, "main");
-        assert_eq!(app.projects[0].branch_status, ProjectBranchStatus::Leading);
+        assert_eq!(app.engine.projects[0].current_branch, "main");
+        assert_eq!(
+            app.engine.projects[0].branch_status,
+            ProjectBranchStatus::Leading
+        );
         assert!(app.status.text().contains("Checked out \"main\""));
     }
 
     #[test]
     fn create_agent_prefills_name_when_randomized_default_enabled() {
         let mut app = test_app(default_bindings());
-        app.config.defaults.enable_randomized_pet_name_by_default = true;
+        app.engine
+            .config
+            .defaults
+            .enable_randomized_pet_name_by_default = true;
 
         app.create_agent_for_selected_project().unwrap();
         complete_create_agent_branch_inspection(&mut app, "main", "main");
@@ -7959,7 +7990,10 @@ not_a_real_action = ["x"]
     #[test]
     fn fork_agent_prefills_name_when_randomized_default_enabled() {
         let mut app = test_app(default_bindings());
-        app.config.defaults.enable_randomized_pet_name_by_default = true;
+        app.engine
+            .config
+            .defaults
+            .enable_randomized_pet_name_by_default = true;
 
         app.fork_selected_session().unwrap();
 
@@ -7991,7 +8025,7 @@ not_a_real_action = ["x"]
 
         match &app.prompt {
             PromptState::PickProjectWorktree(prompt) => {
-                assert_eq!(prompt.project.id, app.projects[0].id);
+                assert_eq!(prompt.project.id, app.engine.projects[0].id);
                 assert!(prompt.loading);
                 assert!(prompt.entries.is_empty());
             }
@@ -8002,7 +8036,7 @@ not_a_real_action = ["x"]
     #[test]
     fn disabled_project_worktree_entries_cannot_be_selected_or_confirmed() {
         let mut app = test_app(default_bindings());
-        let project = app.projects[0].clone();
+        let project = app.engine.projects[0].clone();
         app.prompt = PromptState::PickProjectWorktree(PickProjectWorktreePrompt {
             project,
             entries: vec![ProjectWorktreeEntry {
@@ -8033,8 +8067,8 @@ not_a_real_action = ["x"]
     #[test]
     fn selecting_managed_orphan_worktree_opens_name_prompt() {
         let mut app = test_app(default_bindings());
-        let project = app.projects[0].clone();
-        let worktree_path = app.paths.worktrees_root.join("demo").join("orphan");
+        let project = app.engine.projects[0].clone();
+        let worktree_path = app.engine.paths.worktrees_root.join("demo").join("orphan");
         app.prompt = PromptState::PickProjectWorktree(PickProjectWorktreePrompt {
             project,
             entries: vec![ProjectWorktreeEntry {
@@ -8061,7 +8095,7 @@ not_a_real_action = ["x"]
                     branch_name,
                     ..
                 } => {
-                    assert_eq!(project.id, app.projects[0].id);
+                    assert_eq!(project.id, app.engine.projects[0].id);
                     assert_eq!(selected_path, &worktree_path);
                     assert_eq!(branch_name, "orphan");
                     assert_eq!(input.text, "orphan");
@@ -8075,9 +8109,17 @@ not_a_real_action = ["x"]
     #[test]
     fn managed_worktree_default_name_overrides_randomized_default() {
         let mut app = test_app(default_bindings());
-        app.config.defaults.enable_randomized_pet_name_by_default = true;
-        let project = app.projects[0].clone();
-        let worktree_path = app.paths.worktrees_root.join("demo").join("managed-name");
+        app.engine
+            .config
+            .defaults
+            .enable_randomized_pet_name_by_default = true;
+        let project = app.engine.projects[0].clone();
+        let worktree_path = app
+            .engine
+            .paths
+            .worktrees_root
+            .join("demo")
+            .join("managed-name");
         app.prompt = PromptState::PickProjectWorktree(PickProjectWorktreePrompt {
             project,
             entries: vec![ProjectWorktreeEntry {
@@ -8114,12 +8156,17 @@ not_a_real_action = ["x"]
     #[test]
     fn imported_managed_worktree_is_tracked_for_resume_fallback() {
         let mut app = test_app(default_bindings());
-        let worktree = app.paths.worktrees_root.join("demo").join("imported");
+        let worktree = app
+            .engine
+            .paths
+            .worktrees_root
+            .join("demo")
+            .join("imported");
         std::fs::create_dir_all(&worktree).expect("imported worktree");
         let session = AgentSession {
             id: "imported-session".to_string(),
-            project_id: app.projects[0].id.clone(),
-            project_path: Some(app.projects[0].path.clone()),
+            project_id: app.engine.projects[0].id.clone(),
+            project_path: Some(app.engine.projects[0].path.clone()),
             provider: ProviderKind::from_str("codex"),
             source_branch: "main".to_string(),
             branch_name: "main".to_string(),
@@ -8141,7 +8188,7 @@ not_a_real_action = ["x"]
             true,
             AgentLaunchKind::Create {
                 status_message: "imported".to_string(),
-                repo_path: app.projects[0].path.clone(),
+                repo_path: app.engine.projects[0].path.clone(),
                 owns_worktree: false,
                 startup_result: None,
             },
@@ -8155,7 +8202,8 @@ not_a_real_action = ["x"]
 
         assert!(app.resume_fallback_candidates.contains_key(&session.id));
         assert_eq!(
-            app.sessions
+            app.engine
+                .sessions
                 .iter()
                 .find(|candidate| candidate.id == session.id)
                 .and_then(|candidate| candidate.title.as_deref()),
@@ -8166,7 +8214,7 @@ not_a_real_action = ["x"]
     #[test]
     fn selecting_external_worktree_opens_name_prompt_with_fork_request() {
         let mut app = test_app(default_bindings());
-        let project = app.projects[0].clone();
+        let project = app.engine.projects[0].clone();
         let worktree_path = PathBuf::from("/tmp/external-checkout");
         app.prompt = PromptState::PickProjectWorktree(PickProjectWorktreePrompt {
             project,
@@ -8206,8 +8254,11 @@ not_a_real_action = ["x"]
     #[test]
     fn external_worktree_default_name_overrides_randomized_default() {
         let mut app = test_app(default_bindings());
-        app.config.defaults.enable_randomized_pet_name_by_default = true;
-        let project = app.projects[0].clone();
+        app.engine
+            .config
+            .defaults
+            .enable_randomized_pet_name_by_default = true;
+        let project = app.engine.projects[0].clone();
         let worktree_path = PathBuf::from("/tmp/external-checkout");
         app.prompt = PromptState::PickProjectWorktree(PickProjectWorktreePrompt {
             project,
@@ -8245,7 +8296,10 @@ not_a_real_action = ["x"]
     #[test]
     fn fresh_agent_request_uses_pull_before_create_config_default() {
         let mut app = test_app(default_bindings());
-        app.config.defaults.pull_before_creating_agent_by_default = true;
+        app.engine
+            .config
+            .defaults
+            .pull_before_creating_agent_by_default = true;
 
         app.create_agent_for_selected_project().unwrap();
         complete_create_agent_branch_inspection(&mut app, "main", "main");
@@ -8264,7 +8318,10 @@ not_a_real_action = ["x"]
     #[test]
     fn fresh_agent_prompt_does_not_expose_pull_before_create_checkbox() {
         let mut app = test_app(default_bindings());
-        app.config.defaults.pull_before_creating_agent_by_default = true;
+        app.engine
+            .config
+            .defaults
+            .pull_before_creating_agent_by_default = true;
 
         app.create_agent_for_selected_project().unwrap();
         complete_create_agent_branch_inspection(&mut app, "main", "main");
@@ -8355,7 +8412,7 @@ not_a_real_action = ["x"]
     #[test]
     fn copy_path_copies_selected_session_worktree() {
         let mut app = test_app(default_bindings());
-        let _worktree_path = app.sessions[0].worktree_path.clone();
+        let _worktree_path = app.engine.sessions[0].worktree_path.clone();
         app.clipboard = Clipboard::from_fn(clipboard_ok);
 
         app.copy_selected_path().unwrap();
@@ -8559,7 +8616,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         app.focus = FocusPane::Files;
         app.right_section = RightSection::Unstaged;
-        app.unstaged_files = vec![
+        app.engine.unstaged_files = vec![
             ChangedFile {
                 path: "src/lib.rs".into(),
                 status: "M".into(),
@@ -8575,7 +8632,7 @@ not_a_real_action = ["x"]
                 binary: false,
             },
         ];
-        app.staged_files = vec![ChangedFile {
+        app.engine.staged_files = vec![ChangedFile {
             path: "tests/main.rs".into(),
             status: "A".into(),
             additions: 3,
@@ -8615,7 +8672,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         app.focus = FocusPane::Files;
         app.right_section = RightSection::Unstaged;
-        app.unstaged_files = vec![ChangedFile {
+        app.engine.unstaged_files = vec![ChangedFile {
             path: "src/main.rs".into(),
             status: "M".into(),
             additions: 2,
@@ -8649,7 +8706,7 @@ not_a_real_action = ["x"]
             "fn main() {}\n",
             "fn main() { println!(\"hi\"); }\n",
         );
-        app.unstaged_files = vec![ChangedFile {
+        app.engine.unstaged_files = vec![ChangedFile {
             path: "src/main.rs".into(),
             status: "M".into(),
             additions: 1,
@@ -8694,8 +8751,8 @@ not_a_real_action = ["x"]
     fn mouse_click_empty_left_list_focuses_left_pane() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
-        app.projects.clear();
-        app.sessions.clear();
+        app.engine.projects.clear();
+        app.engine.sessions.clear();
         app.left_items_cache.clear();
         app.selected_left = 0;
         app.focus = FocusPane::Center;
@@ -8709,7 +8766,7 @@ not_a_real_action = ["x"]
     fn mouse_click_right_row_focuses_and_selects_unstaged_file() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
-        app.unstaged_files = vec![
+        app.engine.unstaged_files = vec![
             ChangedFile {
                 path: "a.txt".into(),
                 status: "M".into(),
@@ -8914,14 +8971,14 @@ not_a_real_action = ["x"]
     fn mouse_journey_can_switch_files_sections_by_clicking_rows() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
-        app.unstaged_files = vec![ChangedFile {
+        app.engine.unstaged_files = vec![ChangedFile {
             path: "a.txt".into(),
             status: "M".into(),
             additions: 1,
             deletions: 0,
             binary: false,
         }];
-        app.staged_files = vec![ChangedFile {
+        app.engine.staged_files = vec![ChangedFile {
             path: "b.txt".into(),
             status: "A".into(),
             additions: 3,
@@ -8951,7 +9008,7 @@ not_a_real_action = ["x"]
             "fn main() {}\n",
             "fn main() { println!(\"hi\"); }\n",
         );
-        app.unstaged_files = vec![ChangedFile {
+        app.engine.unstaged_files = vec![ChangedFile {
             path: "src/main.rs".into(),
             status: "M".into(),
             additions: 1,
@@ -8982,7 +9039,7 @@ not_a_real_action = ["x"]
             "fn main() {}\n",
             "fn main() { println!(\"hi\"); }\n",
         );
-        app.unstaged_files = vec![ChangedFile {
+        app.engine.unstaged_files = vec![ChangedFile {
             path: "src/main.rs".into(),
             status: "M".into(),
             additions: 1,
@@ -9055,14 +9112,19 @@ not_a_real_action = ["x"]
     fn left_move_down_closes_open_diff_when_moving_between_agents() {
         let mut app = test_app(default_bindings());
         let now = Utc::now();
-        app.sessions.push(AgentSession {
+        app.engine.sessions.push(AgentSession {
             id: "session-2".to_string(),
-            project_id: app.projects[0].id.clone(),
-            project_path: Some(app.projects[0].path.clone()),
+            project_id: app.engine.projects[0].id.clone(),
+            project_path: Some(app.engine.projects[0].path.clone()),
             provider: ProviderKind::from_str("codex"),
             source_branch: "main".to_string(),
             branch_name: "agent-branch-2".to_string(),
-            worktree_path: app.paths.worktrees_root.to_string_lossy().to_string(),
+            worktree_path: app
+                .engine
+                .paths
+                .worktrees_root
+                .to_string_lossy()
+                .to_string(),
             title: None,
             started_providers: Vec::new(),
             desired_running: false,
@@ -9098,9 +9160,9 @@ not_a_real_action = ["x"]
     }
 
     fn append_empty_projects(app: &mut App, count: usize) {
-        let path = app.projects[0].path.clone();
+        let path = app.engine.projects[0].path.clone();
         for idx in 0..count {
-            app.projects.push(Project {
+            app.engine.projects.push(Project {
                 id: format!("empty-project-{idx}"),
                 name: format!("empty {idx}"),
                 path: path.clone(),
@@ -9121,7 +9183,7 @@ not_a_real_action = ["x"]
     fn left_navigation_skips_empty_projects_separator() {
         let mut app = test_app(default_bindings());
         append_empty_projects(&mut app, 4);
-        app.config.ui.empty_project_separator_min_projects = 5;
+        app.engine.config.ui.empty_project_separator_min_projects = 5;
         app.rebuild_left_items();
         app.selected_left = 1;
         app.focus = FocusPane::Left;
@@ -9148,7 +9210,7 @@ not_a_real_action = ["x"]
     fn mouse_click_empty_projects_separator_keeps_selection() {
         let mut app = test_app(default_bindings());
         append_empty_projects(&mut app, 4);
-        app.config.ui.empty_project_separator_min_projects = 5;
+        app.engine.config.ui.empty_project_separator_min_projects = 5;
         app.rebuild_left_items();
         install_mouse_layout(&mut app);
         app.selected_left = 1;
@@ -9262,17 +9324,17 @@ not_a_real_action = ["x"]
     fn mouse_journey_divider_drag_persists_widths_on_release() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
-        let original_left = app.config.ui.left_width_pct;
-        let original_right = app.config.ui.right_width_pct;
+        let original_left = app.engine.config.ui.left_width_pct;
+        let original_right = app.engine.config.ui.right_width_pct;
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 19, 5));
         app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 30, 5));
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 30, 5));
 
         assert_ne!(app.left_width_pct, original_left);
-        assert_eq!(app.config.ui.left_width_pct, app.left_width_pct);
-        assert_eq!(app.config.ui.right_width_pct, app.right_width_pct);
-        assert_eq!(app.config.ui.right_width_pct, original_right);
+        assert_eq!(app.engine.config.ui.left_width_pct, app.left_width_pct);
+        assert_eq!(app.engine.config.ui.right_width_pct, app.right_width_pct);
+        assert_eq!(app.engine.config.ui.right_width_pct, original_right);
     }
 
     #[test]
@@ -9286,14 +9348,14 @@ not_a_real_action = ["x"]
         // staged inner content: rows 8..12 (y=8, height=5)
         app.mouse_layout.unstaged_list = Some(Rect::new(78, 1, 21, 6));
         app.mouse_layout.staged_list = Some(Rect::new(78, 8, 21, 5));
-        app.unstaged_files = vec![ChangedFile {
+        app.engine.unstaged_files = vec![ChangedFile {
             path: "a.txt".into(),
             status: "M".into(),
             additions: 1,
             deletions: 0,
             binary: false,
         }];
-        app.staged_files = vec![ChangedFile {
+        app.engine.staged_files = vec![ChangedFile {
             path: "b.txt".into(),
             status: "A".into(),
             additions: 1,
@@ -9313,7 +9375,7 @@ not_a_real_action = ["x"]
         // Release persists.
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 80, 12));
         assert_eq!(
-            app.config.ui.staged_pane_height_pct,
+            app.engine.config.ui.staged_pane_height_pct,
             app.staged_pane_height_pct
         );
     }
@@ -9337,14 +9399,14 @@ not_a_real_action = ["x"]
         install_mouse_layout(&mut app);
         app.mouse_layout.unstaged_list = Some(Rect::new(78, 1, 21, 6));
         app.mouse_layout.staged_list = Some(Rect::new(78, 8, 21, 5));
-        app.unstaged_files = vec![ChangedFile {
+        app.engine.unstaged_files = vec![ChangedFile {
             path: "a.txt".into(),
             status: "M".into(),
             additions: 1,
             deletions: 0,
             binary: false,
         }];
-        app.staged_files = vec![ChangedFile {
+        app.engine.staged_files = vec![ChangedFile {
             path: "b.txt".into(),
             status: "A".into(),
             additions: 1,
@@ -9371,7 +9433,7 @@ not_a_real_action = ["x"]
         // commit_area: rows 13..19 (y=13, height=6) — includes border
         app.mouse_layout.staged_list = Some(Rect::new(78, 9, 21, 3));
         app.mouse_layout.commit_area = Some(Rect::new(77, 13, 23, 6));
-        app.staged_files = vec![ChangedFile {
+        app.engine.staged_files = vec![ChangedFile {
             path: "b.txt".into(),
             status: "A".into(),
             additions: 1,
@@ -9391,7 +9453,7 @@ not_a_real_action = ["x"]
         // Release persists.
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 80, 10));
         assert_eq!(
-            app.config.ui.commit_pane_height_pct,
+            app.engine.config.ui.commit_pane_height_pct,
             app.commit_pane_height_pct
         );
     }
@@ -9414,7 +9476,7 @@ not_a_real_action = ["x"]
         install_mouse_layout(&mut app);
         app.mouse_layout.staged_list = Some(Rect::new(78, 9, 21, 3));
         app.mouse_layout.commit_area = Some(Rect::new(77, 13, 23, 6));
-        app.staged_files = vec![ChangedFile {
+        app.engine.staged_files = vec![ChangedFile {
             path: "b.txt".into(),
             status: "A".into(),
             additions: 1,
@@ -9531,7 +9593,7 @@ not_a_real_action = ["x"]
     fn command_palette_gates_new_agent_from_pr_on_github_availability() {
         let mut app = test_app(default_bindings());
 
-        app.github_integration_enabled = true;
+        app.engine.github_integration_enabled = true;
         app.gh_status = crate::model::GhStatus::NotInstalled;
         let unavailable_names = app
             .filtered_palette_commands("pr")
@@ -9548,7 +9610,7 @@ not_a_real_action = ["x"]
             .collect::<Vec<_>>();
         assert!(available_names.contains(&"new-agent-from-pr"));
 
-        app.github_integration_enabled = false;
+        app.engine.github_integration_enabled = false;
         let disabled_names = app
             .filtered_palette_commands("pr")
             .into_iter()
@@ -9560,7 +9622,7 @@ not_a_real_action = ["x"]
     #[test]
     fn resolved_pull_request_prefills_name_prompt_with_head_branch() {
         let mut app = test_app(default_bindings());
-        let project = app.projects[0].clone();
+        let project = app.engine.projects[0].clone();
 
         app.worker_tx
             .send(WorkerEvent::PullRequestResolved {
@@ -9643,7 +9705,7 @@ not_a_real_action = ["x"]
     #[test]
     fn mouse_click_project_browser_row_selects_then_double_click_opens_entry() {
         let mut app = test_app(default_bindings());
-        let root = PathBuf::from(&app.projects[0].path);
+        let root = PathBuf::from(&app.engine.projects[0].path);
         let child = root.join("child");
         std::fs::create_dir_all(&child).expect("child dir");
         app.prompt = PromptState::BrowseProjects {
@@ -9691,7 +9753,7 @@ not_a_real_action = ["x"]
         use ratatui::style::Color;
 
         let mut app = test_app(default_bindings());
-        let themes_dir = app.paths.root.join("themes");
+        let themes_dir = app.engine.paths.root.join("themes");
         std::fs::create_dir_all(&themes_dir).expect("themes dir");
         std::fs::write(
             themes_dir.join("z_mouse_preview.toml"),
@@ -9825,7 +9887,7 @@ cyan = "#00ffff"
     fn mouse_click_browser_search_input_moves_cursor_and_edits_filter() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::BrowseProjects {
-            current_dir: PathBuf::from(&app.projects[0].path),
+            current_dir: PathBuf::from(&app.engine.projects[0].path),
             entries: Vec::new(),
             loading: false,
             selected: 0,
@@ -9858,7 +9920,7 @@ cyan = "#00ffff"
     fn mouse_click_browser_path_input_moves_cursor_and_edits_path() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::BrowseProjects {
-            current_dir: PathBuf::from(&app.projects[0].path),
+            current_dir: PathBuf::from(&app.engine.projects[0].path),
             entries: Vec::new(),
             loading: false,
             selected: 0,
@@ -9887,7 +9949,7 @@ cyan = "#00ffff"
     #[test]
     fn project_browser_typed_enter_failure_opens_modal_and_restores_path() {
         let mut app = test_app(default_bindings());
-        let root = PathBuf::from(&app.projects[0].path);
+        let root = PathBuf::from(&app.engine.projects[0].path);
         let outside = tempdir().expect("outside tempdir");
         let typed = outside.path().join("not-a-repo");
         std::fs::create_dir_all(&typed).expect("typed dir");
@@ -9933,7 +9995,7 @@ cyan = "#00ffff"
     #[test]
     fn project_browser_typed_enter_duplicate_failure_restores_path() {
         let mut app = test_app(default_bindings());
-        let root = PathBuf::from(&app.projects[0].path);
+        let root = PathBuf::from(&app.engine.projects[0].path);
         app.prompt = PromptState::BrowseProjects {
             current_dir: root.clone(),
             entries: Vec::new(),
@@ -9961,7 +10023,7 @@ cyan = "#00ffff"
     #[test]
     fn added_project_is_selected_after_save_completes() {
         let mut app = test_app(default_bindings());
-        let project_dir = app.paths.root.join("second-project");
+        let project_dir = app.engine.paths.root.join("second-project");
         std::fs::create_dir_all(&project_dir).expect("project dir");
         init_test_repo(&project_dir);
 
@@ -9984,7 +10046,7 @@ cyan = "#00ffff"
     #[test]
     fn project_browser_typed_arrows_select_and_tab_applies_completion() {
         let mut app = test_app(default_bindings());
-        let root = PathBuf::from(&app.projects[0].path);
+        let root = PathBuf::from(&app.engine.projects[0].path);
         let alpha = root.join("alpha");
         let alpine = root.join("alpine");
         std::fs::create_dir_all(&alpha).expect("alpha dir");
@@ -10059,7 +10121,7 @@ cyan = "#00ffff"
     #[test]
     fn project_browser_typed_up_down_select_completions_without_applying() {
         let mut app = test_app(default_bindings());
-        let root = PathBuf::from(&app.projects[0].path);
+        let root = PathBuf::from(&app.engine.projects[0].path);
         app.prompt = PromptState::BrowseProjects {
             current_dir: root,
             entries: Vec::new(),
@@ -10108,7 +10170,7 @@ cyan = "#00ffff"
     #[test]
     fn project_browser_exit_path_editor_binding_returns_to_browse_mode() {
         let mut app = test_app(default_bindings());
-        let root = PathBuf::from(&app.projects[0].path);
+        let root = PathBuf::from(&app.engine.projects[0].path);
         app.prompt = PromptState::BrowseProjects {
             current_dir: root,
             entries: Vec::new(),
@@ -10143,10 +10205,10 @@ cyan = "#00ffff"
     #[test]
     fn mouse_click_pick_editor_row_selects_then_double_click_opens_editor() {
         let mut app = test_app(default_bindings());
-        std::fs::create_dir_all(&app.sessions[0].worktree_path).expect("worktree");
+        std::fs::create_dir_all(&app.engine.sessions[0].worktree_path).expect("worktree");
         app.prompt = PromptState::PickEditor {
             session_label: "agent-branch".to_string(),
-            worktree_path: app.sessions[0].worktree_path.clone(),
+            worktree_path: app.engine.sessions[0].worktree_path.clone(),
             editors: vec![DetectedEditor {
                 kind: EditorKind::VsCode,
                 label: "VS Code",
@@ -10378,8 +10440,8 @@ cyan = "#00ffff"
         // immediate feedback for cursor moves and toggles.
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
-            session_id: app.sessions[0].id.clone(),
-            branch_name: app.sessions[0].branch_name.clone(),
+            session_id: app.engine.sessions[0].id.clone(),
+            branch_name: app.engine.sessions[0].branch_name.clone(),
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
             worktree_shared: false,
@@ -10451,11 +10513,11 @@ cyan = "#00ffff"
     #[test]
     fn quit_prompt_counts_running_companion_terminals_and_agents() {
         let mut app = test_app(default_bindings());
-        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
         let (command, args) = ("/bin/sh", vec!["-c".to_string(), "sleep 5".to_string()]);
         let provider =
             PtyClient::spawn(command, &args, worktree, 24, 80, 1_000).expect("spawn test agent");
-        let session_id = app.sessions[0].id.clone();
+        let session_id = app.engine.sessions[0].id.clone();
         app.providers.insert(session_id.clone(), provider);
         // Insert a companion terminal to simulate a running terminal.
         let term_client =
@@ -10491,12 +10553,13 @@ cyan = "#00ffff"
     #[test]
     fn change_agent_provider_swaps_in_place_when_stopped() {
         let mut app = test_app(default_bindings());
-        let original_session_id = app.sessions[0].id.clone();
-        let original_worktree = app.sessions[0].worktree_path.clone();
-        app.sessions[0].provider = ProviderKind::from_str("codex");
-        app.sessions[0].status = SessionStatus::Detached;
-        app.session_store
-            .upsert_session(&app.sessions[0])
+        let original_session_id = app.engine.sessions[0].id.clone();
+        let original_worktree = app.engine.sessions[0].worktree_path.clone();
+        app.engine.sessions[0].provider = ProviderKind::from_str("codex");
+        app.engine.sessions[0].status = SessionStatus::Detached;
+        app.engine
+            .session_store
+            .upsert_session(&app.engine.sessions[0])
             .expect("persist session");
 
         app.rebuild_left_items();
@@ -10523,13 +10586,17 @@ cyan = "#00ffff"
             .expect("apply provider swap");
 
         // Exactly one session still exists; its provider was mutated in place.
-        assert_eq!(app.sessions.len(), 1);
-        assert_eq!(app.sessions[0].id, original_session_id);
-        assert_eq!(app.sessions[0].provider.as_str(), "gemini");
-        assert_eq!(app.sessions[0].worktree_path, original_worktree);
+        assert_eq!(app.engine.sessions.len(), 1);
+        assert_eq!(app.engine.sessions[0].id, original_session_id);
+        assert_eq!(app.engine.sessions[0].provider.as_str(), "gemini");
+        assert_eq!(app.engine.sessions[0].worktree_path, original_worktree);
         assert!(matches!(app.prompt, PromptState::None));
 
-        let persisted = app.session_store.load_sessions().expect("load sessions");
+        let persisted = app
+            .engine
+            .session_store
+            .load_sessions()
+            .expect("load sessions");
         assert_eq!(persisted.len(), 1);
         assert_eq!(persisted[0].provider.as_str(), "gemini");
 
@@ -10539,11 +10606,11 @@ cyan = "#00ffff"
     #[test]
     fn change_agent_provider_swaps_but_warns_when_agent_is_running() {
         let mut app = test_app(default_bindings());
-        app.sessions[0].provider = ProviderKind::from_str("codex");
-        app.sessions[0].status = SessionStatus::Active;
-        let session_id = app.sessions[0].id.clone();
+        app.engine.sessions[0].provider = ProviderKind::from_str("codex");
+        app.engine.sessions[0].status = SessionStatus::Active;
+        let session_id = app.engine.sessions[0].id.clone();
 
-        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
         let provider = PtyClient::spawn(
             "/bin/sh",
             &["-c".to_string(), "sleep 5".to_string()],
@@ -10580,8 +10647,12 @@ cyan = "#00ffff"
 
         // Provider is swapped now; the warning just tells the user the running
         // PTY hasn't caught up yet.
-        assert_eq!(app.sessions[0].provider.as_str(), "gemini");
-        let persisted = app.session_store.load_sessions().expect("load sessions");
+        assert_eq!(app.engine.sessions[0].provider.as_str(), "gemini");
+        let persisted = app
+            .engine
+            .session_store
+            .load_sessions()
+            .expect("load sessions");
         assert_eq!(persisted[0].provider.as_str(), "gemini");
         assert!(
             app.providers.contains_key(&session_id),
@@ -10606,11 +10677,12 @@ cyan = "#00ffff"
     #[test]
     fn change_agent_provider_preserves_resume_for_previously_started_provider() {
         let mut app = test_app(default_bindings());
-        app.sessions[0].provider = ProviderKind::from_str("claude");
-        app.sessions[0].status = SessionStatus::Detached;
-        app.sessions[0].started_providers = vec!["codex".to_string(), "claude".to_string()];
-        app.session_store
-            .upsert_session(&app.sessions[0])
+        app.engine.sessions[0].provider = ProviderKind::from_str("claude");
+        app.engine.sessions[0].status = SessionStatus::Detached;
+        app.engine.sessions[0].started_providers = vec!["codex".to_string(), "claude".to_string()];
+        app.engine
+            .session_store
+            .upsert_session(&app.engine.sessions[0])
             .expect("persist session with history");
 
         app.rebuild_left_items();
@@ -10645,9 +10717,9 @@ cyan = "#00ffff"
         app.apply_change_agent_provider()
             .expect("swap back to codex");
 
-        assert_eq!(app.sessions[0].provider.as_str(), "codex");
+        assert_eq!(app.engine.sessions[0].provider.as_str(), "codex");
         // should_resume_session uses started_providers + config's resume_args.
-        let session = app.sessions[0].clone();
+        let session = app.engine.sessions[0].clone();
         assert!(
             app.should_resume_session(&session),
             "codex was launched on this worktree earlier, so resume must be active"
@@ -10662,11 +10734,11 @@ cyan = "#00ffff"
     #[test]
     fn change_agent_provider_marks_providers_without_resume_support() {
         let mut app = test_app(default_bindings());
-        app.sessions[0].provider = ProviderKind::from_str("codex");
-        app.sessions[0].status = SessionStatus::Detached;
+        app.engine.sessions[0].provider = ProviderKind::from_str("codex");
+        app.engine.sessions[0].status = SessionStatus::Detached;
         // Pretend copilot was launched earlier — it still shouldn't advertise
         // resume because copilot's config has `resume_args: None`.
-        app.sessions[0].started_providers = vec!["copilot".to_string()];
+        app.engine.sessions[0].started_providers = vec!["copilot".to_string()];
 
         app.rebuild_left_items();
         app.selected_left = app
@@ -10805,7 +10877,7 @@ cyan = "#00ffff"
     fn custom_exit_interactive_key_reopens_minimized_agent_from_projects() {
         let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["home"])]);
         let mut app = test_app(bindings);
-        let session_id = app.sessions[0].id.clone();
+        let session_id = app.engine.sessions[0].id.clone();
         app.providers.insert(
             session_id,
             PtyClient::spawn(
@@ -10941,8 +11013,8 @@ cyan = "#00ffff"
 
         assert_eq!(app.running_companion_terminal_count(), 0);
 
-        let session_id = app.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
         let (command, args) = ("/bin/sh", vec!["-c".to_string(), "sleep 2".to_string()]);
         let client = PtyClient::spawn(command, &args, worktree, 24, 80, 1_000).expect("spawn");
         app.companion_terminals.insert(
@@ -11105,7 +11177,7 @@ cyan = "#00ffff"
             "fn main() { println!(\"hi\"); }\n",
         );
         app.selected_left = 1;
-        app.unstaged_files = vec![ChangedFile {
+        app.engine.unstaged_files = vec![ChangedFile {
             path: "src/main.rs".into(),
             status: "M".into(),
             additions: 1,
@@ -11125,7 +11197,7 @@ cyan = "#00ffff"
 
         assert!(matches!(app.prompt, PromptState::None));
         let contents = std::fs::read_to_string(
-            PathBuf::from(&app.sessions[0].worktree_path).join("src/main.rs"),
+            PathBuf::from(&app.engine.sessions[0].worktree_path).join("src/main.rs"),
         )
         .expect("discarded file");
         assert_eq!(contents, "fn main() {}\n");
@@ -11135,8 +11207,8 @@ cyan = "#00ffff"
     fn mouse_click_delete_dialog_cancel_button_closes_prompt() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
-            session_id: app.sessions[0].id.clone(),
-            branch_name: app.sessions[0].branch_name.clone(),
+            session_id: app.engine.sessions[0].id.clone(),
+            branch_name: app.engine.sessions[0].branch_name.clone(),
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
             worktree_shared: false,
@@ -11154,8 +11226,8 @@ cyan = "#00ffff"
     fn mouse_click_delete_dialog_checkbox_toggles_delete_worktree() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
-            session_id: app.sessions[0].id.clone(),
-            branch_name: app.sessions[0].branch_name.clone(),
+            session_id: app.engine.sessions[0].id.clone(),
+            branch_name: app.engine.sessions[0].branch_name.clone(),
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
             worktree_shared: false,
@@ -11184,8 +11256,8 @@ cyan = "#00ffff"
 
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
-            session_id: app.sessions[0].id.clone(),
-            branch_name: app.sessions[0].branch_name.clone(),
+            session_id: app.engine.sessions[0].id.clone(),
+            branch_name: app.engine.sessions[0].branch_name.clone(),
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
             worktree_shared: false,
@@ -11228,8 +11300,8 @@ cyan = "#00ffff"
     fn shift_tab_moves_delete_agent_focus_backwards() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
-            session_id: app.sessions[0].id.clone(),
-            branch_name: app.sessions[0].branch_name.clone(),
+            session_id: app.engine.sessions[0].id.clone(),
+            branch_name: app.engine.sessions[0].branch_name.clone(),
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
             worktree_shared: false,
@@ -11268,8 +11340,8 @@ cyan = "#00ffff"
     fn tab_with_shift_moves_delete_agent_focus_backwards() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
-            session_id: app.sessions[0].id.clone(),
-            branch_name: app.sessions[0].branch_name.clone(),
+            session_id: app.engine.sessions[0].id.clone(),
+            branch_name: app.engine.sessions[0].branch_name.clone(),
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: false,
             worktree_shared: false,
@@ -11397,7 +11469,7 @@ cyan = "#00ffff"
     #[test]
     fn mouse_click_rename_input_moves_cursor() {
         let mut app = test_app(default_bindings());
-        let sid = app.sessions[0].id.clone();
+        let sid = app.engine.sessions[0].id.clone();
         app.prompt = PromptState::RenameSession {
             session_id: sid,
             input: TextInput::with_text("rename me".to_string()),
@@ -11416,7 +11488,7 @@ cyan = "#00ffff"
     #[test]
     fn mouse_click_rename_checkbox_toggles_branch_rename() {
         let mut app = test_app(default_bindings());
-        let sid = app.sessions[0].id.clone();
+        let sid = app.engine.sessions[0].id.clone();
         app.prompt = PromptState::RenameSession {
             session_id: sid,
             input: TextInput::with_text("rename me".to_string()),
@@ -11630,7 +11702,7 @@ cyan = "#00ffff"
     #[test]
     fn read_startup_command_logs_opens_latest_log_fullscreen() {
         let mut app = test_app(default_bindings());
-        let log_dir = crate::startup::agent_log_dir(&app.paths, "project-1", "session-1");
+        let log_dir = crate::startup::agent_log_dir(&app.engine.paths, "project-1", "session-1");
         std::fs::create_dir_all(&log_dir).expect("log dir");
         std::fs::write(log_dir.join("20260515T010000Z-old.log"), "old log").expect("old log");
         std::fs::write(log_dir.join("20260515T020000Z-new.log"), "new log").expect("new log");
@@ -11860,15 +11932,15 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         // Override the "codex" provider to use /bin/sh so the fallback spawn
         // works on CI where codex is not installed.
-        app.config.providers.commands.insert(
+        app.engine.config.providers.commands.insert(
             "codex".to_string(),
             crate::config::ProviderCommandConfig {
                 command: "/bin/sh".to_string(),
                 ..Default::default()
             },
         );
-        let session_id = app.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
         // Spawn a process that exits immediately without producing output.
         let args = vec!["-c".to_string(), "exit 1".to_string()];
         let client =
@@ -11894,7 +11966,7 @@ cyan = "#00ffff"
             app.providers.contains_key(&session_id),
             "provider should still be present after fallback retry"
         );
-        assert_eq!(app.sessions[0].status, SessionStatus::Active);
+        assert_eq!(app.engine.sessions[0].status, SessionStatus::Active);
         assert_eq!(app.input_target, InputTarget::Agent);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
         assert!(
@@ -11911,8 +11983,8 @@ cyan = "#00ffff"
     #[test]
     fn resume_fallback_skipped_when_pty_had_substantial_output() {
         let mut app = test_app(default_bindings());
-        let session_id = app.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
         // Spawn a process that produces many lines of output before exiting.
         // This simulates a real agent session that ran and then exited normally.
         let args = vec!["-c".to_string(), "seq 1 30".to_string()];
@@ -11928,12 +12000,12 @@ cyan = "#00ffff"
         // Wait for the process to produce output and exit.
         std::thread::sleep(std::time::Duration::from_millis(200));
         drain_until(&mut app, |app| {
-            app.sessions[0].status == SessionStatus::Detached
+            app.engine.sessions[0].status == SessionStatus::Detached
         });
 
         // Since the PTY had substantial output (>5 lines), the fallback
         // should NOT have triggered. The session should be detached.
-        assert_eq!(app.sessions[0].status, SessionStatus::Detached);
+        assert_eq!(app.engine.sessions[0].status, SessionStatus::Detached);
         assert!(
             !app.resume_fallback_candidates.contains_key(&session_id),
             "candidate should have been removed even when skipped"
@@ -11945,15 +12017,15 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         // Override the "codex" provider to use /bin/sh so the fallback spawn
         // works on CI where codex is not installed.
-        app.config.providers.commands.insert(
+        app.engine.config.providers.commands.insert(
             "codex".to_string(),
             crate::config::ProviderCommandConfig {
                 command: "/bin/sh".to_string(),
                 ..Default::default()
             },
         );
-        let session_id = app.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
         // Spawn a process that prints a single line (like a failed --continue)
         // and then exits. The fallback should still trigger because the output
         // is minimal (≤5 lines with no scrollback).
@@ -11984,7 +12056,7 @@ cyan = "#00ffff"
             app.providers.contains_key(&session_id),
             "provider should still be present after fallback retry"
         );
-        assert_eq!(app.sessions[0].status, SessionStatus::Active);
+        assert_eq!(app.engine.sessions[0].status, SessionStatus::Active);
         assert!(
             app.status.text().contains("No prior session to resume"),
             "status should inform user about fallback: {:?}",
@@ -11995,8 +12067,8 @@ cyan = "#00ffff"
     #[test]
     fn no_fallback_for_non_candidate_sessions() {
         let mut app = test_app(default_bindings());
-        let session_id = app.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
         // Spawn a process that exits immediately, but do NOT add it as a candidate.
         let args = vec!["-c".to_string(), "exit 1".to_string()];
         let client =
@@ -12015,14 +12087,14 @@ cyan = "#00ffff"
             !app.providers.contains_key(&session_id),
             "provider should have been removed"
         );
-        assert_eq!(app.sessions[0].status, SessionStatus::Detached);
+        assert_eq!(app.engine.sessions[0].status, SessionStatus::Detached);
     }
 
     #[test]
     fn zero_exit_clears_desired_running() {
         let mut app = test_app(default_bindings());
-        let session_id = app.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
         let args = vec!["-c".to_string(), "exit 0".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn zero-exit");
@@ -12033,16 +12105,20 @@ cyan = "#00ffff"
         std::thread::sleep(std::time::Duration::from_millis(200));
         drain_until(&mut app, |app| !app.providers.contains_key(&session_id));
 
-        assert!(!app.sessions[0].desired_running);
-        let loaded = app.session_store.load_sessions().expect("load sessions");
+        assert!(!app.engine.sessions[0].desired_running);
+        let loaded = app
+            .engine
+            .session_store
+            .load_sessions()
+            .expect("load sessions");
         assert!(!loaded[0].desired_running);
     }
 
     #[test]
     fn nonzero_exit_keeps_desired_running() {
         let mut app = test_app(default_bindings());
-        let session_id = app.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
         let args = vec!["-c".to_string(), "exit 1".to_string()];
         let client = PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
             .expect("spawn nonzero-exit");
@@ -12053,16 +12129,20 @@ cyan = "#00ffff"
         std::thread::sleep(std::time::Duration::from_millis(200));
         drain_until(&mut app, |app| !app.providers.contains_key(&session_id));
 
-        assert!(app.sessions[0].desired_running);
-        let loaded = app.session_store.load_sessions().expect("load sessions");
+        assert!(app.engine.sessions[0].desired_running);
+        let loaded = app
+            .engine
+            .session_store
+            .load_sessions()
+            .expect("load sessions");
         assert!(loaded[0].desired_running);
     }
 
     #[test]
     fn quick_nonzero_exit_reports_minimal_output() {
         let mut app = test_app(default_bindings());
-        let session_id = app.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
         let args = vec![
             "-c".to_string(),
             "echo 'custom provider failed'; exit 1".to_string(),
@@ -12091,8 +12171,8 @@ cyan = "#00ffff"
     #[test]
     fn startup_auto_reopens_eligible_sessions() {
         let mut app = test_app(default_bindings());
-        let session_id = app.sessions[0].id.clone();
-        app.config.providers.commands.insert(
+        let session_id = app.engine.sessions[0].id.clone();
+        app.engine.config.providers.commands.insert(
             "codex".to_string(),
             crate::config::ProviderCommandConfig {
                 command: "/bin/sh".to_string(),
@@ -12101,24 +12181,24 @@ cyan = "#00ffff"
                 ..Default::default()
             },
         );
-        app.config.ui.auto_reopen_agents = true;
-        app.sessions[0].desired_running = true;
+        app.engine.config.ui.auto_reopen_agents = true;
+        app.engine.sessions[0].desired_running = true;
 
         app.restore_sessions();
         drain_until(&mut app, |app| {
             app.providers.contains_key(&session_id)
                 && !app.agent_launches_in_flight.contains(&session_id)
-                && app.sessions[0].status == SessionStatus::Active
+                && app.engine.sessions[0].status == SessionStatus::Active
         });
 
         assert!(app.providers.contains_key(&session_id));
-        assert_eq!(app.sessions[0].status, SessionStatus::Active);
+        assert_eq!(app.engine.sessions[0].status, SessionStatus::Active);
     }
 
     #[test]
     fn startup_auto_reopen_respects_global_project_and_agent_opt_outs() {
         let mut app = test_app(default_bindings());
-        app.config.providers.commands.insert(
+        app.engine.config.providers.commands.insert(
             "codex".to_string(),
             crate::config::ProviderCommandConfig {
                 command: "/bin/sh".to_string(),
@@ -12126,19 +12206,19 @@ cyan = "#00ffff"
                 ..Default::default()
             },
         );
-        app.sessions[0].desired_running = true;
+        app.engine.sessions[0].desired_running = true;
 
-        app.config.ui.auto_reopen_agents = false;
+        app.engine.config.ui.auto_reopen_agents = false;
         app.restore_sessions();
         assert!(app.providers.is_empty());
 
-        app.config.ui.auto_reopen_agents = true;
-        app.projects[0].auto_reopen_agents = Some(false);
+        app.engine.config.ui.auto_reopen_agents = true;
+        app.engine.projects[0].auto_reopen_agents = Some(false);
         app.restore_sessions();
         assert!(app.providers.is_empty());
 
-        app.projects[0].auto_reopen_agents = None;
-        app.sessions[0].auto_reopen_enabled = false;
+        app.engine.projects[0].auto_reopen_agents = None;
+        app.engine.sessions[0].auto_reopen_enabled = false;
         app.restore_sessions();
         assert!(app.providers.is_empty());
     }
@@ -12146,7 +12226,7 @@ cyan = "#00ffff"
     #[test]
     fn hung_resume_falls_back_to_fresh_session_once() {
         let mut app = test_app(default_bindings());
-        app.config.providers.commands.insert(
+        app.engine.config.providers.commands.insert(
             "opencode".to_string(),
             crate::config::ProviderCommandConfig {
                 command: "/bin/sh".to_string(),
@@ -12156,9 +12236,9 @@ cyan = "#00ffff"
                 ..Default::default()
             },
         );
-        app.sessions[0].provider = ProviderKind::from_str("opencode");
-        let session_id = app.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        app.engine.sessions[0].provider = ProviderKind::from_str("opencode");
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn hung resume");
@@ -12181,7 +12261,7 @@ cyan = "#00ffff"
             app.providers.contains_key(&session_id),
             "provider should still be present after timeout fallback"
         );
-        assert_eq!(app.sessions[0].status, SessionStatus::Active);
+        assert_eq!(app.engine.sessions[0].status, SessionStatus::Active);
         assert!(
             !app.resume_fallback_candidates.contains_key(&session_id),
             "candidate should have been removed after timeout fallback"
@@ -12196,7 +12276,7 @@ cyan = "#00ffff"
     #[test]
     fn hung_fresh_session_does_not_retry_forever() {
         let mut app = test_app(default_bindings());
-        app.config.providers.commands.insert(
+        app.engine.config.providers.commands.insert(
             "opencode".to_string(),
             crate::config::ProviderCommandConfig {
                 command: "/bin/sh".to_string(),
@@ -12206,9 +12286,9 @@ cyan = "#00ffff"
                 ..Default::default()
             },
         );
-        app.sessions[0].provider = ProviderKind::from_str("opencode");
-        let session_id = app.sessions[0].id.clone();
-        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        app.engine.sessions[0].provider = ProviderKind::from_str("opencode");
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn fresh hang");
@@ -12229,7 +12309,7 @@ cyan = "#00ffff"
     /// enough scrollback history so we can engage scroll mode.
     fn app_with_scrolled_back_pty() -> App {
         let mut app = test_app(default_bindings());
-        let session_id = app.sessions[0].id.clone();
+        let session_id = app.engine.sessions[0].id.clone();
 
         // Spawn a shell that prints enough lines to fill the 5-row terminal
         // and produce scrollback history, then sleeps to stay alive.
@@ -12390,7 +12470,7 @@ cyan = "#00ffff"
         let mut app = app_with_scrolled_back_pty();
 
         // Add a macro so OpenMacroBar would normally open the bar.
-        app.config.macros.entries.insert(
+        app.engine.config.macros.entries.insert(
             "test".to_string(),
             crate::config::MacroEntry {
                 text: "hello".to_string(),
@@ -12544,7 +12624,7 @@ cyan = "#00ffff"
     /// and a mouse layout so we can test click-outside-overlay behavior.
     fn app_with_interactive_agent_pty() -> App {
         let mut app = test_app(default_bindings());
-        let session_id = app.sessions[0].id.clone();
+        let session_id = app.engine.sessions[0].id.clone();
 
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         let client = PtyClient::spawn("sh", &args, std::path::Path::new("."), 5, 40, 100)
@@ -13315,14 +13395,14 @@ cyan = "#00ffff"
 
     fn app_with_two_macros() -> App {
         let mut app = test_app(default_bindings());
-        app.config.macros.entries.insert(
+        app.engine.config.macros.entries.insert(
             "greet".to_string(),
             crate::config::MacroEntry {
                 text: "hello".to_string(),
                 surface: crate::config::MacroSurface::Agent,
             },
         );
-        app.config.macros.entries.insert(
+        app.engine.config.macros.entries.insert(
             "farewell".to_string(),
             crate::config::MacroEntry {
                 text: "goodbye".to_string(),
@@ -13354,11 +13434,11 @@ cyan = "#00ffff"
 
         assert_eq!(pending_delete_state(&app), Some(("greet", false)));
         assert_eq!(
-            app.config.macros.entries.len(),
+            app.engine.config.macros.entries.len(),
             2,
             "macro must not be removed from config until confirmed"
         );
-        assert!(app.config.macros.entries.contains_key("greet"));
+        assert!(app.engine.config.macros.entries.contains_key("greet"));
     }
 
     #[test]
@@ -13376,7 +13456,7 @@ cyan = "#00ffff"
             matches!(app.prompt, PromptState::EditMacros { .. }),
             "macro editor should remain open after dismissing the confirm dialog"
         );
-        assert_eq!(app.config.macros.entries.len(), 2);
+        assert_eq!(app.engine.config.macros.entries.len(), 2);
     }
 
     #[test]
@@ -13405,14 +13485,14 @@ cyan = "#00ffff"
             .expect("handle enter");
 
         assert!(pending_delete_state(&app).is_none());
-        assert_eq!(app.config.macros.entries.len(), 2);
-        assert!(app.config.macros.entries.contains_key("greet"));
+        assert_eq!(app.engine.config.macros.entries.len(), 2);
+        assert!(app.engine.config.macros.entries.contains_key("greet"));
     }
 
     #[test]
     fn macro_delete_enter_on_delete_removes_and_persists() {
         let mut app = app_with_two_macros();
-        let config_path = app.paths.config_path.clone();
+        let config_path = app.engine.paths.config_path.clone();
         app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
             .expect("handle d");
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
@@ -13423,10 +13503,10 @@ cyan = "#00ffff"
 
         assert!(pending_delete_state(&app).is_none());
         assert!(
-            !app.config.macros.entries.contains_key("greet"),
+            !app.engine.config.macros.entries.contains_key("greet"),
             "macro should be removed from in-memory config"
         );
-        assert_eq!(app.config.macros.entries.len(), 1);
+        assert_eq!(app.engine.config.macros.entries.len(), 1);
 
         if let PromptState::EditMacros { entries, .. } = &app.prompt {
             assert!(
@@ -13452,7 +13532,8 @@ cyan = "#00ffff"
     fn macro_delete_surfaces_save_failure_on_status_line() {
         let mut app = app_with_two_macros();
         // Point config_path at a directory that doesn't exist so save_config fails.
-        app.paths.config_path = app
+        app.engine.paths.config_path = app
+            .engine
             .paths
             .root
             .join("nope")
@@ -13492,7 +13573,7 @@ cyan = "#00ffff"
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .expect("handle space");
         assert!(pending_delete_state(&app).is_none());
-        assert_eq!(app.config.macros.entries.len(), 2);
+        assert_eq!(app.engine.config.macros.entries.len(), 2);
 
         // Now re-open and focus Delete, then Space should remove.
         app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
@@ -13503,7 +13584,7 @@ cyan = "#00ffff"
             .expect("handle space");
 
         assert!(pending_delete_state(&app).is_none());
-        assert!(!app.config.macros.entries.contains_key("greet"));
+        assert!(!app.engine.config.macros.entries.contains_key("greet"));
     }
 
     #[test]
@@ -13516,7 +13597,7 @@ cyan = "#00ffff"
         // literal `^[[200` and `^[[201` strings. If the text is sent as-is,
         // only the macro text will appear.
         let mut app = test_app(default_bindings());
-        let session_id = app.sessions[0].id.clone();
+        let session_id = app.engine.sessions[0].id.clone();
         let client = PtyClient::spawn(
             "sh",
             &["-c".to_string(), "stty raw -echo; exec cat -v".to_string()],
@@ -13533,7 +13614,7 @@ cyan = "#00ffff"
         // Give the shell a moment to enter raw mode and exec cat.
         std::thread::sleep(std::time::Duration::from_millis(250));
 
-        app.config.macros.entries.insert(
+        app.engine.config.macros.entries.insert(
             "greet".to_string(),
             crate::config::MacroEntry {
                 text: "hello-macro".to_string(),
@@ -13611,7 +13692,7 @@ cyan = "#00ffff"
         // works, the `^[` and `^M` markers will appear between the two
         // halves of the macro text.
         let mut app = test_app(default_bindings());
-        let session_id = app.sessions[0].id.clone();
+        let session_id = app.engine.sessions[0].id.clone();
         let client = PtyClient::spawn(
             "sh",
             &["-c".to_string(), "stty raw -echo; exec cat -v".to_string()],
@@ -13627,7 +13708,7 @@ cyan = "#00ffff"
 
         std::thread::sleep(std::time::Duration::from_millis(250));
 
-        app.config.macros.entries.insert(
+        app.engine.config.macros.entries.insert(
             "multi".to_string(),
             crate::config::MacroEntry {
                 text: "first\nsecond".to_string(),
@@ -13669,13 +13750,13 @@ cyan = "#00ffff"
     #[test]
     fn change_default_provider_updates_config_and_refreshes_projects() {
         let mut app = test_app(default_bindings());
-        app.config.defaults.provider = "codex".to_string();
+        app.engine.config.defaults.provider = "codex".to_string();
 
         // project-2 pins itself to "gemini" and must not be touched.
         let pinned = Project {
             id: "project-2".to_string(),
             name: "pinned".to_string(),
-            path: app.paths.root.join("pinned").display().to_string(),
+            path: app.engine.paths.root.join("pinned").display().to_string(),
             explicit_default_provider: Some(ProviderKind::from_str("gemini")),
             default_provider: ProviderKind::from_str("gemini"),
             leading_branch: Some("main".to_string()),
@@ -13686,7 +13767,8 @@ cyan = "#00ffff"
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         };
-        app.session_store
+        app.engine
+            .session_store
             .upsert_project(&ProjectConfig {
                 id: pinned.id.clone(),
                 path: pinned.path.clone(),
@@ -13698,9 +13780,9 @@ cyan = "#00ffff"
                 env: pinned.env.clone(),
             })
             .expect("seed pinned project");
-        app.projects.push(pinned);
+        app.engine.projects.push(pinned);
 
-        let original_session_provider = app.sessions[0].provider.clone();
+        let original_session_provider = app.engine.sessions[0].provider.clone();
 
         app.open_change_default_provider_prompt()
             .expect("open default provider picker");
@@ -13719,12 +13801,13 @@ cyan = "#00ffff"
             .expect("apply default provider");
 
         // Config was updated in memory and on disk.
-        assert_eq!(app.config.defaults.provider, "claude");
-        let persisted = crate::config::ensure_config(&app.paths).expect("reload config");
+        assert_eq!(app.engine.config.defaults.provider, "claude");
+        let persisted = crate::config::ensure_config(&app.engine.paths).expect("reload config");
         assert_eq!(persisted.defaults.provider, "claude");
 
         // Inherited project picks up the new default.
         let inherited = app
+            .engine
             .projects
             .iter()
             .find(|project| project.id == "project-1")
@@ -13733,6 +13816,7 @@ cyan = "#00ffff"
 
         // Pinned project keeps its explicit override.
         let pinned = app
+            .engine
             .projects
             .iter()
             .find(|project| project.id == "project-2")
@@ -13740,7 +13824,7 @@ cyan = "#00ffff"
         assert_eq!(pinned.default_provider.as_str(), "gemini");
 
         // Existing sessions are untouched — provider is frozen at creation.
-        assert_eq!(app.sessions[0].provider, original_session_provider);
+        assert_eq!(app.engine.sessions[0].provider, original_session_provider);
 
         assert!(matches!(app.prompt, PromptState::None));
         assert!(
@@ -13753,7 +13837,7 @@ cyan = "#00ffff"
     #[test]
     fn change_default_provider_rejects_current_selection_without_mutating_config() {
         let mut app = test_app(default_bindings());
-        app.config.defaults.provider = "codex".to_string();
+        app.engine.config.defaults.provider = "codex".to_string();
 
         app.open_change_default_provider_prompt()
             .expect("open default provider picker");
@@ -13771,7 +13855,7 @@ cyan = "#00ffff"
         app.apply_change_default_provider()
             .expect("apply no-op selection");
 
-        assert_eq!(app.config.defaults.provider, "codex");
+        assert_eq!(app.engine.config.defaults.provider, "codex");
         assert!(matches!(app.prompt, PromptState::None));
         assert!(
             app.status
@@ -13793,8 +13877,12 @@ cyan = "#00ffff"
                 .contains("Startup auto-reopen disabled for project")
         });
 
-        assert_eq!(app.projects[0].auto_reopen_agents, Some(false));
-        let persisted = app.session_store.load_projects().expect("load projects");
+        assert_eq!(app.engine.projects[0].auto_reopen_agents, Some(false));
+        let persisted = app
+            .engine
+            .session_store
+            .load_projects()
+            .expect("load projects");
         assert_eq!(persisted[0].auto_reopen_agents, Some(false));
         assert!(
             app.status
@@ -13810,8 +13898,12 @@ cyan = "#00ffff"
         app.execute_command("toggle-agent-auto-reopen".to_string())
             .expect("toggle agent auto-reopen");
 
-        assert!(!app.sessions[0].auto_reopen_enabled);
-        let loaded = app.session_store.load_sessions().expect("load sessions");
+        assert!(!app.engine.sessions[0].auto_reopen_enabled);
+        let loaded = app
+            .engine
+            .session_store
+            .load_sessions()
+            .expect("load sessions");
         assert_eq!(loaded.len(), 1);
         assert!(!loaded[0].auto_reopen_enabled);
         assert!(
@@ -13824,12 +13916,12 @@ cyan = "#00ffff"
     #[test]
     fn change_project_default_provider_updates_selected_project_only() {
         let mut app = test_app(default_bindings());
-        app.config.defaults.provider = "codex".to_string();
+        app.engine.config.defaults.provider = "codex".to_string();
 
         let pinned = Project {
             id: "project-2".to_string(),
             name: "pinned".to_string(),
-            path: app.paths.root.join("pinned").display().to_string(),
+            path: app.engine.paths.root.join("pinned").display().to_string(),
             explicit_default_provider: Some(ProviderKind::from_str("gemini")),
             default_provider: ProviderKind::from_str("gemini"),
             leading_branch: Some("main".to_string()),
@@ -13840,7 +13932,8 @@ cyan = "#00ffff"
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
         };
-        app.session_store
+        app.engine
+            .session_store
             .upsert_project(&ProjectConfig {
                 id: pinned.id.clone(),
                 path: pinned.path.clone(),
@@ -13852,7 +13945,7 @@ cyan = "#00ffff"
                 env: pinned.env.clone(),
             })
             .expect("seed pinned project");
-        app.projects.push(pinned);
+        app.engine.projects.push(pinned);
 
         app.open_change_project_default_provider_prompt()
             .expect("open project provider picker");
@@ -13879,8 +13972,12 @@ cyan = "#00ffff"
             app.status.text().contains("changed to claude")
         });
 
-        assert_eq!(app.config.defaults.provider, "codex");
-        let persisted = app.session_store.load_projects().expect("load projects");
+        assert_eq!(app.engine.config.defaults.provider, "codex");
+        let persisted = app
+            .engine
+            .session_store
+            .load_projects()
+            .expect("load projects");
         let inherited_cfg = persisted
             .iter()
             .find(|project| project.id == "project-1")
@@ -13894,6 +13991,7 @@ cyan = "#00ffff"
         assert_eq!(pinned_cfg.default_provider.as_deref(), Some("gemini"));
 
         let project = app
+            .engine
             .projects
             .iter()
             .find(|project| project.id == "project-1")
@@ -13910,12 +14008,13 @@ cyan = "#00ffff"
     #[test]
     fn change_project_default_provider_can_revert_to_global_default() {
         let mut app = test_app(default_bindings());
-        app.config.defaults.provider = "codex".to_string();
-        app.session_store
-            .update_project_default_provider(&app.projects[0].id, Some("gemini"))
+        app.engine.config.defaults.provider = "codex".to_string();
+        app.engine
+            .session_store
+            .update_project_default_provider(&app.engine.projects[0].id, Some("gemini"))
             .expect("seed project override");
-        app.projects[0].explicit_default_provider = Some(ProviderKind::from_str("gemini"));
-        app.projects[0].default_provider = ProviderKind::from_str("gemini");
+        app.engine.projects[0].explicit_default_provider = Some(ProviderKind::from_str("gemini"));
+        app.engine.projects[0].default_provider = ProviderKind::from_str("gemini");
 
         app.open_change_project_default_provider_prompt()
             .expect("open project provider picker");
@@ -13938,13 +14037,17 @@ cyan = "#00ffff"
                 .contains("now inherits the global default provider")
         });
 
-        let persisted = app.session_store.load_projects().expect("load projects");
+        let persisted = app
+            .engine
+            .session_store
+            .load_projects()
+            .expect("load projects");
         let config = persisted
             .iter()
             .find(|project| project.id == "project-1")
             .expect("project-1 config");
         assert_eq!(config.default_provider, None);
-        assert_eq!(app.projects[0].default_provider.as_str(), "codex");
+        assert_eq!(app.engine.projects[0].default_provider.as_str(), "codex");
         assert!(
             app.status
                 .text()
@@ -13985,7 +14088,7 @@ cyan = "#00ffff"
 
         let mut app = test_app(default_bindings());
         append_empty_projects(&mut app, 4);
-        app.config.ui.empty_project_separator_min_projects = 5;
+        app.engine.config.ui.empty_project_separator_min_projects = 5;
         app.rebuild_left_items();
 
         let backend = TestBackend::new(160, 24);
@@ -14020,10 +14123,10 @@ cyan = "#00ffff"
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
-        app.config.defaults.provider = "claude".to_string();
-        app.projects[0].explicit_default_provider = Some(ProviderKind::from_str("codex"));
-        app.projects[0].default_provider = ProviderKind::from_str("codex");
-        app.sessions[0].provider = ProviderKind::from_str("gemini");
+        app.engine.config.defaults.provider = "claude".to_string();
+        app.engine.projects[0].explicit_default_provider = Some(ProviderKind::from_str("codex"));
+        app.engine.projects[0].default_provider = ProviderKind::from_str("codex");
+        app.engine.sessions[0].provider = ProviderKind::from_str("gemini");
         app.rebuild_left_items();
         app.selected_left = app
             .left_items()
@@ -14064,10 +14167,10 @@ cyan = "#00ffff"
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
-        app.config.defaults.provider = "codex".to_string();
-        app.projects[0].explicit_default_provider = None;
-        app.projects[0].default_provider = ProviderKind::from_str("codex");
-        app.sessions[0].provider = ProviderKind::from_str("codex");
+        app.engine.config.defaults.provider = "codex".to_string();
+        app.engine.projects[0].explicit_default_provider = None;
+        app.engine.projects[0].default_provider = ProviderKind::from_str("codex");
+        app.engine.sessions[0].provider = ProviderKind::from_str("codex");
         app.rebuild_left_items();
         app.selected_left = app
             .left_items()
@@ -14112,13 +14215,13 @@ cyan = "#00ffff"
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
-        app.projects[0].default_provider = ProviderKind::from_str("codex");
-        app.sessions[0].provider = ProviderKind::from_str("codex");
-        app.sessions[0].status = SessionStatus::Active;
-        let session_id = app.sessions[0].id.clone();
+        app.engine.projects[0].default_provider = ProviderKind::from_str("codex");
+        app.engine.sessions[0].provider = ProviderKind::from_str("codex");
+        app.engine.sessions[0].status = SessionStatus::Active;
+        let session_id = app.engine.sessions[0].id.clone();
 
         // Spawn a real PTY so the session looks live.
-        let worktree = std::path::Path::new(&app.sessions[0].worktree_path);
+        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
         let pty = PtyClient::spawn(
             "/bin/sh",
             &["-c".to_string(), "sleep 5".to_string()],
@@ -14154,8 +14257,11 @@ cyan = "#00ffff"
 
         // session.provider is now gemini, but the PTY is still running codex;
         // running_provider_for should reflect that.
-        assert_eq!(app.sessions[0].provider.as_str(), "gemini");
-        assert_eq!(app.running_provider_for(&app.sessions[0]).as_str(), "codex");
+        assert_eq!(app.engine.sessions[0].provider.as_str(), "gemini");
+        assert_eq!(
+            app.running_provider_for(&app.engine.sessions[0]).as_str(),
+            "codex"
+        );
 
         let backend = TestBackend::new(200, 30);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -14188,7 +14294,7 @@ cyan = "#00ffff"
         app.providers.remove(&session_id);
         app.running_provider_pins.remove(&session_id);
         assert_eq!(
-            app.running_provider_for(&app.sessions[0]).as_str(),
+            app.running_provider_for(&app.engine.sessions[0]).as_str(),
             "gemini"
         );
 
