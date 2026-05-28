@@ -99,14 +99,6 @@ pub struct ResourceStats {
 }
 
 #[derive(Clone, Debug)]
-pub enum VisualRow {
-    /// Index into the `ResourceStats` rows vec.
-    Parent(usize),
-    /// (parent row index, child index within that parent's `children`).
-    Child(usize, usize),
-}
-
-#[derive(Clone, Debug)]
 pub struct BrowserEntry {
     pub path: PathBuf,
     pub label: String,

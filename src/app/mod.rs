@@ -55,7 +55,7 @@ pub(crate) use dux_core::worker::{
     AgentLaunchFailedData, AgentLaunchKind, AgentLaunchReadyData, AgentLaunchRequest,
     BranchWarningKind, BrowserEntry, CreateAgentBranchInspection, NonDefaultBranchAction,
     ProcessInfo, ProjectPersistenceAction, ProjectWorktreeEntry, PullTarget, ResolvedPullRequest,
-    ResourceStats, VisualRow, WorkerEvent,
+    ResourceStats, WorkerEvent,
 };
 
 pub struct App {
@@ -742,6 +742,14 @@ pub(crate) fn leading_branch_for_project(path: &Path, current_branch: &str) -> S
         Some(default) => default,
         None => current_branch.to_string(),
     }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum VisualRow {
+    /// Index into the `ResourceStats` rows vec.
+    Parent(usize),
+    /// (parent row index, child index within that parent's `children`).
+    Child(usize, usize),
 }
 
 pub(crate) fn build_visual_rows(rows: &[ResourceStats], expanded: &HashSet<u32>) -> Vec<VisualRow> {
