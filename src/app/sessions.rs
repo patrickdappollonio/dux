@@ -291,7 +291,7 @@ impl App {
     ) -> Result<()> {
         self.prompt = PromptState::None;
         self.set_busy(format!("Resolving PR for project \"{}\"...", project.name));
-        let worker_tx = self.worker_tx.clone();
+        let worker_tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
             super::workers::run_pull_request_lookup_job(project, raw_input, worker_tx);
         });
@@ -368,7 +368,7 @@ impl App {
         self.set_busy(format!(
             "Checking out \"{target_branch}\" in {path} {reason}..."
         ));
-        let worker_tx = self.worker_tx.clone();
+        let worker_tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
             super::workers::run_add_project_checkout_job(action, target_branch, worker_tx);
         });
@@ -379,7 +379,7 @@ impl App {
             "Checking the current branch for project \"{}\" before creating an agent...",
             project.name
         ));
-        let worker_tx = self.worker_tx.clone();
+        let worker_tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
             super::workers::run_create_agent_branch_inspection_job(project, worker_tx);
         });
@@ -403,7 +403,7 @@ impl App {
             "Checking the default branch for project \"{}\"...",
             project.name
         ));
-        let worker_tx = self.worker_tx.clone();
+        let worker_tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
             super::workers::run_checkout_project_default_branch_inspection_job(project, worker_tx);
         });
@@ -415,15 +415,15 @@ impl App {
         request: CreateAgentRequest,
         busy_message: String,
     ) -> Result<()> {
-        if self.create_agent_in_flight {
+        if self.engine.create_agent_in_flight {
             self.set_error("An agent is already being created or forked.");
             return Ok(());
         }
-        self.create_agent_in_flight = true;
+        self.engine.create_agent_in_flight = true;
         self.set_busy(busy_message);
         let paths = self.engine.paths.clone();
         let config = self.engine.config.clone();
-        let worker_tx = self.worker_tx.clone();
+        let worker_tx = self.engine.worker_tx.clone();
         let term_size = crossterm::terminal::size().unwrap_or((80, 24));
         thread::spawn(move || {
             super::workers::run_create_agent_job(request, paths, config, worker_tx, term_size);
@@ -468,14 +468,18 @@ impl App {
 
     pub(crate) fn dispatch_agent_launch(&mut self, request: AgentLaunchRequest) -> bool {
         let session_id = request.session.id.clone();
-        if !self.agent_launches_in_flight.insert(session_id.clone()) {
+        if !self
+            .engine
+            .agent_launches_in_flight
+            .insert(session_id.clone())
+        {
             self.set_info(format!(
                 "Agent \"{}\" is already launching.",
                 request.session.branch_name
             ));
             return false;
         }
-        let tx = self.worker_tx.clone();
+        let tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
             super::workers::run_agent_launch_job(request, tx);
         });
@@ -558,7 +562,7 @@ impl App {
                 .unwrap_or_else(|| session.branch_name.clone());
             format!("{base} ({count})")
         };
-        self.companion_terminals.insert(
+        self.engine.companion_terminals.insert(
             terminal_id.clone(),
             CompanionTerminal {
                 session_id: session.id.clone(),
@@ -587,6 +591,7 @@ impl App {
         };
 
         let first = self
+            .engine
             .companion_terminals
             .iter()
             .filter(|(_, t)| t.session_id == session.id)
@@ -643,7 +648,7 @@ impl App {
         } else {
             format!("{base} ({count})")
         };
-        self.companion_terminals.insert(
+        self.engine.companion_terminals.insert(
             terminal_id.clone(),
             CompanionTerminal {
                 session_id: session.id.clone(),
@@ -808,7 +813,7 @@ impl App {
         // uses a separate async path entirely. If a caller violates this
         // contract two concurrent git calls will race, so we assert in debug.
         debug_assert!(
-            !self.pending_deletions.contains(session_id),
+            !self.engine.pending_deletions.contains(session_id),
             "do_delete_session called while an async delete worker is in-flight for {}",
             session_id,
         );
@@ -841,7 +846,7 @@ impl App {
         // Reject duplicate delete requests for the same session. The first
         // worker will clean up when it finishes; spawning a second one would
         // just race and confuse the status line.
-        if self.pending_deletions.contains(session_id) {
+        if self.engine.pending_deletions.contains(session_id) {
             self.set_error("Deletion already in progress for this agent. Wait for it to finish.");
             return;
         }
@@ -879,12 +884,12 @@ impl App {
             // Mark in-flight BEFORE spawning, so a fast follow-up action from
             // the same event loop tick can see the guard. The worker event
             // handler clears the entry on completion (Ok or Err).
-            self.pending_deletions.insert(session.id.clone());
+            self.engine.pending_deletions.insert(session.id.clone());
             let sid = session.id.clone();
             let project_path = project.path.clone();
             let worktree_path = session.worktree_path.clone();
             let branch_name = session.branch_name.clone();
-            let tx = self.worker_tx.clone();
+            let tx = self.engine.worker_tx.clone();
             std::thread::spawn(move || {
                 let result = git::remove_worktree(
                     Path::new(&project_path),
@@ -903,7 +908,8 @@ impl App {
                 session.branch_name
             );
             self.set_busy(&busy_msg);
-            self.deletion_busy_messages
+            self.engine
+                .deletion_busy_messages
                 .insert(session.id.clone(), busy_msg);
         } else {
             logger::info(&format!(
@@ -968,10 +974,10 @@ impl App {
             session.id.clone(),
         );
 
-        self.providers.remove(&session.id);
-        self.running_provider_pins.remove(&session.id);
+        self.engine.providers.remove(&session.id);
+        self.engine.running_provider_pins.remove(&session.id);
         self.last_pty_activity.remove(&session.id);
-        self.resume_fallback_candidates.remove(&session.id);
+        self.engine.resume_fallback_candidates.remove(&session.id);
         self.clear_companion_terminals_for_session(&session.id);
         self.engine
             .sessions
@@ -1073,11 +1079,12 @@ impl App {
 
     pub(crate) fn do_delete_terminal(&mut self, terminal_id: &str) {
         let label = self
+            .engine
             .companion_terminals
             .get(terminal_id)
             .map(|t| t.label.clone());
         // Removing from the map drops PtyClient, which kills the child process.
-        self.companion_terminals.remove(terminal_id);
+        self.engine.companion_terminals.remove(terminal_id);
         if self.active_terminal_id.as_deref() == Some(terminal_id) {
             self.active_terminal_id = None;
         }
@@ -1170,7 +1177,7 @@ impl App {
         self.prompt = PromptState::None;
 
         let session_id = self.engine.sessions[session_index].id.clone();
-        let running = self.providers.contains_key(&session_id);
+        let running = self.engine.providers.contains_key(&session_id);
         let previous_provider = self.engine.sessions[session_index].provider.clone();
 
         let session = &mut self.engine.sessions[session_index];
@@ -1183,7 +1190,8 @@ impl App {
         // the user exits and relaunches the agent. Only set on the first
         // swap-while-running — later swaps don't change what's spawned.
         if running {
-            self.running_provider_pins
+            self.engine
+                .running_provider_pins
                 .entry(session_id.clone())
                 .or_insert(previous_provider.clone());
         }
@@ -1643,7 +1651,7 @@ impl App {
             return Ok(());
         };
         let paths = self.engine.paths.clone();
-        let tx = self.worker_tx.clone();
+        let tx = self.engine.worker_tx.clone();
         let branch = session.branch_name.clone();
         let terminal = self.engine.config.startup_command_terminal.clone();
         let env = crate::config::resolve_agent_env(&self.engine.config.env, &project.env)
@@ -1781,7 +1789,7 @@ impl App {
 
     fn spawn_open_path(&mut self, path: PathBuf, target: &'static str) {
         let display = path.display().to_string();
-        let tx = self.worker_tx.clone();
+        let tx = self.engine.worker_tx.clone();
         std::thread::spawn(move || {
             let result = crate::startup::open_path(&path).map_err(|err| format!("{err:#}"));
             let _ = tx.send(WorkerEvent::OpenPathCompleted {
@@ -1798,7 +1806,7 @@ impl App {
         scope: crate::startup::StartupCommandLogScope,
     ) {
         let paths = self.engine.paths.clone();
-        let tx = self.worker_tx.clone();
+        let tx = self.engine.worker_tx.clone();
         let status_label = scope_label.clone();
         std::thread::spawn(move || {
             let result = crate::startup::latest_log_for_scope(&paths, scope)
@@ -1971,11 +1979,10 @@ impl App {
         // would race the worker, potentially leaving the project deletion
         // half-finished. The user must wait for the worker to complete (or
         // fail) before retrying.
-        let pending_in_project = self
-            .engine
-            .sessions
-            .iter()
-            .any(|s| s.project_id == project.id && self.pending_deletions.contains(&s.id));
+        let pending_in_project =
+            self.engine.sessions.iter().any(|s| {
+                s.project_id == project.id && self.engine.pending_deletions.contains(&s.id)
+            });
         if pending_in_project {
             self.set_error(
                 "Cannot delete project while agent worktree removals are in progress. \
@@ -2038,10 +2045,10 @@ impl App {
             return Ok(());
         }
         // Kill existing PTY if the agent is still active.
-        self.providers.remove(&session.id);
-        self.running_provider_pins.remove(&session.id);
+        self.engine.providers.remove(&session.id);
+        self.engine.running_provider_pins.remove(&session.id);
         self.last_pty_activity.remove(&session.id);
-        self.resume_fallback_candidates.remove(&session.id);
+        self.engine.resume_fallback_candidates.remove(&session.id);
 
         let detached_label =
             self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
@@ -2101,7 +2108,7 @@ impl App {
             return Ok(());
         };
         logger::info(&format!("reconnecting session {}", session.id));
-        if self.providers.contains_key(&session.id) {
+        if self.engine.providers.contains_key(&session.id) {
             self.set_info(format!(
                 "Agent \"{}\" is already connected.",
                 session.branch_name
@@ -2250,7 +2257,7 @@ impl App {
                 match self.clipboard.copy_text(
                     &p,
                     "Agent's path copied to clipboard.",
-                    &self.worker_tx,
+                    &self.engine.worker_tx,
                 ) {
                     Ok(()) => self.set_busy("Copying path to clipboard…"),
                     Err(e) => self.set_error(format!("Copy path failed: {e}")),
@@ -2342,7 +2349,7 @@ impl App {
 
     pub(crate) fn current_pr_info(&self) -> Option<&crate::model::PrInfo> {
         self.selected_session()
-            .and_then(|session| self.pr_statuses.get(&session.id))
+            .and_then(|session| self.engine.pr_statuses.get(&session.id))
     }
 
     pub(crate) fn current_pr_url(&self) -> Option<&str> {
@@ -2395,7 +2402,7 @@ impl App {
         let mut runtimes = Vec::new();
 
         for session in &self.engine.sessions {
-            if !self.providers.contains_key(&session.id) {
+            if !self.engine.providers.contains_key(&session.id) {
                 continue;
             }
             let project_name = self.project_name_for_session(session);
@@ -2579,8 +2586,8 @@ impl App {
         for target_id in target_ids {
             match target_id {
                 RuntimeTargetId::Agent(session_id) => {
-                    if self.providers.remove(session_id).is_some() {
-                        self.running_provider_pins.remove(session_id);
+                    if self.engine.providers.remove(session_id).is_some() {
+                        self.engine.running_provider_pins.remove(session_id);
                         self.last_pty_activity.remove(session_id);
                         self.mark_session_status(session_id, SessionStatus::Detached);
                         killed_agents += 1;
@@ -2590,7 +2597,12 @@ impl App {
                     }
                 }
                 RuntimeTargetId::Terminal(terminal_id) => {
-                    if self.companion_terminals.remove(terminal_id).is_some() {
+                    if self
+                        .engine
+                        .companion_terminals
+                        .remove(terminal_id)
+                        .is_some()
+                    {
                         killed_terminals += 1;
                         if active_terminal_id.as_deref() == Some(terminal_id.as_str()) {
                             active_terminal_killed = true;
@@ -2616,7 +2628,8 @@ impl App {
         }
 
         self.clamp_terminal_cursor();
-        self.has_active_processes
+        self.engine
+            .has_active_processes
             .store(self.running_process_count() > 0, Ordering::Relaxed);
 
         (killed_agents, killed_terminals)
@@ -2644,16 +2657,18 @@ impl App {
             .find(|s| {
                 s.id != exclude_id
                     && s.worktree_path == worktree_path
-                    && self.providers.contains_key(&s.id)
+                    && self.engine.providers.contains_key(&s.id)
             })
             .cloned()?;
 
         let label = self.session_label(&conflicting);
         let provider = conflicting.provider.as_str().to_string();
-        self.providers.remove(&conflicting.id);
-        self.running_provider_pins.remove(&conflicting.id);
+        self.engine.providers.remove(&conflicting.id);
+        self.engine.running_provider_pins.remove(&conflicting.id);
         self.last_pty_activity.remove(&conflicting.id);
-        self.resume_fallback_candidates.remove(&conflicting.id);
+        self.engine
+            .resume_fallback_candidates
+            .remove(&conflicting.id);
         self.mark_session_status(&conflicting.id, SessionStatus::Detached);
 
         logger::info(&format!(
@@ -2781,6 +2796,27 @@ mod tests {
             terminal_counter: 0,
             github_integration_enabled: false,
             single_instance_lock,
+            worker_tx,
+            worker_rx,
+            providers: std::collections::HashMap::new(),
+            running_provider_pins: std::collections::HashMap::new(),
+            companion_terminals: std::collections::HashMap::new(),
+            gh_status: crate::model::GhStatus::Unknown,
+            pr_statuses: std::collections::HashMap::new(),
+            branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
+            pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
+            pr_sync_enabled: Arc::new(AtomicBool::new(false)),
+            refs_watcher: None,
+            refs_watch_paths: std::collections::HashMap::new(),
+            resume_fallback_candidates: std::collections::HashMap::new(),
+            pending_deletions: std::collections::HashSet::new(),
+            deletion_busy_messages: std::collections::HashMap::new(),
+            watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
+            has_active_processes: Arc::new(AtomicBool::new(false)),
+            create_agent_in_flight: false,
+            agent_launches_in_flight: std::collections::HashSet::new(),
+            pulls_in_flight: std::collections::HashSet::new(),
+            resource_stats_in_flight: false,
         };
         let mut app = App {
             engine,
@@ -2817,17 +2853,8 @@ mod tests {
             input_target: InputTarget::None,
             session_surface: crate::model::SessionSurface::Agent,
             clipboard: Clipboard::new(),
-            worker_tx,
-            worker_rx,
-            providers: std::collections::HashMap::new(),
-            running_provider_pins: std::collections::HashMap::new(),
-            companion_terminals: std::collections::HashMap::new(),
             active_terminal_id: None,
             terminal_return_to_list: false,
-            create_agent_in_flight: false,
-            agent_launches_in_flight: std::collections::HashSet::new(),
-            pulls_in_flight: std::collections::HashSet::new(),
-            resource_stats_in_flight: false,
             last_pty_size: (0, 0),
             last_pty_activity: std::collections::HashMap::new(),
             prev_scrollback_offset: 0,
@@ -2837,8 +2864,6 @@ mod tests {
             tick_count: 0,
             start_time: std::time::Instant::now(),
             readonly_nudge_tick: None,
-            watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
-            has_active_processes: Arc::new(AtomicBool::new(false)),
             collapsed_projects: std::collections::HashSet::new(),
             left_items_cache: Vec::new(),
             mouse_layout: MouseLayoutState::default(),
@@ -2860,18 +2885,8 @@ mod tests {
             welcome_logo_visible: false,
             welcome_logo_alt: false,
             welcome_tip_selection: usize::MAX,
-            branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-            gh_status: crate::model::GhStatus::Unknown,
             pr_banner_at_bottom: true,
-            pr_statuses: std::collections::HashMap::new(),
-            pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-            pr_sync_enabled: Arc::new(AtomicBool::new(false)),
             pr_last_checked: std::collections::HashMap::new(),
-            refs_watcher: None,
-            refs_watch_paths: std::collections::HashMap::new(),
-            resume_fallback_candidates: std::collections::HashMap::new(),
-            pending_deletions: std::collections::HashSet::new(),
-            deletion_busy_messages: std::collections::HashMap::new(),
             syntax_cache: crate::diff::SyntaxCache::new(),
             snapshot_buf: crate::pty::TerminalSnapshot::empty(),
             last_snapshot_id: None,
@@ -2920,13 +2935,13 @@ mod tests {
         }
     }
 
-    /// Inserts a dummy PtyClient placeholder into `app.providers` so that the
+    /// Inserts a dummy PtyClient placeholder into `app.engine.providers` so that the
     /// session appears "active" without actually spawning a process.
     fn mark_active(app: &mut App, session_id: &str) {
         let client =
             crate::pty::PtyClient::spawn("echo", &[], std::path::Path::new("/tmp"), 24, 80, 1000)
                 .expect("spawn echo for test");
-        app.providers.insert(session_id.to_string(), client);
+        app.engine.providers.insert(session_id.to_string(), client);
     }
 
     #[test]
@@ -2939,7 +2954,7 @@ mod tests {
 
         let label = app.detach_conflicting_worktree_session("/tmp/wt/a", "s2");
         assert!(label.is_some());
-        assert!(!app.providers.contains_key("s1"));
+        assert!(!app.engine.providers.contains_key("s1"));
     }
 
     #[test]
@@ -2952,7 +2967,7 @@ mod tests {
 
         let label = app.detach_conflicting_worktree_session("/tmp/wt/b", "s2");
         assert!(label.is_none());
-        assert!(app.providers.contains_key("s1"));
+        assert!(app.engine.providers.contains_key("s1"));
     }
 
     #[test]
@@ -2964,7 +2979,7 @@ mod tests {
 
         let label = app.detach_conflicting_worktree_session("/tmp/wt/a", "s1");
         assert!(label.is_none());
-        assert!(app.providers.contains_key("s1"));
+        assert!(app.engine.providers.contains_key("s1"));
     }
 
     #[test]
@@ -2977,7 +2992,7 @@ mod tests {
 
         let label = app.detach_conflicting_worktree_session("/tmp/wt/a", "s2");
         assert!(label.is_some());
-        assert!(!app.providers.contains_key("s1"));
+        assert!(!app.engine.providers.contains_key("s1"));
         let s1_session = app.engine.sessions.iter().find(|s| s.id == "s1").unwrap();
         assert_eq!(s1_session.status, SessionStatus::Detached);
     }
@@ -3322,7 +3337,7 @@ mod tests {
         app.begin_delete_session("s1", true);
 
         assert!(
-            app.pending_deletions.contains("s1"),
+            app.engine.pending_deletions.contains("s1"),
             "session must be marked pending while async worker runs",
         );
     }
@@ -3343,7 +3358,7 @@ mod tests {
         app.begin_delete_session("s1", false);
 
         assert!(
-            app.pending_deletions.is_empty(),
+            app.engine.pending_deletions.is_empty(),
             "inline path should never populate pending_deletions",
         );
     }
@@ -3363,11 +3378,11 @@ mod tests {
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
         app.begin_delete_session("s1", true);
-        assert_eq!(app.pending_deletions.len(), 1, "first call records pending");
+        assert_eq!(app.engine.pending_deletions.len(), 1, "first call records pending");
 
         app.begin_delete_session("s1", true);
         assert_eq!(
-            app.pending_deletions.len(),
+            app.engine.pending_deletions.len(),
             1,
             "duplicate request must not spawn a second worker",
         );
@@ -3391,15 +3406,15 @@ mod tests {
         // the tracking map entry.
         let busy_msg = "Removing worktree for agent \"branch-s1\"\u{2026}";
         app.set_busy(busy_msg);
-        app.pending_deletions.insert("s1".to_string());
-        app.deletion_busy_messages
+        app.engine.pending_deletions.insert("s1".to_string());
+        app.engine.deletion_busy_messages
             .insert("s1".to_string(), busy_msg.to_string());
 
         // Another code path removes the session before the worker replies.
         app.engine.sessions.retain(|s| s.id != "s1");
 
         // The worker then reports success.
-        app.worker_tx
+        app.engine.worker_tx
             .send(WorkerEvent::WorktreeRemoveCompleted {
                 session_id: "s1".to_string(),
                 result: Ok(false),
@@ -3408,7 +3423,7 @@ mod tests {
         app.drain_events();
 
         assert!(
-            app.pending_deletions.is_empty(),
+            app.engine.pending_deletions.is_empty(),
             "pending guard must be cleared on completion",
         );
         assert_ne!(
@@ -3433,15 +3448,15 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        app.pending_deletions.insert("s1".to_string());
-        app.deletion_busy_messages
+        app.engine.pending_deletions.insert("s1".to_string());
+        app.engine.deletion_busy_messages
             .insert("s1".to_string(), "Removing worktree\u{2026}".to_string());
         app.engine.sessions.retain(|s| s.id != "s1");
 
         // Another action already set a non-Busy status.
         app.set_info("Deleted project \"demo\" and all its agents");
 
-        app.worker_tx
+        app.engine.worker_tx
             .send(WorkerEvent::WorktreeRemoveCompleted {
                 session_id: "s1".to_string(),
                 result: Ok(false),
@@ -3476,8 +3491,8 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        app.pending_deletions.insert("s1".to_string());
-        app.deletion_busy_messages.insert(
+        app.engine.pending_deletions.insert("s1".to_string());
+        app.engine.deletion_busy_messages.insert(
             "s1".to_string(),
             "Removing worktree for agent \"branch-s1\"\u{2026}".to_string(),
         );
@@ -3486,7 +3501,7 @@ mod tests {
         // An unrelated operation set its own Busy message.
         app.set_busy("Pushing to remote\u{2026}");
 
-        app.worker_tx
+        app.engine.worker_tx
             .send(WorkerEvent::WorktreeRemoveCompleted {
                 session_id: "s1".to_string(),
                 result: Ok(false),
@@ -3525,7 +3540,7 @@ mod tests {
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
         // Simulate an async delete in-flight for this session.
-        app.pending_deletions.insert("s1".to_string());
+        app.engine.pending_deletions.insert("s1".to_string());
 
         // The project is the first item in the list, select it.
         app.selected_left = 0;
@@ -3562,9 +3577,9 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        app.pending_deletions.insert("s1".to_string());
+        app.engine.pending_deletions.insert("s1".to_string());
 
-        app.worker_tx
+        app.engine.worker_tx
             .send(WorkerEvent::WorktreeRemoveCompleted {
                 session_id: "s1".to_string(),
                 result: Err("fatal: not a git repository".to_string()),

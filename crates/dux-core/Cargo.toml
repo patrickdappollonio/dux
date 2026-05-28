@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 alacritty_terminal = "0.26.0"
+notify.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 compact_str = "0.9"

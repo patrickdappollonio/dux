@@ -452,7 +452,7 @@ impl App {
         if !defer_global && let Some(action) = self.bindings.lookup(&key, BindingScope::Global) {
             match action {
                 Action::Quit => {
-                    let agent_count = self.providers.len();
+                    let agent_count = self.engine.providers.len();
                     let terminal_count = self.running_companion_terminal_count();
                     if agent_count + terminal_count > 0 {
                         self.prompt = PromptState::ConfirmQuit {
@@ -670,7 +670,7 @@ impl App {
                     if self.selected_session().is_some()
                         && self
                             .selected_session()
-                            .map(|s| self.providers.contains_key(&s.id))
+                            .map(|s| self.engine.providers.contains_key(&s.id))
                             .unwrap_or(false)
                     {
                         self.focus = FocusPane::Center;
@@ -751,7 +751,7 @@ impl App {
                     // or entering interactive mode if the agent is active.
                     let has_provider = self
                         .selected_session()
-                        .map(|s| self.providers.contains_key(&s.id))
+                        .map(|s| self.engine.providers.contains_key(&s.id))
                         .unwrap_or(false);
                     if has_provider {
                         self.reset_pty_scrollback();
@@ -1260,7 +1260,7 @@ impl App {
 
         let cfg = provider_config(&self.engine.config, &session.provider);
         let prov = provider::create_provider(session.provider.as_str(), cfg);
-        let tx = self.worker_tx.clone();
+        let tx = self.engine.worker_tx.clone();
         self.commit_input
             .set_overlay("Generating commit message\u{2026}");
         self.set_busy("Generating AI commit message from staged diff\u{2026}");
@@ -1308,7 +1308,7 @@ impl App {
             return Ok(());
         };
         let worktree = PathBuf::from(&session.worktree_path);
-        let tx = self.worker_tx.clone();
+        let tx = self.engine.worker_tx.clone();
         self.set_busy("Pushing to remote…");
         thread::spawn(move || {
             let result = git::push(&worktree).map(|_| ()).map_err(|e| e.to_string());
@@ -1325,12 +1325,12 @@ impl App {
         already_running_message: impl Into<String>,
     ) {
         let repo_key = repo_path.to_string_lossy().into_owned();
-        if !self.pulls_in_flight.insert(repo_key.clone()) {
+        if !self.engine.pulls_in_flight.insert(repo_key.clone()) {
             self.set_warning(already_running_message);
             return;
         }
 
-        let tx = self.worker_tx.clone();
+        let tx = self.engine.worker_tx.clone();
         self.set_busy(busy_message);
         thread::spawn(move || {
             let result = match &target {
@@ -5507,7 +5507,7 @@ impl App {
                         self.reload_changed_files();
                         if self
                             .selected_session()
-                            .map(|s| self.providers.contains_key(&s.id))
+                            .map(|s| self.engine.providers.contains_key(&s.id))
                             .unwrap_or(false)
                         {
                             self.input_target = InputTarget::Agent;
@@ -5526,7 +5526,7 @@ impl App {
                 self.reload_changed_files();
                 if self
                     .selected_session()
-                    .map(|s| self.providers.contains_key(&s.id))
+                    .map(|s| self.engine.providers.contains_key(&s.id))
                     .unwrap_or(false)
                 {
                     self.input_target = InputTarget::Agent;
@@ -5555,7 +5555,7 @@ impl App {
         if self.selected_session().is_some()
             && self
                 .selected_session()
-                .map(|s| self.providers.contains_key(&s.id))
+                .map(|s| self.engine.providers.contains_key(&s.id))
                 .unwrap_or(false)
         {
             self.reset_pty_scrollback();
@@ -6103,7 +6103,7 @@ impl App {
             let _ = self.clipboard.copy_text(
                 &text,
                 "Terminal text copied to clipboard.",
-                &self.worker_tx,
+                &self.engine.worker_tx,
             );
         }
     }
@@ -6239,7 +6239,7 @@ impl App {
             let _ = self.clipboard.copy_text(
                 &text,
                 "Startup command log text copied to clipboard.",
-                &self.worker_tx,
+                &self.engine.worker_tx,
             );
         }
     }
@@ -6430,7 +6430,7 @@ mod tests {
 
     fn complete_create_agent_branch_inspection(app: &mut App, branch: &str, leading_branch: &str) {
         let project = app.engine.projects[0].clone();
-        app.worker_tx
+        app.engine.worker_tx
             .send(WorkerEvent::CreateAgentBranchInspected {
                 project,
                 result: Ok(CreateAgentBranchInspection {
@@ -6514,6 +6514,27 @@ mod tests {
             terminal_counter: 0,
             github_integration_enabled: false,
             single_instance_lock,
+            worker_tx,
+            worker_rx,
+            providers: std::collections::HashMap::new(),
+            running_provider_pins: std::collections::HashMap::new(),
+            companion_terminals: std::collections::HashMap::new(),
+            gh_status: crate::model::GhStatus::Unknown,
+            pr_statuses: std::collections::HashMap::new(),
+            branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
+            pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
+            pr_sync_enabled: Arc::new(AtomicBool::new(false)),
+            refs_watcher: None,
+            refs_watch_paths: std::collections::HashMap::new(),
+            resume_fallback_candidates: std::collections::HashMap::new(),
+            pending_deletions: std::collections::HashSet::new(),
+            deletion_busy_messages: std::collections::HashMap::new(),
+            watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
+            has_active_processes: Arc::new(AtomicBool::new(false)),
+            create_agent_in_flight: false,
+            agent_launches_in_flight: std::collections::HashSet::new(),
+            pulls_in_flight: std::collections::HashSet::new(),
+            resource_stats_in_flight: false,
         };
         let mut app = App {
             engine,
@@ -6550,17 +6571,8 @@ mod tests {
             input_target: InputTarget::None,
             session_surface: crate::model::SessionSurface::Agent,
             clipboard: Clipboard::new(),
-            worker_tx,
-            worker_rx,
-            providers: std::collections::HashMap::new(),
-            running_provider_pins: std::collections::HashMap::new(),
-            companion_terminals: std::collections::HashMap::new(),
             active_terminal_id: None,
             terminal_return_to_list: false,
-            create_agent_in_flight: false,
-            agent_launches_in_flight: std::collections::HashSet::new(),
-            pulls_in_flight: std::collections::HashSet::new(),
-            resource_stats_in_flight: false,
             last_pty_size: (0, 0),
             last_pty_activity: std::collections::HashMap::new(),
             prev_scrollback_offset: 0,
@@ -6570,8 +6582,6 @@ mod tests {
             tick_count: 0,
             start_time: std::time::Instant::now(),
             readonly_nudge_tick: None,
-            watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
-            has_active_processes: Arc::new(AtomicBool::new(false)),
             collapsed_projects: std::collections::HashSet::new(),
             left_items_cache: Vec::new(),
             mouse_layout: MouseLayoutState::default(),
@@ -6593,18 +6603,8 @@ mod tests {
             welcome_logo_visible: false,
             welcome_logo_alt: false,
             welcome_tip_selection: usize::MAX,
-            branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-            gh_status: crate::model::GhStatus::Unknown,
             pr_banner_at_bottom: true,
-            pr_statuses: std::collections::HashMap::new(),
-            pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-            pr_sync_enabled: Arc::new(AtomicBool::new(false)),
             pr_last_checked: std::collections::HashMap::new(),
-            refs_watcher: None,
-            refs_watch_paths: std::collections::HashMap::new(),
-            resume_fallback_candidates: std::collections::HashMap::new(),
-            pending_deletions: std::collections::HashSet::new(),
-            deletion_busy_messages: std::collections::HashMap::new(),
             syntax_cache: crate::diff::SyntaxCache::new(),
             snapshot_buf: crate::pty::TerminalSnapshot::empty(),
             last_snapshot_id: None,
@@ -7003,7 +7003,7 @@ not_a_real_action = ["x"]
             .expect("repeat refresh should not error");
 
         let repo_path = app.engine.projects[0].path.clone();
-        assert!(app.pulls_in_flight.contains(&repo_path));
+        assert!(app.engine.pulls_in_flight.contains(&repo_path));
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
         assert!(app.status.text().contains("already in progress"));
     }
@@ -7012,9 +7012,9 @@ not_a_real_action = ["x"]
     fn project_pull_completion_clears_in_flight_guard() {
         let mut app = test_app(default_bindings());
         let repo_path = app.engine.projects[0].path.clone();
-        app.pulls_in_flight.insert(repo_path.clone());
+        app.engine.pulls_in_flight.insert(repo_path.clone());
 
-        app.worker_tx
+        app.engine.worker_tx
             .send(WorkerEvent::PullCompleted {
                 repo_path,
                 target: PullTarget::Project {
@@ -7028,7 +7028,7 @@ not_a_real_action = ["x"]
 
         app.drain_events();
 
-        assert!(app.pulls_in_flight.is_empty());
+        assert!(app.engine.pulls_in_flight.is_empty());
         assert_eq!(app.engine.projects[0].current_branch, "feature/demo");
         assert_eq!(
             app.engine.projects[0].branch_status,
@@ -7047,7 +7047,7 @@ not_a_real_action = ["x"]
             .expect("repeat pull should not error");
 
         let repo_path = app.engine.sessions[0].worktree_path.clone();
-        assert!(app.pulls_in_flight.contains(&repo_path));
+        assert!(app.engine.pulls_in_flight.contains(&repo_path));
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
         assert!(app.status.text().contains("already in progress"));
     }
@@ -7366,11 +7366,11 @@ not_a_real_action = ["x"]
         let worktree_path = app.engine.sessions[0].worktree_path.clone();
         let worktree = std::path::Path::new(&worktree_path);
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
-        app.providers.insert(
+        app.engine.providers.insert(
             app.engine.sessions[0].id.clone(),
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn agent"),
         );
-        app.companion_terminals.insert(
+        app.engine.companion_terminals.insert(
             "term-1".to_string(),
             crate::app::CompanionTerminal {
                 session_id: app.engine.sessions[0].id.clone(),
@@ -7418,7 +7418,7 @@ not_a_real_action = ["x"]
         let worktree_path = app.engine.sessions[0].worktree_path.clone();
         let worktree = std::path::Path::new(&worktree_path);
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
-        app.companion_terminals.insert(
+        app.engine.companion_terminals.insert(
             "term-1".to_string(),
             crate::app::CompanionTerminal {
                 session_id: app.engine.sessions[0].id.clone(),
@@ -7616,11 +7616,11 @@ not_a_real_action = ["x"]
             updated_at: now,
         });
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
-        app.providers.insert(
+        app.engine.providers.insert(
             "session-1".to_string(),
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn first"),
         );
-        app.providers.insert(
+        app.engine.providers.insert(
             "session-2".to_string(),
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn second"),
         );
@@ -7639,8 +7639,8 @@ not_a_real_action = ["x"]
             .unwrap();
         app.resolve_confirm_kill_running(true);
 
-        assert!(app.providers.contains_key("session-1"));
-        assert!(!app.providers.contains_key("session-2"));
+        assert!(app.engine.providers.contains_key("session-1"));
+        assert!(!app.engine.providers.contains_key("session-2"));
     }
 
     #[test]
@@ -7648,11 +7648,11 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
-        app.providers.insert(
+        app.engine.providers.insert(
             "session-1".to_string(),
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn agent"),
         );
-        app.companion_terminals.insert(
+        app.engine.companion_terminals.insert(
             "term-1".to_string(),
             crate::app::CompanionTerminal {
                 session_id: app.engine.sessions[0].id.clone(),
@@ -7685,8 +7685,8 @@ not_a_real_action = ["x"]
             .unwrap();
         app.resolve_confirm_kill_running(true);
 
-        assert!(app.providers.is_empty());
-        assert!(app.companion_terminals.is_empty());
+        assert!(app.engine.providers.is_empty());
+        assert!(app.engine.companion_terminals.is_empty());
         assert_eq!(app.session_surface, SessionSurface::Agent);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
         assert!(matches!(app.prompt, PromptState::None));
@@ -7742,7 +7742,7 @@ not_a_real_action = ["x"]
             }
             other => panic!("expected name-new-agent prompt, got {other:?}"),
         }
-        assert!(!app.create_agent_in_flight);
+        assert!(!app.engine.create_agent_in_flight);
     }
 
     #[test]
@@ -7862,7 +7862,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         let repo_path = PathBuf::from(&app.engine.projects[0].path);
         run_git(&repo_path, &["branch", "feature/pr-42"]);
-        app.create_agent_in_flight = true;
+        app.engine.create_agent_in_flight = true;
 
         app.prompt = PromptState::NameNewAgent {
             request: CreateAgentRequest::PullRequest {
@@ -7919,7 +7919,7 @@ not_a_real_action = ["x"]
     fn project_branch_status_ready_marks_project_not_leading() {
         let mut app = test_app(default_bindings());
 
-        app.worker_tx
+        app.engine.worker_tx
             .send(WorkerEvent::ProjectBranchStatusReady {
                 project_id: app.engine.projects[0].id.clone(),
                 result: Ok(("feature".to_string(), ProjectBranchStatus::NotLeading)),
@@ -7943,7 +7943,7 @@ not_a_real_action = ["x"]
         project.branch_status = ProjectBranchStatus::NotLeading;
         app.engine.projects[0] = project.clone();
 
-        app.worker_tx
+        app.engine.worker_tx
             .send(WorkerEvent::NonDefaultBranchCheckoutCompleted {
                 action: NonDefaultBranchAction::CheckoutProjectDefault { project },
                 target_branch: "main".to_string(),
@@ -8012,7 +8012,7 @@ not_a_real_action = ["x"]
             }
             other => panic!("expected name-new-agent prompt, got {other:?}"),
         }
-        assert!(!app.create_agent_in_flight);
+        assert!(!app.engine.create_agent_in_flight);
     }
 
     #[test]
@@ -8193,14 +8193,14 @@ not_a_real_action = ["x"]
                 startup_result: None,
             },
         );
-        app.worker_tx
+        app.engine.worker_tx
             .send(WorkerEvent::AgentLaunchReady(Box::new(
                 crate::app::AgentLaunchReadyData { request, client },
             )))
             .unwrap();
         app.drain_events();
 
-        assert!(app.resume_fallback_candidates.contains_key(&session.id));
+        assert!(app.engine.resume_fallback_candidates.contains_key(&session.id));
         assert_eq!(
             app.engine
                 .sessions
@@ -8872,7 +8872,7 @@ not_a_real_action = ["x"]
         app.selected_left = 1;
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Center;
-        app.providers.insert(
+        app.engine.providers.insert(
             "session-1".to_string(),
             PtyClient::spawn(
                 "sh",
@@ -8900,7 +8900,7 @@ not_a_real_action = ["x"]
         app.selected_left = 1;
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Left;
-        app.providers.insert(
+        app.engine.providers.insert(
             "session-1".to_string(),
             PtyClient::spawn(
                 "sh",
@@ -8931,7 +8931,7 @@ not_a_real_action = ["x"]
         app.selected_left = 1;
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Center;
-        app.providers.insert(
+        app.engine.providers.insert(
             "session-1".to_string(),
             PtyClient::spawn(
                 "sh",
@@ -9536,7 +9536,7 @@ not_a_real_action = ["x"]
     #[test]
     fn command_palette_shows_current_pr_command_with_known_pr() {
         let mut app = test_app(default_bindings());
-        app.pr_statuses.insert(
+        app.engine.pr_statuses.insert(
             "session-1".to_string(),
             PrInfo {
                 number: 42,
@@ -9561,7 +9561,7 @@ not_a_real_action = ["x"]
     #[test]
     fn footer_hints_show_pr_only_for_center_focus_with_known_pr() {
         let mut app = test_app(default_bindings());
-        app.pr_statuses.insert(
+        app.engine.pr_statuses.insert(
             "session-1".to_string(),
             PrInfo {
                 number: 42,
@@ -9594,7 +9594,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
 
         app.engine.github_integration_enabled = true;
-        app.gh_status = crate::model::GhStatus::NotInstalled;
+        app.engine.gh_status = crate::model::GhStatus::NotInstalled;
         let unavailable_names = app
             .filtered_palette_commands("pr")
             .into_iter()
@@ -9602,7 +9602,7 @@ not_a_real_action = ["x"]
             .collect::<Vec<_>>();
         assert!(!unavailable_names.contains(&"new-agent-from-pr"));
 
-        app.gh_status = crate::model::GhStatus::Available;
+        app.engine.gh_status = crate::model::GhStatus::Available;
         let available_names = app
             .filtered_palette_commands("pr")
             .into_iter()
@@ -9624,7 +9624,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         let project = app.engine.projects[0].clone();
 
-        app.worker_tx
+        app.engine.worker_tx
             .send(WorkerEvent::PullRequestResolved {
                 result: Ok(ResolvedPullRequest {
                     project,
@@ -10518,11 +10518,11 @@ cyan = "#00ffff"
         let provider =
             PtyClient::spawn(command, &args, worktree, 24, 80, 1_000).expect("spawn test agent");
         let session_id = app.engine.sessions[0].id.clone();
-        app.providers.insert(session_id.clone(), provider);
+        app.engine.providers.insert(session_id.clone(), provider);
         // Insert a companion terminal to simulate a running terminal.
         let term_client =
             PtyClient::spawn(command, &args, worktree, 24, 80, 1_000).expect("spawn test terminal");
-        app.companion_terminals.insert(
+        app.engine.companion_terminals.insert(
             "term-test".to_string(),
             crate::app::CompanionTerminal {
                 session_id,
@@ -10620,7 +10620,7 @@ cyan = "#00ffff"
             1_000,
         )
         .expect("spawn test agent");
-        app.providers.insert(session_id.clone(), provider);
+        app.engine.providers.insert(session_id.clone(), provider);
 
         app.rebuild_left_items();
         app.selected_left = app
@@ -10655,7 +10655,7 @@ cyan = "#00ffff"
             .expect("load sessions");
         assert_eq!(persisted[0].provider.as_str(), "gemini");
         assert!(
-            app.providers.contains_key(&session_id),
+            app.engine.providers.contains_key(&session_id),
             "the old PTY keeps running until the user exits it"
         );
         assert_eq!(
@@ -10671,7 +10671,7 @@ cyan = "#00ffff"
         assert!(matches!(app.prompt, PromptState::None));
 
         // Clean up so the PTY doesn't outlive the test.
-        app.providers.remove(&session_id);
+        app.engine.providers.remove(&session_id);
     }
 
     #[test]
@@ -10790,7 +10790,7 @@ cyan = "#00ffff"
             app.selected_companion_terminal_status(),
             CompanionTerminalStatus::Running
         );
-        assert_eq!(app.companion_terminals.len(), 1);
+        assert_eq!(app.engine.companion_terminals.len(), 1);
         assert!(app.active_terminal_id.is_some());
         assert_eq!(app.session_surface, SessionSurface::Terminal);
         assert_eq!(app.input_target, InputTarget::Terminal);
@@ -10813,7 +10813,7 @@ cyan = "#00ffff"
         let second_id = app.active_terminal_id.clone().unwrap();
 
         assert_ne!(first_id, second_id);
-        assert_eq!(app.companion_terminals.len(), 2);
+        assert_eq!(app.engine.companion_terminals.len(), 2);
         assert_eq!(app.terminal_items().len(), 2);
     }
 
@@ -10878,7 +10878,7 @@ cyan = "#00ffff"
         let bindings = bindings_with_overrides(&[(Action::ExitInteractive, &["home"])]);
         let mut app = test_app(bindings);
         let session_id = app.engine.sessions[0].id.clone();
-        app.providers.insert(
+        app.engine.providers.insert(
             session_id,
             PtyClient::spawn(
                 "sh",
@@ -10915,7 +10915,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.focus = FocusPane::Center;
         app.center_mode = CenterMode::Agent;
-        app.providers.insert(
+        app.engine.providers.insert(
             "session-1".to_string(),
             PtyClient::spawn(
                 "sh",
@@ -10950,7 +10950,7 @@ cyan = "#00ffff"
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
         assert_eq!(app.session_surface, SessionSurface::Agent);
         // Terminal PTY should still be alive in the map.
-        assert_eq!(app.companion_terminals.len(), 1);
+        assert_eq!(app.engine.companion_terminals.len(), 1);
     }
 
     #[test]
@@ -10967,7 +10967,7 @@ cyan = "#00ffff"
 
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
         // Terminal PTY should still be alive.
-        assert_eq!(app.companion_terminals.len(), 1);
+        assert_eq!(app.engine.companion_terminals.len(), 1);
     }
 
     #[test]
@@ -11017,7 +11017,7 @@ cyan = "#00ffff"
         let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);
         let (command, args) = ("/bin/sh", vec!["-c".to_string(), "sleep 2".to_string()]);
         let client = PtyClient::spawn(command, &args, worktree, 24, 80, 1_000).expect("spawn");
-        app.companion_terminals.insert(
+        app.engine.companion_terminals.insert(
             "term-1".to_string(),
             crate::app::CompanionTerminal {
                 session_id,
@@ -11034,12 +11034,12 @@ cyan = "#00ffff"
     fn show_or_open_first_terminal_spawns_when_none_exist() {
         let mut app = test_app(default_bindings());
 
-        assert!(app.companion_terminals.is_empty());
+        assert!(app.engine.companion_terminals.is_empty());
 
         app.show_or_open_first_terminal()
             .expect("should spawn new terminal");
 
-        assert_eq!(app.companion_terminals.len(), 1);
+        assert_eq!(app.engine.companion_terminals.len(), 1);
         assert!(app.active_terminal_id.is_some());
         assert_eq!(app.session_surface, SessionSurface::Terminal);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
@@ -11055,7 +11055,7 @@ cyan = "#00ffff"
         // Spawn an initial terminal.
         app.show_companion_terminal().expect("spawn first");
         let first_id = app.active_terminal_id.clone().unwrap();
-        assert_eq!(app.companion_terminals.len(), 1);
+        assert_eq!(app.engine.companion_terminals.len(), 1);
 
         // Close overlay to simulate returning to normal view.
         app.fullscreen_overlay = FullscreenOverlay::None;
@@ -11066,7 +11066,7 @@ cyan = "#00ffff"
         app.show_or_open_first_terminal()
             .expect("should reuse existing terminal");
 
-        assert_eq!(app.companion_terminals.len(), 1, "no new terminal spawned");
+        assert_eq!(app.engine.companion_terminals.len(), 1, "no new terminal spawned");
         assert_eq!(app.active_terminal_id.as_deref(), Some(first_id.as_str()));
         assert_eq!(app.session_surface, SessionSurface::Terminal);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
@@ -11089,7 +11089,7 @@ cyan = "#00ffff"
         app.show_companion_terminal().expect("second");
         let second_id = app.active_terminal_id.clone().unwrap();
         assert_ne!(first_id, second_id);
-        assert_eq!(app.companion_terminals.len(), 2);
+        assert_eq!(app.engine.companion_terminals.len(), 2);
 
         // Close overlay.
         app.fullscreen_overlay = FullscreenOverlay::None;
@@ -11101,7 +11101,7 @@ cyan = "#00ffff"
             .expect("should reuse first");
 
         assert_eq!(app.active_terminal_id.as_deref(), Some(first_id.as_str()));
-        assert_eq!(app.companion_terminals.len(), 2, "still two terminals");
+        assert_eq!(app.engine.companion_terminals.len(), 2, "still two terminals");
     }
 
     #[test]
@@ -11118,12 +11118,12 @@ cyan = "#00ffff"
         app.left_section = LeftSection::Terminals;
         app.selected_terminal_index = 0;
 
-        let initial_count = app.companion_terminals.len();
+        let initial_count = app.engine.companion_terminals.len();
         app.spawn_terminal_for_selected_terminal()
             .expect("spawn from terminals pane");
 
         assert_eq!(
-            app.companion_terminals.len(),
+            app.engine.companion_terminals.len(),
             initial_count + 1,
             "a new terminal was created"
         );
@@ -11149,7 +11149,7 @@ cyan = "#00ffff"
         );
         assert!(app.status.text().contains("Select an agent session"));
         assert!(
-            app.companion_terminals.is_empty(),
+            app.engine.companion_terminals.is_empty(),
             "no terminal should be spawned"
         );
     }
@@ -11161,7 +11161,7 @@ cyan = "#00ffff"
         app.new_companion_terminal()
             .expect("should spawn new terminal");
 
-        assert_eq!(app.companion_terminals.len(), 1);
+        assert_eq!(app.engine.companion_terminals.len(), 1);
         assert!(app.active_terminal_id.is_some());
         assert_eq!(app.input_target, InputTarget::Terminal);
     }
@@ -11945,9 +11945,9 @@ cyan = "#00ffff"
         let args = vec!["-c".to_string(), "exit 1".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn quick-exit");
-        app.providers.insert(session_id.clone(), client);
+        app.engine.providers.insert(session_id.clone(), client);
         app.mark_session_status(&session_id, SessionStatus::Active);
-        app.resume_fallback_candidates
+        app.engine.resume_fallback_candidates
             .insert(session_id.clone(), std::time::Instant::now());
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
@@ -11955,22 +11955,22 @@ cyan = "#00ffff"
         // Wait for the process to exit.
         std::thread::sleep(std::time::Duration::from_millis(200));
         drain_until(&mut app, |app| {
-            app.providers.contains_key(&session_id)
-                && !app.agent_launches_in_flight.contains(&session_id)
+            app.engine.providers.contains_key(&session_id)
+                && !app.engine.agent_launches_in_flight.contains(&session_id)
                 && app.status.text().contains("No prior session to resume")
         });
 
         // The fallback should have spawned a fresh session, so the provider
         // is still present and the session is active (not detached).
         assert!(
-            app.providers.contains_key(&session_id),
+            app.engine.providers.contains_key(&session_id),
             "provider should still be present after fallback retry"
         );
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Active);
         assert_eq!(app.input_target, InputTarget::Agent);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
         assert!(
-            !app.resume_fallback_candidates.contains_key(&session_id),
+            !app.engine.resume_fallback_candidates.contains_key(&session_id),
             "candidate should have been removed after fallback"
         );
         assert!(
@@ -11990,9 +11990,9 @@ cyan = "#00ffff"
         let args = vec!["-c".to_string(), "seq 1 30".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn with output");
-        app.providers.insert(session_id.clone(), client);
+        app.engine.providers.insert(session_id.clone(), client);
         app.mark_session_status(&session_id, SessionStatus::Active);
-        app.resume_fallback_candidates
+        app.engine.resume_fallback_candidates
             .insert(session_id.clone(), std::time::Instant::now());
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
@@ -12007,7 +12007,7 @@ cyan = "#00ffff"
         // should NOT have triggered. The session should be detached.
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Detached);
         assert!(
-            !app.resume_fallback_candidates.contains_key(&session_id),
+            !app.engine.resume_fallback_candidates.contains_key(&session_id),
             "candidate should have been removed even when skipped"
         );
     }
@@ -12035,9 +12035,9 @@ cyan = "#00ffff"
         ];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn one-liner");
-        app.providers.insert(session_id.clone(), client);
+        app.engine.providers.insert(session_id.clone(), client);
         app.mark_session_status(&session_id, SessionStatus::Active);
-        app.resume_fallback_candidates
+        app.engine.resume_fallback_candidates
             .insert(session_id.clone(), std::time::Instant::now());
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
@@ -12045,15 +12045,15 @@ cyan = "#00ffff"
         // Wait for the process to produce its one line and exit.
         std::thread::sleep(std::time::Duration::from_millis(200));
         drain_until(&mut app, |app| {
-            app.providers.contains_key(&session_id)
-                && !app.agent_launches_in_flight.contains(&session_id)
+            app.engine.providers.contains_key(&session_id)
+                && !app.engine.agent_launches_in_flight.contains(&session_id)
                 && app.status.text().contains("No prior session to resume")
         });
 
         // Despite having output, the fallback should trigger because the
         // output is minimal (one line, no scrollback).
         assert!(
-            app.providers.contains_key(&session_id),
+            app.engine.providers.contains_key(&session_id),
             "provider should still be present after fallback retry"
         );
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Active);
@@ -12073,18 +12073,18 @@ cyan = "#00ffff"
         let args = vec!["-c".to_string(), "exit 1".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn quick-exit");
-        app.providers.insert(session_id.clone(), client);
+        app.engine.providers.insert(session_id.clone(), client);
         app.mark_session_status(&session_id, SessionStatus::Active);
         // Deliberately not adding to resume_fallback_candidates.
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
 
         std::thread::sleep(std::time::Duration::from_millis(200));
-        drain_until(&mut app, |app| !app.providers.contains_key(&session_id));
+        drain_until(&mut app, |app| !app.engine.providers.contains_key(&session_id));
 
         // Without being a candidate, the session should just go to detached.
         assert!(
-            !app.providers.contains_key(&session_id),
+            !app.engine.providers.contains_key(&session_id),
             "provider should have been removed"
         );
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Detached);
@@ -12098,12 +12098,12 @@ cyan = "#00ffff"
         let args = vec!["-c".to_string(), "exit 0".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn zero-exit");
-        app.providers.insert(session_id.clone(), client);
+        app.engine.providers.insert(session_id.clone(), client);
         app.mark_session_desired_running(&session_id, true);
         app.mark_session_status(&session_id, SessionStatus::Active);
 
         std::thread::sleep(std::time::Duration::from_millis(200));
-        drain_until(&mut app, |app| !app.providers.contains_key(&session_id));
+        drain_until(&mut app, |app| !app.engine.providers.contains_key(&session_id));
 
         assert!(!app.engine.sessions[0].desired_running);
         let loaded = app
@@ -12122,12 +12122,12 @@ cyan = "#00ffff"
         let args = vec!["-c".to_string(), "exit 1".to_string()];
         let client = PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
             .expect("spawn nonzero-exit");
-        app.providers.insert(session_id.clone(), client);
+        app.engine.providers.insert(session_id.clone(), client);
         app.mark_session_desired_running(&session_id, true);
         app.mark_session_status(&session_id, SessionStatus::Active);
 
         std::thread::sleep(std::time::Duration::from_millis(200));
-        drain_until(&mut app, |app| !app.providers.contains_key(&session_id));
+        drain_until(&mut app, |app| !app.engine.providers.contains_key(&session_id));
 
         assert!(app.engine.sessions[0].desired_running);
         let loaded = app
@@ -12149,7 +12149,7 @@ cyan = "#00ffff"
         ];
         let client = PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
             .expect("spawn nonzero-output");
-        app.providers.insert(session_id.clone(), client);
+        app.engine.providers.insert(session_id.clone(), client);
         app.mark_session_desired_running(&session_id, true);
         app.mark_session_status(&session_id, SessionStatus::Active);
         app.selected_left = 1;
@@ -12186,12 +12186,12 @@ cyan = "#00ffff"
 
         app.restore_sessions();
         drain_until(&mut app, |app| {
-            app.providers.contains_key(&session_id)
-                && !app.agent_launches_in_flight.contains(&session_id)
+            app.engine.providers.contains_key(&session_id)
+                && !app.engine.agent_launches_in_flight.contains(&session_id)
                 && app.engine.sessions[0].status == SessionStatus::Active
         });
 
-        assert!(app.providers.contains_key(&session_id));
+        assert!(app.engine.providers.contains_key(&session_id));
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Active);
     }
 
@@ -12210,17 +12210,17 @@ cyan = "#00ffff"
 
         app.engine.config.ui.auto_reopen_agents = false;
         app.restore_sessions();
-        assert!(app.providers.is_empty());
+        assert!(app.engine.providers.is_empty());
 
         app.engine.config.ui.auto_reopen_agents = true;
         app.engine.projects[0].auto_reopen_agents = Some(false);
         app.restore_sessions();
-        assert!(app.providers.is_empty());
+        assert!(app.engine.providers.is_empty());
 
         app.engine.projects[0].auto_reopen_agents = None;
         app.engine.sessions[0].auto_reopen_enabled = false;
         app.restore_sessions();
-        assert!(app.providers.is_empty());
+        assert!(app.engine.providers.is_empty());
     }
 
     #[test]
@@ -12242,9 +12242,9 @@ cyan = "#00ffff"
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn hung resume");
-        app.providers.insert(session_id.clone(), client);
+        app.engine.providers.insert(session_id.clone(), client);
         app.mark_session_status(&session_id, SessionStatus::Active);
-        app.resume_fallback_candidates.insert(
+        app.engine.resume_fallback_candidates.insert(
             session_id.clone(),
             std::time::Instant::now() - std::time::Duration::from_millis(20),
         );
@@ -12252,18 +12252,18 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
 
         drain_until(&mut app, |app| {
-            app.providers.contains_key(&session_id)
-                && !app.agent_launches_in_flight.contains(&session_id)
+            app.engine.providers.contains_key(&session_id)
+                && !app.engine.agent_launches_in_flight.contains(&session_id)
                 && app.status.text().contains("Resume timed out")
         });
 
         assert!(
-            app.providers.contains_key(&session_id),
+            app.engine.providers.contains_key(&session_id),
             "provider should still be present after timeout fallback"
         );
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Active);
         assert!(
-            !app.resume_fallback_candidates.contains_key(&session_id),
+            !app.engine.resume_fallback_candidates.contains_key(&session_id),
             "candidate should have been removed after timeout fallback"
         );
         assert!(
@@ -12292,15 +12292,15 @@ cyan = "#00ffff"
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn fresh hang");
-        app.providers.insert(session_id.clone(), client);
+        app.engine.providers.insert(session_id.clone(), client);
         app.mark_session_status(&session_id, SessionStatus::Active);
 
         app.drain_events();
         std::thread::sleep(std::time::Duration::from_millis(30));
         app.drain_events();
 
-        assert!(app.providers.contains_key(&session_id));
-        assert!(app.resume_fallback_candidates.is_empty());
+        assert!(app.engine.providers.contains_key(&session_id));
+        assert!(app.engine.resume_fallback_candidates.is_empty());
     }
 
     // ── Scroll-mode input suppression tests ─────────────────────────
@@ -12319,7 +12319,7 @@ cyan = "#00ffff"
         ];
         let client = PtyClient::spawn("sh", &args, std::path::Path::new("."), 5, 40, 100)
             .expect("spawn pty");
-        app.providers.insert(session_id, client);
+        app.engine.providers.insert(session_id, client);
 
         // Enter interactive agent mode.
         app.input_target = InputTarget::Agent;
@@ -12629,7 +12629,7 @@ cyan = "#00ffff"
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         let client = PtyClient::spawn("sh", &args, std::path::Path::new("."), 5, 40, 100)
             .expect("spawn pty");
-        app.providers.insert(session_id, client);
+        app.engine.providers.insert(session_id, client);
 
         app.input_target = InputTarget::Agent;
         app.session_surface = SessionSurface::Agent;
@@ -13176,7 +13176,7 @@ cyan = "#00ffff"
         app.show_companion_terminal()
             .expect("launch companion terminal");
 
-        assert_eq!(app.companion_terminals.len(), 1);
+        assert_eq!(app.engine.companion_terminals.len(), 1);
         let terminal_id = app.terminal_items()[0].0.clone();
 
         app.prompt = PromptState::ConfirmDeleteTerminal {
@@ -13188,7 +13188,7 @@ cyan = "#00ffff"
         app.resolve_confirm_delete_terminal(true);
 
         assert!(
-            app.companion_terminals.is_empty(),
+            app.engine.companion_terminals.is_empty(),
             "terminal should be removed after confirm"
         );
         assert!(matches!(app.prompt, PromptState::None));
@@ -13200,7 +13200,7 @@ cyan = "#00ffff"
         app.show_companion_terminal()
             .expect("launch companion terminal");
 
-        assert_eq!(app.companion_terminals.len(), 1);
+        assert_eq!(app.engine.companion_terminals.len(), 1);
         let terminal_id = app.terminal_items()[0].0.clone();
 
         app.prompt = PromptState::ConfirmDeleteTerminal {
@@ -13212,7 +13212,7 @@ cyan = "#00ffff"
         app.resolve_confirm_delete_terminal(false);
 
         assert_eq!(
-            app.companion_terminals.len(),
+            app.engine.companion_terminals.len(),
             1,
             "terminal should remain after cancel"
         );
@@ -13233,7 +13233,7 @@ cyan = "#00ffff"
         let terminal_id = app.terminal_items()[0].0.clone();
         app.do_delete_terminal(&terminal_id);
 
-        assert!(app.companion_terminals.is_empty());
+        assert!(app.engine.companion_terminals.is_empty());
         assert_eq!(
             app.left_section,
             LeftSection::Projects,
@@ -13254,7 +13254,7 @@ cyan = "#00ffff"
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
         // Spawn a real PTY so write_bytes has somewhere to go.
-        app.providers.insert(
+        app.engine.providers.insert(
             "session-1".to_string(),
             PtyClient::spawn(
                 "sh",
@@ -13295,7 +13295,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.input_target = InputTarget::Agent;
 
-        app.providers.insert(
+        app.engine.providers.insert(
             "session-1".to_string(),
             PtyClient::spawn(
                 "sh",
@@ -13336,7 +13336,7 @@ cyan = "#00ffff"
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
-        app.providers.insert(
+        app.engine.providers.insert(
             "session-1".to_string(),
             PtyClient::spawn(
                 "sh",
@@ -13380,7 +13380,7 @@ cyan = "#00ffff"
             100,
         )
         .expect("spawn pty");
-        app.providers.insert("session-1".to_string(), client);
+        app.engine.providers.insert("session-1".to_string(), client);
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Feed 100 'x' characters — they should all be forwarded.
@@ -13607,7 +13607,7 @@ cyan = "#00ffff"
             100,
         )
         .expect("spawn pty");
-        app.providers.insert(session_id, client);
+        app.engine.providers.insert(session_id, client);
         app.input_target = InputTarget::Agent;
         app.session_surface = crate::model::SessionSurface::Agent;
 
@@ -13637,7 +13637,7 @@ cyan = "#00ffff"
         // Wait for cat to echo the bytes back into the embedded terminal.
         std::thread::sleep(std::time::Duration::from_millis(300));
 
-        let provider = app.providers.values().next().expect("provider");
+        let provider = app.engine.providers.values().next().expect("provider");
         let snapshot = provider.snapshot();
         let rendered: String = snapshot
             .cells
@@ -13702,7 +13702,7 @@ cyan = "#00ffff"
             100,
         )
         .expect("spawn pty");
-        app.providers.insert(session_id, client);
+        app.engine.providers.insert(session_id, client);
         app.input_target = InputTarget::Agent;
         app.session_surface = crate::model::SessionSurface::Agent;
 
@@ -13729,7 +13729,7 @@ cyan = "#00ffff"
 
         std::thread::sleep(std::time::Duration::from_millis(300));
 
-        let provider = app.providers.values().next().expect("provider");
+        let provider = app.engine.providers.values().next().expect("provider");
         let snapshot = provider.snapshot();
         let rendered: String = snapshot
             .cells
@@ -14231,7 +14231,7 @@ cyan = "#00ffff"
             1_000,
         )
         .expect("spawn test agent");
-        app.providers.insert(session_id.clone(), pty);
+        app.engine.providers.insert(session_id.clone(), pty);
 
         app.rebuild_left_items();
         app.selected_left = app
@@ -14291,8 +14291,8 @@ cyan = "#00ffff"
         );
 
         // Tearing down the PTY clears the pin — the next launch will be gemini.
-        app.providers.remove(&session_id);
-        app.running_provider_pins.remove(&session_id);
+        app.engine.providers.remove(&session_id);
+        app.engine.running_provider_pins.remove(&session_id);
         assert_eq!(
             app.running_provider_for(&app.engine.sessions[0]).as_str(),
             "gemini"

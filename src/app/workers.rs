@@ -1,12 +1,14 @@
+use std::sync::mpsc::Sender;
+
 use super::*;
 
 impl App {
     pub(crate) fn drain_events(&mut self) {
-        while let Ok(event) = self.worker_rx.try_recv() {
+        while let Ok(event) = self.engine.worker_rx.try_recv() {
             match event {
                 WorkerEvent::CreateAgentProgress(message) => self.set_busy(message),
                 WorkerEvent::CreateAgentFailed(message) => {
-                    self.create_agent_in_flight = false;
+                    self.engine.create_agent_in_flight = false;
                     self.set_error(message);
                 }
                 WorkerEvent::AgentLaunchReady(boxed) => {
@@ -53,7 +55,7 @@ impl App {
                     target,
                     result,
                 } => {
-                    self.pulls_in_flight.remove(&repo_path);
+                    self.engine.pulls_in_flight.remove(&repo_path);
                     match target {
                         PullTarget::Project {
                             project_id,
@@ -165,7 +167,7 @@ impl App {
                     }
                 }
                 WorkerEvent::GhStatusChecked(status) => {
-                    self.gh_status = status;
+                    self.engine.gh_status = status;
                     if matches!(status, crate::model::GhStatus::Available)
                         && self.engine.github_integration_enabled
                     {
@@ -204,11 +206,11 @@ impl App {
                                     title: pr.title.clone(),
                                     url: pr.url.clone(),
                                 });
-                                self.pr_statuses.insert(session_id, pr);
+                                self.engine.pr_statuses.insert(session_id, pr);
                                 changed = true;
                             }
                             None => {
-                                if self.pr_statuses.remove(&session_id).is_some() {
+                                if self.engine.pr_statuses.remove(&session_id).is_some() {
                                     changed = true;
                                 }
                             }
@@ -307,7 +309,7 @@ impl App {
                     // Always clear the in-flight guard so the session is
                     // interactive again — whether we're about to remove it
                     // (Ok path) or leave it in place for retry (Err path).
-                    self.pending_deletions.remove(&session_id);
+                    self.engine.pending_deletions.remove(&session_id);
 
                     // Retrieve (and remove) the exact Busy message we set
                     // when the worker was spawned. We compare this against
@@ -315,7 +317,7 @@ impl App {
                     // tone alone, because another operation (push, pull,
                     // refresh, concurrent delete) may have since set its own
                     // Busy message that we must not clobber.
-                    let our_busy_msg = self.deletion_busy_messages.remove(&session_id);
+                    let our_busy_msg = self.engine.deletion_busy_messages.remove(&session_id);
 
                     match result {
                         Ok(branch_already_deleted) => {
@@ -377,7 +379,7 @@ impl App {
                     }
                 }
                 WorkerEvent::ResourceStatsReady(stats) => {
-                    self.resource_stats_in_flight = false;
+                    self.engine.resource_stats_in_flight = false;
                     if let PromptState::ResourceMonitor {
                         rows,
                         selected_row,
@@ -640,7 +642,7 @@ impl App {
         self.retry_hung_resume_sessions();
         // Detect PTY exits.
         let mut exited = Vec::new();
-        for (session_id, provider) in &mut self.providers {
+        for (session_id, provider) in &mut self.engine.providers {
             let exit_success = provider.try_wait().map(|status| status.success());
             if exit_success.is_some() || provider.is_exited() {
                 let is_minimal = provider.has_minimal_output(5);
@@ -658,7 +660,12 @@ impl App {
         // This handles `claude --continue || claude` style fallback.
         let mut retried = HashSet::new();
         for (session_id, _, is_minimal, _) in &exited {
-            if self.resume_fallback_candidates.remove(session_id).is_none() {
+            if self
+                .engine
+                .resume_fallback_candidates
+                .remove(session_id)
+                .is_none()
+            {
                 continue;
             }
             // Check whether the exited process produced only minimal output
@@ -677,8 +684,8 @@ impl App {
             else {
                 continue;
             };
-            self.providers.remove(session_id);
-            self.running_provider_pins.remove(session_id);
+            self.engine.providers.remove(session_id);
+            self.engine.running_provider_pins.remove(session_id);
             self.last_pty_activity.remove(session_id);
             logger::info(&format!(
                 "resume args exited without output for agent \"{}\", retrying with regular args",
@@ -707,8 +714,8 @@ impl App {
             if retried.contains(session_id) {
                 continue;
             }
-            self.providers.remove(session_id);
-            self.running_provider_pins.remove(session_id);
+            self.engine.providers.remove(session_id);
+            self.engine.running_provider_pins.remove(session_id);
             self.last_pty_activity.remove(session_id);
             if *exit_success == Some(true) {
                 self.mark_session_desired_running(session_id, false);
@@ -758,13 +765,13 @@ impl App {
         }
 
         let mut exited_terminal_ids = Vec::new();
-        for (terminal_id, terminal) in &mut self.companion_terminals {
+        for (terminal_id, terminal) in &mut self.engine.companion_terminals {
             if terminal.client.is_exited() || terminal.client.try_wait().is_some() {
                 exited_terminal_ids.push(terminal_id.clone());
             }
         }
         for terminal_id in &exited_terminal_ids {
-            self.companion_terminals.remove(terminal_id);
+            self.engine.companion_terminals.remove(terminal_id);
         }
         if !exited_terminal_ids.is_empty() {
             // If the active terminal just exited, close the overlay.
@@ -784,7 +791,7 @@ impl App {
 
         // Poll foreground process names every ~2 seconds (every 20 ticks).
         if self.tick_count.is_multiple_of(20) {
-            for terminal in self.companion_terminals.values_mut() {
+            for terminal in self.engine.companion_terminals.values_mut() {
                 terminal.foreground_cmd = terminal.client.foreground_process_name();
             }
         }
@@ -800,7 +807,8 @@ impl App {
         }
 
         // Keep the poller's interval flag in sync with whether any runtime PTY is alive.
-        self.has_active_processes
+        self.engine
+            .has_active_processes
             .store(self.running_process_count() > 0, Ordering::Relaxed);
     }
 
@@ -1034,7 +1042,7 @@ impl App {
 
     pub(crate) fn spawn_project_persistence(&self, action: ProjectPersistenceAction) {
         let db_path = self.engine.paths.sessions_db_path.clone();
-        let tx = self.worker_tx.clone();
+        let tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
             let result = (|| -> Result<()> {
                 let store = SessionStore::open(&db_path)?;
@@ -1105,7 +1113,7 @@ impl App {
         let mut config = self.engine.config.clone();
         config.env = env.clone();
         let config_path = self.engine.paths.config_path.clone();
-        let tx = self.worker_tx.clone();
+        let tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
             let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
             let result = crate::config::save_config(&config_path, &config, &bindings)
@@ -1118,11 +1126,11 @@ impl App {
         let AgentLaunchReadyData { request, client } = data;
         let session = request.session.clone();
         let session_id = session.id.clone();
-        self.agent_launches_in_flight.remove(&session_id);
+        self.engine.agent_launches_in_flight.remove(&session_id);
         self.last_pty_size = request.pty_size;
 
         if matches!(request.kind, AgentLaunchKind::Create { .. }) {
-            self.create_agent_in_flight = false;
+            self.engine.create_agent_in_flight = false;
             if let Err(err) = self.engine.session_store.upsert_session(&session) {
                 logger::error(&format!(
                     "session store upsert failed for {}: {err}",
@@ -1132,11 +1140,12 @@ impl App {
                 return;
             }
             self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
-            self.providers.insert(session.id.clone(), client);
+            self.engine.providers.insert(session.id.clone(), client);
             self.engine.sessions.insert(0, session.clone());
             self.mark_session_provider_started(&session.id);
             if request.resume {
-                self.resume_fallback_candidates
+                self.engine
+                    .resume_fallback_candidates
                     .insert(session.id.clone(), Instant::now());
             }
             self.update_branch_sync_sessions();
@@ -1179,9 +1188,10 @@ impl App {
         }
 
         self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
-        self.providers.insert(session.id.clone(), client);
+        self.engine.providers.insert(session.id.clone(), client);
         if request.resume {
-            self.resume_fallback_candidates
+            self.engine
+                .resume_fallback_candidates
                 .insert(session.id.clone(), Instant::now());
         }
         self.mark_session_desired_running(&session.id, true);
@@ -1214,11 +1224,11 @@ impl App {
     fn handle_agent_launch_failed(&mut self, data: AgentLaunchFailedData) {
         let AgentLaunchFailedData { request, message } = data;
         let session = request.session;
-        self.agent_launches_in_flight.remove(&session.id);
+        self.engine.agent_launches_in_flight.remove(&session.id);
 
         match request.kind {
             AgentLaunchKind::Create { .. } => {
-                self.create_agent_in_flight = false;
+                self.engine.create_agent_in_flight = false;
                 self.set_error(message);
             }
             AgentLaunchKind::Reconnect { .. } => {
@@ -1254,7 +1264,7 @@ impl App {
     }
 
     pub(crate) fn spawn_browser_entries(&self, dir: &Path) {
-        let tx = self.worker_tx.clone();
+        let tx = self.engine.worker_tx.clone();
         let dir = dir.to_path_buf();
         thread::spawn(move || {
             let entries = browser_entries(&dir);
@@ -1271,7 +1281,7 @@ impl App {
     }
 
     pub(crate) fn spawn_project_worktrees_worker(&self, project: Project) {
-        let tx = self.worker_tx.clone();
+        let tx = self.engine.worker_tx.clone();
         let paths = self.engine.paths.clone();
         let sessions = self.engine.sessions.clone();
         thread::spawn(move || {
@@ -1290,8 +1300,8 @@ impl App {
         if interval_secs == 0 {
             return; // disabled by config
         }
-        let tx = self.worker_tx.clone();
-        let sessions = Arc::clone(&self.branch_sync_sessions);
+        let tx = self.engine.worker_tx.clone();
+        let sessions = Arc::clone(&self.engine.branch_sync_sessions);
         thread::spawn(move || {
             let interval = Duration::from_secs(u64::from(interval_secs));
             loop {
@@ -1323,7 +1333,7 @@ impl App {
             .filter(|project| !project.path_missing)
         {
             let project = project.clone();
-            let worker_tx = self.worker_tx.clone();
+            let worker_tx = self.engine.worker_tx.clone();
             thread::spawn(move || {
                 run_project_branch_status_job(project, worker_tx);
             });
@@ -1335,7 +1345,7 @@ impl App {
     pub(crate) fn spawn_refs_watcher(&mut self) {
         use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 
-        let tx = self.worker_tx.clone();
+        let tx = self.engine.worker_tx.clone();
         // Build a reverse map of watched paths for event routing.
         let path_to_session: Arc<Mutex<HashMap<PathBuf, String>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -1386,8 +1396,8 @@ impl App {
 
         match watcher_result {
             Ok(watcher) => {
-                self.refs_watcher = Some(Arc::new(Mutex::new(watcher)));
-                self.refs_watch_paths.clear();
+                self.engine.refs_watcher = Some(Arc::new(Mutex::new(watcher)));
+                self.engine.refs_watch_paths.clear();
                 // Populate the path map and start watching existing sessions.
                 let mut paths = HashMap::new();
                 for session in &self.engine.sessions {
@@ -1396,7 +1406,7 @@ impl App {
                         .join("refs")
                         .join("heads");
                     if refs_dir.is_dir()
-                        && let Some(ref watcher_arc) = self.refs_watcher
+                        && let Some(ref watcher_arc) = self.engine.refs_watcher
                         && let Ok(mut w) = watcher_arc.lock()
                     {
                         match w.watch(&refs_dir, RecursiveMode::NonRecursive) {
@@ -1418,14 +1428,14 @@ impl App {
                         }
                     }
                 }
-                self.refs_watch_paths = paths.clone();
+                self.engine.refs_watch_paths = paths.clone();
                 // Populate the closure's path map so events can route to sessions.
                 if let Ok(mut map) = path_to_session.lock() {
                     *map = paths;
                 }
                 logger::info(&format!(
                     "[gh-integration] refs watcher: initialized, watching {} session(s)",
-                    self.refs_watch_paths.len(),
+                    self.engine.refs_watch_paths.len(),
                 ));
             }
             Err(e) => {
@@ -1443,7 +1453,7 @@ impl App {
         if !self.engine.github_integration_enabled {
             return;
         }
-        let tx = self.worker_tx.clone();
+        let tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
             use crate::model::GhStatus;
             // Step 1: Is `gh` on PATH?
@@ -1490,7 +1500,7 @@ impl App {
             .map(|pr| (pr.session_id.clone(), pr))
             .collect();
 
-        if let Ok(mut guard) = self.pr_sync_sessions.lock() {
+        if let Ok(mut guard) = self.engine.pr_sync_sessions.lock() {
             *guard = self
                 .engine
                 .sessions
@@ -1500,16 +1510,16 @@ impl App {
                     branch_name: s.branch_name.clone(),
                     worktree_path: s.worktree_path.clone(),
                     known_pr: known_map.get(&s.id).cloned(),
-                    agent_exited: !self.providers.contains_key(&s.id),
+                    agent_exited: !self.engine.providers.contains_key(&s.id),
                 })
                 .collect();
         }
     }
 
     pub(crate) fn spawn_pr_sync_worker(&self) {
-        let tx = self.worker_tx.clone();
-        let sessions = Arc::clone(&self.pr_sync_sessions);
-        let enabled = Arc::clone(&self.pr_sync_enabled);
+        let tx = self.engine.worker_tx.clone();
+        let sessions = Arc::clone(&self.engine.pr_sync_sessions);
+        let enabled = Arc::clone(&self.engine.pr_sync_enabled);
         enabled.store(true, Ordering::Relaxed);
         thread::spawn(move || {
             let interval = Duration::from_secs(45);
@@ -1527,8 +1537,8 @@ impl App {
     }
 
     pub(crate) fn spawn_initial_pr_refresh(&self) {
-        let tx = self.worker_tx.clone();
-        let sessions = Arc::clone(&self.pr_sync_sessions);
+        let tx = self.engine.worker_tx.clone();
+        let sessions = Arc::clone(&self.engine.pr_sync_sessions);
         thread::spawn(move || {
             let results = run_pr_sync(&sessions);
             if !results.is_empty() {
@@ -1541,7 +1551,7 @@ impl App {
     /// recently (within 10 seconds).
     pub(crate) fn spawn_pr_check_for_session(&mut self, session_id: &str) {
         if !self.engine.github_integration_enabled
-            || !matches!(self.gh_status, crate::model::GhStatus::Available)
+            || !matches!(self.engine.gh_status, crate::model::GhStatus::Available)
         {
             return;
         }
@@ -1565,9 +1575,9 @@ impl App {
             branch_name: session.branch_name.clone(),
             worktree_path: session.worktree_path.clone(),
             known_pr,
-            agent_exited: !self.providers.contains_key(session_id),
+            agent_exited: !self.engine.providers.contains_key(session_id),
         };
-        let tx = self.worker_tx.clone();
+        let tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
             let result = check_pr_for_entry(&entry);
             let _ = tx.send(WorkerEvent::PrStatusReady(vec![(entry.session_id, result)]));
@@ -1575,9 +1585,9 @@ impl App {
     }
 
     pub(crate) fn spawn_changed_files_poller(&self) {
-        let tx = self.worker_tx.clone();
-        let watched = Arc::clone(&self.watched_worktree);
-        let has_agent = Arc::clone(&self.has_active_processes);
+        let tx = self.engine.worker_tx.clone();
+        let watched = Arc::clone(&self.engine.watched_worktree);
+        let has_agent = Arc::clone(&self.engine.has_active_processes);
         thread::spawn(move || {
             loop {
                 let interval = if has_agent.load(Ordering::Relaxed) {
@@ -1600,7 +1610,7 @@ impl App {
     }
 
     pub(crate) fn spawn_config_reload_worker(&self) {
-        let tx = self.worker_tx.clone();
+        let tx = self.engine.worker_tx.clone();
         let paths = self.engine.paths.clone();
         thread::spawn(move || {
             let result = crate::config::ensure_config(&paths)
@@ -1635,7 +1645,7 @@ impl App {
     }
 
     pub(crate) fn spawn_config_recover_worker(&self) {
-        let tx = self.worker_tx.clone();
+        let tx = self.engine.worker_tx.clone();
         let config_path = self.engine.paths.config_path.clone();
         let config = self.engine.config.clone();
         thread::spawn(move || {
@@ -1650,7 +1660,7 @@ impl App {
     fn retry_hung_resume_sessions(&mut self) {
         let mut hung = Vec::new();
 
-        for (session_id, started_at) in &self.resume_fallback_candidates {
+        for (session_id, started_at) in &self.engine.resume_fallback_candidates {
             let Some(session) = self.engine.sessions.iter().find(|s| s.id == *session_id) else {
                 continue;
             };
@@ -1661,7 +1671,7 @@ impl App {
             if started_at.elapsed() < Duration::from_millis(timeout_ms) {
                 continue;
             }
-            let Some(provider) = self.providers.get(session_id) else {
+            let Some(provider) = self.engine.providers.get(session_id) else {
                 continue;
             };
             if provider.has_output() {
@@ -1671,7 +1681,7 @@ impl App {
         }
 
         for session_id in hung {
-            self.resume_fallback_candidates.remove(&session_id);
+            self.engine.resume_fallback_candidates.remove(&session_id);
             let Some(session) = self
                 .engine
                 .sessions
@@ -1681,8 +1691,8 @@ impl App {
             else {
                 continue;
             };
-            self.providers.remove(&session_id);
-            self.running_provider_pins.remove(&session_id);
+            self.engine.providers.remove(&session_id);
+            self.engine.running_provider_pins.remove(&session_id);
             self.last_pty_activity.remove(&session_id);
             logger::info(&format!(
                 "resume args produced no visible output for agent \"{}\" within timeout, retrying with regular args",

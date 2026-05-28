@@ -763,11 +763,11 @@ impl App {
                     // excluded because it renders through a separate helper
                     // and the in-flight window is too brief to justify
                     // threading a deletion flag through it.
-                    let deleting = self.pending_deletions.contains(&session.id);
+                    let deleting = self.engine.pending_deletions.contains(&session.id);
                     let label_color = if deleting {
                         self.theme.session_deleting
                     } else {
-                        match self.pr_statuses.get(&session.id).map(|pr| &pr.state) {
+                        match self.engine.pr_statuses.get(&session.id).map(|pr| &pr.state) {
                             Some(crate::model::PrState::Merged) => self.theme.pr_merged_label,
                             Some(crate::model::PrState::Closed) => self.theme.pr_closed_label,
                             Some(crate::model::PrState::Open) => self.theme.pr_open_label,
@@ -898,7 +898,7 @@ impl App {
         );
         let pr_info = if !is_input {
             self.selected_session()
-                .and_then(|s| self.pr_statuses.get(&s.id))
+                .and_then(|s| self.engine.pr_statuses.get(&s.id))
                 .cloned()
         } else {
             None
@@ -1249,7 +1249,7 @@ impl App {
         let session_active = match active_surface {
             SessionSurface::Agent => session_id
                 .as_ref()
-                .map(|id| self.providers.contains_key(id))
+                .map(|id| self.engine.providers.contains_key(id))
                 .unwrap_or(false),
             SessionSurface::Terminal => terminal_status.is_running(),
         };
@@ -2242,7 +2242,7 @@ impl App {
                     "Disabled — enable via command palette (toggle-github-integration)".to_string(),
                 )
             } else {
-                match self.gh_status {
+                match self.engine.gh_status {
                     GhStatus::Unknown => ("◐", "Checking gh CLI availability…".to_string()),
                     GhStatus::NotInstalled => (
                         "⚠",
@@ -2253,13 +2253,13 @@ impl App {
                         "gh CLI not authenticated — run: gh auth login".to_string(),
                     ),
                     GhStatus::Available => {
-                        let count = self.pr_statuses.len();
+                        let count = self.engine.pr_statuses.len();
                         let noun = if count == 1 { "session" } else { "sessions" };
                         ("✓", format!("Active — tracking PRs for {count} {noun}"))
                     }
                 }
             };
-            let icon_color = match self.gh_status {
+            let icon_color = match self.engine.gh_status {
                 GhStatus::Available if self.engine.github_integration_enabled => {
                     self.theme.session_active
                 }
@@ -6234,6 +6234,7 @@ impl App {
                 let provider = capitalize(self.running_provider_for(session).as_str());
                 let name = session.title.as_deref().unwrap_or(&session.branch_name);
                 let pr_suffix = self
+                    .engine
                     .pr_statuses
                     .get(&session.id)
                     .map(|pr| format!(" · {}#{}", pr.owner_repo, pr.number))

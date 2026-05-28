@@ -3,7 +3,7 @@ use std::fs;
 use std::io::stdout;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -93,21 +93,8 @@ pub struct App {
     pub(crate) input_target: InputTarget,
     pub(crate) session_surface: SessionSurface,
     pub(crate) clipboard: Clipboard,
-    pub(crate) worker_tx: Sender<WorkerEvent>,
-    pub(crate) worker_rx: Receiver<WorkerEvent>,
-    pub(crate) providers: HashMap<String, PtyClient>,
-    /// When a provider swap happens while the agent's PTY is still running,
-    /// the currently-spawned provider is pinned here so UI labels keep
-    /// showing what's actually running until the user exits and relaunches
-    /// the agent. Cleared whenever the PTY is torn down.
-    pub(crate) running_provider_pins: HashMap<String, ProviderKind>,
-    pub(crate) companion_terminals: HashMap<String, CompanionTerminal>,
     pub(crate) active_terminal_id: Option<String>,
     pub(crate) terminal_return_to_list: bool,
-    pub(crate) create_agent_in_flight: bool,
-    pub(crate) agent_launches_in_flight: HashSet<String>,
-    pub(crate) pulls_in_flight: HashSet<String>,
-    pub(crate) resource_stats_in_flight: bool,
     pub(crate) last_pty_size: (u16, u16),
     /// Tracks when each agent last received PTY data, for the streaming
     /// activity spinner in the left pane.
@@ -123,8 +110,6 @@ pub struct App {
     /// regardless of how fast the event loop is running.
     pub(crate) start_time: Instant,
     pub(crate) readonly_nudge_tick: Option<u64>,
-    pub(crate) watched_worktree: Arc<Mutex<Option<PathBuf>>>,
-    pub(crate) has_active_processes: Arc<AtomicBool>,
     pub(crate) collapsed_projects: HashSet<String>,
     pub(crate) left_items_cache: Vec<LeftItem>,
     pub(crate) mouse_layout: MouseLayoutState,
@@ -158,37 +143,10 @@ pub struct App {
     pub(crate) welcome_tip_selection: usize,
     /// When true, show the alternate (duck) logo instead of the text logo.
     pub(crate) welcome_logo_alt: bool,
-    pub(crate) branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,
-    pub(crate) gh_status: crate::model::GhStatus,
     pub(crate) pr_banner_at_bottom: bool,
-    pub(crate) pr_statuses: HashMap<String, crate::model::PrInfo>,
-    pub(crate) pr_sync_sessions: Arc<Mutex<Vec<PrSyncEntry>>>,
-    pub(crate) pr_sync_enabled: Arc<AtomicBool>,
     /// Timestamps of the last PR check per session, to avoid hammering on rapid
     /// state transitions.
     pub(crate) pr_last_checked: HashMap<String, Instant>,
-    /// File-system watcher for `.git/refs/heads/` directories. `None` if the
-    /// watcher could not be created (graceful fallback to poll-only).
-    pub(crate) refs_watcher: Option<Arc<Mutex<notify::RecommendedWatcher>>>,
-    /// Maps watched worktree paths back to session IDs so the refs watcher
-    /// can route change events.
-    pub(crate) refs_watch_paths: HashMap<PathBuf, String>,
-    /// Session IDs spawned with resume args and the wall-clock time the resume
-    /// attempt began. Used for one-shot fallbacks when resume exits quickly or
-    /// hangs without rendering visible output.
-    pub(crate) resume_fallback_candidates: HashMap<String, Instant>,
-    /// Session IDs whose worktree is currently being removed by a background
-    /// worker. Prevents duplicate delete requests from spawning a second
-    /// worker while the first is still running; also drives the dimmed
-    /// visual cue on the left pane row so the user can see the in-flight
-    /// state.
-    pub(crate) pending_deletions: HashSet<String>,
-    /// Maps session IDs to the exact Busy message set by
-    /// `begin_delete_session`. Used by the worker event handler to decide
-    /// whether the current status-line content was set by this deletion (and
-    /// should be cleared) or by an unrelated operation (and should be left
-    /// alone). Cleared per-session when the worker event arrives.
-    pub(crate) deletion_busy_messages: HashMap<String, String>,
     /// Cached syntax highlighting resources shared across diff computations.
     pub(crate) syntax_cache: SyntaxCache,
     /// Reusable snapshot buffer to avoid per-frame allocation of terminal cells.
@@ -1353,6 +1311,10 @@ impl App {
         let sessions = session_store.load_sessions()?;
         let (worker_tx, worker_rx) = mpsc::channel();
         let watched_worktree: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let branch_sync_sessions = Arc::new(Mutex::new(Vec::new()));
+        let pr_sync_sessions = Arc::new(Mutex::new(Vec::new()));
+        let pr_sync_enabled = Arc::new(AtomicBool::new(false));
+        let has_active_processes = Arc::new(AtomicBool::new(false));
         let initial_status = format!(
             "Press {} to add a project, {} to create an agent, {} for help.",
             bindings.label_for(Action::OpenProjectBrowser),
@@ -1383,6 +1345,27 @@ impl App {
             terminal_counter: 0,
             github_integration_enabled: gh_integration_val,
             single_instance_lock,
+            worker_tx,
+            worker_rx,
+            providers: HashMap::new(),
+            running_provider_pins: HashMap::new(),
+            companion_terminals: HashMap::new(),
+            gh_status: crate::model::GhStatus::Unknown,
+            pr_statuses: HashMap::new(),
+            branch_sync_sessions,
+            pr_sync_sessions,
+            pr_sync_enabled,
+            refs_watcher: None,
+            refs_watch_paths: HashMap::new(),
+            resume_fallback_candidates: HashMap::new(),
+            pending_deletions: HashSet::new(),
+            deletion_busy_messages: HashMap::new(),
+            watched_worktree: Arc::clone(&watched_worktree),
+            has_active_processes,
+            create_agent_in_flight: false,
+            agent_launches_in_flight: HashSet::new(),
+            pulls_in_flight: HashSet::new(),
+            resource_stats_in_flight: false,
         };
         let mut app = Self {
             show_diff_line_numbers,
@@ -1419,17 +1402,8 @@ impl App {
             input_target: InputTarget::None,
             session_surface: SessionSurface::Agent,
             clipboard: Clipboard::new(),
-            worker_tx,
-            worker_rx,
-            providers: HashMap::new(),
-            running_provider_pins: HashMap::new(),
-            companion_terminals: HashMap::new(),
             active_terminal_id: None,
             terminal_return_to_list: false,
-            create_agent_in_flight: false,
-            agent_launches_in_flight: HashSet::new(),
-            pulls_in_flight: HashSet::new(),
-            resource_stats_in_flight: false,
             last_pty_size: (0, 0),
             last_pty_activity: HashMap::new(),
             prev_scrollback_offset: 0,
@@ -1439,8 +1413,6 @@ impl App {
             tick_count: 0,
             start_time: Instant::now(),
             readonly_nudge_tick: None,
-            watched_worktree: Arc::clone(&watched_worktree),
-            has_active_processes: Arc::new(AtomicBool::new(false)),
             collapsed_projects: HashSet::new(),
             left_items_cache: Vec::new(),
             mouse_layout: MouseLayoutState::default(),
@@ -1463,18 +1435,8 @@ impl App {
             welcome_logo_visible: false,
             welcome_logo_alt: false,
             welcome_tip_selection: usize::MAX,
-            branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-            gh_status: crate::model::GhStatus::Unknown,
             pr_banner_at_bottom,
-            pr_statuses: HashMap::new(),
-            pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-            pr_sync_enabled: Arc::new(AtomicBool::new(false)),
             pr_last_checked: HashMap::new(),
-            refs_watcher: None,
-            refs_watch_paths: HashMap::new(),
-            resume_fallback_candidates: HashMap::new(),
-            pending_deletions: HashSet::new(),
-            deletion_busy_messages: HashMap::new(),
             syntax_cache: SyntaxCache::new(),
             snapshot_buf: TerminalSnapshot::empty(),
             last_snapshot_id: None,
@@ -1709,7 +1671,7 @@ impl App {
                 "CLOSED" => PrState::Closed,
                 _ => continue,
             };
-            self.pr_statuses.insert(
+            self.engine.pr_statuses.insert(
                 pr.session_id,
                 PrInfo {
                     number: pr.pr_number,
@@ -1721,10 +1683,10 @@ impl App {
                 },
             );
         }
-        if !self.pr_statuses.is_empty() {
+        if !self.engine.pr_statuses.is_empty() {
             logger::info(&format!(
                 "[gh-integration] seeded {} PR statuses from database",
-                self.pr_statuses.len(),
+                self.engine.pr_statuses.len(),
             ));
         }
     }
@@ -1796,7 +1758,7 @@ impl App {
     /// activity timestamp used by the left-pane streaming indicator.
     fn poll_pty_activity(&mut self) {
         let now = Instant::now();
-        for (session_id, provider) in &self.providers {
+        for (session_id, provider) in &self.engine.providers {
             if provider.take_received_data() {
                 self.last_pty_activity.insert(session_id.clone(), now);
             }
@@ -1888,7 +1850,7 @@ impl App {
     fn resource_monitor_targets(&self) -> Vec<(String, u32)> {
         let mut targets = Vec::new();
         for session in &self.engine.sessions {
-            if let Some(pty) = self.providers.get(&session.id)
+            if let Some(pty) = self.engine.providers.get(&session.id)
                 && let Some(pid) = pty.child_process_id()
             {
                 let title = session.title.as_deref().unwrap_or(&session.branch_name);
@@ -1896,7 +1858,7 @@ impl App {
                 targets.push((format!("Agent ({provider}): {title}"), pid));
             }
         }
-        for terminal in self.companion_terminals.values() {
+        for terminal in self.engine.companion_terminals.values() {
             if let Some(pid) = terminal.client.child_process_id() {
                 let label = match &terminal.foreground_cmd {
                     Some(cmd) => format!("Terminal ({cmd}): {}", terminal.label),
@@ -1909,12 +1871,12 @@ impl App {
     }
 
     pub(crate) fn spawn_resource_stats_worker(&mut self) {
-        if self.resource_stats_in_flight {
+        if self.engine.resource_stats_in_flight {
             return;
         }
-        self.resource_stats_in_flight = true;
+        self.engine.resource_stats_in_flight = true;
         let targets = self.resource_monitor_targets();
-        let tx = self.worker_tx.clone();
+        let tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
             let rows = collect_resource_stats(targets);
             let _ = tx.send(WorkerEvent::ResourceStatsReady(rows));
@@ -1923,7 +1885,7 @@ impl App {
 
     pub(crate) fn github_pr_agent_command_available(&self) -> bool {
         self.engine.github_integration_enabled
-            && matches!(self.gh_status, crate::model::GhStatus::Available)
+            && matches!(self.engine.gh_status, crate::model::GhStatus::Available)
     }
 
     pub(crate) fn persist_config_projects_from_runtime(&mut self) -> Result<()> {
@@ -2089,14 +2051,14 @@ impl App {
                     &self.bindings,
                 );
                 if self.engine.github_integration_enabled
-                    && matches!(self.gh_status, crate::model::GhStatus::Available)
+                    && matches!(self.engine.gh_status, crate::model::GhStatus::Available)
                 {
                     self.update_pr_sync_sessions();
                     self.spawn_initial_pr_refresh();
-                    self.pr_sync_enabled.store(true, Ordering::Relaxed);
+                    self.engine.pr_sync_enabled.store(true, Ordering::Relaxed);
                 } else if !self.engine.github_integration_enabled {
-                    self.pr_statuses.clear();
-                    self.pr_sync_enabled.store(false, Ordering::Relaxed);
+                    self.engine.pr_statuses.clear();
+                    self.engine.pr_sync_enabled.store(false, Ordering::Relaxed);
                     self.rebuild_left_items();
                 }
                 let state = if self.engine.github_integration_enabled {
@@ -2233,14 +2195,14 @@ impl App {
         }
         self.update_branch_sync_sessions();
         if self.engine.github_integration_enabled
-            && matches!(self.gh_status, crate::model::GhStatus::Available)
+            && matches!(self.engine.gh_status, crate::model::GhStatus::Available)
         {
             self.update_pr_sync_sessions();
             self.spawn_initial_pr_refresh();
-            self.pr_sync_enabled.store(true, Ordering::Relaxed);
+            self.engine.pr_sync_enabled.store(true, Ordering::Relaxed);
         } else {
-            self.pr_statuses.clear();
-            self.pr_sync_enabled.store(false, Ordering::Relaxed);
+            self.engine.pr_statuses.clear();
+            self.engine.pr_sync_enabled.store(false, Ordering::Relaxed);
         }
         self.reload_changed_files();
         self.refresh_current_diff()?;
@@ -2468,7 +2430,8 @@ impl App {
     /// the *original* provider until the user exits and relaunches — so the
     /// pane title doesn't lie about what's actually on screen.
     pub(crate) fn running_provider_for(&self, session: &AgentSession) -> ProviderKind {
-        self.running_provider_pins
+        self.engine
+            .running_provider_pins
             .get(&session.id)
             .cloned()
             .unwrap_or_else(|| session.provider.clone())
@@ -2480,7 +2443,7 @@ impl App {
             .selected_session()
             .map(|s| PathBuf::from(&s.worktree_path));
         // Keep the background poller in sync with the currently selected session.
-        if let Ok(mut guard) = self.watched_worktree.lock() {
+        if let Ok(mut guard) = self.engine.watched_worktree.lock() {
             *guard = worktree.clone();
         }
         let (staged, unstaged) = worktree
@@ -2668,7 +2631,7 @@ impl App {
             let worktree = session.worktree_path.clone();
             let sid = session.id.clone();
             let new_branch = name.clone();
-            let tx = self.worker_tx.clone();
+            let tx = self.engine.worker_tx.clone();
             std::thread::spawn(move || {
                 let result = git::rename_branch(Path::new(&worktree), &old_branch, &new_branch)
                     .map_err(|e| e.to_string());
@@ -2744,7 +2707,7 @@ impl App {
 
     /// Refreshes the shared session snapshot used by the branch-sync worker.
     pub(crate) fn update_branch_sync_sessions(&self) {
-        if let Ok(mut guard) = self.branch_sync_sessions.lock() {
+        if let Ok(mut guard) = self.engine.branch_sync_sessions.lock() {
             *guard = self
                 .engine
                 .sessions
@@ -2775,33 +2738,34 @@ impl App {
     }
 
     pub(crate) fn clear_companion_terminals_for_session(&mut self, session_id: &str) {
-        self.companion_terminals
+        self.engine
+            .companion_terminals
             .retain(|_, t| t.session_id != session_id);
         if let Some(ref id) = self.active_terminal_id
-            && !self.companion_terminals.contains_key(id)
+            && !self.engine.companion_terminals.contains_key(id)
         {
             self.active_terminal_id = None;
         }
     }
 
     pub(crate) fn running_process_count(&self) -> usize {
-        self.providers.len() + self.companion_terminals.len()
+        self.engine.providers.len() + self.engine.companion_terminals.len()
     }
 
     pub(crate) fn running_companion_terminal_count(&self) -> usize {
-        self.companion_terminals.len()
+        self.engine.companion_terminals.len()
     }
 
     /// Returns all running companion terminals as (terminal_id, terminal) pairs,
     /// sorted by creation order (terminal_id encodes the counter).
     pub(crate) fn terminal_items(&self) -> Vec<(&String, &CompanionTerminal)> {
-        let mut items: Vec<_> = self.companion_terminals.iter().collect();
+        let mut items: Vec<_> = self.engine.companion_terminals.iter().collect();
         items.sort_by_key(|(id, _)| (*id).clone());
         items
     }
 
     pub(crate) fn has_terminal_items(&self) -> bool {
-        !self.companion_terminals.is_empty()
+        !self.engine.companion_terminals.is_empty()
     }
 
     pub(crate) fn clamp_terminal_cursor(&mut self) {
@@ -2823,7 +2787,8 @@ impl App {
 
     /// Returns the number of running companion terminals for a given session.
     pub(crate) fn session_terminal_count(&self, session_id: &str) -> usize {
-        self.companion_terminals
+        self.engine
+            .companion_terminals
             .values()
             .filter(|t| t.session_id == session_id)
             .count()
@@ -2833,11 +2798,11 @@ impl App {
         match self.session_surface {
             SessionSurface::Agent => {
                 let session_id = self.selected_session()?.id.as_str();
-                self.providers.get(session_id)
+                self.engine.providers.get(session_id)
             }
             SessionSurface::Terminal => {
                 let id = self.active_terminal_id.as_ref()?;
-                self.companion_terminals.get(id).map(|t| &t.client)
+                self.engine.companion_terminals.get(id).map(|t| &t.client)
             }
         }
     }
@@ -2852,7 +2817,7 @@ impl App {
                     Some(s) => s.id.clone(),
                     None => return false,
                 };
-                let provider = self.providers.get(&session_id);
+                let provider = self.engine.providers.get(&session_id);
                 (session_id, provider)
             }
             SessionSurface::Terminal => {
@@ -2860,7 +2825,7 @@ impl App {
                     Some(id) => id.clone(),
                     None => return false,
                 };
-                let provider = self.companion_terminals.get(&id).map(|t| &t.client);
+                let provider = self.engine.companion_terminals.get(&id).map(|t| &t.client);
                 (id, provider)
             }
         };
