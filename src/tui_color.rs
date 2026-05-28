@@ -27,11 +27,23 @@ pub(crate) fn to_ratatui_color(c: CellColor) -> Color {
 
 pub(crate) fn to_ratatui_modifier(m: CellModifier) -> Modifier {
     let mut out = Modifier::empty();
-    if m.bold { out.insert(Modifier::BOLD); }
-    if m.dim { out.insert(Modifier::DIM); }
-    if m.italic { out.insert(Modifier::ITALIC); }
-    if m.underlined { out.insert(Modifier::UNDERLINED); }
-    if m.reversed { out.insert(Modifier::REVERSED); }
-    if m.crossed_out { out.insert(Modifier::CROSSED_OUT); }
+    if m.bold {
+        out.insert(Modifier::BOLD);
+    }
+    if m.dim {
+        out.insert(Modifier::DIM);
+    }
+    if m.italic {
+        out.insert(Modifier::ITALIC);
+    }
+    if m.underlined {
+        out.insert(Modifier::UNDERLINED);
+    }
+    if m.reversed {
+        out.insert(Modifier::REVERSED);
+    }
+    if m.crossed_out {
+        out.insert(Modifier::CROSSED_OUT);
+    }
     out
 }
