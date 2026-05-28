@@ -406,7 +406,9 @@ impl App {
         ));
         let worker_tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
-            super::workers::run_checkout_project_default_branch_inspection_job(project, worker_tx);
+            dux_core::project_browser::run_checkout_project_default_branch_inspection_job(
+                project, worker_tx,
+            );
         });
         Ok(())
     }
@@ -969,7 +971,7 @@ impl App {
         // in-memory state first and the DB call then failed, the session
         // would vanish from the UI but reappear on restart.
         self.engine.session_store.delete_session(&session.id)?;
-        Self::spawn_delete_startup_command_logs(
+        dux_core::startup::spawn_delete_startup_command_logs(
             self.engine.paths.clone(),
             session.project_id.clone(),
             session.id.clone(),
@@ -1824,16 +1826,6 @@ impl App {
         self.set_busy(format!(
             "Opening startup command logs for {status_label}..."
         ));
-    }
-
-    fn spawn_delete_startup_command_logs(paths: DuxPaths, project_id: String, session_id: String) {
-        std::thread::spawn(move || {
-            if let Err(err) = crate::startup::delete_agent_logs(&paths, &project_id, &session_id) {
-                logger::error(&format!(
-                    "failed to delete startup command logs for session {session_id}: {err:#}"
-                ));
-            }
-        });
     }
 
     pub(crate) fn open_change_theme_prompt(&mut self) -> Result<()> {

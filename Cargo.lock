@@ -581,6 +581,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sysinfo",
  "tempfile",
  "uuid",
 ]

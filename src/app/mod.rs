@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::io::stdout;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -54,11 +53,13 @@ pub(crate) use dux_core::model::CompanionTerminal;
 
 use text_input::TextInput;
 
+#[cfg(test)]
+pub(crate) use dux_core::worker::ProcessInfo;
 pub(crate) use dux_core::worker::{
     AgentLaunchFailedData, AgentLaunchKind, AgentLaunchReadyData, AgentLaunchRequest,
     BranchWarningKind, BrowserEntry, CreateAgentBranchInspection, NonDefaultBranchAction,
-    PrSyncEntry, ProcessInfo, ProjectPersistenceAction, ProjectWorktreeEntry, PullTarget,
-    ResolvedPullRequest, ResourceStats, WorkerEvent,
+    PrSyncEntry, ProjectPersistenceAction, ProjectWorktreeEntry, PullTarget, ResolvedPullRequest,
+    ResourceStats, WorkerEvent,
 };
 
 pub struct App {
@@ -738,64 +739,6 @@ pub(crate) fn selectable_project_worktree_indices(entries: &[ProjectWorktreeEntr
         .enumerate()
         .filter_map(|(index, entry)| entry.is_selectable.then_some(index))
         .collect()
-}
-
-fn canonical_or_original(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
-
-pub(crate) fn classify_project_worktrees(
-    project: &Project,
-    paths: &DuxPaths,
-    sessions: &[AgentSession],
-    worktrees: Vec<git::GitWorktree>,
-) -> Vec<ProjectWorktreeEntry> {
-    let managed_project_root = paths.worktrees_root.join(&project.name);
-    let project_checkout_path = canonical_or_original(Path::new(&project.path));
-    let session_by_path = sessions
-        .iter()
-        .map(|session| {
-            (
-                canonical_or_original(Path::new(&session.worktree_path)),
-                session.id.clone(),
-            )
-        })
-        .collect::<HashMap<_, _>>();
-
-    let mut entries = worktrees
-        .into_iter()
-        .map(|worktree| {
-            let canonical_path = canonical_or_original(&worktree.path);
-            let existing_session_id = session_by_path.get(&canonical_path).cloned();
-            let is_project_checkout = canonical_path == project_checkout_path;
-            let is_managed_by_dux = git::is_under(&managed_project_root, &worktree.path);
-            let is_external = !is_managed_by_dux;
-            let is_selectable = existing_session_id.is_none() && !is_project_checkout;
-            ProjectWorktreeEntry {
-                path: canonical_path,
-                branch_name: worktree.label(),
-                is_managed_by_dux,
-                existing_session_id,
-                is_external,
-                is_project_checkout,
-                is_selectable,
-            }
-        })
-        .collect::<Vec<_>>();
-
-    entries.sort_by(|a, b| {
-        a.is_selectable
-            .cmp(&b.is_selectable)
-            .reverse()
-            .then_with(|| a.is_project_checkout.cmp(&b.is_project_checkout))
-            .then_with(|| {
-                a.branch_name
-                    .to_lowercase()
-                    .cmp(&b.branch_name.to_lowercase())
-            })
-            .then_with(|| a.path.cmp(&b.path))
-    });
-    entries
 }
 
 #[derive(Clone, Debug)]
@@ -1859,7 +1802,7 @@ impl App {
         let targets = self.resource_monitor_targets();
         let tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
-            let rows = collect_resource_stats(targets);
+            let rows = dux_core::resource_stats::collect_resource_stats(targets);
             let _ = tx.send(WorkerEvent::ResourceStatsReady(rows));
         });
     }
@@ -3068,118 +3011,6 @@ pub(crate) fn runtime_project_to_config(
     }
 }
 
-// ── Resource monitor helpers ───────────────────────────────────────────────
-
-/// Collect CPU and memory stats for dux itself plus each labeled target
-/// process tree. Runs on a background thread — no `&self` needed.
-fn collect_resource_stats(targets: Vec<(String, u32)>) -> Vec<ResourceStats> {
-    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
-
-    let mut sys = System::new();
-    let refresh_kind = ProcessRefreshKind::nothing().with_cpu().with_memory();
-    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
-
-    let mut rows = Vec::new();
-
-    // Row: dux itself.
-    let self_pid = Pid::from_u32(std::process::id());
-    if let Some(proc_info) = sys.process(self_pid) {
-        rows.push(ResourceStats {
-            label: "dux (this process)".into(),
-            pid: Some(std::process::id()),
-            cpu_percent: proc_info.cpu_usage(),
-            rss_bytes: proc_info.memory(),
-            process_count: 1,
-            children: Vec::new(),
-        });
-    }
-
-    // Rows: each labeled target (agents and companion terminals).
-    for (label, root_pid) in &targets {
-        let (cpu, rss, count, children) = aggregate_tree(&sys, Pid::from_u32(*root_pid));
-        rows.push(ResourceStats {
-            label: label.clone(),
-            pid: Some(*root_pid),
-            cpu_percent: cpu,
-            rss_bytes: rss,
-            process_count: count,
-            children,
-        });
-    }
-
-    // Total row.
-    let total_cpu: f32 = rows.iter().map(|r| r.cpu_percent).sum();
-    let total_rss: u64 = rows.iter().map(|r| r.rss_bytes).sum();
-    let total_procs: usize = rows.iter().map(|r| r.process_count).sum();
-    rows.push(ResourceStats {
-        label: "TOTAL".into(),
-        pid: None,
-        cpu_percent: total_cpu,
-        rss_bytes: total_rss,
-        process_count: total_procs,
-        children: Vec::new(),
-    });
-
-    rows
-}
-
-/// Check whether `pid` is a descendant (child, grandchild, ...) of `ancestor`
-/// by walking up the process tree.
-fn is_descendant_of(sys: &sysinfo::System, pid: sysinfo::Pid, ancestor: sysinfo::Pid) -> bool {
-    use sysinfo::Pid;
-
-    let mut current = pid;
-    // Depth limit prevents infinite loops if the tree has a cycle (shouldn't
-    // happen, but be defensive).
-    for _ in 0..64 {
-        if let Some(proc) = sys.process(current) {
-            if let Some(parent) = proc.parent() {
-                if parent == ancestor {
-                    return true;
-                }
-                if parent == Pid::from_u32(0) {
-                    return false;
-                }
-                current = parent;
-            } else {
-                return false;
-            }
-        } else {
-            return false;
-        }
-    }
-    false
-}
-
-/// Aggregate CPU% and RSS across a root PID and all its descendants.
-/// Returns `(total_cpu, total_rss, process_count, top_children)` where
-/// `top_children` contains the top 10 individual processes by RSS.
-fn aggregate_tree(
-    sys: &sysinfo::System,
-    root: sysinfo::Pid,
-) -> (f32, u64, usize, Vec<ProcessInfo>) {
-    let mut cpu = 0.0f32;
-    let mut rss = 0u64;
-    let mut count = 0usize;
-    let mut children = Vec::new();
-    for (pid, proc_info) in sys.processes() {
-        if *pid == root || is_descendant_of(sys, *pid, root) {
-            cpu += proc_info.cpu_usage();
-            rss += proc_info.memory();
-            count += 1;
-            children.push(ProcessInfo {
-                name: proc_info.name().to_string_lossy().into_owned(),
-                pid: pid.as_u32(),
-                cpu_percent: proc_info.cpu_usage(),
-                rss_bytes: proc_info.memory(),
-            });
-        }
-    }
-    children.sort_by_key(|b| std::cmp::Reverse(b.rss_bytes));
-    children.truncate(10);
-    (cpu, rss, count, children)
-}
-
 pub(crate) fn provider_config(config: &Config, provider: &ProviderKind) -> ProviderCommandConfig {
     config
         .providers
@@ -3653,56 +3484,6 @@ leading_branch = "main"
     }
 
     #[test]
-    fn current_process_is_descendant_of_pid_1() {
-        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
-
-        let mut sys = System::new();
-        sys.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing(),
-        );
-        let self_pid = Pid::from_u32(std::process::id());
-        let init_pid = Pid::from_u32(1);
-        assert!(
-            is_descendant_of(&sys, self_pid, init_pid),
-            "current process should be a descendant of PID 1"
-        );
-    }
-
-    #[test]
-    fn aggregate_tree_includes_self_process() {
-        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
-
-        let mut sys = System::new();
-        sys.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing().with_memory(),
-        );
-        let self_pid = Pid::from_u32(std::process::id());
-        let (_cpu, rss, count, _children) = aggregate_tree(&sys, self_pid);
-        assert!(count >= 1, "should include at least the root process");
-        assert!(rss > 0, "current process should have nonzero RSS");
-    }
-
-    #[test]
-    fn is_descendant_of_returns_false_for_unrelated_pid() {
-        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
-
-        let mut sys = System::new();
-        sys.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing(),
-        );
-        // PID 1 is not a descendant of the current process.
-        let self_pid = Pid::from_u32(std::process::id());
-        let init_pid = Pid::from_u32(1);
-        assert!(!is_descendant_of(&sys, init_pid, self_pid));
-    }
-
-    #[test]
     fn build_visual_rows_respects_expansion() {
         let rows = vec![
             ResourceStats {
@@ -3764,121 +3545,6 @@ leading_branch = "main"
         expanded.insert(999);
         let visual = build_visual_rows(&rows, &expanded);
         assert_eq!(visual.len(), 3);
-    }
-
-    #[test]
-    fn classify_project_worktrees_marks_managed_external_and_existing_agent() {
-        let root =
-            std::env::temp_dir().join(format!("dux-classify-worktrees-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let repo = root.join("repo");
-        let managed = root.join("worktrees").join("demo").join("managed-orphan");
-        let external = root.join("external checkout");
-        let existing = root.join("worktrees").join("demo").join("existing-agent");
-        fs::create_dir_all(&repo).unwrap();
-        fs::create_dir_all(&managed).unwrap();
-        fs::create_dir_all(&external).unwrap();
-        fs::create_dir_all(&existing).unwrap();
-
-        let project = Project {
-            id: "project-1".to_string(),
-            name: "demo".to_string(),
-            path: repo.to_string_lossy().to_string(),
-            explicit_default_provider: None,
-            default_provider: ProviderKind::new("codex"),
-            leading_branch: Some("main".to_string()),
-            auto_reopen_agents: None,
-            startup_command: None,
-            env: Default::default(),
-            current_branch: "main".to_string(),
-            branch_status: ProjectBranchStatus::Leading,
-            path_missing: false,
-        };
-        let paths = DuxPaths {
-            root: root.clone(),
-            config_path: root.join("config.toml"),
-            sessions_db_path: root.join("sessions.sqlite"),
-            worktrees_root: root.join("worktrees"),
-            lock_path: root.join("lock"),
-        };
-        let sessions = vec![AgentSession {
-            id: "session-1".to_string(),
-            project_id: project.id.clone(),
-            project_path: Some(project.path.clone()),
-            provider: ProviderKind::new("codex"),
-            source_branch: "main".to_string(),
-            branch_name: "existing".to_string(),
-            worktree_path: existing.to_string_lossy().to_string(),
-            title: None,
-            started_providers: Vec::new(),
-            desired_running: false,
-            auto_reopen_enabled: true,
-            status: SessionStatus::Detached,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }];
-        let worktrees = vec![
-            git::GitWorktree {
-                path: repo.clone(),
-                head: Some("0000000".to_string()),
-                branch_name: Some("main".to_string()),
-                detached: false,
-            },
-            git::GitWorktree {
-                path: managed.clone(),
-                head: Some("1111111".to_string()),
-                branch_name: Some("managed-orphan".to_string()),
-                detached: false,
-            },
-            git::GitWorktree {
-                path: external.clone(),
-                head: Some("2222222".to_string()),
-                branch_name: Some("feature".to_string()),
-                detached: false,
-            },
-            git::GitWorktree {
-                path: existing.clone(),
-                head: Some("3333333".to_string()),
-                branch_name: Some("existing".to_string()),
-                detached: false,
-            },
-        ];
-
-        let entries = classify_project_worktrees(&project, &paths, &sessions, worktrees);
-        let managed_entry = entries
-            .iter()
-            .find(|entry| entry.path == managed.canonicalize().unwrap())
-            .unwrap();
-        assert!(managed_entry.is_managed_by_dux);
-        assert!(!managed_entry.is_external);
-        assert!(managed_entry.is_selectable);
-
-        let external_entry = entries
-            .iter()
-            .find(|entry| entry.path == external.canonicalize().unwrap())
-            .unwrap();
-        assert!(!external_entry.is_managed_by_dux);
-        assert!(external_entry.is_external);
-        assert!(external_entry.is_selectable);
-
-        let existing_entry = entries
-            .iter()
-            .find(|entry| entry.path == existing.canonicalize().unwrap())
-            .unwrap();
-        assert_eq!(
-            existing_entry.existing_session_id.as_deref(),
-            Some("session-1")
-        );
-        assert!(!existing_entry.is_selectable);
-
-        let project_checkout_entry = entries
-            .iter()
-            .find(|entry| entry.path == repo.canonicalize().unwrap())
-            .unwrap();
-        assert!(project_checkout_entry.is_project_checkout);
-        assert!(!project_checkout_entry.is_selectable);
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -1,0 +1,347 @@
+//! Project-browser and project-worktree intelligence helpers. Pure free
+//! functions used by the project-browser worker (`spawn_browser_entries`),
+//! the worktree picker (`spawn_project_worktrees_worker`), and the project
+//! branch-status worker (`spawn_project_branch_status_checks`). The spawn
+//! fns themselves move to `Engine` in T3b once these helpers are in core.
+
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
+
+use crate::config::DuxPaths;
+use crate::git::{self, GitWorktree};
+use crate::model::{AgentSession, Project, ProjectBranchStatus};
+use crate::worker::{BranchWarningKind, BrowserEntry, ProjectWorktreeEntry, WorkerEvent};
+
+pub fn browser_entries(dir: &Path) -> Vec<BrowserEntry> {
+    let mut entries = fs::read_dir(dir)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_dir() {
+                return None;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                return None;
+            }
+            let is_git_repo = path.join(".git").exists();
+            let label = if is_git_repo {
+                name
+            } else {
+                format!("{name}/")
+            };
+            Some(BrowserEntry {
+                is_git_repo,
+                path,
+                label,
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| {
+        b.is_git_repo
+            .cmp(&a.is_git_repo)
+            .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
+    });
+    if let Some(parent) = dir.parent() {
+        entries.insert(
+            0,
+            BrowserEntry {
+                path: parent.to_path_buf(),
+                label: "../".to_string(),
+                is_git_repo: false,
+            },
+        );
+    }
+    entries
+}
+
+fn canonical_or_original(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+pub fn classify_project_worktrees(
+    project: &Project,
+    paths: &DuxPaths,
+    sessions: &[AgentSession],
+    worktrees: Vec<GitWorktree>,
+) -> Vec<ProjectWorktreeEntry> {
+    let managed_project_root = paths.worktrees_root.join(&project.name);
+    let project_checkout_path = canonical_or_original(Path::new(&project.path));
+    let session_by_path = sessions
+        .iter()
+        .map(|session| {
+            (
+                canonical_or_original(Path::new(&session.worktree_path)),
+                session.id.clone(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut entries = worktrees
+        .into_iter()
+        .map(|worktree| {
+            let canonical_path = canonical_or_original(&worktree.path);
+            let existing_session_id = session_by_path.get(&canonical_path).cloned();
+            let is_project_checkout = canonical_path == project_checkout_path;
+            let is_managed_by_dux = git::is_under(&managed_project_root, &worktree.path);
+            let is_external = !is_managed_by_dux;
+            let is_selectable = existing_session_id.is_none() && !is_project_checkout;
+            ProjectWorktreeEntry {
+                path: canonical_path,
+                branch_name: worktree.label(),
+                is_managed_by_dux,
+                existing_session_id,
+                is_external,
+                is_project_checkout,
+                is_selectable,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    entries.sort_by(|a, b| {
+        a.is_selectable
+            .cmp(&b.is_selectable)
+            .reverse()
+            .then_with(|| a.is_project_checkout.cmp(&b.is_project_checkout))
+            .then_with(|| {
+                a.branch_name
+                    .to_lowercase()
+                    .cmp(&b.branch_name.to_lowercase())
+            })
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    entries
+}
+
+pub fn run_project_branch_status_job(project: Project, worker_tx: Sender<WorkerEvent>) {
+    let repo_path = PathBuf::from(&project.path);
+    let result = git::current_branch(&repo_path)
+        .map(|branch| {
+            let branch_status = if let Some(leading_branch) = project.leading_branch.as_deref() {
+                if branch == leading_branch {
+                    ProjectBranchStatus::Leading
+                } else {
+                    ProjectBranchStatus::NotLeading
+                }
+            } else {
+                let warning_kind = git::branch_warning_kind(&repo_path, &branch);
+                git::branch_status_from_warning(warning_kind.as_ref())
+            };
+            (branch, branch_status)
+        })
+        .map_err(|err| format!("{err:#}"));
+    let _ = worker_tx.send(WorkerEvent::ProjectBranchStatusReady {
+        project_id: project.id,
+        result,
+    });
+}
+
+pub fn run_checkout_project_default_branch_inspection_job(
+    project: Project,
+    worker_tx: Sender<WorkerEvent>,
+) {
+    let repo_path = PathBuf::from(&project.path);
+    let result = git::current_branch(&repo_path)
+        .map(|branch| {
+            let warning_kind = if let Some(leading_branch) = project.leading_branch.as_deref() {
+                if branch == leading_branch {
+                    None
+                } else {
+                    Some(BranchWarningKind::Known {
+                        default_branch: leading_branch.to_string(),
+                    })
+                }
+            } else {
+                git::branch_warning_kind(&repo_path, &branch)
+            };
+            (branch, warning_kind)
+        })
+        .map_err(|err| format!("{err:#}"));
+    let _ = worker_tx.send(WorkerEvent::CheckoutProjectDefaultBranchInspected { project, result });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::mpsc;
+
+    use chrono::Utc;
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::model::{ProviderKind, SessionStatus};
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed in {}: {}",
+            args,
+            cwd.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn checkout_project_default_branch_inspection_uses_stored_leading_branch() {
+        let repo = tempdir().expect("repo tempdir");
+        run_git(repo.path(), &["init", "-b", "trunk"]);
+        run_git(repo.path(), &["config", "user.name", "test"]);
+        run_git(repo.path(), &["config", "user.email", "t@t"]);
+        run_git(repo.path(), &["commit", "--allow-empty", "-m", "init"]);
+        run_git(repo.path(), &["switch", "-c", "feature"]);
+
+        let project = Project {
+            id: "project-1".to_string(),
+            name: "demo".to_string(),
+            path: repo.path().to_string_lossy().to_string(),
+            explicit_default_provider: None,
+            default_provider: ProviderKind::from_str("codex"),
+            leading_branch: Some("trunk".to_string()),
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: Default::default(),
+            current_branch: "feature".to_string(),
+            branch_status: ProjectBranchStatus::NotLeading,
+            path_missing: false,
+        };
+        let (worker_tx, worker_rx) = mpsc::channel();
+
+        run_checkout_project_default_branch_inspection_job(project, worker_tx);
+
+        match worker_rx.recv().expect("worker event") {
+            WorkerEvent::CheckoutProjectDefaultBranchInspected { result, .. } => {
+                let (current_branch, warning_kind) = result.expect("inspection");
+                assert_eq!(current_branch, "feature");
+                assert!(matches!(
+                    warning_kind,
+                    Some(BranchWarningKind::Known { default_branch }) if default_branch == "trunk"
+                ));
+            }
+            _ => panic!("expected checkout inspection event"),
+        }
+    }
+
+    #[test]
+    fn classify_project_worktrees_marks_managed_external_and_existing_agent() {
+        let root =
+            std::env::temp_dir().join(format!("dux-classify-worktrees-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        let managed = root.join("worktrees").join("demo").join("managed-orphan");
+        let external = root.join("external checkout");
+        let existing = root.join("worktrees").join("demo").join("existing-agent");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&managed).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        fs::create_dir_all(&existing).unwrap();
+
+        let project = Project {
+            id: "project-1".to_string(),
+            name: "demo".to_string(),
+            path: repo.to_string_lossy().to_string(),
+            explicit_default_provider: None,
+            default_provider: ProviderKind::new("codex"),
+            leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: Default::default(),
+            current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Leading,
+            path_missing: false,
+        };
+        let paths = DuxPaths {
+            root: root.clone(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("lock"),
+        };
+        let sessions = vec![AgentSession {
+            id: "session-1".to_string(),
+            project_id: project.id.clone(),
+            project_path: Some(project.path.clone()),
+            provider: ProviderKind::new("codex"),
+            source_branch: "main".to_string(),
+            branch_name: "existing".to_string(),
+            worktree_path: existing.to_string_lossy().to_string(),
+            title: None,
+            started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
+            status: SessionStatus::Detached,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }];
+        let worktrees = vec![
+            git::GitWorktree {
+                path: repo.clone(),
+                head: Some("0000000".to_string()),
+                branch_name: Some("main".to_string()),
+                detached: false,
+            },
+            git::GitWorktree {
+                path: managed.clone(),
+                head: Some("1111111".to_string()),
+                branch_name: Some("managed-orphan".to_string()),
+                detached: false,
+            },
+            git::GitWorktree {
+                path: external.clone(),
+                head: Some("2222222".to_string()),
+                branch_name: Some("feature".to_string()),
+                detached: false,
+            },
+            git::GitWorktree {
+                path: existing.clone(),
+                head: Some("3333333".to_string()),
+                branch_name: Some("existing".to_string()),
+                detached: false,
+            },
+        ];
+
+        let entries = classify_project_worktrees(&project, &paths, &sessions, worktrees);
+        let managed_entry = entries
+            .iter()
+            .find(|entry| entry.path == managed.canonicalize().unwrap())
+            .unwrap();
+        assert!(managed_entry.is_managed_by_dux);
+        assert!(!managed_entry.is_external);
+        assert!(managed_entry.is_selectable);
+
+        let external_entry = entries
+            .iter()
+            .find(|entry| entry.path == external.canonicalize().unwrap())
+            .unwrap();
+        assert!(!external_entry.is_managed_by_dux);
+        assert!(external_entry.is_external);
+        assert!(external_entry.is_selectable);
+
+        let existing_entry = entries
+            .iter()
+            .find(|entry| entry.path == existing.canonicalize().unwrap())
+            .unwrap();
+        assert_eq!(
+            existing_entry.existing_session_id.as_deref(),
+            Some("session-1")
+        );
+        assert!(!existing_entry.is_selectable);
+
+        let project_checkout_entry = entries
+            .iter()
+            .find(|entry| entry.path == repo.canonicalize().unwrap())
+            .unwrap();
+        assert!(project_checkout_entry.is_project_checkout);
+        assert!(!project_checkout_entry.is_selectable);
+
+        let _ = fs::remove_dir_all(root);
+    }
+}

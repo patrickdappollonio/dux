@@ -65,6 +65,19 @@ pub fn delete_agent_logs(paths: &DuxPaths, project_id: &str, session_id: &str) -
     fs::remove_dir_all(&dir).with_context(|| format!("failed to delete {}", dir.display()))
 }
 
+/// Fire-and-forget background deletion of an agent's startup-command logs.
+/// Errors are logged but not surfaced to the caller, since session deletion
+/// has already succeeded by the time this runs.
+pub fn spawn_delete_startup_command_logs(paths: DuxPaths, project_id: String, session_id: String) {
+    std::thread::spawn(move || {
+        if let Err(err) = delete_agent_logs(&paths, &project_id, &session_id) {
+            crate::logger::error(&format!(
+                "failed to delete startup command logs for session {session_id}: {err:#}"
+            ));
+        }
+    });
+}
+
 pub fn list_agent_logs(
     paths: &DuxPaths,
     project_id: &str,
