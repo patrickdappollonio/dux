@@ -3378,7 +3378,11 @@ mod tests {
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
         app.begin_delete_session("s1", true);
-        assert_eq!(app.engine.pending_deletions.len(), 1, "first call records pending");
+        assert_eq!(
+            app.engine.pending_deletions.len(),
+            1,
+            "first call records pending"
+        );
 
         app.begin_delete_session("s1", true);
         assert_eq!(
@@ -3407,14 +3411,16 @@ mod tests {
         let busy_msg = "Removing worktree for agent \"branch-s1\"\u{2026}";
         app.set_busy(busy_msg);
         app.engine.pending_deletions.insert("s1".to_string());
-        app.engine.deletion_busy_messages
+        app.engine
+            .deletion_busy_messages
             .insert("s1".to_string(), busy_msg.to_string());
 
         // Another code path removes the session before the worker replies.
         app.engine.sessions.retain(|s| s.id != "s1");
 
         // The worker then reports success.
-        app.engine.worker_tx
+        app.engine
+            .worker_tx
             .send(WorkerEvent::WorktreeRemoveCompleted {
                 session_id: "s1".to_string(),
                 result: Ok(false),
@@ -3449,14 +3455,16 @@ mod tests {
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
         app.engine.pending_deletions.insert("s1".to_string());
-        app.engine.deletion_busy_messages
+        app.engine
+            .deletion_busy_messages
             .insert("s1".to_string(), "Removing worktree\u{2026}".to_string());
         app.engine.sessions.retain(|s| s.id != "s1");
 
         // Another action already set a non-Busy status.
         app.set_info("Deleted project \"demo\" and all its agents");
 
-        app.engine.worker_tx
+        app.engine
+            .worker_tx
             .send(WorkerEvent::WorktreeRemoveCompleted {
                 session_id: "s1".to_string(),
                 result: Ok(false),
@@ -3501,7 +3509,8 @@ mod tests {
         // An unrelated operation set its own Busy message.
         app.set_busy("Pushing to remote\u{2026}");
 
-        app.engine.worker_tx
+        app.engine
+            .worker_tx
             .send(WorkerEvent::WorktreeRemoveCompleted {
                 session_id: "s1".to_string(),
                 result: Ok(false),
@@ -3579,7 +3588,8 @@ mod tests {
 
         app.engine.pending_deletions.insert("s1".to_string());
 
-        app.engine.worker_tx
+        app.engine
+            .worker_tx
             .send(WorkerEvent::WorktreeRemoveCompleted {
                 session_id: "s1".to_string(),
                 result: Err("fatal: not a git repository".to_string()),

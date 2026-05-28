@@ -6430,7 +6430,8 @@ mod tests {
 
     fn complete_create_agent_branch_inspection(app: &mut App, branch: &str, leading_branch: &str) {
         let project = app.engine.projects[0].clone();
-        app.engine.worker_tx
+        app.engine
+            .worker_tx
             .send(WorkerEvent::CreateAgentBranchInspected {
                 project,
                 result: Ok(CreateAgentBranchInspection {
@@ -7014,7 +7015,8 @@ not_a_real_action = ["x"]
         let repo_path = app.engine.projects[0].path.clone();
         app.engine.pulls_in_flight.insert(repo_path.clone());
 
-        app.engine.worker_tx
+        app.engine
+            .worker_tx
             .send(WorkerEvent::PullCompleted {
                 repo_path,
                 target: PullTarget::Project {
@@ -7919,7 +7921,8 @@ not_a_real_action = ["x"]
     fn project_branch_status_ready_marks_project_not_leading() {
         let mut app = test_app(default_bindings());
 
-        app.engine.worker_tx
+        app.engine
+            .worker_tx
             .send(WorkerEvent::ProjectBranchStatusReady {
                 project_id: app.engine.projects[0].id.clone(),
                 result: Ok(("feature".to_string(), ProjectBranchStatus::NotLeading)),
@@ -7943,7 +7946,8 @@ not_a_real_action = ["x"]
         project.branch_status = ProjectBranchStatus::NotLeading;
         app.engine.projects[0] = project.clone();
 
-        app.engine.worker_tx
+        app.engine
+            .worker_tx
             .send(WorkerEvent::NonDefaultBranchCheckoutCompleted {
                 action: NonDefaultBranchAction::CheckoutProjectDefault { project },
                 target_branch: "main".to_string(),
@@ -8193,14 +8197,19 @@ not_a_real_action = ["x"]
                 startup_result: None,
             },
         );
-        app.engine.worker_tx
+        app.engine
+            .worker_tx
             .send(WorkerEvent::AgentLaunchReady(Box::new(
                 crate::app::AgentLaunchReadyData { request, client },
             )))
             .unwrap();
         app.drain_events();
 
-        assert!(app.engine.resume_fallback_candidates.contains_key(&session.id));
+        assert!(
+            app.engine
+                .resume_fallback_candidates
+                .contains_key(&session.id)
+        );
         assert_eq!(
             app.engine
                 .sessions
@@ -9624,7 +9633,8 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         let project = app.engine.projects[0].clone();
 
-        app.engine.worker_tx
+        app.engine
+            .worker_tx
             .send(WorkerEvent::PullRequestResolved {
                 result: Ok(ResolvedPullRequest {
                     project,
@@ -11066,7 +11076,11 @@ cyan = "#00ffff"
         app.show_or_open_first_terminal()
             .expect("should reuse existing terminal");
 
-        assert_eq!(app.engine.companion_terminals.len(), 1, "no new terminal spawned");
+        assert_eq!(
+            app.engine.companion_terminals.len(),
+            1,
+            "no new terminal spawned"
+        );
         assert_eq!(app.active_terminal_id.as_deref(), Some(first_id.as_str()));
         assert_eq!(app.session_surface, SessionSurface::Terminal);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
@@ -11101,7 +11115,11 @@ cyan = "#00ffff"
             .expect("should reuse first");
 
         assert_eq!(app.active_terminal_id.as_deref(), Some(first_id.as_str()));
-        assert_eq!(app.engine.companion_terminals.len(), 2, "still two terminals");
+        assert_eq!(
+            app.engine.companion_terminals.len(),
+            2,
+            "still two terminals"
+        );
     }
 
     #[test]
@@ -11947,7 +11965,8 @@ cyan = "#00ffff"
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn quick-exit");
         app.engine.providers.insert(session_id.clone(), client);
         app.mark_session_status(&session_id, SessionStatus::Active);
-        app.engine.resume_fallback_candidates
+        app.engine
+            .resume_fallback_candidates
             .insert(session_id.clone(), std::time::Instant::now());
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
@@ -11970,7 +11989,9 @@ cyan = "#00ffff"
         assert_eq!(app.input_target, InputTarget::Agent);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
         assert!(
-            !app.engine.resume_fallback_candidates.contains_key(&session_id),
+            !app.engine
+                .resume_fallback_candidates
+                .contains_key(&session_id),
             "candidate should have been removed after fallback"
         );
         assert!(
@@ -11992,7 +12013,8 @@ cyan = "#00ffff"
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn with output");
         app.engine.providers.insert(session_id.clone(), client);
         app.mark_session_status(&session_id, SessionStatus::Active);
-        app.engine.resume_fallback_candidates
+        app.engine
+            .resume_fallback_candidates
             .insert(session_id.clone(), std::time::Instant::now());
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
@@ -12007,7 +12029,9 @@ cyan = "#00ffff"
         // should NOT have triggered. The session should be detached.
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Detached);
         assert!(
-            !app.engine.resume_fallback_candidates.contains_key(&session_id),
+            !app.engine
+                .resume_fallback_candidates
+                .contains_key(&session_id),
             "candidate should have been removed even when skipped"
         );
     }
@@ -12037,7 +12061,8 @@ cyan = "#00ffff"
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn one-liner");
         app.engine.providers.insert(session_id.clone(), client);
         app.mark_session_status(&session_id, SessionStatus::Active);
-        app.engine.resume_fallback_candidates
+        app.engine
+            .resume_fallback_candidates
             .insert(session_id.clone(), std::time::Instant::now());
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
@@ -12080,7 +12105,9 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
 
         std::thread::sleep(std::time::Duration::from_millis(200));
-        drain_until(&mut app, |app| !app.engine.providers.contains_key(&session_id));
+        drain_until(&mut app, |app| {
+            !app.engine.providers.contains_key(&session_id)
+        });
 
         // Without being a candidate, the session should just go to detached.
         assert!(
@@ -12103,7 +12130,9 @@ cyan = "#00ffff"
         app.mark_session_status(&session_id, SessionStatus::Active);
 
         std::thread::sleep(std::time::Duration::from_millis(200));
-        drain_until(&mut app, |app| !app.engine.providers.contains_key(&session_id));
+        drain_until(&mut app, |app| {
+            !app.engine.providers.contains_key(&session_id)
+        });
 
         assert!(!app.engine.sessions[0].desired_running);
         let loaded = app
@@ -12127,7 +12156,9 @@ cyan = "#00ffff"
         app.mark_session_status(&session_id, SessionStatus::Active);
 
         std::thread::sleep(std::time::Duration::from_millis(200));
-        drain_until(&mut app, |app| !app.engine.providers.contains_key(&session_id));
+        drain_until(&mut app, |app| {
+            !app.engine.providers.contains_key(&session_id)
+        });
 
         assert!(app.engine.sessions[0].desired_running);
         let loaded = app
@@ -12263,7 +12294,9 @@ cyan = "#00ffff"
         );
         assert_eq!(app.engine.sessions[0].status, SessionStatus::Active);
         assert!(
-            !app.engine.resume_fallback_candidates.contains_key(&session_id),
+            !app.engine
+                .resume_fallback_candidates
+                .contains_key(&session_id),
             "candidate should have been removed after timeout fallback"
         );
         assert!(
