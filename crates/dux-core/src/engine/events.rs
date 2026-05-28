@@ -214,11 +214,11 @@ impl Engine {
                                 } else if existing.leading_branch.is_some() {
                                     ProjectBranchStatus::NotLeading
                                 } else {
-                                    let warning = engine_branch_warning_kind(
+                                    let warning = crate::git::branch_warning_kind(
                                         Path::new(&existing.path),
                                         &existing.current_branch,
                                     );
-                                    engine_branch_status_from_warning(warning.as_ref())
+                                    crate::git::branch_status_from_warning(warning.as_ref())
                                 };
                             }
                             EventReaction::Status(StatusUpdate::info(format!(
@@ -591,26 +591,510 @@ impl Engine {
     }
 }
 
-// Local copies of the branch-warning helpers from `src/app/mod.rs`. We
-// duplicate the logic here (a few lines) instead of moving the App helpers
-// into dux-core so that the `PullCompleted Project` arm can compute branch
-// status without touching App code.
-fn engine_branch_warning_kind(path: &Path, branch: &str) -> Option<BranchWarningKind> {
-    match crate::git::remote_default_branch(path) {
-        Some(default) if default != branch => Some(BranchWarningKind::Known {
-            default_branch: default,
-        }),
-        Some(_) => None,
-        None if branch != "main" && branch != "master" => Some(BranchWarningKind::Heuristic),
-        None => None,
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DuxPaths;
+    use crate::lockfile::SingleInstanceLock;
+    use crate::model::{
+        AgentSession, GhStatus, PrInfo, PrState, Project, ProjectBranchStatus, ProviderKind,
+        SessionStatus,
+    };
+    use crate::storage::SessionStore;
+    use crate::worker::{
+        AgentLaunchFailedData, AgentLaunchKind, AgentLaunchRequest, PullTarget, WorkerEvent,
+    };
+    use chrono::Utc;
+    use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
 
-fn engine_branch_status_from_warning(
-    warning_kind: Option<&BranchWarningKind>,
-) -> ProjectBranchStatus {
-    match warning_kind {
-        Some(_) => ProjectBranchStatus::NotLeading,
-        None => ProjectBranchStatus::Leading,
+    /// Construct a minimally-wired `Engine` for tests, alongside the `TempDir`
+    /// that backs its on-disk state (sqlite, lockfile). Keep the `TempDir`
+    /// alive for the lifetime of the test so it is cleaned up afterwards.
+    fn test_engine() -> (Engine, TempDir) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root: root.clone(),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).expect("worktrees dir");
+        let session_store = SessionStore::open(&paths.sessions_db_path).expect("session store");
+        let single_instance_lock =
+            SingleInstanceLock::acquire(&paths.lock_path).expect("single-instance lock");
+        let (worker_tx, worker_rx) = mpsc::channel();
+        let engine = Engine {
+            config: Config::default(),
+            paths,
+            session_store,
+            projects: Vec::new(),
+            sessions: Vec::new(),
+            staged_files: Vec::new(),
+            unstaged_files: Vec::new(),
+            terminal_counter: 0,
+            github_integration_enabled: false,
+            single_instance_lock,
+            worker_tx,
+            worker_rx,
+            providers: HashMap::new(),
+            running_provider_pins: HashMap::new(),
+            companion_terminals: HashMap::new(),
+            gh_status: GhStatus::Unknown,
+            pr_statuses: HashMap::new(),
+            branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
+            pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
+            pr_sync_enabled: Arc::new(AtomicBool::new(false)),
+            refs_watcher: None,
+            refs_watch_paths: HashMap::new(),
+            resume_fallback_candidates: HashMap::new(),
+            pending_deletions: HashSet::new(),
+            deletion_busy_messages: HashMap::new(),
+            watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
+            has_active_processes: Arc::new(AtomicBool::new(false)),
+            create_agent_in_flight: false,
+            agent_launches_in_flight: HashSet::new(),
+            pulls_in_flight: HashSet::new(),
+            resource_stats_in_flight: false,
+        };
+        (engine, tmp)
+    }
+
+    fn sample_project(id: &str, path: &str) -> Project {
+        Project {
+            id: id.to_string(),
+            name: format!("{id}-name"),
+            path: path.to_string(),
+            explicit_default_provider: None,
+            default_provider: ProviderKind::new("claude"),
+            leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: BTreeMap::new(),
+            current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Leading,
+            path_missing: false,
+        }
+    }
+
+    fn sample_session(id: &str, project_id: &str, branch: &str) -> AgentSession {
+        let now = Utc::now();
+        AgentSession {
+            id: id.to_string(),
+            project_id: project_id.to_string(),
+            project_path: None,
+            provider: ProviderKind::new("claude"),
+            source_branch: "main".to_string(),
+            branch_name: branch.to_string(),
+            worktree_path: format!("/tmp/{id}-worktree"),
+            title: Some(format!("{id}-title")),
+            started_providers: Vec::new(),
+            desired_running: true,
+            auto_reopen_enabled: false,
+            status: SessionStatus::Detached,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn unwrap_status(reaction: EventReaction) -> StatusUpdate {
+        match reaction {
+            EventReaction::Status(s) => s,
+            other => panic!("expected Status reaction, got {:?}", reaction_kind(&other)),
+        }
+    }
+
+    fn reaction_kind(r: &EventReaction) -> &'static str {
+        match r {
+            EventReaction::Nothing => "Nothing",
+            EventReaction::Status(_) => "Status",
+            EventReaction::Multi(_) => "Multi",
+            EventReaction::RebuildLeftItems => "RebuildLeftItems",
+            EventReaction::ReloadChangedFiles => "ReloadChangedFiles",
+            EventReaction::ClampFilesCursor => "ClampFilesCursor",
+            EventReaction::AgentLaunchReady(_) => "AgentLaunchReady",
+            EventReaction::AgentLaunchFailed(_) => "AgentLaunchFailed",
+            EventReaction::CommitMessageGenerated(_) => "CommitMessageGenerated",
+            EventReaction::CommitMessageFailed(_) => "CommitMessageFailed",
+            EventReaction::BrowserEntriesArrived { .. } => "BrowserEntriesArrived",
+            EventReaction::ProjectWorktreesArrived { .. } => "ProjectWorktreesArrived",
+            EventReaction::UpdatePrLastChecked(_) => "UpdatePrLastChecked",
+            EventReaction::SpawnPrCheckForSession(_) => "SpawnPrCheckForSession",
+            EventReaction::OpenNewAgentPromptForPr(_) => "OpenNewAgentPromptForPr",
+            EventReaction::SpawnPrSyncWorkers => "SpawnPrSyncWorkers",
+            EventReaction::WorktreeRemoveSucceeded { .. } => "WorktreeRemoveSucceeded",
+            EventReaction::WorktreeRemoveFailed { .. } => "WorktreeRemoveFailed",
+            EventReaction::ResourceStatsArrived(_) => "ResourceStatsArrived",
+            EventReaction::AddProjectAfterBranchCheckout { .. } => "AddProjectAfterBranchCheckout",
+            EventReaction::ContinueCreateAgentAfterInspection { .. } => {
+                "ContinueCreateAgentAfterInspection"
+            }
+            EventReaction::DispatchProjectDefaultBranchCheckout { .. } => {
+                "DispatchProjectDefaultBranchCheckout"
+            }
+            EventReaction::ApplyReloadedConfig(_) => "ApplyReloadedConfig",
+            EventReaction::OpenConfigReloadFailedModal(_) => "OpenConfigReloadFailedModal",
+            EventReaction::ProjectPersistenceCompleted { .. } => "ProjectPersistenceCompleted",
+            EventReaction::StartupCommandSucceeded { .. } => "StartupCommandSucceeded",
+            EventReaction::StartupLogArrived { .. } => "StartupLogArrived",
+        }
+    }
+
+    // ── PullCompleted (Project) ──────────────────────────────────────────
+
+    #[test]
+    fn pull_completed_project_ok_updates_branch_and_clears_inflight() {
+        let (mut engine, _tmp) = test_engine();
+        let project = sample_project("p1", "/tmp/p1");
+        engine.projects.push(project);
+        let repo_path = "/tmp/p1".to_string();
+        engine.pulls_in_flight.insert(repo_path.clone());
+
+        let reaction = engine.process_worker_event(WorkerEvent::PullCompleted {
+            repo_path: repo_path.clone(),
+            target: PullTarget::Project {
+                project_id: "p1".to_string(),
+                project_name: "p1-name".to_string(),
+                leading_branch: Some("main".to_string()),
+            },
+            result: Ok(Some("feature-x".to_string())),
+        });
+
+        // In-flight entry is cleared regardless of result.
+        assert!(!engine.pulls_in_flight.contains(&repo_path));
+
+        // Project's current branch is updated; status is NotLeading because
+        // leading_branch is Some("main") and current_branch is "feature-x".
+        let p = &engine.projects[0];
+        assert_eq!(p.current_branch, "feature-x");
+        assert_eq!(p.branch_status, ProjectBranchStatus::NotLeading);
+
+        let status = unwrap_status(reaction);
+        assert_eq!(status.tone, StatusTone::Info);
+        assert_eq!(
+            status.message,
+            "Refreshed project \"p1-name\". Local branch is up to date with remote."
+        );
+    }
+
+    #[test]
+    fn pull_completed_project_err_still_clears_inflight() {
+        let (mut engine, _tmp) = test_engine();
+        let repo_path = "/tmp/p1".to_string();
+        engine.pulls_in_flight.insert(repo_path.clone());
+
+        let reaction = engine.process_worker_event(WorkerEvent::PullCompleted {
+            repo_path: repo_path.clone(),
+            target: PullTarget::Project {
+                project_id: "p1".to_string(),
+                project_name: "p1-name".to_string(),
+                leading_branch: None,
+            },
+            result: Err("network down".to_string()),
+        });
+
+        assert!(!engine.pulls_in_flight.contains(&repo_path));
+        let status = unwrap_status(reaction);
+        assert_eq!(status.tone, StatusTone::Error);
+        assert_eq!(
+            status.message,
+            "Project refresh failed for \"p1-name\": network down"
+        );
+    }
+
+    // ── BranchSyncReady ──────────────────────────────────────────────────
+
+    #[test]
+    fn branch_sync_ready_changed_branch_returns_rebuild() {
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(sample_session("s1", "p1", "old"));
+        let before_updated_at = engine.sessions[0].updated_at;
+
+        let reaction = engine.process_worker_event(WorkerEvent::BranchSyncReady(vec![(
+            "s1".to_string(),
+            "new".to_string(),
+        )]));
+
+        assert!(matches!(reaction, EventReaction::RebuildLeftItems));
+        let s = &engine.sessions[0];
+        assert_eq!(s.branch_name, "new");
+        assert!(s.updated_at >= before_updated_at);
+
+        // Verify the upsert hit the session store.
+        let loaded = engine.session_store.load_sessions().expect("load");
+        let stored = loaded.iter().find(|s| s.id == "s1").expect("stored s1");
+        assert_eq!(stored.branch_name, "new");
+    }
+
+    #[test]
+    fn branch_sync_ready_no_change_returns_nothing() {
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(sample_session("s1", "p1", "same"));
+
+        let reaction = engine.process_worker_event(WorkerEvent::BranchSyncReady(vec![(
+            "s1".to_string(),
+            "same".to_string(),
+        )]));
+
+        assert!(matches!(reaction, EventReaction::Nothing));
+        // Session store should not contain "s1" since no upsert happened.
+        let loaded = engine.session_store.load_sessions().expect("load");
+        assert!(loaded.iter().all(|s| s.id != "s1"));
+    }
+
+    // ── PrStatusReady ────────────────────────────────────────────────────
+
+    #[test]
+    fn pr_status_ready_with_pr_upserts_and_returns_all_ids() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat");
+        // Persist the session row first so the session_prs foreign key
+        // constraint on session_id is satisfied when upsert_pr fires from
+        // the dispatcher.
+        engine
+            .session_store
+            .upsert_session(&session)
+            .expect("seed session");
+        engine.sessions.push(session);
+
+        let pr = PrInfo {
+            number: 42,
+            state: PrState::Open,
+            title: "Add feature".to_string(),
+            host: "github.com".to_string(),
+            owner_repo: "octo/repo".to_string(),
+            url: "https://github.com/octo/repo/pull/42".to_string(),
+        };
+        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
+            "s1".to_string(),
+            Some(pr.clone()),
+        )]));
+
+        // changed -> outer is Multi(UpdatePrLastChecked, RebuildLeftItems).
+        let parts = match reaction {
+            EventReaction::Multi(v) => v,
+            other => panic!("expected Multi, got {}", reaction_kind(&other)),
+        };
+        assert_eq!(parts.len(), 2);
+        match &parts[0] {
+            EventReaction::UpdatePrLastChecked(ids) => {
+                assert_eq!(ids, &vec!["s1".to_string()]);
+            }
+            other => panic!("expected UpdatePrLastChecked, got {}", reaction_kind(other)),
+        }
+        assert!(matches!(parts[1], EventReaction::RebuildLeftItems));
+
+        // pr_statuses populated; sqlite has the row.
+        assert!(engine.pr_statuses.contains_key("s1"));
+        let stored = engine
+            .session_store
+            .load_all_latest_prs()
+            .expect("load prs");
+        let row = stored.iter().find(|p| p.session_id == "s1").expect("row");
+        assert_eq!(row.pr_number, 42);
+        assert_eq!(row.state, "OPEN");
+        assert_eq!(row.title, "Add feature");
+    }
+
+    #[test]
+    fn pr_status_ready_none_removes_and_returns_ids_even_when_unchanged() {
+        let (mut engine, _tmp) = test_engine();
+        // Pre-seed pr_statuses for s1 so the None path actually removes
+        // something (and flips `changed`). s2 has no PR — None for s2 leaves
+        // `changed` alone for s2 but its id must still appear in the
+        // UpdatePrLastChecked list.
+        let pr = PrInfo {
+            number: 1,
+            state: PrState::Open,
+            title: "x".into(),
+            host: "github.com".into(),
+            owner_repo: "o/r".into(),
+            url: "https://example".into(),
+        };
+        engine.pr_statuses.insert("s1".to_string(), pr);
+
+        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![
+            ("s1".to_string(), None),
+            ("s2".to_string(), None),
+        ]));
+
+        // s1 was removed -> changed -> Multi
+        let parts = match reaction {
+            EventReaction::Multi(v) => v,
+            other => panic!("expected Multi, got {}", reaction_kind(&other)),
+        };
+        match &parts[0] {
+            EventReaction::UpdatePrLastChecked(ids) => {
+                assert_eq!(
+                    ids,
+                    &vec!["s1".to_string(), "s2".to_string()],
+                    "every session id from results must appear, even those with no state change"
+                );
+            }
+            other => panic!("expected UpdatePrLastChecked, got {}", reaction_kind(other)),
+        }
+        assert!(matches!(parts[1], EventReaction::RebuildLeftItems));
+        assert!(!engine.pr_statuses.contains_key("s1"));
+    }
+
+    #[test]
+    fn pr_status_ready_unchanged_only_returns_update_pr_last_checked() {
+        let (mut engine, _tmp) = test_engine();
+        // No pre-seeded pr_statuses; sending None for s1 leaves changed=false.
+        let reaction =
+            engine.process_worker_event(WorkerEvent::PrStatusReady(vec![("s1".to_string(), None)]));
+
+        match reaction {
+            EventReaction::UpdatePrLastChecked(ids) => {
+                assert_eq!(ids, vec!["s1".to_string()]);
+            }
+            other => panic!(
+                "expected bare UpdatePrLastChecked (no Multi wrapping), got {}",
+                reaction_kind(&other)
+            ),
+        }
+    }
+
+    // ── WorktreeRemoveCompleted ──────────────────────────────────────────
+
+    #[test]
+    fn worktree_remove_completed_ok_clears_state_and_returns_busy_message() {
+        let (mut engine, _tmp) = test_engine();
+        engine.pending_deletions.insert("s1".to_string());
+        engine
+            .deletion_busy_messages
+            .insert("s1".to_string(), "Deleting agent \"s1\"…".to_string());
+
+        let reaction = engine.process_worker_event(WorkerEvent::WorktreeRemoveCompleted {
+            session_id: "s1".to_string(),
+            result: Ok(true),
+        });
+
+        assert!(!engine.pending_deletions.contains("s1"));
+        assert!(!engine.deletion_busy_messages.contains_key("s1"));
+
+        match reaction {
+            EventReaction::WorktreeRemoveSucceeded {
+                session_id,
+                branch_already_deleted,
+                our_busy_message,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert!(branch_already_deleted);
+                assert_eq!(our_busy_message.as_deref(), Some("Deleting agent \"s1\"…"));
+            }
+            other => panic!(
+                "expected WorktreeRemoveSucceeded, got {}",
+                reaction_kind(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn worktree_remove_completed_err_still_clears_state() {
+        let (mut engine, _tmp) = test_engine();
+        engine.pending_deletions.insert("s1".to_string());
+        engine
+            .deletion_busy_messages
+            .insert("s1".to_string(), "busy".to_string());
+
+        let reaction = engine.process_worker_event(WorkerEvent::WorktreeRemoveCompleted {
+            session_id: "s1".to_string(),
+            result: Err("git failed".to_string()),
+        });
+
+        // Even on Err, both maps must be cleaned up.
+        assert!(!engine.pending_deletions.contains("s1"));
+        assert!(!engine.deletion_busy_messages.contains_key("s1"));
+
+        match reaction {
+            EventReaction::WorktreeRemoveFailed {
+                session_id,
+                message,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(message, "git failed");
+            }
+            other => panic!(
+                "expected WorktreeRemoveFailed, got {}",
+                reaction_kind(&other)
+            ),
+        }
+    }
+
+    // ── CreateAgentFailed ────────────────────────────────────────────────
+
+    #[test]
+    fn create_agent_failed_flips_inflight_and_returns_error_status() {
+        let (mut engine, _tmp) = test_engine();
+        engine.create_agent_in_flight = true;
+
+        let reaction =
+            engine.process_worker_event(WorkerEvent::CreateAgentFailed("nope".to_string()));
+
+        assert!(!engine.create_agent_in_flight);
+        let status = unwrap_status(reaction);
+        assert_eq!(status.tone, StatusTone::Error);
+        assert_eq!(status.message, "nope");
+    }
+
+    // ── GlobalEnvPersistenceCompleted ────────────────────────────────────
+
+    #[test]
+    fn global_env_persistence_completed_ok_empty_clears_and_reports() {
+        let (mut engine, _tmp) = test_engine();
+        // Seed a non-empty env to prove it gets replaced by the empty map.
+        let mut prior = BTreeMap::new();
+        prior.insert("OLD".to_string(), "1".to_string());
+        engine.config.env = prior;
+
+        let reaction = engine.process_worker_event(WorkerEvent::GlobalEnvPersistenceCompleted {
+            env: BTreeMap::new(),
+            result: Ok(()),
+        });
+
+        assert!(engine.config.env.is_empty());
+        let status = unwrap_status(reaction);
+        assert_eq!(status.tone, StatusTone::Info);
+        assert_eq!(status.message, "Global environment variables cleared.");
+    }
+
+    #[test]
+    fn global_env_persistence_completed_ok_nonempty_replaces_env() {
+        let (mut engine, _tmp) = test_engine();
+        let mut env = BTreeMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        env.insert("BAZ".to_string(), "qux".to_string());
+
+        let reaction = engine.process_worker_event(WorkerEvent::GlobalEnvPersistenceCompleted {
+            env: env.clone(),
+            result: Ok(()),
+        });
+
+        assert_eq!(engine.config.env, env);
+        let status = unwrap_status(reaction);
+        assert_eq!(status.tone, StatusTone::Info);
+        assert_eq!(
+            status.message,
+            "Saved 2 global environment variable(s). New agents and terminals will receive them unless a project overrides the same key."
+        );
+    }
+
+    // Sanity: the unused-import linter won't catch AgentLaunchFailedData
+    // because we reference it via a no-op assertion to prove the test module
+    // compiles against the same shape the dispatcher uses.
+    #[allow(dead_code)]
+    fn _agent_launch_failed_shape_compiles(req: AgentLaunchRequest, msg: String) {
+        let _boxed = Box::new(AgentLaunchFailedData {
+            request: req,
+            message: msg,
+        });
+        let _kind = AgentLaunchKind::StartupAutoReopen;
     }
 }

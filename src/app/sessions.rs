@@ -56,7 +56,7 @@ impl App {
         let branch = git::current_branch(&path)?;
         let leading_branch = leading_branch_for_project(&path, &branch);
 
-        if let Some(kind) = branch_warning_kind(&path, &branch) {
+        if let Some(kind) = git::branch_warning_kind(&path, &branch) {
             // Default the checkbox to on for the confident path so hitting
             // Enter resolves the warning in the way users typically want —
             // "switch to main, then add". The heuristic path ignores this

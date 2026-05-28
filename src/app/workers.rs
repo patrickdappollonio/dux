@@ -1234,8 +1234,8 @@ pub(crate) fn run_project_branch_status_job(project: Project, worker_tx: Sender<
                     ProjectBranchStatus::NotLeading
                 }
             } else {
-                let warning_kind = branch_warning_kind(&repo_path, &branch);
-                branch_status_from_warning(warning_kind.as_ref())
+                let warning_kind = git::branch_warning_kind(&repo_path, &branch);
+                git::branch_status_from_warning(warning_kind.as_ref())
             };
             (branch, branch_status)
         })
@@ -1262,7 +1262,7 @@ pub(crate) fn run_checkout_project_default_branch_inspection_job(
                     })
                 }
             } else {
-                branch_warning_kind(&repo_path, &branch)
+                git::branch_warning_kind(&repo_path, &branch)
             };
             (branch, warning_kind)
         })

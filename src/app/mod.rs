@@ -642,26 +642,6 @@ pub(crate) enum PromptState {
     },
 }
 
-pub(crate) fn branch_warning_kind(path: &Path, branch: &str) -> Option<BranchWarningKind> {
-    match git::remote_default_branch(path) {
-        Some(default) if default != branch => Some(BranchWarningKind::Known {
-            default_branch: default,
-        }),
-        Some(_) => None,
-        None if branch != "main" && branch != "master" => Some(BranchWarningKind::Heuristic),
-        None => None,
-    }
-}
-
-pub(crate) fn branch_status_from_warning(
-    warning_kind: Option<&BranchWarningKind>,
-) -> ProjectBranchStatus {
-    match warning_kind {
-        Some(_) => ProjectBranchStatus::NotLeading,
-        None => ProjectBranchStatus::Leading,
-    }
-}
-
 pub(crate) fn leading_branch_for_project(path: &Path, current_branch: &str) -> String {
     match git::remote_default_branch(path) {
         Some(default) => default,

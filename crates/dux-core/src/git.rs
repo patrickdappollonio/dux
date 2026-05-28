@@ -9,7 +9,8 @@ use anyhow::{Context, Result, anyhow};
 use content_inspector::{ContentType, inspect};
 
 use crate::logger;
-use crate::model::ChangedFile;
+use crate::model::{ChangedFile, ProjectBranchStatus};
+use crate::worker::BranchWarningKind;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitWorktree {
@@ -101,6 +102,36 @@ pub fn remote_default_branch(repo_path: &Path) -> Option<String> {
     full_ref
         .strip_prefix("refs/remotes/origin/")
         .map(|s| s.to_string())
+}
+
+/// Classifies a checked-out branch against the repo's known default branch.
+///
+/// - `Some(Known { default_branch })` when `origin/HEAD` resolves to a branch
+///   that differs from `branch`.
+/// - `None` when `origin/HEAD` resolves to `branch` (already on default), or
+///   when it's unavailable and `branch` is one of the common defaults
+///   (`main` or `master`).
+/// - `Some(Heuristic)` when `origin/HEAD` is unavailable and `branch` is
+///   neither `main` nor `master`.
+pub fn branch_warning_kind(path: &Path, branch: &str) -> Option<BranchWarningKind> {
+    match remote_default_branch(path) {
+        Some(default) if default != branch => Some(BranchWarningKind::Known {
+            default_branch: default,
+        }),
+        Some(_) => None,
+        None if branch != "main" && branch != "master" => Some(BranchWarningKind::Heuristic),
+        None => None,
+    }
+}
+
+/// Translates a `BranchWarningKind` from [`branch_warning_kind`] into the
+/// corresponding `ProjectBranchStatus`. `Some(_) -> NotLeading`,
+/// `None -> Leading`.
+pub fn branch_status_from_warning(warning_kind: Option<&BranchWarningKind>) -> ProjectBranchStatus {
+    match warning_kind {
+        Some(_) => ProjectBranchStatus::NotLeading,
+        None => ProjectBranchStatus::Leading,
+    }
 }
 
 pub fn is_git_repo(path: &Path) -> bool {
