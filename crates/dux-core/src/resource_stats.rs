@@ -59,7 +59,7 @@ pub fn collect_resource_stats(targets: Vec<(String, u32)>) -> Vec<ResourceStats>
 
 /// Check whether `pid` is a descendant (child, grandchild, ...) of `ancestor`
 /// by walking up the process tree.
-pub fn is_descendant_of(sys: &sysinfo::System, pid: sysinfo::Pid, ancestor: sysinfo::Pid) -> bool {
+fn is_descendant_of(sys: &sysinfo::System, pid: sysinfo::Pid, ancestor: sysinfo::Pid) -> bool {
     use sysinfo::Pid;
 
     let mut current = pid;
@@ -88,7 +88,7 @@ pub fn is_descendant_of(sys: &sysinfo::System, pid: sysinfo::Pid, ancestor: sysi
 /// Aggregate CPU% and RSS across a root PID and all its descendants.
 /// Returns `(total_cpu, total_rss, process_count, top_children)` where
 /// `top_children` contains the top 10 individual processes by RSS.
-pub fn aggregate_tree(
+fn aggregate_tree(
     sys: &sysinfo::System,
     root: sysinfo::Pid,
 ) -> (f32, u64, usize, Vec<ProcessInfo>) {

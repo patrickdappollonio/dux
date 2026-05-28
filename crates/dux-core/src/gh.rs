@@ -95,7 +95,7 @@ pub fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<PrInfo> {
 
 /// Reconstruct a PrInfo from stored data without a network call.
 /// Used for terminal states (merged/closed) that don't need refreshing.
-pub fn reconstruct_from_stored(stored: &StoredPr) -> Option<PrInfo> {
+fn reconstruct_from_stored(stored: &StoredPr) -> Option<PrInfo> {
     let state = match stored.state.as_str() {
         "MERGED" => PrState::Merged,
         "CLOSED" => PrState::Closed,
@@ -113,7 +113,7 @@ pub fn reconstruct_from_stored(stored: &StoredPr) -> Option<PrInfo> {
 }
 
 /// Check a known PR by number using `gh pr view`.
-pub fn view_pr_by_number(
+fn view_pr_by_number(
     number: u64,
     host: &str,
     owner_repo: &str,
@@ -146,7 +146,7 @@ pub fn view_pr_by_number(
 }
 
 /// Discover a PR by branch name using `gh pr list --state all`.
-pub fn discover_pr_by_branch(
+fn discover_pr_by_branch(
     branch: &str,
     host: &str,
     owner_repo: &str,
@@ -186,17 +186,13 @@ pub fn discover_pr_by_branch(
 }
 
 /// Parse a single PR JSON object (from `gh pr view` output).
-pub fn parse_pr_json_object(json: &str, host: &str, owner_repo: &str) -> Option<PrInfo> {
+fn parse_pr_json_object(json: &str, host: &str, owner_repo: &str) -> Option<PrInfo> {
     let obj: serde_json::Value = serde_json::from_str(json).ok()?;
     parse_pr_json_value(&obj, host, owner_repo)
 }
 
 /// Extract PrInfo from a serde_json::Value.
-pub fn parse_pr_json_value(
-    obj: &serde_json::Value,
-    host: &str,
-    owner_repo: &str,
-) -> Option<PrInfo> {
+fn parse_pr_json_value(obj: &serde_json::Value, host: &str, owner_repo: &str) -> Option<PrInfo> {
     let number = obj.get("number")?.as_u64()?;
     let state_str = obj.get("state")?.as_str()?;
     let title = obj
@@ -241,7 +237,7 @@ pub fn gh_repo_arg(host: &str, owner_repo: &str) -> String {
     }
 }
 
-pub fn normalize_github_host(host: &str) -> &str {
+fn normalize_github_host(host: &str) -> &str {
     if host.trim().is_empty() {
         "github.com"
     } else {
