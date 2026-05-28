@@ -31,7 +31,7 @@ impl App {
             tab_completions: Vec::new(),
             tab_index: 0,
         };
-        self.spawn_browser_entries(&start_dir);
+        self.engine.spawn_browser_entries(&start_dir);
         {
             let open = self.bindings.label_for(Action::OpenEntry);
             let add = self.bindings.label_for(Action::AddCurrentDir);
@@ -233,7 +233,7 @@ impl App {
             selected: None,
             error: None,
         });
-        self.spawn_project_worktrees_worker(project);
+        self.engine.spawn_project_worktrees_worker(project);
         self.set_busy("Loading git worktrees for the selected project...");
         Ok(())
     }
@@ -2801,6 +2801,7 @@ mod tests {
             agent_launches_in_flight: std::collections::HashSet::new(),
             pulls_in_flight: std::collections::HashSet::new(),
             resource_stats_in_flight: false,
+            pr_last_checked: std::collections::HashMap::new(),
         };
         let mut app = App {
             engine,
@@ -2870,7 +2871,6 @@ mod tests {
             welcome_logo_alt: false,
             welcome_tip_selection: usize::MAX,
             pr_banner_at_bottom: true,
-            pr_last_checked: std::collections::HashMap::new(),
             syntax_cache: crate::diff::SyntaxCache::new(),
             snapshot_buf: crate::pty::TerminalSnapshot::empty(),
             last_snapshot_id: None,

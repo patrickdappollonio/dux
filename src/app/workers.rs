@@ -135,7 +135,7 @@ impl App {
             for sid in &exited {
                 let session_id = &sid.0;
                 if !retried.contains(session_id) {
-                    self.spawn_pr_check_for_session(session_id);
+                    self.engine.spawn_pr_check_for_session(session_id);
                 }
             }
         }
@@ -179,7 +179,7 @@ impl App {
         } = self.prompt
             && last_refresh.elapsed() >= Duration::from_secs(2)
         {
-            self.spawn_resource_stats_worker();
+            self.engine.spawn_resource_stats_worker();
         }
 
         // Keep the poller's interval flag in sync with whether any runtime PTY is alive.
@@ -287,15 +287,6 @@ impl App {
                 }
             }
 
-            EventReaction::UpdatePrLastChecked(ids) => {
-                let now = Instant::now();
-                for id in ids {
-                    self.pr_last_checked.insert(id, now);
-                }
-            }
-            EventReaction::SpawnPrCheckForSession(sid) => {
-                self.spawn_pr_check_for_session(&sid);
-            }
             EventReaction::OpenNewAgentPromptForPr(pr) => {
                 let pr = *pr;
                 let request = CreateAgentRequest::PullRequest {
@@ -318,11 +309,6 @@ impl App {
                     ));
                 }
             }
-            EventReaction::SpawnPrSyncWorkers => {
-                self.spawn_pr_sync_worker();
-                self.spawn_initial_pr_refresh();
-            }
-
             EventReaction::WorktreeRemoveSucceeded {
                 session_id,
                 branch_already_deleted,
@@ -832,127 +818,6 @@ impl App {
                 ));
             }
         }
-    }
-
-    pub(crate) fn spawn_browser_entries(&self, dir: &Path) {
-        let tx = self.engine.worker_tx.clone();
-        let dir = dir.to_path_buf();
-        thread::spawn(move || {
-            let entries = dux_core::project_browser::browser_entries(&dir);
-            logger::debug(&format!(
-                "browser loaded {} with {} entries",
-                dir.display(),
-                entries.len()
-            ));
-            let _ = tx.send(WorkerEvent::BrowserEntriesReady {
-                dir: dir.clone(),
-                entries,
-            });
-        });
-    }
-
-    pub(crate) fn spawn_project_worktrees_worker(&self, project: Project) {
-        let tx = self.engine.worker_tx.clone();
-        let paths = self.engine.paths.clone();
-        let sessions = self.engine.sessions.clone();
-        thread::spawn(move || {
-            let result = git::list_worktrees(Path::new(&project.path))
-                .map(|worktrees| {
-                    dux_core::project_browser::classify_project_worktrees(
-                        &project, &paths, &sessions, worktrees,
-                    )
-                })
-                .map_err(|err| format!("{err:#}"));
-            let _ = tx.send(WorkerEvent::ProjectWorktreesReady {
-                project_id: project.id,
-                result,
-            });
-        });
-    }
-
-    pub(crate) fn spawn_project_branch_status_checks(&self) {
-        for project in self
-            .engine
-            .projects
-            .iter()
-            .filter(|project| !project.path_missing)
-        {
-            let project = project.clone();
-            let worker_tx = self.engine.worker_tx.clone();
-            thread::spawn(move || {
-                dux_core::project_browser::run_project_branch_status_job(project, worker_tx);
-            });
-        }
-    }
-
-    // -- GitHub PR integration workers --
-
-    pub(crate) fn spawn_pr_sync_worker(&self) {
-        let tx = self.engine.worker_tx.clone();
-        let sessions = Arc::clone(&self.engine.pr_sync_sessions);
-        let enabled = Arc::clone(&self.engine.pr_sync_enabled);
-        enabled.store(true, Ordering::Relaxed);
-        thread::spawn(move || {
-            let interval = Duration::from_secs(45);
-            loop {
-                thread::sleep(interval);
-                if !enabled.load(Ordering::Relaxed) {
-                    break;
-                }
-                let results = dux_core::gh::run_pr_sync(&sessions);
-                if !results.is_empty() && tx.send(WorkerEvent::PrStatusReady(results)).is_err() {
-                    break;
-                }
-            }
-        });
-    }
-
-    pub(crate) fn spawn_initial_pr_refresh(&self) {
-        let tx = self.engine.worker_tx.clone();
-        let sessions = Arc::clone(&self.engine.pr_sync_sessions);
-        thread::spawn(move || {
-            let results = dux_core::gh::run_pr_sync(&sessions);
-            if !results.is_empty() {
-                let _ = tx.send(WorkerEvent::PrStatusReady(results));
-            }
-        });
-    }
-
-    /// Trigger a one-shot PR check for a single session, unless it was checked
-    /// recently (within 10 seconds).
-    pub(crate) fn spawn_pr_check_for_session(&mut self, session_id: &str) {
-        if !self.engine.github_integration_enabled
-            || !matches!(self.engine.gh_status, crate::model::GhStatus::Available)
-        {
-            return;
-        }
-        // Rate-limit: skip if checked within the last 10 seconds.
-        if let Some(last) = self.pr_last_checked.get(session_id)
-            && last.elapsed() < Duration::from_secs(10)
-        {
-            return;
-        }
-        let Some(session) = self.engine.sessions.iter().find(|s| s.id == session_id) else {
-            return;
-        };
-        let known_pr = self
-            .engine
-            .session_store
-            .load_prs(session_id)
-            .ok()
-            .and_then(|prs| prs.into_iter().next());
-        let entry = PrSyncEntry {
-            session_id: session.id.clone(),
-            branch_name: session.branch_name.clone(),
-            worktree_path: session.worktree_path.clone(),
-            known_pr,
-            agent_exited: !self.engine.providers.contains_key(session_id),
-        };
-        let tx = self.engine.worker_tx.clone();
-        thread::spawn(move || {
-            let result = dux_core::gh::check_pr_for_entry(&entry);
-            let _ = tx.send(WorkerEvent::PrStatusReady(vec![(entry.session_id, result)]));
-        });
     }
 
     pub(crate) fn spawn_config_reload_worker(&self) {

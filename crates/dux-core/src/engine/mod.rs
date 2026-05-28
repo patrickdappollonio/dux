@@ -84,6 +84,11 @@ pub struct Engine {
     pub agent_launches_in_flight: HashSet<String>,
     pub pulls_in_flight: HashSet<String>,
     pub resource_stats_in_flight: bool,
+    /// Last-checked timestamps for the one-shot PR-check rate-limiter.
+    /// Keyed by `session_id`; written by `process_worker_event`'s
+    /// `PrStatusReady` arm and read by `spawn_pr_check_for_session` to
+    /// skip checks made within the last 10 seconds.
+    pub pr_last_checked: HashMap<String, Instant>,
 }
 
 impl Engine {
@@ -348,6 +353,160 @@ impl Engine {
                     break; // receiver dropped, app is shutting down
                 }
             }
+        });
+    }
+
+    pub fn spawn_browser_entries(&self, dir: &Path) {
+        let tx = self.worker_tx.clone();
+        let dir = dir.to_path_buf();
+        thread::spawn(move || {
+            let entries = crate::project_browser::browser_entries(&dir);
+            crate::logger::debug(&format!(
+                "browser loaded {} with {} entries",
+                dir.display(),
+                entries.len()
+            ));
+            let _ = tx.send(WorkerEvent::BrowserEntriesReady {
+                dir: dir.clone(),
+                entries,
+            });
+        });
+    }
+
+    pub fn spawn_project_worktrees_worker(&self, project: Project) {
+        let tx = self.worker_tx.clone();
+        let paths = self.paths.clone();
+        let sessions = self.sessions.clone();
+        thread::spawn(move || {
+            let result = crate::git::list_worktrees(Path::new(&project.path))
+                .map(|worktrees| {
+                    crate::project_browser::classify_project_worktrees(
+                        &project, &paths, &sessions, worktrees,
+                    )
+                })
+                .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(WorkerEvent::ProjectWorktreesReady {
+                project_id: project.id,
+                result,
+            });
+        });
+    }
+
+    pub fn spawn_project_branch_status_checks(&self) {
+        for project in self.projects.iter().filter(|project| !project.path_missing) {
+            let project = project.clone();
+            let worker_tx = self.worker_tx.clone();
+            thread::spawn(move || {
+                crate::project_browser::run_project_branch_status_job(project, worker_tx);
+            });
+        }
+    }
+
+    // -- GitHub PR integration workers --
+
+    pub fn spawn_pr_sync_worker(&self) {
+        let tx = self.worker_tx.clone();
+        let sessions = Arc::clone(&self.pr_sync_sessions);
+        let enabled = Arc::clone(&self.pr_sync_enabled);
+        enabled.store(true, Ordering::Relaxed);
+        thread::spawn(move || {
+            let interval = Duration::from_secs(45);
+            loop {
+                thread::sleep(interval);
+                if !enabled.load(Ordering::Relaxed) {
+                    break;
+                }
+                let results = crate::gh::run_pr_sync(&sessions);
+                if !results.is_empty() && tx.send(WorkerEvent::PrStatusReady(results)).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    pub fn spawn_initial_pr_refresh(&self) {
+        let tx = self.worker_tx.clone();
+        let sessions = Arc::clone(&self.pr_sync_sessions);
+        thread::spawn(move || {
+            let results = crate::gh::run_pr_sync(&sessions);
+            if !results.is_empty() {
+                let _ = tx.send(WorkerEvent::PrStatusReady(results));
+            }
+        });
+    }
+
+    /// Gather the labeled PIDs that the resource monitor should report on.
+    /// Each entry is `(label, root_pid)` — the worker will aggregate the
+    /// full process tree under each root.
+    fn resource_monitor_targets(&self) -> Vec<(String, u32)> {
+        let mut targets = Vec::new();
+        for session in &self.sessions {
+            if let Some(pty) = self.providers.get(&session.id)
+                && let Some(pid) = pty.child_process_id()
+            {
+                let title = session.title.as_deref().unwrap_or(&session.branch_name);
+                let provider = session.provider.as_str();
+                targets.push((format!("Agent ({provider}): {title}"), pid));
+            }
+        }
+        for terminal in self.companion_terminals.values() {
+            if let Some(pid) = terminal.client.child_process_id() {
+                let label = match &terminal.foreground_cmd {
+                    Some(cmd) => format!("Terminal ({cmd}): {}", terminal.label),
+                    None => format!("Terminal: {}", terminal.label),
+                };
+                targets.push((label, pid));
+            }
+        }
+        targets
+    }
+
+    pub fn spawn_resource_stats_worker(&mut self) {
+        if self.resource_stats_in_flight {
+            return;
+        }
+        self.resource_stats_in_flight = true;
+        let targets = self.resource_monitor_targets();
+        let tx = self.worker_tx.clone();
+        thread::spawn(move || {
+            let rows = crate::resource_stats::collect_resource_stats(targets);
+            let _ = tx.send(WorkerEvent::ResourceStatsReady(rows));
+        });
+    }
+
+    /// Trigger a one-shot PR check for a single session, unless it was checked
+    /// recently (within 10 seconds).
+    pub fn spawn_pr_check_for_session(&self, session_id: &str) {
+        if !self.github_integration_enabled
+            || !matches!(self.gh_status, crate::model::GhStatus::Available)
+        {
+            return;
+        }
+        // Rate-limit: skip if checked within the last 10 seconds.
+        if let Some(last) = self.pr_last_checked.get(session_id)
+            && last.elapsed() < Duration::from_secs(10)
+        {
+            return;
+        }
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
+            return;
+        };
+        let known_pr = self
+            .session_store
+            .load_prs(session_id)
+            .ok()
+            .and_then(|prs| prs.into_iter().next());
+        let entry = PrSyncEntry {
+            session_id: session.id.clone(),
+            branch_name: session.branch_name.clone(),
+            worktree_path: session.worktree_path.clone(),
+            known_pr,
+            agent_exited: !self.providers.contains_key(session_id),
+        };
+        let tx = self.worker_tx.clone();
+        thread::spawn(move || {
+            let result = crate::gh::check_pr_for_entry(&entry);
+            let _ = tx.send(WorkerEvent::PrStatusReady(vec![(entry.session_id, result)]));
         });
     }
 }

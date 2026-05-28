@@ -58,8 +58,8 @@ pub(crate) use dux_core::worker::ProcessInfo;
 pub(crate) use dux_core::worker::{
     AgentLaunchFailedData, AgentLaunchKind, AgentLaunchReadyData, AgentLaunchRequest,
     BranchWarningKind, BrowserEntry, CreateAgentBranchInspection, NonDefaultBranchAction,
-    PrSyncEntry, ProjectPersistenceAction, ProjectWorktreeEntry, PullTarget, ResolvedPullRequest,
-    ResourceStats, WorkerEvent,
+    ProjectPersistenceAction, ProjectWorktreeEntry, PullTarget, ResolvedPullRequest, ResourceStats,
+    WorkerEvent,
 };
 
 pub struct App {
@@ -145,9 +145,6 @@ pub struct App {
     /// When true, show the alternate (duck) logo instead of the text logo.
     pub(crate) welcome_logo_alt: bool,
     pub(crate) pr_banner_at_bottom: bool,
-    /// Timestamps of the last PR check per session, to avoid hammering on rapid
-    /// state transitions.
-    pub(crate) pr_last_checked: HashMap<String, Instant>,
     /// Cached syntax highlighting resources shared across diff computations.
     pub(crate) syntax_cache: SyntaxCache,
     /// Reusable snapshot buffer to avoid per-frame allocation of terminal cells.
@@ -1289,6 +1286,7 @@ impl App {
             agent_launches_in_flight: HashSet::new(),
             pulls_in_flight: HashSet::new(),
             resource_stats_in_flight: false,
+            pr_last_checked: HashMap::new(),
         };
         let mut app = Self {
             show_diff_line_numbers,
@@ -1359,7 +1357,6 @@ impl App {
             welcome_logo_alt: false,
             welcome_tip_selection: usize::MAX,
             pr_banner_at_bottom,
-            pr_last_checked: HashMap::new(),
             syntax_cache: SyntaxCache::new(),
             snapshot_buf: TerminalSnapshot::empty(),
             last_snapshot_id: None,
@@ -1377,7 +1374,7 @@ impl App {
     pub fn run(&mut self) -> Result<()> {
         self.engine.spawn_changed_files_poller();
         self.engine.spawn_branch_sync_worker();
-        self.spawn_project_branch_status_checks();
+        self.engine.spawn_project_branch_status_checks();
         self.engine.spawn_gh_status_check();
         let mut terminal = ratatui::init();
         execute!(stdout(), EnableMouseCapture)?;
@@ -1758,7 +1755,7 @@ impl App {
             last_refresh: Instant::now(),
             first_sample: true,
         };
-        self.spawn_resource_stats_worker();
+        self.engine.spawn_resource_stats_worker();
     }
 
     fn is_palette_action_available(&self, action: Action) -> bool {
@@ -1766,45 +1763,6 @@ impl App {
             Action::OpenCurrentPullRequest => self.current_pr_info().is_some(),
             _ => true,
         }
-    }
-
-    /// Gather the labeled PIDs that the resource monitor should report on.
-    /// Each entry is `(label, root_pid)` — the worker will aggregate the
-    /// full process tree under each root.
-    fn resource_monitor_targets(&self) -> Vec<(String, u32)> {
-        let mut targets = Vec::new();
-        for session in &self.engine.sessions {
-            if let Some(pty) = self.engine.providers.get(&session.id)
-                && let Some(pid) = pty.child_process_id()
-            {
-                let title = session.title.as_deref().unwrap_or(&session.branch_name);
-                let provider = session.provider.as_str();
-                targets.push((format!("Agent ({provider}): {title}"), pid));
-            }
-        }
-        for terminal in self.engine.companion_terminals.values() {
-            if let Some(pid) = terminal.client.child_process_id() {
-                let label = match &terminal.foreground_cmd {
-                    Some(cmd) => format!("Terminal ({cmd}): {}", terminal.label),
-                    None => format!("Terminal: {}", terminal.label),
-                };
-                targets.push((label, pid));
-            }
-        }
-        targets
-    }
-
-    pub(crate) fn spawn_resource_stats_worker(&mut self) {
-        if self.engine.resource_stats_in_flight {
-            return;
-        }
-        self.engine.resource_stats_in_flight = true;
-        let targets = self.resource_monitor_targets();
-        let tx = self.engine.worker_tx.clone();
-        thread::spawn(move || {
-            let rows = dux_core::resource_stats::collect_resource_stats(targets);
-            let _ = tx.send(WorkerEvent::ResourceStatsReady(rows));
-        });
     }
 
     pub(crate) fn github_pr_agent_command_available(&self) -> bool {
@@ -1978,7 +1936,7 @@ impl App {
                     && matches!(self.engine.gh_status, crate::model::GhStatus::Available)
                 {
                     self.engine.update_pr_sync_sessions();
-                    self.spawn_initial_pr_refresh();
+                    self.engine.spawn_initial_pr_refresh();
                     self.engine.pr_sync_enabled.store(true, Ordering::Relaxed);
                 } else if !self.engine.github_integration_enabled {
                     self.engine.pr_statuses.clear();
@@ -2122,7 +2080,7 @@ impl App {
             && matches!(self.engine.gh_status, crate::model::GhStatus::Available)
         {
             self.engine.update_pr_sync_sessions();
-            self.spawn_initial_pr_refresh();
+            self.engine.spawn_initial_pr_refresh();
             self.engine.pr_sync_enabled.store(true, Ordering::Relaxed);
         } else {
             self.engine.pr_statuses.clear();
@@ -2378,7 +2336,7 @@ impl App {
         self.clamp_files_cursor();
         // Opportunistically check PR status for the newly-selected session.
         if let Some(sid) = session_id {
-            self.spawn_pr_check_for_session(&sid);
+            self.engine.spawn_pr_check_for_session(&sid);
         }
     }
 

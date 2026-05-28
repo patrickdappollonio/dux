@@ -97,15 +97,8 @@ pub enum EventReaction {
         result: Result<Vec<ProjectWorktreeEntry>, String>,
     },
 
-    // -- PR / refs follow-ups (App owns `pr_last_checked`). --
-    UpdatePrLastChecked(Vec<String>),
-    SpawnPrCheckForSession(String),
+    // -- PR / refs follow-ups. --
     OpenNewAgentPromptForPr(Box<ResolvedPullRequest>),
-    /// gh just became available with integration enabled: the App must spawn
-    /// the PR sync worker + the initial refresh. These spawn helpers depend on
-    /// PR-sync helper free functions that still live in the binary, so they
-    /// stay App-side.
-    SpawnPrSyncWorkers,
 
     // -- Worktree delete follow-up. --
     WorktreeRemoveSucceeded {
@@ -596,20 +589,21 @@ impl Engine {
                     logger::info("[gh-integration] gh CLI is available and authenticated");
                     self.update_pr_sync_sessions();
                     self.spawn_refs_watcher();
-                    EventReaction::SpawnPrSyncWorkers
+                    self.spawn_pr_sync_worker();
+                    self.spawn_initial_pr_refresh();
                 } else {
                     logger::info(&format!(
                         "[gh-integration] gh status: {:?}, integration enabled: {}",
                         status, self.github_integration_enabled,
                     ));
-                    EventReaction::Nothing
                 }
+                EventReaction::Nothing
             }
             WorkerEvent::PrStatusReady(results) => {
+                let now = Instant::now();
                 let mut changed = false;
-                let mut updated_ids = Vec::with_capacity(results.len());
                 for (session_id, maybe_pr) in results {
-                    updated_ids.push(session_id.clone());
+                    self.pr_last_checked.insert(session_id.clone(), now);
                     match maybe_pr {
                         Some(pr) => {
                             // Persist the PR association (including state) so
@@ -643,12 +637,9 @@ impl Engine {
                     // Refresh the sync entries so the worker has updated
                     // known_pr data.
                     self.update_pr_sync_sessions();
-                    EventReaction::Multi(vec![
-                        EventReaction::UpdatePrLastChecked(updated_ids),
-                        EventReaction::RebuildLeftItems,
-                    ])
+                    EventReaction::RebuildLeftItems
                 } else {
-                    EventReaction::UpdatePrLastChecked(updated_ids)
+                    EventReaction::Nothing
                 }
             }
             WorkerEvent::PullRequestResolved { result } => match result {
@@ -660,7 +651,8 @@ impl Engine {
                     "[gh-integration] refs watcher: triggering PR check for session {}",
                     session_id,
                 ));
-                EventReaction::SpawnPrCheckForSession(session_id)
+                self.spawn_pr_check_for_session(&session_id);
+                EventReaction::Nothing
             }
             WorkerEvent::BrowserEntriesReady { dir, entries } => {
                 EventReaction::BrowserEntriesArrived { dir, entries }
@@ -942,6 +934,7 @@ mod tests {
             agent_launches_in_flight: HashSet::new(),
             pulls_in_flight: HashSet::new(),
             resource_stats_in_flight: false,
+            pr_last_checked: HashMap::new(),
         };
         (engine, tmp)
     }
@@ -1004,10 +997,7 @@ mod tests {
             EventReaction::CommitMessageFailed(_) => "CommitMessageFailed",
             EventReaction::BrowserEntriesArrived { .. } => "BrowserEntriesArrived",
             EventReaction::ProjectWorktreesArrived { .. } => "ProjectWorktreesArrived",
-            EventReaction::UpdatePrLastChecked(_) => "UpdatePrLastChecked",
-            EventReaction::SpawnPrCheckForSession(_) => "SpawnPrCheckForSession",
             EventReaction::OpenNewAgentPromptForPr(_) => "OpenNewAgentPromptForPr",
-            EventReaction::SpawnPrSyncWorkers => "SpawnPrSyncWorkers",
             EventReaction::WorktreeRemoveSucceeded { .. } => "WorktreeRemoveSucceeded",
             EventReaction::WorktreeRemoveFailed { .. } => "WorktreeRemoveFailed",
             EventReaction::ResourceStatsArrived(_) => "ResourceStatsArrived",
@@ -1131,7 +1121,7 @@ mod tests {
     // ── PrStatusReady ────────────────────────────────────────────────────
 
     #[test]
-    fn pr_status_ready_with_pr_upserts_and_returns_all_ids() {
+    fn pr_status_ready_with_pr_upserts_and_records_timestamp() {
         let (mut engine, _tmp) = test_engine();
         let session = sample_session("s1", "p1", "feat");
         // Persist the session row first so the session_prs foreign key
@@ -1156,19 +1146,13 @@ mod tests {
             Some(pr.clone()),
         )]));
 
-        // changed -> outer is Multi(UpdatePrLastChecked, RebuildLeftItems).
-        let parts = match reaction {
-            EventReaction::Multi(v) => v,
-            other => panic!("expected Multi, got {}", reaction_kind(&other)),
-        };
-        assert_eq!(parts.len(), 2);
-        match &parts[0] {
-            EventReaction::UpdatePrLastChecked(ids) => {
-                assert_eq!(ids, &vec!["s1".to_string()]);
-            }
-            other => panic!("expected UpdatePrLastChecked, got {}", reaction_kind(other)),
-        }
-        assert!(matches!(parts[1], EventReaction::RebuildLeftItems));
+        // changed -> RebuildLeftItems (engine writes the timestamp directly).
+        assert!(
+            matches!(reaction, EventReaction::RebuildLeftItems),
+            "expected RebuildLeftItems, got {}",
+            reaction_kind(&reaction),
+        );
+        assert!(engine.pr_last_checked.contains_key("s1"));
 
         // pr_statuses populated; sqlite has the row.
         assert!(engine.pr_statuses.contains_key("s1"));
@@ -1183,12 +1167,12 @@ mod tests {
     }
 
     #[test]
-    fn pr_status_ready_none_removes_and_returns_ids_even_when_unchanged() {
+    fn pr_status_ready_none_removes_existing_and_records_timestamps() {
         let (mut engine, _tmp) = test_engine();
         // Pre-seed pr_statuses for s1 so the None path actually removes
         // something (and flips `changed`). s2 has no PR — None for s2 leaves
-        // `changed` alone for s2 but its id must still appear in the
-        // UpdatePrLastChecked list.
+        // `changed` alone for s2 but its id must still get a timestamp in
+        // `pr_last_checked`.
         let pr = PrInfo {
             number: 1,
             state: PrState::Open,
@@ -1204,41 +1188,32 @@ mod tests {
             ("s2".to_string(), None),
         ]));
 
-        // s1 was removed -> changed -> Multi
-        let parts = match reaction {
-            EventReaction::Multi(v) => v,
-            other => panic!("expected Multi, got {}", reaction_kind(&other)),
-        };
-        match &parts[0] {
-            EventReaction::UpdatePrLastChecked(ids) => {
-                assert_eq!(
-                    ids,
-                    &vec!["s1".to_string(), "s2".to_string()],
-                    "every session id from results must appear, even those with no state change"
-                );
-            }
-            other => panic!("expected UpdatePrLastChecked, got {}", reaction_kind(other)),
-        }
-        assert!(matches!(parts[1], EventReaction::RebuildLeftItems));
+        // s1 was removed -> changed -> RebuildLeftItems.
+        assert!(
+            matches!(reaction, EventReaction::RebuildLeftItems),
+            "expected RebuildLeftItems, got {}",
+            reaction_kind(&reaction),
+        );
         assert!(!engine.pr_statuses.contains_key("s1"));
+        // Both ids must get a timestamp in pr_last_checked even though only
+        // s1 caused a state change.
+        assert!(engine.pr_last_checked.contains_key("s1"));
+        assert!(engine.pr_last_checked.contains_key("s2"));
     }
 
     #[test]
-    fn pr_status_ready_unchanged_only_returns_update_pr_last_checked() {
+    fn pr_status_ready_unchanged_writes_timestamp_and_returns_nothing() {
         let (mut engine, _tmp) = test_engine();
         // No pre-seeded pr_statuses; sending None for s1 leaves changed=false.
         let reaction =
             engine.process_worker_event(WorkerEvent::PrStatusReady(vec![("s1".to_string(), None)]));
 
-        match reaction {
-            EventReaction::UpdatePrLastChecked(ids) => {
-                assert_eq!(ids, vec!["s1".to_string()]);
-            }
-            other => panic!(
-                "expected bare UpdatePrLastChecked (no Multi wrapping), got {}",
-                reaction_kind(&other)
-            ),
-        }
+        assert!(
+            matches!(reaction, EventReaction::Nothing),
+            "expected Nothing, got {}",
+            reaction_kind(&reaction),
+        );
+        assert!(engine.pr_last_checked.contains_key("s1"));
     }
 
     // ── WorktreeRemoveCompleted ──────────────────────────────────────────
