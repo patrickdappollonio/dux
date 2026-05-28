@@ -1,0 +1,299 @@
+//! Background-worker events and their domain payloads. `WorkerEvent` is the
+//! channel message a worker sends back to the owner (the TUI today, the Engine
+//! in E2+); the payload types are plain data describing worker results.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use crate::config::{Config, ProviderCommandConfig};
+use crate::model::{AgentSession, ChangedFile, Project, ProjectBranchStatus, ProviderKind};
+use crate::pty::PtyClient;
+
+#[derive(Clone, Debug)]
+pub struct ProjectWorktreeEntry {
+    pub path: PathBuf,
+    pub branch_name: String,
+    pub is_managed_by_dux: bool,
+    pub existing_session_id: Option<String>,
+    pub is_external: bool,
+    pub is_project_checkout: bool,
+    pub is_selectable: bool,
+}
+
+impl ProjectWorktreeEntry {
+    pub fn display_name(&self) -> String {
+        self.path
+            .file_name()
+            .and_then(|part| part.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| self.path.display().to_string())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolvedPullRequest {
+    pub project: Project,
+    pub host: String,
+    pub owner_repo: String,
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+    pub head_ref_name: String,
+}
+
+#[derive(Clone, Debug)]
+pub enum BranchWarningKind {
+    /// We resolved `origin/HEAD` and know the default branch for certain.
+    Known { default_branch: String },
+    /// `origin/HEAD` unavailable; current branch is not `main` or `master`.
+    Heuristic,
+}
+
+#[derive(Clone, Debug)]
+pub enum NonDefaultBranchAction {
+    AddProject {
+        path: String,
+        name: String,
+        leading_branch: String,
+    },
+    CheckoutProjectDefault {
+        project: Project,
+    },
+}
+
+impl NonDefaultBranchAction {
+    pub fn repo_path(&self) -> &str {
+        match self {
+            Self::AddProject { path, .. } => path,
+            Self::CheckoutProjectDefault { project } => &project.path,
+        }
+    }
+
+    pub fn allows_add_anyway(&self) -> bool {
+        matches!(self, Self::AddProject { .. })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CreateAgentBranchInspection {
+    pub current_branch: String,
+    pub leading_branch: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProcessInfo {
+    pub name: String,
+    pub pid: u32,
+    pub cpu_percent: f32,
+    pub rss_bytes: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct ResourceStats {
+    pub label: String,
+    pub pid: Option<u32>,
+    pub cpu_percent: f32,
+    pub rss_bytes: u64,
+    pub process_count: usize,
+    pub children: Vec<ProcessInfo>,
+}
+
+#[derive(Clone, Debug)]
+pub enum VisualRow {
+    /// Index into the `ResourceStats` rows vec.
+    Parent(usize),
+    /// (parent row index, child index within that parent's `children`).
+    Child(usize, usize),
+}
+
+#[derive(Clone, Debug)]
+pub struct BrowserEntry {
+    pub path: PathBuf,
+    pub label: String,
+    pub is_git_repo: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum AgentLaunchKind {
+    Create {
+        status_message: String,
+        repo_path: String,
+        owns_worktree: bool,
+        startup_result: Option<crate::startup::StartupCommandResult>,
+    },
+    Reconnect {
+        status_message: String,
+    },
+    ForceReconnect {
+        status_message: String,
+    },
+    ResumeFallback {
+        status_message: String,
+    },
+    StartupAutoReopen,
+}
+
+#[derive(Clone, Debug)]
+pub struct AgentLaunchRequest {
+    pub session: AgentSession,
+    pub provider_config: ProviderCommandConfig,
+    pub env: Vec<(String, String)>,
+    pub resume: bool,
+    pub pty_size: (u16, u16),
+    pub scrollback_lines: usize,
+    pub kind: AgentLaunchKind,
+}
+
+pub struct AgentLaunchReadyData {
+    pub request: AgentLaunchRequest,
+    pub client: PtyClient,
+}
+
+#[derive(Clone, Debug)]
+pub struct AgentLaunchFailedData {
+    pub request: AgentLaunchRequest,
+    pub message: String,
+}
+
+pub enum WorkerEvent {
+    CreateAgentProgress(String),
+    CreateAgentFailed(String),
+    AgentLaunchReady(Box<AgentLaunchReadyData>),
+    AgentLaunchFailed(Box<AgentLaunchFailedData>),
+    ChangedFilesReady {
+        staged: Vec<ChangedFile>,
+        unstaged: Vec<ChangedFile>,
+    },
+    CommitMessageGenerated(String),
+    CommitMessageFailed(String),
+    PushCompleted(Result<(), String>),
+    PullCompleted {
+        repo_path: String,
+        target: PullTarget,
+        result: Result<Option<String>, String>,
+    },
+    BrowserEntriesReady {
+        dir: PathBuf,
+        entries: Vec<BrowserEntry>,
+    },
+    ProjectWorktreesReady {
+        project_id: String,
+        result: Result<Vec<ProjectWorktreeEntry>, String>,
+    },
+    ClipboardCopyCompleted {
+        /// Human-readable success message shown in the status bar.
+        label: String,
+        result: Result<(), String>,
+    },
+    BranchSyncReady(Vec<(String, String)>),
+    BranchRenameCompleted {
+        session_id: String,
+        new_branch: String,
+        previous_title: Option<String>,
+        result: Result<(), String>,
+    },
+    ResourceStatsReady(Vec<ResourceStats>),
+    GhStatusChecked(crate::model::GhStatus),
+    PrStatusReady(Vec<(String, Option<crate::model::PrInfo>)>),
+    PullRequestResolved {
+        result: Result<ResolvedPullRequest, String>,
+    },
+    RefsChanged(String),
+    /// Background `git worktree remove` for a session-initiated delete has
+    /// finished. On `Ok`, the boolean indicates whether the branch was
+    /// already gone (used for the status message). On `Err`, the message is
+    /// the formatted error; the session record must be preserved so the user
+    /// can retry.
+    WorktreeRemoveCompleted {
+        session_id: String,
+        result: Result<bool, String>,
+    },
+    /// Background `git switch <target_branch>` run from a non-default branch
+    /// warning modal has finished. On `Ok`, the main loop continues the
+    /// original action. On `Err`, the formatted git error is surfaced.
+    NonDefaultBranchCheckoutCompleted {
+        action: NonDefaultBranchAction,
+        target_branch: String,
+        result: Result<(), String>,
+    },
+    /// Background inspection of the selected project checkout before opening
+    /// the New Agent prompt.
+    CreateAgentBranchInspected {
+        project: Project,
+        result: Result<CreateAgentBranchInspection, String>,
+    },
+    ProjectBranchStatusReady {
+        project_id: String,
+        result: Result<(String, ProjectBranchStatus), String>,
+    },
+    CheckoutProjectDefaultBranchInspected {
+        project: Project,
+        result: Result<(String, Option<BranchWarningKind>), String>,
+    },
+    ConfigReloadReady(Box<Result<Config, String>>),
+    ConfigRecoverCompleted(Result<(), String>),
+    ProjectPersistenceCompleted {
+        action: ProjectPersistenceAction,
+        result: Result<(), String>,
+    },
+    GlobalEnvPersistenceCompleted {
+        env: BTreeMap<String, String>,
+        result: Result<(), String>,
+    },
+    StartupCommandRerunCompleted(crate::startup::StartupCommandResult),
+    StartupCommandLogsLoaded {
+        scope_label: String,
+        result: Result<crate::startup::StartupCommandLatestLog, String>,
+    },
+    OpenPathCompleted {
+        target: String,
+        result: Result<(), String>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub enum PullTarget {
+    Project {
+        project_id: String,
+        project_name: String,
+        leading_branch: Option<String>,
+    },
+    Session,
+}
+
+#[derive(Clone, Debug)]
+pub enum ProjectPersistenceAction {
+    Add {
+        project: Project,
+        status_message: String,
+    },
+    Remove {
+        project_id: String,
+        project_name: String,
+    },
+    Delete {
+        project_id: String,
+        project_name: String,
+    },
+    UpdateDefaultProvider {
+        project_id: String,
+        project_name: String,
+        provider: Option<ProviderKind>,
+        global_default: ProviderKind,
+    },
+    UpdateAutoReopen {
+        project_id: String,
+        project_name: String,
+        auto_reopen_agents: Option<bool>,
+    },
+    UpdateStartupCommand {
+        project_id: String,
+        project_name: String,
+        startup_command: Option<String>,
+    },
+    UpdateEnv {
+        project_id: String,
+        project_name: String,
+        env: BTreeMap<String, String>,
+    },
+}

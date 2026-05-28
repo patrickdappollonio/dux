@@ -18,3 +18,4 @@ pub mod startup;
 pub mod statusline;
 pub mod storage;
 pub mod theme;
+pub mod worker;
