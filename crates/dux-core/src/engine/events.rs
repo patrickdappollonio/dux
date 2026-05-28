@@ -8,18 +8,19 @@
 //! translates each variant back into concrete view mutations.
 
 use std::path::Path;
+use std::time::Instant;
 
 use chrono::Utc;
 
 use crate::config::Config;
 use crate::engine::Engine;
 use crate::logger;
-use crate::model::{GhStatus, PrState, Project, ProjectBranchStatus};
+use crate::model::{AgentSession, GhStatus, PrState, Project, ProjectBranchStatus, SessionStatus};
 use crate::startup::StartupCommandLatestLog;
 use crate::statusline::StatusTone;
 use crate::storage::StoredPr;
 use crate::worker::{
-    AgentLaunchFailedData, AgentLaunchReadyData, BranchWarningKind, BrowserEntry,
+    AgentLaunchFailedData, AgentLaunchKind, AgentLaunchReadyData, BranchWarningKind, BrowserEntry,
     CreateAgentBranchInspection, NonDefaultBranchAction, ProjectPersistenceAction,
     ProjectWorktreeEntry, PullTarget, ResolvedPullRequest, ResourceStats, WorkerEvent,
 };
@@ -77,9 +78,10 @@ pub enum EventReaction {
     ReloadChangedFiles,
     ClampFilesCursor,
 
-    // -- Agent launch (T2a: pass-through; T2b will swap to typed outcome). --
-    AgentLaunchReady(Box<AgentLaunchReadyData>),
-    AgentLaunchFailed(Box<AgentLaunchFailedData>),
+    // -- Agent launch (T2b: Engine performs all domain-state mutations and
+    //    returns a typed view-only outcome the App applies). --
+    AgentLaunchReadyView(Box<AgentLaunchReadyOutcome>),
+    AgentLaunchFailedView(Box<AgentLaunchFailedOutcome>),
 
     // -- Commit message overlay (App formats final status with bindings). --
     CommitMessageGenerated(String),
@@ -157,7 +159,279 @@ pub enum EventReaction {
     },
 }
 
+/// Result of `Engine::detach_conflicting_worktree_session` — the App caller
+/// uses `id` to clear `last_pty_activity` and `label` for status messages.
+#[derive(Clone, Debug)]
+pub struct DetachedSession {
+    pub id: String,
+    pub label: String,
+}
+
+/// View-only follow-up for `WorkerEvent::AgentLaunchReady`. The Engine has
+/// already performed all domain-state mutations (in_flight maps, sessions,
+/// providers, session_store, mark_session_* helpers, resume_fallback_*,
+/// update_branch_sync_sessions, and the pure-engine portion of
+/// detach_conflicting_worktree_session). The App applies `last_pty_size`,
+/// clears `last_pty_activity` for any `detached_session_id`, runs view
+/// rebuilds, sets surfaces/overlays/status.
+pub struct AgentLaunchReadyOutcome {
+    pub session: AgentSession,
+    pub pty_size: (u16, u16),
+    pub detached_session_id: Option<String>,
+    pub view: AgentLaunchReadyView,
+}
+
+pub enum AgentLaunchReadyView {
+    /// Create-kind launch: `session_store.upsert_session` failed before the
+    /// session could be committed. App surfaces the error; no view rebuild.
+    CreatePersistFailed { error: String },
+    /// Create-kind launch committed. App rebuilds left items, selects the
+    /// new session, reloads changed files, shows the agent surface, and
+    /// surfaces either the startup-command error or the create status.
+    CreateCommitted {
+        status_message: String,
+        startup_result_error: Option<String>,
+    },
+    /// Non-Create launch found the session vanished. App does nothing
+    /// (Engine has already logged the "dropping launched PTY" line).
+    SessionMissing,
+    /// Reconnect / ForceReconnect: App shows the agent surface + sets info.
+    Reconnect { status_message: String },
+    /// ResumeFallback: App shows the agent surface only if `session_id` is
+    /// the currently selected session, and always sets info.
+    ResumeFallback {
+        session_id: String,
+        status_message: String,
+    },
+    /// StartupAutoReopen: App does nothing.
+    StartupAutoReopen,
+}
+
+/// View-only follow-up for `WorkerEvent::AgentLaunchFailed`. Engine has
+/// already cleared `agent_launches_in_flight`, flipped
+/// `create_agent_in_flight` for Create-kind failures, logged the
+/// ResumeFallback / StartupAutoReopen cases, and marked ResumeFallback
+/// sessions Detached. The App only formats the status message.
+pub enum AgentLaunchFailedOutcome {
+    Create {
+        message: String,
+    },
+    Reconnect {
+        branch_name: String,
+        message: String,
+    },
+    ForceReconnect {
+        branch_name: String,
+        message: String,
+    },
+    /// Engine logged + marked Detached; App has nothing to do.
+    ResumeFallback,
+    StartupAutoReopen {
+        branch_name: String,
+        message: String,
+    },
+}
+
+/// Display name for a session — title if present, branch name otherwise.
+/// (Engine-internal helper; the binary keeps `App::session_label` for the
+/// ~8 view-side callers in `sessions.rs`.)
+fn session_label(session: &AgentSession) -> String {
+    session
+        .title
+        .clone()
+        .unwrap_or_else(|| session.branch_name.clone())
+}
+
 impl Engine {
+    /// Find any other session that owns `worktree_path` and currently has a
+    /// running provider, and detach it so the incoming launch can take over.
+    /// Returns the detached session's id + label so the App caller can clear
+    /// `last_pty_activity` and surface the label in status messages.
+    ///
+    /// The App's `detach_conflicting_worktree_session` is a thin wrapper that
+    /// also drops `last_pty_activity` for the returned id.
+    pub fn detach_conflicting_worktree_session(
+        &mut self,
+        worktree_path: &str,
+        exclude_id: &str,
+    ) -> Option<DetachedSession> {
+        let conflicting = self
+            .sessions
+            .iter()
+            .find(|s| {
+                s.id != exclude_id
+                    && s.worktree_path == worktree_path
+                    && self.providers.contains_key(&s.id)
+            })
+            .cloned()?;
+
+        let label = session_label(&conflicting);
+        let provider = conflicting.provider.as_str().to_string();
+        self.providers.remove(&conflicting.id);
+        self.running_provider_pins.remove(&conflicting.id);
+        self.resume_fallback_candidates.remove(&conflicting.id);
+        self.mark_session_status(&conflicting.id, SessionStatus::Detached);
+
+        logger::info(&format!(
+            "auto-detached {} agent \"{}\" to avoid worktree conflict",
+            provider, label,
+        ));
+        Some(DetachedSession {
+            id: conflicting.id,
+            label,
+        })
+    }
+}
+
+impl Engine {
+    pub fn process_agent_launch_ready(
+        &mut self,
+        data: AgentLaunchReadyData,
+    ) -> AgentLaunchReadyOutcome {
+        let AgentLaunchReadyData { request, client } = data;
+        let session = request.session.clone();
+        let pty_size = request.pty_size;
+        self.agent_launches_in_flight.remove(&session.id);
+
+        if matches!(request.kind, AgentLaunchKind::Create { .. }) {
+            self.create_agent_in_flight = false;
+            if let Err(err) = self.session_store.upsert_session(&session) {
+                logger::error(&format!(
+                    "session store upsert failed for {}: {err}",
+                    session.id,
+                ));
+                return AgentLaunchReadyOutcome {
+                    session,
+                    pty_size,
+                    detached_session_id: None,
+                    view: AgentLaunchReadyView::CreatePersistFailed {
+                        error: err.to_string(),
+                    },
+                };
+            }
+            let detached =
+                self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
+            self.providers.insert(session.id.clone(), client);
+            self.sessions.insert(0, session.clone());
+            self.mark_session_provider_started(&session.id);
+            if request.resume {
+                self.resume_fallback_candidates
+                    .insert(session.id.clone(), Instant::now());
+            }
+            self.update_branch_sync_sessions();
+
+            // Extract Create-kind payload for the view outcome.
+            let AgentLaunchKind::Create {
+                status_message,
+                startup_result,
+                ..
+            } = request.kind
+            else {
+                unreachable!("matched AgentLaunchKind::Create above")
+            };
+            let startup_result_error = startup_result.and_then(|r| r.status.err());
+
+            return AgentLaunchReadyOutcome {
+                session,
+                pty_size,
+                detached_session_id: detached.map(|d| d.id),
+                view: AgentLaunchReadyView::CreateCommitted {
+                    status_message,
+                    startup_result_error,
+                },
+            };
+        }
+
+        // Non-Create branches share the "drop on missing session" guard.
+        if !self.sessions.iter().any(|s| s.id == session.id) {
+            logger::info(&format!(
+                "dropping launched PTY for missing session {}",
+                session.id,
+            ));
+            return AgentLaunchReadyOutcome {
+                session,
+                pty_size,
+                detached_session_id: None,
+                view: AgentLaunchReadyView::SessionMissing,
+            };
+        }
+
+        let detached =
+            self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
+        self.providers.insert(session.id.clone(), client);
+        if request.resume {
+            self.resume_fallback_candidates
+                .insert(session.id.clone(), Instant::now());
+        }
+        self.mark_session_desired_running(&session.id, true);
+        self.mark_session_status(&session.id, SessionStatus::Active);
+        self.mark_session_provider_started(&session.id);
+
+        let view = match request.kind {
+            AgentLaunchKind::Reconnect { status_message }
+            | AgentLaunchKind::ForceReconnect { status_message } => {
+                AgentLaunchReadyView::Reconnect { status_message }
+            }
+            AgentLaunchKind::ResumeFallback { status_message } => {
+                AgentLaunchReadyView::ResumeFallback {
+                    session_id: session.id.clone(),
+                    status_message,
+                }
+            }
+            AgentLaunchKind::StartupAutoReopen => AgentLaunchReadyView::StartupAutoReopen,
+            AgentLaunchKind::Create { .. } => unreachable!("create launch handled above"),
+        };
+
+        AgentLaunchReadyOutcome {
+            session,
+            pty_size,
+            detached_session_id: detached.map(|d| d.id),
+            view,
+        }
+    }
+
+    pub fn process_agent_launch_failed(
+        &mut self,
+        data: AgentLaunchFailedData,
+    ) -> AgentLaunchFailedOutcome {
+        let AgentLaunchFailedData { request, message } = data;
+        let session = request.session;
+        self.agent_launches_in_flight.remove(&session.id);
+
+        match request.kind {
+            AgentLaunchKind::Create { .. } => {
+                self.create_agent_in_flight = false;
+                AgentLaunchFailedOutcome::Create { message }
+            }
+            AgentLaunchKind::Reconnect { .. } => AgentLaunchFailedOutcome::Reconnect {
+                branch_name: session.branch_name,
+                message,
+            },
+            AgentLaunchKind::ForceReconnect { .. } => AgentLaunchFailedOutcome::ForceReconnect {
+                branch_name: session.branch_name,
+                message,
+            },
+            AgentLaunchKind::ResumeFallback { .. } => {
+                logger::error(&format!(
+                    "fallback PTY spawn failed for {}: {}",
+                    session.id, message,
+                ));
+                self.mark_session_status(&session.id, SessionStatus::Detached);
+                AgentLaunchFailedOutcome::ResumeFallback
+            }
+            AgentLaunchKind::StartupAutoReopen => {
+                logger::error(&format!(
+                    "startup auto-reopen failed for agent \"{}\": {}",
+                    session.branch_name, message,
+                ));
+                AgentLaunchFailedOutcome::StartupAutoReopen {
+                    branch_name: session.branch_name,
+                    message,
+                }
+            }
+        }
+    }
+
     /// Process a `WorkerEvent`: perform engine-side mutations and return the
     /// view follow-up the App caller should apply.
     ///
@@ -172,8 +446,14 @@ impl Engine {
                 self.create_agent_in_flight = false;
                 EventReaction::Status(StatusUpdate::error(message))
             }
-            WorkerEvent::AgentLaunchReady(boxed) => EventReaction::AgentLaunchReady(boxed),
-            WorkerEvent::AgentLaunchFailed(boxed) => EventReaction::AgentLaunchFailed(boxed),
+            WorkerEvent::AgentLaunchReady(boxed) => {
+                let outcome = self.process_agent_launch_ready(*boxed);
+                EventReaction::AgentLaunchReadyView(Box::new(outcome))
+            }
+            WorkerEvent::AgentLaunchFailed(boxed) => {
+                let outcome = self.process_agent_launch_failed(*boxed);
+                EventReaction::AgentLaunchFailedView(Box::new(outcome))
+            }
             WorkerEvent::ChangedFilesReady { staged, unstaged } => {
                 self.staged_files = staged;
                 self.unstaged_files = unstaged;
@@ -594,7 +874,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::DuxPaths;
+    use crate::config::{DuxPaths, ProviderCommandConfig};
     use crate::lockfile::SingleInstanceLock;
     use crate::model::{
         AgentSession, GhStatus, PrInfo, PrState, Project, ProjectBranchStatus, ProviderKind,
@@ -718,8 +998,8 @@ mod tests {
             EventReaction::RebuildLeftItems => "RebuildLeftItems",
             EventReaction::ReloadChangedFiles => "ReloadChangedFiles",
             EventReaction::ClampFilesCursor => "ClampFilesCursor",
-            EventReaction::AgentLaunchReady(_) => "AgentLaunchReady",
-            EventReaction::AgentLaunchFailed(_) => "AgentLaunchFailed",
+            EventReaction::AgentLaunchReadyView(_) => "AgentLaunchReadyView",
+            EventReaction::AgentLaunchFailedView(_) => "AgentLaunchFailedView",
             EventReaction::CommitMessageGenerated(_) => "CommitMessageGenerated",
             EventReaction::CommitMessageFailed(_) => "CommitMessageFailed",
             EventReaction::BrowserEntriesArrived { .. } => "BrowserEntriesArrived",
@@ -1096,5 +1376,115 @@ mod tests {
             message: msg,
         });
         let _kind = AgentLaunchKind::StartupAutoReopen;
+    }
+
+    // ── process_agent_launch_failed + detach_conflicting_worktree_session ──
+
+    fn make_failed_data(
+        session_id: &str,
+        branch: &str,
+        kind: AgentLaunchKind,
+        message: &str,
+    ) -> AgentLaunchFailedData {
+        AgentLaunchFailedData {
+            request: AgentLaunchRequest {
+                session: sample_session(session_id, "project-1", branch),
+                provider_config: ProviderCommandConfig::default(),
+                env: Vec::new(),
+                resume: false,
+                pty_size: (24, 80),
+                scrollback_lines: 1000,
+                kind,
+            },
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn process_agent_launch_failed_create_clears_in_flight_and_returns_message() {
+        let (mut engine, _tmp) = test_engine();
+        engine.agent_launches_in_flight.insert("s1".to_string());
+        engine.create_agent_in_flight = true;
+        let data = make_failed_data(
+            "s1",
+            "feat/x",
+            AgentLaunchKind::Create {
+                status_message: String::new(),
+                repo_path: String::from("/tmp/wt"),
+                owns_worktree: true,
+                startup_result: None,
+            },
+            "boom",
+        );
+        let outcome = engine.process_agent_launch_failed(data);
+        assert!(!engine.agent_launches_in_flight.contains("s1"));
+        assert!(!engine.create_agent_in_flight);
+        assert!(
+            matches!(outcome, AgentLaunchFailedOutcome::Create { message } if message == "boom")
+        );
+    }
+
+    #[test]
+    fn process_agent_launch_failed_resume_fallback_marks_detached() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "project-1", "feat/x");
+        let _ = engine.session_store.upsert_session(&session);
+        engine.sessions.push(session);
+        engine.agent_launches_in_flight.insert("s1".to_string());
+
+        let data = make_failed_data(
+            "s1",
+            "feat/x",
+            AgentLaunchKind::ResumeFallback {
+                status_message: String::new(),
+            },
+            "boom",
+        );
+        let outcome = engine.process_agent_launch_failed(data);
+        assert!(matches!(outcome, AgentLaunchFailedOutcome::ResumeFallback));
+        assert!(!engine.agent_launches_in_flight.contains("s1"));
+        assert_eq!(engine.sessions[0].status, SessionStatus::Detached);
+    }
+
+    #[test]
+    fn process_agent_launch_failed_reconnect_returns_branch_name() {
+        // Verifies that the Reconnect arm carries branch_name to the App for
+        // the "Reconnect failed for agent \"…\": …" status format.
+        let (mut engine, _tmp) = test_engine();
+        let data = make_failed_data(
+            "s1",
+            "feat/x",
+            AgentLaunchKind::Reconnect {
+                status_message: String::new(),
+            },
+            "boom",
+        );
+        let outcome = engine.process_agent_launch_failed(data);
+        assert!(matches!(
+            outcome,
+            AgentLaunchFailedOutcome::Reconnect { branch_name, message }
+                if branch_name == "feat/x" && message == "boom"
+        ));
+    }
+
+    #[test]
+    fn process_agent_launch_failed_startup_auto_reopen_returns_branch_and_message() {
+        let (mut engine, _tmp) = test_engine();
+        let data = make_failed_data("s1", "feat/x", AgentLaunchKind::StartupAutoReopen, "boom");
+        let outcome = engine.process_agent_launch_failed(data);
+        assert!(matches!(
+            outcome,
+            AgentLaunchFailedOutcome::StartupAutoReopen { branch_name, message }
+                if branch_name == "feat/x" && message == "boom"
+        ));
+    }
+
+    #[test]
+    fn detach_conflicting_worktree_session_returns_none_with_no_conflict() {
+        let (mut engine, _tmp) = test_engine();
+        let s1 = sample_session("s1", "project-1", "feat/x");
+        engine.sessions.push(s1);
+        let detached = engine.detach_conflicting_worktree_session("/tmp/wt/a", "s1");
+        assert!(detached.is_none());
     }
 }

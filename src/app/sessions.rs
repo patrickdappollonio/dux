@@ -2653,38 +2653,21 @@ impl App {
     /// If another session on the same worktree has a running PTY, detach it
     /// (kill the PTY and mark the session as `Detached`).  Returns the
     /// human-readable label of the detached session, if any.
+    ///
+    /// Thin view wrapper over `Engine::detach_conflicting_worktree_session`:
+    /// the engine performs the domain-state mutation and returns the detached
+    /// session's id + label; the App clears `last_pty_activity` for the id
+    /// and surfaces the label for status messages.
     pub(crate) fn detach_conflicting_worktree_session(
         &mut self,
         worktree_path: &str,
         exclude_id: &str,
     ) -> Option<String> {
-        let conflicting = self
+        let detached = self
             .engine
-            .sessions
-            .iter()
-            .find(|s| {
-                s.id != exclude_id
-                    && s.worktree_path == worktree_path
-                    && self.engine.providers.contains_key(&s.id)
-            })
-            .cloned()?;
-
-        let label = self.session_label(&conflicting);
-        let provider = conflicting.provider.as_str().to_string();
-        self.engine.providers.remove(&conflicting.id);
-        self.engine.running_provider_pins.remove(&conflicting.id);
-        self.last_pty_activity.remove(&conflicting.id);
-        self.engine
-            .resume_fallback_candidates
-            .remove(&conflicting.id);
-        self.engine
-            .mark_session_status(&conflicting.id, SessionStatus::Detached);
-
-        logger::info(&format!(
-            "auto-detached {} agent \"{}\" to avoid worktree conflict",
-            provider, label,
-        ));
-        Some(label)
+            .detach_conflicting_worktree_session(worktree_path, exclude_id)?;
+        self.last_pty_activity.remove(&detached.id);
+        Some(detached.label)
     }
 }
 

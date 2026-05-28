@@ -1,6 +1,9 @@
 use std::sync::mpsc::Sender;
 
-use dux_core::engine::{EventReaction, StatusUpdate};
+use dux_core::engine::{
+    AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView, EventReaction,
+    StatusUpdate,
+};
 
 use super::*;
 
@@ -203,8 +206,12 @@ impl App {
             EventReaction::ReloadChangedFiles => self.reload_changed_files(),
             EventReaction::ClampFilesCursor => self.clamp_files_cursor(),
 
-            EventReaction::AgentLaunchReady(boxed) => self.handle_agent_launch_ready(*boxed),
-            EventReaction::AgentLaunchFailed(boxed) => self.handle_agent_launch_failed(*boxed),
+            EventReaction::AgentLaunchReadyView(boxed) => {
+                self.apply_agent_launch_ready_view(*boxed);
+            }
+            EventReaction::AgentLaunchFailedView(boxed) => {
+                self.apply_agent_launch_failed_view(*boxed);
+            }
 
             EventReaction::CommitMessageGenerated(msg) => {
                 self.commit_input.clear_overlay();
@@ -738,94 +745,51 @@ impl App {
         });
     }
 
-    fn handle_agent_launch_ready(&mut self, data: AgentLaunchReadyData) {
-        let AgentLaunchReadyData { request, client } = data;
-        let session = request.session.clone();
-        let session_id = session.id.clone();
-        self.engine.agent_launches_in_flight.remove(&session_id);
-        self.last_pty_size = request.pty_size;
-
-        if matches!(request.kind, AgentLaunchKind::Create { .. }) {
-            self.engine.create_agent_in_flight = false;
-            if let Err(err) = self.engine.session_store.upsert_session(&session) {
-                logger::error(&format!(
-                    "session store upsert failed for {}: {err}",
-                    session.id
-                ));
-                self.set_error(format!("Failed to persist session: {err}"));
-                return;
+    fn apply_agent_launch_ready_view(&mut self, outcome: AgentLaunchReadyOutcome) {
+        self.last_pty_size = outcome.pty_size;
+        if let Some(id) = outcome.detached_session_id {
+            self.last_pty_activity.remove(&id);
+        }
+        match outcome.view {
+            AgentLaunchReadyView::CreatePersistFailed { error } => {
+                self.set_error(format!("Failed to persist session: {error}"));
             }
-            self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
-            self.engine.providers.insert(session.id.clone(), client);
-            self.engine.sessions.insert(0, session.clone());
-            self.engine.mark_session_provider_started(&session.id);
-            if request.resume {
-                self.engine
-                    .resume_fallback_candidates
-                    .insert(session.id.clone(), Instant::now());
-            }
-            self.engine.update_branch_sync_sessions();
-            self.rebuild_left_items();
-            self.selected_left = self
-                .left_items()
-                .iter()
-                .position(|item| matches!(item, LeftItem::Session(index) if self.engine.sessions.get(*index).map(|candidate| candidate.id.as_str()) == Some(session.id.as_str())))
-                .unwrap_or(0);
-            self.reload_changed_files();
-            self.show_agent_surface();
-            self.input_target = InputTarget::Agent;
-            self.fullscreen_overlay = FullscreenOverlay::Agent;
-            if let AgentLaunchKind::Create {
+            AgentLaunchReadyView::CreateCommitted {
                 status_message,
-                startup_result,
-                ..
-            } = request.kind
-            {
-                if let Some(result) = startup_result
-                    && let Err(err) = result.status
-                {
+                startup_result_error,
+            } => {
+                self.rebuild_left_items();
+                self.selected_left = self
+                    .left_items()
+                    .iter()
+                    .position(|item| matches!(item, LeftItem::Session(index) if self.engine.sessions.get(*index).map(|candidate| candidate.id.as_str()) == Some(outcome.session.id.as_str())))
+                    .unwrap_or(0);
+                self.reload_changed_files();
+                self.show_agent_surface();
+                self.input_target = InputTarget::Agent;
+                self.fullscreen_overlay = FullscreenOverlay::Agent;
+                if let Some(err) = startup_result_error {
                     self.set_error(format!(
                         "Startup command failed for agent \"{}\": {err}. Run read-startup-command-logs for details.",
-                        session.branch_name
+                        outcome.session.branch_name
                     ));
                 } else {
                     self.set_info(status_message);
                 }
             }
-            return;
-        }
-
-        if !self.engine.sessions.iter().any(|s| s.id == session.id) {
-            logger::info(&format!(
-                "dropping launched PTY for missing session {}",
-                session.id
-            ));
-            return;
-        }
-
-        self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
-        self.engine.providers.insert(session.id.clone(), client);
-        if request.resume {
-            self.engine
-                .resume_fallback_candidates
-                .insert(session.id.clone(), Instant::now());
-        }
-        self.engine.mark_session_desired_running(&session.id, true);
-        self.engine
-            .mark_session_status(&session.id, SessionStatus::Active);
-        self.engine.mark_session_provider_started(&session.id);
-
-        match request.kind {
-            AgentLaunchKind::Reconnect { status_message }
-            | AgentLaunchKind::ForceReconnect { status_message } => {
+            AgentLaunchReadyView::SessionMissing => {}
+            AgentLaunchReadyView::Reconnect { status_message } => {
                 self.show_agent_surface();
                 self.input_target = InputTarget::Agent;
                 self.fullscreen_overlay = FullscreenOverlay::Agent;
                 self.set_info(status_message);
             }
-            AgentLaunchKind::ResumeFallback { status_message } => {
+            AgentLaunchReadyView::ResumeFallback {
+                session_id,
+                status_message,
+            } => {
                 if self.selected_session().map(|selected| selected.id.as_str())
-                    == Some(session.id.as_str())
+                    == Some(session_id.as_str())
                 {
                     self.show_agent_surface();
                     self.input_target = InputTarget::Agent;
@@ -833,49 +797,38 @@ impl App {
                 }
                 self.set_info(status_message);
             }
-            AgentLaunchKind::StartupAutoReopen => {}
-            AgentLaunchKind::Create { .. } => unreachable!("create launch handled above"),
+            AgentLaunchReadyView::StartupAutoReopen => {}
         }
     }
 
-    fn handle_agent_launch_failed(&mut self, data: AgentLaunchFailedData) {
-        let AgentLaunchFailedData { request, message } = data;
-        let session = request.session;
-        self.engine.agent_launches_in_flight.remove(&session.id);
-
-        match request.kind {
-            AgentLaunchKind::Create { .. } => {
-                self.engine.create_agent_in_flight = false;
-                self.set_error(message);
-            }
-            AgentLaunchKind::Reconnect { .. } => {
+    fn apply_agent_launch_failed_view(&mut self, outcome: AgentLaunchFailedOutcome) {
+        match outcome {
+            AgentLaunchFailedOutcome::Create { message } => self.set_error(message),
+            AgentLaunchFailedOutcome::Reconnect {
+                branch_name,
+                message,
+            } => {
                 self.set_error(format!(
-                    "Reconnect failed for agent \"{}\": {}",
-                    session.branch_name, message
+                    "Reconnect failed for agent \"{branch_name}\": {message}"
                 ));
             }
-            AgentLaunchKind::ForceReconnect { .. } => {
+            AgentLaunchFailedOutcome::ForceReconnect {
+                branch_name,
+                message,
+            } => {
                 self.set_error(format!(
-                    "Fresh restart failed for agent \"{}\": {}",
-                    session.branch_name, message
+                    "Fresh restart failed for agent \"{branch_name}\": {message}"
                 ));
             }
-            AgentLaunchKind::ResumeFallback { .. } => {
-                logger::error(&format!(
-                    "fallback PTY spawn failed for {}: {}",
-                    session.id, message
-                ));
-                self.engine
-                    .mark_session_status(&session.id, SessionStatus::Detached);
+            AgentLaunchFailedOutcome::ResumeFallback => {
+                // Engine logged + marked Detached; nothing for the view.
             }
-            AgentLaunchKind::StartupAutoReopen => {
-                logger::error(&format!(
-                    "startup auto-reopen failed for agent \"{}\": {}",
-                    session.branch_name, message
-                ));
+            AgentLaunchFailedOutcome::StartupAutoReopen {
+                branch_name,
+                message,
+            } => {
                 self.set_warning(format!(
-                    "Couldn't auto-reopen agent \"{}\": {}",
-                    session.branch_name, message
+                    "Couldn't auto-reopen agent \"{branch_name}\": {message}"
                 ));
             }
         }

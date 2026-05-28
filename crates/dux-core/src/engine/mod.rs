@@ -4,7 +4,10 @@
 
 mod events;
 
-pub use events::{EventReaction, StatusUpdate};
+pub use events::{
+    AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView, DetachedSession,
+    EventReaction, StatusUpdate,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
