@@ -56,9 +56,9 @@ use text_input::TextInput;
 
 pub(crate) use dux_core::worker::{
     AgentLaunchFailedData, AgentLaunchKind, AgentLaunchReadyData, AgentLaunchRequest,
-    BranchSyncEntry, BranchWarningKind, BrowserEntry, CreateAgentBranchInspection,
-    NonDefaultBranchAction, PrSyncEntry, ProcessInfo, ProjectPersistenceAction,
-    ProjectWorktreeEntry, PullTarget, ResolvedPullRequest, ResourceStats, WorkerEvent,
+    BranchWarningKind, BrowserEntry, CreateAgentBranchInspection, NonDefaultBranchAction,
+    PrSyncEntry, ProcessInfo, ProjectPersistenceAction, ProjectWorktreeEntry, PullTarget,
+    ResolvedPullRequest, ResourceStats, WorkerEvent,
 };
 
 pub struct App {
@@ -1447,7 +1447,7 @@ impl App {
         app.seed_pr_statuses_from_db();
         app.rebuild_left_items();
         app.reload_changed_files();
-        app.update_branch_sync_sessions();
+        app.engine.update_branch_sync_sessions();
         Ok(app)
     }
 
@@ -1618,9 +1618,10 @@ impl App {
             .collect();
         for (id, exists) in ids {
             if exists {
-                self.mark_session_status(&id, SessionStatus::Detached);
+                self.engine
+                    .mark_session_status(&id, SessionStatus::Detached);
             } else {
-                self.mark_session_status(&id, SessionStatus::Exited);
+                self.engine.mark_session_status(&id, SessionStatus::Exited);
             }
         }
         self.auto_reopen_eligible_sessions();
@@ -2053,7 +2054,7 @@ impl App {
                 if self.engine.github_integration_enabled
                     && matches!(self.engine.gh_status, crate::model::GhStatus::Available)
                 {
-                    self.update_pr_sync_sessions();
+                    self.engine.update_pr_sync_sessions();
                     self.spawn_initial_pr_refresh();
                     self.engine.pr_sync_enabled.store(true, Ordering::Relaxed);
                 } else if !self.engine.github_integration_enabled {
@@ -2193,11 +2194,11 @@ impl App {
         if self.selected_left >= self.left_items_cache.len() {
             self.selected_left = self.left_items_cache.len().saturating_sub(1);
         }
-        self.update_branch_sync_sessions();
+        self.engine.update_branch_sync_sessions();
         if self.engine.github_integration_enabled
             && matches!(self.engine.gh_status, crate::model::GhStatus::Available)
         {
-            self.update_pr_sync_sessions();
+            self.engine.update_pr_sync_sessions();
             self.spawn_initial_pr_refresh();
             self.engine.pr_sync_enabled.store(true, Ordering::Relaxed);
         } else {
@@ -2645,79 +2646,7 @@ impl App {
             self.set_busy(format!("Renaming branch to \"{name}\"\u{2026}"));
         } else {
             self.set_info(format!("Renamed agent to \"{name}\"."));
-            self.update_branch_sync_sessions();
-        }
-    }
-
-    pub(crate) fn mark_session_status(&mut self, session_id: &str, status: SessionStatus) {
-        if let Some(session) = self
-            .engine
-            .sessions
-            .iter_mut()
-            .find(|candidate| candidate.id == session_id)
-        {
-            if session.status == status {
-                return;
-            }
-            session.status = status;
-            session.updated_at = Utc::now();
-            let _ = self.engine.session_store.upsert_session(session);
-        }
-    }
-
-    pub(crate) fn mark_session_desired_running(&mut self, session_id: &str, desired: bool) {
-        if let Some(session) = self
-            .engine
-            .sessions
-            .iter_mut()
-            .find(|candidate| candidate.id == session_id)
-        {
-            if session.desired_running == desired {
-                return;
-            }
-            session.desired_running = desired;
-            session.updated_at = Utc::now();
-            let _ = self.engine.session_store.upsert_session(session);
-        } else {
-            let _ = self
-                .engine
-                .session_store
-                .set_desired_running(session_id, desired);
-        }
-    }
-
-    pub(crate) fn mark_session_provider_started(&mut self, session_id: &str) {
-        let Some(session) = self
-            .engine
-            .sessions
-            .iter_mut()
-            .find(|candidate| candidate.id == session_id)
-        else {
-            return;
-        };
-
-        let provider = session.provider.clone();
-        if !session.mark_provider_started(&provider) {
-            return;
-        }
-
-        session.updated_at = Utc::now();
-        let _ = self.engine.session_store.upsert_session(session);
-    }
-
-    /// Refreshes the shared session snapshot used by the branch-sync worker.
-    pub(crate) fn update_branch_sync_sessions(&self) {
-        if let Ok(mut guard) = self.engine.branch_sync_sessions.lock() {
-            *guard = self
-                .engine
-                .sessions
-                .iter()
-                .map(|s| BranchSyncEntry {
-                    session_id: s.id.clone(),
-                    worktree_path: s.worktree_path.clone(),
-                    branch_name: s.branch_name.clone(),
-                })
-                .collect();
+            self.engine.update_branch_sync_sessions();
         }
     }
 

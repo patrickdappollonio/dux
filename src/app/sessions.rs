@@ -983,7 +983,7 @@ impl App {
         self.engine
             .sessions
             .retain(|candidate| candidate.id != session.id);
-        self.update_branch_sync_sessions();
+        self.engine.update_branch_sync_sessions();
         let project_still_has_sessions = self
             .engine
             .sessions
@@ -2596,7 +2596,8 @@ impl App {
                     if self.engine.providers.remove(session_id).is_some() {
                         self.engine.running_provider_pins.remove(session_id);
                         self.last_pty_activity.remove(session_id);
-                        self.mark_session_status(session_id, SessionStatus::Detached);
+                        self.engine
+                            .mark_session_status(session_id, SessionStatus::Detached);
                         killed_agents += 1;
                         if selected_session_id.as_deref() == Some(session_id.as_str()) {
                             selected_agent_killed = true;
@@ -2676,7 +2677,8 @@ impl App {
         self.engine
             .resume_fallback_candidates
             .remove(&conflicting.id);
-        self.mark_session_status(&conflicting.id, SessionStatus::Detached);
+        self.engine
+            .mark_session_status(&conflicting.id, SessionStatus::Detached);
 
         logger::info(&format!(
             "auto-detached {} agent \"{}\" to avoid worktree conflict",
@@ -3072,7 +3074,7 @@ mod tests {
         let project = make_project("project-1", "claude");
         let mut app = test_app_with_sessions(vec![session], vec![project]);
 
-        app.mark_session_provider_started("s1");
+        app.engine.mark_session_provider_started("s1");
 
         assert_eq!(
             app.engine.sessions[0].started_providers,

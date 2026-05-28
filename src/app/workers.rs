@@ -1,643 +1,14 @@
 use std::sync::mpsc::Sender;
 
+use dux_core::engine::{EventReaction, StatusUpdate};
+
 use super::*;
 
 impl App {
     pub(crate) fn drain_events(&mut self) {
         while let Ok(event) = self.engine.worker_rx.try_recv() {
-            match event {
-                WorkerEvent::CreateAgentProgress(message) => self.set_busy(message),
-                WorkerEvent::CreateAgentFailed(message) => {
-                    self.engine.create_agent_in_flight = false;
-                    self.set_error(message);
-                }
-                WorkerEvent::AgentLaunchReady(boxed) => {
-                    self.handle_agent_launch_ready(*boxed);
-                }
-                WorkerEvent::AgentLaunchFailed(boxed) => {
-                    self.handle_agent_launch_failed(*boxed);
-                }
-                WorkerEvent::ChangedFilesReady { staged, unstaged } => {
-                    self.engine.staged_files = staged;
-                    self.engine.unstaged_files = unstaged;
-                    self.clamp_files_cursor();
-                }
-                WorkerEvent::CommitMessageGenerated(msg) => {
-                    self.commit_input.clear_overlay();
-                    self.commit_input.set_text(msg);
-                    self.input_target = InputTarget::CommitMessage;
-                    {
-                        let exit_key = self.bindings.label_for(Action::ExitCommitInput);
-                        let commit_key = self.bindings.label_for(Action::CommitChanges);
-                        self.set_info(format!(
-                            "AI commit message generated. Press {exit_key} to exit, then {commit_key} to commit.",
-                        ));
-                    }
-                }
-                WorkerEvent::CommitMessageFailed(err) => {
-                    self.commit_input.clear_overlay();
-                    {
-                        let gen_key = self.bindings.label_for(Action::GenerateCommitMessage);
-                        self.set_error(format!(
-                            "Failed to generate AI commit message: {err}. \
-                             You can write one manually or retry with {gen_key}.",
-                        ));
-                    }
-                }
-                WorkerEvent::PushCompleted(result) => match result {
-                    Ok(()) => self.set_info(
-                        "Pushed to remote successfully. Your changes are now available to collaborators.",
-                    ),
-                    Err(e) => self.set_error(format!("Push to remote failed: {e}")),
-                },
-                WorkerEvent::PullCompleted {
-                    repo_path,
-                    target,
-                    result,
-                } => {
-                    self.engine.pulls_in_flight.remove(&repo_path);
-                    match target {
-                        PullTarget::Project {
-                            project_id,
-                            project_name,
-                            ..
-                        } => match result {
-                            Ok(branch_name) => {
-                                if let Some(existing) = self
-                                    .engine.projects
-                                    .iter_mut()
-                                    .find(|candidate| candidate.id == project_id)
-                                    && let Some(branch_name) = branch_name
-                                {
-                                    existing.current_branch = branch_name;
-                                    existing.branch_status =
-                                        if existing.leading_branch.as_deref()
-                                            == Some(&existing.current_branch)
-                                        {
-                                            ProjectBranchStatus::Leading
-                                        } else if existing.leading_branch.is_some() {
-                                            ProjectBranchStatus::NotLeading
-                                        } else {
-                                            let warning = branch_warning_kind(
-                                                Path::new(&existing.path),
-                                                &existing.current_branch,
-                                            );
-                                            branch_status_from_warning(warning.as_ref())
-                                        };
-                                }
-                                self.set_info(format!(
-                                    "Refreshed project \"{}\". Local branch is up to date with remote.",
-                                    project_name,
-                                ));
-                            }
-                            Err(e) => self
-                                .set_error(format!("Project refresh failed for \"{}\": {e}", project_name)),
-                        },
-                        PullTarget::Session => match result {
-                            Ok(_) => {
-                                self.set_info(
-                                    "Pulled latest changes from remote successfully. Local branch is up to date.",
-                                );
-                                self.reload_changed_files();
-                            }
-                            Err(e) => self.set_error(format!("Pull from remote failed: {e}")),
-                        },
-                    }
-                }
-                WorkerEvent::ClipboardCopyCompleted { label, result } => match result {
-                    Ok(()) => self.set_info(label),
-                    Err(e) => self.set_error(format!("Clipboard copy failed: {e}")),
-                },
-                WorkerEvent::BranchRenameCompleted {
-                    session_id,
-                    new_branch,
-                    previous_title,
-                    result,
-                } => match result {
-                    Ok(()) => {
-                        if let Some(session) =
-                            self.engine.sessions.iter_mut().find(|s| s.id == session_id)
-                        {
-                            session.branch_name = new_branch.clone();
-                            session.updated_at = Utc::now();
-                            let _ = self.engine.session_store.upsert_session(session);
-                        }
-                        self.update_branch_sync_sessions();
-                        self.rebuild_left_items();
-                        self.set_info(format!(
-                            "Renamed agent and branch to \"{new_branch}\"."
-                        ));
-                    }
-                    Err(e) => {
-                        // Revert the title so the session doesn't stay in a
-                        // mixed state where the display name changed but the
-                        // branch didn't.
-                        if let Some(session) =
-                            self.engine.sessions.iter_mut().find(|s| s.id == session_id)
-                        {
-                            session.title = previous_title;
-                            session.updated_at = Utc::now();
-                            let _ = self.engine.session_store.upsert_session(session);
-                        }
-                        self.rebuild_left_items();
-                        self.set_error(format!(
-                            "Branch rename failed, reverted agent name: {e}"
-                        ));
-                    }
-                },
-                WorkerEvent::BranchSyncReady(updates) => {
-                    let mut changed = false;
-                    for (session_id, actual_branch) in updates {
-                        if let Some(session) =
-                            self.engine.sessions.iter_mut().find(|s| s.id == session_id)
-                            && session.branch_name != actual_branch {
-                                logger::info(&format!(
-                                    "branch sync: session {} branch changed {} -> {}",
-                                    session_id, session.branch_name, actual_branch,
-                                ));
-                                session.branch_name = actual_branch;
-                                session.updated_at = Utc::now();
-                                let _ = self.engine.session_store.upsert_session(session);
-                                changed = true;
-                            }
-                    }
-                    if changed {
-                        self.update_branch_sync_sessions();
-                        self.rebuild_left_items();
-                    }
-                }
-                WorkerEvent::GhStatusChecked(status) => {
-                    self.engine.gh_status = status;
-                    if matches!(status, crate::model::GhStatus::Available)
-                        && self.engine.github_integration_enabled
-                    {
-                        logger::info("[gh-integration] gh CLI is available and authenticated");
-                        self.update_pr_sync_sessions();
-                        self.spawn_pr_sync_worker();
-                        self.spawn_initial_pr_refresh();
-                        self.engine.spawn_refs_watcher();
-                    } else {
-                        logger::info(&format!(
-                            "[gh-integration] gh status: {:?}, integration enabled: {}",
-                            status, self.engine.github_integration_enabled,
-                        ));
-                    }
-                }
-                WorkerEvent::PrStatusReady(results) => {
-                    let now = Instant::now();
-                    let mut changed = false;
-                    for (session_id, maybe_pr) in results {
-                        self.pr_last_checked.insert(session_id.clone(), now);
-                        match maybe_pr {
-                            Some(pr) => {
-                                // Persist the PR association (including state) so it
-                                // survives restarts and squash-merge branch deletions.
-                                let state_str = match pr.state {
-                                    crate::model::PrState::Open => "OPEN",
-                                    crate::model::PrState::Merged => "MERGED",
-                                    crate::model::PrState::Closed => "CLOSED",
-                                };
-                                let _ = self.engine.session_store.upsert_pr(&crate::storage::StoredPr {
-                                    session_id: session_id.clone(),
-                                    pr_number: pr.number,
-                                    host: pr.host.clone(),
-                                    owner_repo: pr.owner_repo.clone(),
-                                    state: state_str.to_string(),
-                                    title: pr.title.clone(),
-                                    url: pr.url.clone(),
-                                });
-                                self.engine.pr_statuses.insert(session_id, pr);
-                                changed = true;
-                            }
-                            None => {
-                                if self.engine.pr_statuses.remove(&session_id).is_some() {
-                                    changed = true;
-                                }
-                            }
-                        }
-                    }
-                    if changed {
-                        // Refresh the sync entries so the worker has updated known_pr data.
-                        self.update_pr_sync_sessions();
-                        self.rebuild_left_items();
-                    }
-                }
-                WorkerEvent::PullRequestResolved { result } => match result {
-                    Ok(pr) => {
-                        let request = CreateAgentRequest::PullRequest {
-                            project: pr.project.clone(),
-                            host: pr.host.clone(),
-                            owner_repo: pr.owner_repo.clone(),
-                            number: pr.number,
-                            title: pr.title.clone(),
-                            state: pr.state.clone(),
-                            head_branch: pr.head_ref_name.clone(),
-                            custom_name: Some(pr.head_ref_name.clone()),
-                            use_existing_branch: false,
-                        };
-                        if let Err(err) = self.open_name_new_agent_prompt(request) {
-                            self.set_error(format!("{err:#}"));
-                        } else {
-                            self.set_info(format!(
-                                "Resolved PR #{}: {}. Confirm or edit the branch name.",
-                                pr.number, pr.title
-                            ));
-                        }
-                    }
-                    Err(message) => {
-                        self.set_error(message);
-                    }
-                },
-                WorkerEvent::RefsChanged(session_id) => {
-                    logger::debug(&format!(
-                        "[gh-integration] refs watcher: triggering PR check for session {}",
-                        session_id,
-                    ));
-                    self.spawn_pr_check_for_session(&session_id);
-                }
-                WorkerEvent::BrowserEntriesReady { dir, entries } => {
-                    if let PromptState::BrowseProjects {
-                        current_dir,
-                        entries: current_entries,
-                        loading,
-                        selected,
-                        ..
-                    } = &mut self.prompt
-                        && *current_dir == dir
-                    {
-                        *current_entries = entries;
-                        *loading = false;
-                        *selected = 0;
-                    }
-                }
-                WorkerEvent::ProjectWorktreesReady { project_id, result } => {
-                    let mut status_after_update: Option<Result<&'static str, String>> = None;
-                    if let PromptState::PickProjectWorktree(prompt) = &mut self.prompt
-                        && prompt.project.id == project_id
-                    {
-                        prompt.loading = false;
-                        match result {
-                            Ok(entries) => {
-                                prompt.selected =
-                                    selectable_project_worktree_indices(&entries).into_iter().next();
-                                prompt.entries = entries;
-                                prompt.error = None;
-                                status_after_update = Some(Ok(
-                                    "Choose an available worktree to launch a new agent.",
-                                ));
-                            }
-                            Err(error) => {
-                                let project_name = prompt.project.name.clone();
-                                prompt.entries.clear();
-                                prompt.selected = None;
-                                prompt.error = Some(error.clone());
-                                status_after_update = Some(Err(format!(
-                                    "Failed to load worktrees for project \"{}\": {error}",
-                                    project_name
-                                )));
-                            }
-                        }
-                    }
-                    if let Some(status) = status_after_update {
-                        match status {
-                            Ok(message) => self.set_info(message),
-                            Err(message) => self.set_error(message),
-                        }
-                    }
-                }
-                WorkerEvent::WorktreeRemoveCompleted { session_id, result } => {
-                    // Always clear the in-flight guard so the session is
-                    // interactive again — whether we're about to remove it
-                    // (Ok path) or leave it in place for retry (Err path).
-                    self.engine.pending_deletions.remove(&session_id);
-
-                    // Retrieve (and remove) the exact Busy message we set
-                    // when the worker was spawned. We compare this against
-                    // the current status-line content rather than checking
-                    // tone alone, because another operation (push, pull,
-                    // refresh, concurrent delete) may have since set its own
-                    // Busy message that we must not clobber.
-                    let our_busy_msg = self.engine.deletion_busy_messages.remove(&session_id);
-
-                    match result {
-                        Ok(branch_already_deleted) => {
-                            // Only update the status line if the current
-                            // content is still the Busy message we set when
-                            // spawning this worker. If another operation
-                            // (push, pull, concurrent delete) has since
-                            // overwritten it, we should not clobber their
-                            // message — the session will visually disappear
-                            // from the list, which is sufficient feedback.
-                            let our_busy_still_showing =
-                                our_busy_msg.as_ref().is_some_and(|msg| {
-                                    self.status.tone()
-                                        == crate::statusline::StatusTone::Busy
-                                        && self.status.message() == msg.as_str()
-                                });
-
-                            if self.engine.sessions.iter().any(|s| s.id == session_id) {
-                                if let Err(e) = self.finish_delete_session(
-                                    &session_id,
-                                    true,
-                                    Some(branch_already_deleted),
-                                    our_busy_still_showing,
-                                ) {
-                                    self.set_error(format!(
-                                        "Worktree removed but session cleanup failed: {e:#}"
-                                    ));
-                                }
-                            } else if our_busy_still_showing {
-                                // Session removed by another path; just clear
-                                // the lingering Busy so it doesn't stick.
-                                self.set_info("Worktree removal finished.");
-                            }
-                        }
-                        Err(msg) => {
-                            // Session record is normally still present
-                            // because we deferred cleanup until git
-                            // succeeded. Look up the session label so the
-                            // user knows which agent failed — multiple async
-                            // deletes can be in flight concurrently, and a
-                            // bare error would be ambiguous.
-                            if let Some(session) =
-                                self.engine.sessions.iter().find(|s| s.id == session_id)
-                            {
-                                let name = session
-                                    .title
-                                    .as_deref()
-                                    .unwrap_or(&session.branch_name);
-                                self.set_error(format!(
-                                    "Worktree delete failed for {} agent \"{name}\": {msg}",
-                                    session.provider.as_str(),
-                                ));
-                            } else {
-                                self.set_error(format!(
-                                    "Worktree delete failed: {msg}"
-                                ));
-                            }
-                        }
-                    }
-                }
-                WorkerEvent::ResourceStatsReady(stats) => {
-                    self.engine.resource_stats_in_flight = false;
-                    if let PromptState::ResourceMonitor {
-                        rows,
-                        selected_row,
-                        expanded,
-                        last_refresh,
-                        first_sample,
-                        ..
-                    } = &mut self.prompt
-                    {
-                        *rows = stats;
-                        *last_refresh = Instant::now();
-                        *first_sample = false;
-                        // Clamp cursor to the (possibly changed) visual row count.
-                        let visual = build_visual_rows(rows, expanded);
-                        let max_row = visual.len().saturating_sub(1);
-                        if *selected_row > max_row {
-                            *selected_row = max_row;
-                        }
-                    }
-                }
-                WorkerEvent::NonDefaultBranchCheckoutCompleted {
-                    action,
-                    target_branch,
-                    result,
-                } => match result {
-                    Ok(()) => match action {
-                        NonDefaultBranchAction::AddProject {
-                            path,
-                            name,
-                            leading_branch,
-                        } => {
-                            let display_name = if name.trim().is_empty() {
-                                std::path::Path::new(&path)
-                                    .file_name()
-                                    .and_then(|s| s.to_str())
-                                    .unwrap_or("project")
-                                    .to_string()
-                            } else {
-                                name.trim().to_string()
-                            };
-                            let status_message = format!(
-                                "Checked out \"{target_branch}\" and added project \"{display_name}\" to workspace."
-                            );
-                            if let Err(e) = self.finish_add_project_with_status(
-                                path,
-                                name,
-                                target_branch.clone(),
-                                leading_branch,
-                                status_message,
-                            ) {
-                                self.set_error(format!("{e:#}"));
-                            }
-                        }
-                        NonDefaultBranchAction::CheckoutProjectDefault { project } => {
-                            if let Some(existing) =
-                                self.engine.projects.iter_mut().find(|p| p.id == project.id)
-                            {
-                                existing.current_branch = target_branch.clone();
-                                existing.branch_status = ProjectBranchStatus::Leading;
-                            }
-                            self.set_info(format!(
-                                "Checked out \"{target_branch}\" for project \"{}\".",
-                                project.name
-                            ));
-                        }
-                    },
-                    Err(err) => {
-                        // Preserve the full git stderr in the log so
-                        // debugging stays possible after the status line
-                        // summary is overwritten by the next message.
-                        let path = action.repo_path().to_string();
-                        logger::error(&format!(
-                            "non-default branch checkout failed for {path}: {err}"
-                        ));
-                        self.set_error(format!(
-                            "Couldn't check out \"{target_branch}\" in {path} — resolve in your terminal and retry."
-                        ));
-                    }
-                },
-                WorkerEvent::CreateAgentBranchInspected { project, result } => match result {
-                    Ok(inspection) => {
-                        let project_name = project.name.clone();
-                        if let Some(existing) =
-                            self.engine.projects.iter_mut().find(|p| p.id == project.id)
-                        {
-                            existing.current_branch = inspection.current_branch.clone();
-                            existing.leading_branch = Some(inspection.leading_branch.clone());
-                            existing.branch_status =
-                                if existing.current_branch == inspection.leading_branch {
-                                    ProjectBranchStatus::Leading
-                                } else {
-                                    ProjectBranchStatus::NotLeading
-                                };
-                        }
-                        if let Err(err) = self.persist_projects_to_config_and_store() {
-                            self.set_error(format!(
-                                "Project branch was detected, but config.toml could not be updated: {err:#}"
-                            ));
-                        }
-                        if let Err(err) =
-                            self.continue_create_agent_after_branch_inspection(project, inspection)
-                        {
-                            self.set_error(format!("{err:#}"));
-                        } else {
-                            self.set_info(format!(
-                                "Branch check complete for \"{project_name}\". Confirm or edit the agent name to continue."
-                            ));
-                        }
-                    }
-                    Err(err) => {
-                        self.set_error(err);
-                    }
-                },
-                WorkerEvent::ProjectBranchStatusReady { project_id, result } => match result {
-                    Ok((current_branch, branch_status)) => {
-                        if let Some(project) =
-                            self.engine.projects.iter_mut().find(|p| p.id == project_id)
-                        {
-                            project.current_branch = current_branch;
-                            project.branch_status = branch_status;
-                        }
-                    }
-                    Err(err) => {
-                        logger::debug(&format!(
-                            "project branch status inspection failed for {project_id}: {err}"
-                        ));
-                    }
-                },
-                WorkerEvent::CheckoutProjectDefaultBranchInspected { project, result } => {
-                    match result {
-                        Ok((current_branch, warning_kind)) => match warning_kind {
-                            Some(BranchWarningKind::Known { default_branch }) => {
-                                let mut project = project;
-                                project.current_branch = current_branch;
-                                self.dispatch_non_default_branch_checkout(
-                                    NonDefaultBranchAction::CheckoutProjectDefault { project },
-                                    default_branch,
-                                    "for the selected project".to_string(),
-                                );
-                            }
-                            Some(BranchWarningKind::Heuristic) => {
-                                self.set_error(format!(
-                                    "Can't determine the default branch for project \"{}\" while it is on \"{}\". Resolve the default branch in your terminal and retry.",
-                                    project.name, current_branch
-                                ));
-                            }
-                            None => {
-                                if let Some(existing) =
-                                    self.engine.projects.iter_mut().find(|p| p.id == project.id)
-                                {
-                                    existing.current_branch = current_branch.clone();
-                                    existing.branch_status = ProjectBranchStatus::Leading;
-                                }
-                                self.set_info(format!(
-                                    "Project \"{}\" is already on the leading branch \"{}\".",
-                                    project.name, current_branch
-                                ));
-                            }
-                        },
-                        Err(err) => self.set_error(format!(
-                            "Couldn't inspect the default branch for project \"{}\": {err}",
-                            project.name
-                        )),
-                    }
-                },
-                WorkerEvent::ConfigReloadReady(result) => match *result {
-                    Ok(config) => {
-                        if let Err(err) = self.apply_reloaded_config(config) {
-                            self.set_error(format!(
-                                "Config validation passed, but applying it failed: {err:#}"
-                            ));
-                        } else {
-                            self.set_info(
-                                "Configuration reloaded. New settings are active now.",
-                            );
-                        }
-                    }
-                    Err(message) => {
-                        self.open_config_reload_failed_modal(message);
-                        self.set_error(
-                            "Config reload failed. Review the modal before retrying.",
-                        );
-                    }
-                },
-                WorkerEvent::ConfigRecoverCompleted(result) => match result {
-                    Ok(()) => {
-                        self.set_info(
-                            "Restored the last working configuration to config.toml.",
-                        );
-                    }
-                    Err(message) => {
-                        self.set_error(format!(
-                            "Couldn't restore the last working configuration: {message}"
-                        ));
-                    }
-                },
-                WorkerEvent::ProjectPersistenceCompleted { action, result } => {
-                    self.apply_project_persistence_result(action, result);
-                }
-                WorkerEvent::GlobalEnvPersistenceCompleted { env, result } => match result {
-                    Ok(()) => {
-                        self.engine.config.env = env;
-                        if self.engine.config.env.is_empty() {
-                            self.set_info("Global environment variables cleared.");
-                        } else {
-                            self.set_info(format!(
-                                "Saved {} global environment variable(s). New agents and terminals will receive them unless a project overrides the same key.",
-                                self.engine.config.env.len()
-                            ));
-                        }
-                    }
-                    Err(err) => {
-                        self.set_error(format!(
-                            "Could not save global environment variables to config.toml: {err}"
-                        ));
-                    }
-                },
-                WorkerEvent::StartupCommandRerunCompleted(result) => match result.status {
-                    Ok(()) => {
-                        let palette_key = self.bindings.label_for(Action::OpenPalette);
-                        self.set_info(format!(
-                            "Startup command completed for project \"{}\". Press {palette_key} and run read-startup-command-logs to view the latest log.",
-                            result.project_name
-                        ));
-                    }
-                    Err(err) => self.set_error(format!(
-                        "Startup command failed for project \"{}\": {err}. Run read-startup-command-logs for details.",
-                        result.project_name
-                    )),
-                },
-                WorkerEvent::StartupCommandLogsLoaded {
-                    scope_label,
-                    result,
-                } => match result {
-                    Ok(log) => {
-                        self.input_target = InputTarget::None;
-                        self.terminal_selection = None;
-                        self.prompt = PromptState::None;
-                        self.fullscreen_overlay = FullscreenOverlay::StartupLog;
-                        self.startup_log_viewer = Some(StartupLogViewer {
-                            scope_label,
-                            path: log.path,
-                            display_name: log.display_name,
-                            content: log.content,
-                            scroll_offset: 0,
-                            search: TextInput::new(),
-                            searching: false,
-                        });
-                    }
-                    Err(err) => self.set_error(format!(
-                        "Could not read startup command logs for {scope_label}: {err}"
-                    )),
-                },
-                WorkerEvent::OpenPathCompleted { target, result } => match result {
-                    Ok(()) => self.set_info(format!("Opened {target}.")),
-                    Err(err) => self.set_error(format!("Could not open {target}: {err}")),
-                },
-            }
+            let reaction = self.engine.process_worker_event(event);
+            self.apply_reaction(reaction);
         }
         self.retry_hung_resume_sessions();
         // Detect PTY exits.
@@ -706,7 +77,8 @@ impl App {
             if self.dispatch_agent_launch(request) {
                 retried.insert(session_id.clone());
             } else {
-                self.mark_session_status(session_id, SessionStatus::Detached);
+                self.engine
+                    .mark_session_status(session_id, SessionStatus::Detached);
             }
         }
 
@@ -718,9 +90,10 @@ impl App {
             self.engine.running_provider_pins.remove(session_id);
             self.last_pty_activity.remove(session_id);
             if *exit_success == Some(true) {
-                self.mark_session_desired_running(session_id, false);
+                self.engine.mark_session_desired_running(session_id, false);
             }
-            self.mark_session_status(session_id, SessionStatus::Detached);
+            self.engine
+                .mark_session_status(session_id, SessionStatus::Detached);
         }
         if !exited.is_empty() {
             // If the currently-viewed session just exited (and was not retried),
@@ -810,6 +183,315 @@ impl App {
         self.engine
             .has_active_processes
             .store(self.running_process_count() > 0, Ordering::Relaxed);
+    }
+
+    fn apply_reaction(&mut self, reaction: EventReaction) {
+        match reaction {
+            EventReaction::Nothing => {}
+            EventReaction::Status(StatusUpdate { tone, message }) => match tone {
+                StatusTone::Info => self.set_info(message),
+                StatusTone::Busy => self.set_busy(message),
+                StatusTone::Warning => self.set_warning(message),
+                StatusTone::Error => self.set_error(message),
+            },
+            EventReaction::Multi(reactions) => {
+                for r in reactions {
+                    self.apply_reaction(r);
+                }
+            }
+            EventReaction::RebuildLeftItems => self.rebuild_left_items(),
+            EventReaction::ReloadChangedFiles => self.reload_changed_files(),
+            EventReaction::ClampFilesCursor => self.clamp_files_cursor(),
+
+            EventReaction::AgentLaunchReady(boxed) => self.handle_agent_launch_ready(*boxed),
+            EventReaction::AgentLaunchFailed(boxed) => self.handle_agent_launch_failed(*boxed),
+
+            EventReaction::CommitMessageGenerated(msg) => {
+                self.commit_input.clear_overlay();
+                self.commit_input.set_text(msg);
+                self.input_target = InputTarget::CommitMessage;
+                {
+                    let exit_key = self.bindings.label_for(Action::ExitCommitInput);
+                    let commit_key = self.bindings.label_for(Action::CommitChanges);
+                    self.set_info(format!(
+                        "AI commit message generated. Press {exit_key} to exit, then {commit_key} to commit.",
+                    ));
+                }
+            }
+            EventReaction::CommitMessageFailed(err) => {
+                self.commit_input.clear_overlay();
+                {
+                    let gen_key = self.bindings.label_for(Action::GenerateCommitMessage);
+                    self.set_error(format!(
+                        "Failed to generate AI commit message: {err}. \
+                         You can write one manually or retry with {gen_key}.",
+                    ));
+                }
+            }
+
+            EventReaction::BrowserEntriesArrived { dir, entries } => {
+                if let PromptState::BrowseProjects {
+                    current_dir,
+                    entries: current_entries,
+                    loading,
+                    selected,
+                    ..
+                } = &mut self.prompt
+                    && *current_dir == dir
+                {
+                    *current_entries = entries;
+                    *loading = false;
+                    *selected = 0;
+                }
+            }
+            EventReaction::ProjectWorktreesArrived { project_id, result } => {
+                let mut status_after_update: Option<Result<&'static str, String>> = None;
+                if let PromptState::PickProjectWorktree(prompt) = &mut self.prompt
+                    && prompt.project.id == project_id
+                {
+                    prompt.loading = false;
+                    match result {
+                        Ok(entries) => {
+                            prompt.selected = selectable_project_worktree_indices(&entries)
+                                .into_iter()
+                                .next();
+                            prompt.entries = entries;
+                            prompt.error = None;
+                            status_after_update =
+                                Some(Ok("Choose an available worktree to launch a new agent."));
+                        }
+                        Err(error) => {
+                            let project_name = prompt.project.name.clone();
+                            prompt.entries.clear();
+                            prompt.selected = None;
+                            prompt.error = Some(error.clone());
+                            status_after_update = Some(Err(format!(
+                                "Failed to load worktrees for project \"{}\": {error}",
+                                project_name
+                            )));
+                        }
+                    }
+                }
+                if let Some(status) = status_after_update {
+                    match status {
+                        Ok(message) => self.set_info(message),
+                        Err(message) => self.set_error(message),
+                    }
+                }
+            }
+
+            EventReaction::UpdatePrLastChecked(ids) => {
+                let now = Instant::now();
+                for id in ids {
+                    self.pr_last_checked.insert(id, now);
+                }
+            }
+            EventReaction::SpawnPrCheckForSession(sid) => {
+                self.spawn_pr_check_for_session(&sid);
+            }
+            EventReaction::OpenNewAgentPromptForPr(pr) => {
+                let pr = *pr;
+                let request = CreateAgentRequest::PullRequest {
+                    project: pr.project.clone(),
+                    host: pr.host.clone(),
+                    owner_repo: pr.owner_repo.clone(),
+                    number: pr.number,
+                    title: pr.title.clone(),
+                    state: pr.state.clone(),
+                    head_branch: pr.head_ref_name.clone(),
+                    custom_name: Some(pr.head_ref_name.clone()),
+                    use_existing_branch: false,
+                };
+                if let Err(err) = self.open_name_new_agent_prompt(request) {
+                    self.set_error(format!("{err:#}"));
+                } else {
+                    self.set_info(format!(
+                        "Resolved PR #{}: {}. Confirm or edit the branch name.",
+                        pr.number, pr.title
+                    ));
+                }
+            }
+            EventReaction::SpawnPrSyncWorkers => {
+                self.spawn_pr_sync_worker();
+                self.spawn_initial_pr_refresh();
+            }
+
+            EventReaction::WorktreeRemoveSucceeded {
+                session_id,
+                branch_already_deleted,
+                our_busy_message,
+            } => {
+                // Only update the status line if the current content is still
+                // the Busy message we set when spawning this worker. If
+                // another operation (push, pull, concurrent delete) has since
+                // overwritten it, we should not clobber their message — the
+                // session will visually disappear from the list, which is
+                // sufficient feedback.
+                let our_busy_still_showing = our_busy_message.as_ref().is_some_and(|msg| {
+                    self.status.tone() == crate::statusline::StatusTone::Busy
+                        && self.status.message() == msg.as_str()
+                });
+
+                if self.engine.sessions.iter().any(|s| s.id == session_id) {
+                    if let Err(e) = self.finish_delete_session(
+                        &session_id,
+                        true,
+                        Some(branch_already_deleted),
+                        our_busy_still_showing,
+                    ) {
+                        self.set_error(format!(
+                            "Worktree removed but session cleanup failed: {e:#}"
+                        ));
+                    }
+                } else if our_busy_still_showing {
+                    // Session removed by another path; just clear the
+                    // lingering Busy so it doesn't stick.
+                    self.set_info("Worktree removal finished.");
+                }
+            }
+            EventReaction::WorktreeRemoveFailed {
+                session_id,
+                message,
+            } => {
+                // Session record is normally still present because we
+                // deferred cleanup until git succeeded. Look up the session
+                // label so the user knows which agent failed — multiple
+                // async deletes can be in flight concurrently, and a bare
+                // error would be ambiguous.
+                if let Some(session) = self.engine.sessions.iter().find(|s| s.id == session_id) {
+                    let name = session.title.as_deref().unwrap_or(&session.branch_name);
+                    self.set_error(format!(
+                        "Worktree delete failed for {} agent \"{name}\": {message}",
+                        session.provider.as_str(),
+                    ));
+                } else {
+                    self.set_error(format!("Worktree delete failed: {message}"));
+                }
+            }
+
+            EventReaction::ResourceStatsArrived(stats) => {
+                if let PromptState::ResourceMonitor {
+                    rows,
+                    selected_row,
+                    expanded,
+                    last_refresh,
+                    first_sample,
+                    ..
+                } = &mut self.prompt
+                {
+                    *rows = stats;
+                    *last_refresh = Instant::now();
+                    *first_sample = false;
+                    // Clamp cursor to the (possibly changed) visual row count.
+                    let visual = build_visual_rows(rows, expanded);
+                    let max_row = visual.len().saturating_sub(1);
+                    if *selected_row > max_row {
+                        *selected_row = max_row;
+                    }
+                }
+            }
+
+            EventReaction::AddProjectAfterBranchCheckout {
+                path,
+                name,
+                target_branch,
+                leading_branch,
+            } => {
+                let display_name = if name.trim().is_empty() {
+                    std::path::Path::new(&path)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("project")
+                        .to_string()
+                } else {
+                    name.trim().to_string()
+                };
+                let status_message = format!(
+                    "Checked out \"{target_branch}\" and added project \"{display_name}\" to workspace."
+                );
+                if let Err(e) = self.finish_add_project_with_status(
+                    path,
+                    name,
+                    target_branch.clone(),
+                    leading_branch,
+                    status_message,
+                ) {
+                    self.set_error(format!("{e:#}"));
+                }
+            }
+
+            EventReaction::ContinueCreateAgentAfterInspection {
+                project,
+                inspection,
+            } => {
+                let project_name = project.name.clone();
+                if let Err(err) = self.persist_projects_to_config_and_store() {
+                    self.set_error(format!(
+                        "Project branch was detected, but config.toml could not be updated: {err:#}"
+                    ));
+                }
+                if let Err(err) =
+                    self.continue_create_agent_after_branch_inspection(project, inspection)
+                {
+                    self.set_error(format!("{err:#}"));
+                } else {
+                    self.set_info(format!(
+                        "Branch check complete for \"{project_name}\". Confirm or edit the agent name to continue."
+                    ));
+                }
+            }
+            EventReaction::DispatchProjectDefaultBranchCheckout {
+                project,
+                default_branch,
+            } => {
+                self.dispatch_non_default_branch_checkout(
+                    NonDefaultBranchAction::CheckoutProjectDefault { project },
+                    default_branch,
+                    "for the selected project".to_string(),
+                );
+            }
+
+            EventReaction::ApplyReloadedConfig(boxed) => {
+                if let Err(err) = self.apply_reloaded_config(*boxed) {
+                    self.set_error(format!(
+                        "Config validation passed, but applying it failed: {err:#}"
+                    ));
+                } else {
+                    self.set_info("Configuration reloaded. New settings are active now.");
+                }
+            }
+            EventReaction::OpenConfigReloadFailedModal(message) => {
+                self.open_config_reload_failed_modal(message);
+                self.set_error("Config reload failed. Review the modal before retrying.");
+            }
+
+            EventReaction::ProjectPersistenceCompleted { action, result } => {
+                self.apply_project_persistence_result(action, result);
+            }
+
+            EventReaction::StartupCommandSucceeded { project_name } => {
+                let palette_key = self.bindings.label_for(Action::OpenPalette);
+                self.set_info(format!(
+                    "Startup command completed for project \"{}\". Press {palette_key} and run read-startup-command-logs to view the latest log.",
+                    project_name
+                ));
+            }
+            EventReaction::StartupLogArrived { scope_label, log } => {
+                self.input_target = InputTarget::None;
+                self.terminal_selection = None;
+                self.prompt = PromptState::None;
+                self.fullscreen_overlay = FullscreenOverlay::StartupLog;
+                self.startup_log_viewer = Some(StartupLogViewer {
+                    scope_label,
+                    path: log.path,
+                    display_name: log.display_name,
+                    content: log.content,
+                    scroll_offset: 0,
+                    search: TextInput::new(),
+                    searching: false,
+                });
+            }
+        }
     }
 
     fn apply_project_persistence_result(
@@ -1076,13 +758,13 @@ impl App {
             self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
             self.engine.providers.insert(session.id.clone(), client);
             self.engine.sessions.insert(0, session.clone());
-            self.mark_session_provider_started(&session.id);
+            self.engine.mark_session_provider_started(&session.id);
             if request.resume {
                 self.engine
                     .resume_fallback_candidates
                     .insert(session.id.clone(), Instant::now());
             }
-            self.update_branch_sync_sessions();
+            self.engine.update_branch_sync_sessions();
             self.rebuild_left_items();
             self.selected_left = self
                 .left_items()
@@ -1128,9 +810,10 @@ impl App {
                 .resume_fallback_candidates
                 .insert(session.id.clone(), Instant::now());
         }
-        self.mark_session_desired_running(&session.id, true);
-        self.mark_session_status(&session.id, SessionStatus::Active);
-        self.mark_session_provider_started(&session.id);
+        self.engine.mark_session_desired_running(&session.id, true);
+        self.engine
+            .mark_session_status(&session.id, SessionStatus::Active);
+        self.engine.mark_session_provider_started(&session.id);
 
         match request.kind {
             AgentLaunchKind::Reconnect { status_message }
@@ -1182,7 +865,8 @@ impl App {
                     "fallback PTY spawn failed for {}: {}",
                     session.id, message
                 ));
-                self.mark_session_status(&session.id, SessionStatus::Detached);
+                self.engine
+                    .mark_session_status(&session.id, SessionStatus::Detached);
             }
             AgentLaunchKind::StartupAutoReopen => {
                 logger::error(&format!(
@@ -1245,35 +929,6 @@ impl App {
     }
 
     // -- GitHub PR integration workers --
-
-    pub(crate) fn update_pr_sync_sessions(&self) {
-        // Load known PRs from the database so the worker can use `gh pr view`
-        // for sessions that already have a persisted PR association.
-        let known_prs = self
-            .engine
-            .session_store
-            .load_all_latest_prs()
-            .unwrap_or_default();
-        let known_map: HashMap<String, crate::storage::StoredPr> = known_prs
-            .into_iter()
-            .map(|pr| (pr.session_id.clone(), pr))
-            .collect();
-
-        if let Ok(mut guard) = self.engine.pr_sync_sessions.lock() {
-            *guard = self
-                .engine
-                .sessions
-                .iter()
-                .map(|s| PrSyncEntry {
-                    session_id: s.id.clone(),
-                    branch_name: s.branch_name.clone(),
-                    worktree_path: s.worktree_path.clone(),
-                    known_pr: known_map.get(&s.id).cloned(),
-                    agent_exited: !self.engine.providers.contains_key(&s.id),
-                })
-                .collect();
-        }
-    }
 
     pub(crate) fn spawn_pr_sync_worker(&self) {
         let tx = self.engine.worker_tx.clone();
@@ -1445,7 +1100,8 @@ impl App {
                 AgentLaunchKind::ResumeFallback { status_message },
             );
             if !self.dispatch_agent_launch(request) {
-                self.mark_session_status(&session_id, SessionStatus::Detached);
+                self.engine
+                    .mark_session_status(&session_id, SessionStatus::Detached);
             }
         }
     }

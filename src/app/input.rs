@@ -11964,7 +11964,8 @@ cyan = "#00ffff"
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn quick-exit");
         app.engine.providers.insert(session_id.clone(), client);
-        app.mark_session_status(&session_id, SessionStatus::Active);
+        app.engine
+            .mark_session_status(&session_id, SessionStatus::Active);
         app.engine
             .resume_fallback_candidates
             .insert(session_id.clone(), std::time::Instant::now());
@@ -12012,7 +12013,8 @@ cyan = "#00ffff"
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn with output");
         app.engine.providers.insert(session_id.clone(), client);
-        app.mark_session_status(&session_id, SessionStatus::Active);
+        app.engine
+            .mark_session_status(&session_id, SessionStatus::Active);
         app.engine
             .resume_fallback_candidates
             .insert(session_id.clone(), std::time::Instant::now());
@@ -12060,7 +12062,8 @@ cyan = "#00ffff"
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn one-liner");
         app.engine.providers.insert(session_id.clone(), client);
-        app.mark_session_status(&session_id, SessionStatus::Active);
+        app.engine
+            .mark_session_status(&session_id, SessionStatus::Active);
         app.engine
             .resume_fallback_candidates
             .insert(session_id.clone(), std::time::Instant::now());
@@ -12099,7 +12102,8 @@ cyan = "#00ffff"
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn quick-exit");
         app.engine.providers.insert(session_id.clone(), client);
-        app.mark_session_status(&session_id, SessionStatus::Active);
+        app.engine
+            .mark_session_status(&session_id, SessionStatus::Active);
         // Deliberately not adding to resume_fallback_candidates.
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
@@ -12126,8 +12130,9 @@ cyan = "#00ffff"
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn zero-exit");
         app.engine.providers.insert(session_id.clone(), client);
-        app.mark_session_desired_running(&session_id, true);
-        app.mark_session_status(&session_id, SessionStatus::Active);
+        app.engine.mark_session_desired_running(&session_id, true);
+        app.engine
+            .mark_session_status(&session_id, SessionStatus::Active);
 
         std::thread::sleep(std::time::Duration::from_millis(200));
         drain_until(&mut app, |app| {
@@ -12152,8 +12157,9 @@ cyan = "#00ffff"
         let client = PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
             .expect("spawn nonzero-exit");
         app.engine.providers.insert(session_id.clone(), client);
-        app.mark_session_desired_running(&session_id, true);
-        app.mark_session_status(&session_id, SessionStatus::Active);
+        app.engine.mark_session_desired_running(&session_id, true);
+        app.engine
+            .mark_session_status(&session_id, SessionStatus::Active);
 
         std::thread::sleep(std::time::Duration::from_millis(200));
         drain_until(&mut app, |app| {
@@ -12181,8 +12187,9 @@ cyan = "#00ffff"
         let client = PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
             .expect("spawn nonzero-output");
         app.engine.providers.insert(session_id.clone(), client);
-        app.mark_session_desired_running(&session_id, true);
-        app.mark_session_status(&session_id, SessionStatus::Active);
+        app.engine.mark_session_desired_running(&session_id, true);
+        app.engine
+            .mark_session_status(&session_id, SessionStatus::Active);
         app.selected_left = 1;
         app.session_surface = SessionSurface::Agent;
 
@@ -12274,7 +12281,8 @@ cyan = "#00ffff"
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn hung resume");
         app.engine.providers.insert(session_id.clone(), client);
-        app.mark_session_status(&session_id, SessionStatus::Active);
+        app.engine
+            .mark_session_status(&session_id, SessionStatus::Active);
         app.engine.resume_fallback_candidates.insert(
             session_id.clone(),
             std::time::Instant::now() - std::time::Duration::from_millis(20),
@@ -12326,7 +12334,8 @@ cyan = "#00ffff"
         let client =
             PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn fresh hang");
         app.engine.providers.insert(session_id.clone(), client);
-        app.mark_session_status(&session_id, SessionStatus::Active);
+        app.engine
+            .mark_session_status(&session_id, SessionStatus::Active);
 
         app.drain_events();
         std::thread::sleep(std::time::Duration::from_millis(30));

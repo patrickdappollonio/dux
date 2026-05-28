@@ -2,6 +2,10 @@
 //! TUI `App` today, the web server later) embed/drive it. In E2 it is a passive
 //! state container; domain operations and workers move into `Engine` methods in E3.
 
+mod events;
+
+pub use events::{EventReaction, StatusUpdate};
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,10 +14,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
+
 use crate::config::{Config, DuxPaths, ProjectConfig};
 use crate::lockfile::SingleInstanceLock;
 use crate::model::{
     AgentSession, ChangedFile, CompanionTerminal, GhStatus, PrInfo, Project, ProviderKind,
+    SessionStatus,
 };
 use crate::pty::PtyClient;
 use crate::storage::SessionStore;
@@ -339,5 +346,98 @@ impl Engine {
                 }
             }
         });
+    }
+}
+
+impl Engine {
+    pub fn mark_session_status(&mut self, session_id: &str, status: SessionStatus) {
+        if let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|candidate| candidate.id == session_id)
+        {
+            if session.status == status {
+                return;
+            }
+            session.status = status;
+            session.updated_at = Utc::now();
+            let _ = self.session_store.upsert_session(session);
+        }
+    }
+
+    pub fn mark_session_desired_running(&mut self, session_id: &str, desired: bool) {
+        if let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|candidate| candidate.id == session_id)
+        {
+            if session.desired_running == desired {
+                return;
+            }
+            session.desired_running = desired;
+            session.updated_at = Utc::now();
+            let _ = self.session_store.upsert_session(session);
+        } else {
+            let _ = self.session_store.set_desired_running(session_id, desired);
+        }
+    }
+
+    pub fn mark_session_provider_started(&mut self, session_id: &str) {
+        let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|candidate| candidate.id == session_id)
+        else {
+            return;
+        };
+
+        let provider = session.provider.clone();
+        if !session.mark_provider_started(&provider) {
+            return;
+        }
+
+        session.updated_at = Utc::now();
+        let _ = self.session_store.upsert_session(session);
+    }
+
+    /// Refreshes the shared session snapshot used by the branch-sync background
+    /// worker.
+    pub fn update_branch_sync_sessions(&self) {
+        if let Ok(mut guard) = self.branch_sync_sessions.lock() {
+            *guard = self
+                .sessions
+                .iter()
+                .map(|s| BranchSyncEntry {
+                    session_id: s.id.clone(),
+                    worktree_path: s.worktree_path.clone(),
+                    branch_name: s.branch_name.clone(),
+                })
+                .collect();
+        }
+    }
+
+    /// Refreshes the shared session snapshot used by the PR-sync background
+    /// worker. Includes the latest known PR per session so the worker can use
+    /// `gh pr view` for sessions that already have a persisted PR association.
+    pub fn update_pr_sync_sessions(&self) {
+        let known_prs = self.session_store.load_all_latest_prs().unwrap_or_default();
+        let known_map: HashMap<String, crate::storage::StoredPr> = known_prs
+            .into_iter()
+            .map(|pr| (pr.session_id.clone(), pr))
+            .collect();
+
+        if let Ok(mut guard) = self.pr_sync_sessions.lock() {
+            *guard = self
+                .sessions
+                .iter()
+                .map(|s| PrSyncEntry {
+                    session_id: s.id.clone(),
+                    branch_name: s.branch_name.clone(),
+                    worktree_path: s.worktree_path.clone(),
+                    known_pr: known_map.get(&s.id).cloned(),
+                    agent_exited: !self.providers.contains_key(&s.id),
+                })
+                .collect();
+        }
     }
 }
