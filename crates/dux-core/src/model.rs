@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 
+use crate::pty::PtyClient;
+
 /// GitHub CLI availability status, checked once at startup.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GhStatus {
@@ -162,4 +164,11 @@ pub struct ChangedFile {
     pub additions: usize,
     pub deletions: usize,
     pub binary: bool,
+}
+
+pub struct CompanionTerminal {
+    pub session_id: String,
+    pub label: String,
+    pub foreground_cmd: Option<String>,
+    pub client: PtyClient,
 }

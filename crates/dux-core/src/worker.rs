@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use crate::config::{Config, ProviderCommandConfig};
 use crate::model::{AgentSession, ChangedFile, Project, ProjectBranchStatus, ProviderKind};
 use crate::pty::PtyClient;
+use crate::storage::StoredPr;
 
 #[derive(Clone, Debug)]
 pub struct ProjectWorktreeEntry {
@@ -251,6 +252,29 @@ pub enum PullTarget {
         leading_branch: Option<String>,
     },
     Session,
+}
+
+/// Snapshot of session data shared with the branch-sync background worker.
+#[derive(Clone, Debug)]
+pub struct BranchSyncEntry {
+    pub session_id: String,
+    pub worktree_path: String,
+    pub branch_name: String,
+}
+
+/// Snapshot of session data shared with the PR-sync background worker.
+#[derive(Clone, Debug)]
+pub struct PrSyncEntry {
+    pub session_id: String,
+    pub branch_name: String,
+    pub worktree_path: String,
+    /// If we already know a PR for this session, the worker can use `gh pr view`
+    /// (works even after branch deletion) and skip terminal states (merged/closed).
+    pub known_pr: Option<StoredPr>,
+    /// Whether the agent process has exited. Used to skip PR discovery calls
+    /// for sessions that are both exited and in a terminal PR state — nobody
+    /// is pushing to that branch anymore.
+    pub agent_exited: bool,
 }
 
 #[derive(Clone, Debug)]

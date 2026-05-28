@@ -42,20 +42,22 @@ use crate::model::{
     AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProjectBranchStatus, ProviderKind,
     SessionStatus, SessionSurface,
 };
+
 use crate::provider;
 use crate::pty::PtyClient;
 use crate::pty::TerminalSnapshot;
 use crate::statusline::{StatusLine, StatusTone};
 use crate::storage::SessionStore;
 use crate::theme::Theme;
+pub(crate) use dux_core::model::CompanionTerminal;
 
 use text_input::TextInput;
 
 pub(crate) use dux_core::worker::{
     AgentLaunchFailedData, AgentLaunchKind, AgentLaunchReadyData, AgentLaunchRequest,
-    BranchWarningKind, BrowserEntry, CreateAgentBranchInspection, NonDefaultBranchAction,
-    ProcessInfo, ProjectPersistenceAction, ProjectWorktreeEntry, PullTarget, ResolvedPullRequest,
-    ResourceStats, WorkerEvent,
+    BranchSyncEntry, BranchWarningKind, BrowserEntry, CreateAgentBranchInspection,
+    NonDefaultBranchAction, PrSyncEntry, ProcessInfo, ProjectPersistenceAction,
+    ProjectWorktreeEntry, PullTarget, ResolvedPullRequest, ResourceStats, WorkerEvent,
 };
 
 pub struct App {
@@ -210,29 +212,6 @@ pub struct App {
     /// automatically on drop (including crashes), so there is nothing to
     /// clean up on exit.
     _single_instance_lock: SingleInstanceLock,
-}
-
-/// Snapshot of session data shared with the branch-sync background worker.
-#[derive(Clone, Debug)]
-pub(crate) struct BranchSyncEntry {
-    pub(crate) session_id: String,
-    pub(crate) worktree_path: String,
-    pub(crate) branch_name: String,
-}
-
-/// Snapshot of session data shared with the PR-sync background worker.
-#[derive(Clone, Debug)]
-pub(crate) struct PrSyncEntry {
-    pub(crate) session_id: String,
-    pub(crate) branch_name: String,
-    pub(crate) worktree_path: String,
-    /// If we already know a PR for this session, the worker can use `gh pr view`
-    /// (works even after branch deletion) and skip terminal states (merged/closed).
-    pub(crate) known_pr: Option<crate::storage::StoredPr>,
-    /// Whether the agent process has exited. Used to skip PR discovery calls
-    /// for sessions that are both exited and in a terminal PR state — nobody
-    /// is pushing to that branch anymore.
-    pub(crate) agent_exited: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1294,13 +1273,6 @@ fn push_project_left_items(
             items.push(LeftItem::Session(session_index));
         }
     }
-}
-
-pub(crate) struct CompanionTerminal {
-    pub(crate) session_id: String,
-    pub(crate) label: String,
-    pub(crate) foreground_cmd: Option<String>,
-    pub(crate) client: PtyClient,
 }
 
 #[derive(Clone, Debug)]
