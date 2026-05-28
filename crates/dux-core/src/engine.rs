@@ -3,20 +3,21 @@
 //! state container; domain operations and workers move into `Engine` methods in E3.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 
-use crate::config::{Config, DuxPaths};
+use crate::config::{Config, DuxPaths, ProjectConfig};
 use crate::lockfile::SingleInstanceLock;
 use crate::model::{
     AgentSession, ChangedFile, CompanionTerminal, GhStatus, PrInfo, Project, ProviderKind,
 };
 use crate::pty::PtyClient;
 use crate::storage::SessionStore;
-use crate::worker::{BranchSyncEntry, PrSyncEntry, WorkerEvent};
+use crate::worker::{BranchSyncEntry, PrSyncEntry, ProjectPersistenceAction, WorkerEvent};
 
 pub struct Engine {
     pub config: Config,
@@ -73,4 +74,270 @@ pub struct Engine {
     pub agent_launches_in_flight: HashSet<String>,
     pub pulls_in_flight: HashSet<String>,
     pub resource_stats_in_flight: bool,
+}
+
+impl Engine {
+    pub fn spawn_project_persistence(&self, action: ProjectPersistenceAction) {
+        let db_path = self.paths.sessions_db_path.clone();
+        let tx = self.worker_tx.clone();
+        thread::spawn(move || {
+            let result = (|| -> anyhow::Result<()> {
+                let store = SessionStore::open(&db_path)?;
+                match &action {
+                    ProjectPersistenceAction::Add { project, .. } => {
+                        store.upsert_project(&ProjectConfig {
+                            id: project.id.clone(),
+                            path: project.path.clone(),
+                            name: Some(project.name.clone()),
+                            default_provider: project
+                                .explicit_default_provider
+                                .as_ref()
+                                .map(|provider| provider.as_str().to_string()),
+                            leading_branch: project.leading_branch.clone(),
+                            auto_reopen_agents: project.auto_reopen_agents,
+                            startup_command: project.startup_command.clone(),
+                            env: project.env.clone(),
+                        })?;
+                    }
+                    ProjectPersistenceAction::Remove { project_id, .. }
+                    | ProjectPersistenceAction::Delete { project_id, .. } => {
+                        store.delete_project(project_id)?;
+                    }
+                    ProjectPersistenceAction::UpdateDefaultProvider {
+                        project_id,
+                        provider,
+                        ..
+                    } => {
+                        store.update_project_default_provider(
+                            project_id,
+                            provider.as_ref().map(|provider| provider.as_str()),
+                        )?;
+                    }
+                    ProjectPersistenceAction::UpdateAutoReopen {
+                        project_id,
+                        auto_reopen_agents,
+                        ..
+                    } => {
+                        store.update_project_auto_reopen(project_id, *auto_reopen_agents)?;
+                    }
+                    ProjectPersistenceAction::UpdateStartupCommand {
+                        project_id,
+                        startup_command,
+                        ..
+                    } => {
+                        store.update_project_startup_command(
+                            project_id,
+                            startup_command.as_deref(),
+                        )?;
+                    }
+                    ProjectPersistenceAction::UpdateEnv {
+                        project_id, env, ..
+                    } => {
+                        store.update_project_env(project_id, env)?;
+                    }
+                }
+                Ok(())
+            })()
+            .map_err(|err| format!("{err:#}"));
+            let _ = tx.send(WorkerEvent::ProjectPersistenceCompleted { action, result });
+        });
+    }
+
+    pub fn spawn_branch_sync_worker(&self) {
+        let interval_secs = self.config.ui.branch_sync_interval;
+        if interval_secs == 0 {
+            return; // disabled by config
+        }
+        let tx = self.worker_tx.clone();
+        let sessions = Arc::clone(&self.branch_sync_sessions);
+        thread::spawn(move || {
+            let interval = Duration::from_secs(u64::from(interval_secs));
+            loop {
+                thread::sleep(interval);
+                let snapshot = match sessions.lock() {
+                    Ok(guard) => guard.clone(),
+                    Err(_) => continue,
+                };
+                let mut updates = Vec::new();
+                for entry in &snapshot {
+                    if let Ok(actual) = crate::git::current_branch(Path::new(&entry.worktree_path))
+                        && actual != entry.branch_name
+                    {
+                        updates.push((entry.session_id.clone(), actual));
+                    }
+                }
+                if !updates.is_empty() && tx.send(WorkerEvent::BranchSyncReady(updates)).is_err() {
+                    break; // receiver dropped, app is shutting down
+                }
+            }
+        });
+    }
+
+    pub fn spawn_refs_watcher(&mut self) {
+        use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
+
+        let tx = self.worker_tx.clone();
+        // Build a reverse map of watched paths for event routing.
+        let path_to_session: Arc<Mutex<HashMap<PathBuf, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let path_map = Arc::clone(&path_to_session);
+        let debounce_map: Arc<Mutex<HashMap<String, Instant>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let debounce = Arc::clone(&debounce_map);
+
+        let watcher_result = RecommendedWatcher::new(
+            move |res: Result<notify::Event, notify::Error>| {
+                let Ok(event) = res else { return };
+                // We only care about data modifications (ref file updates).
+                if !event.kind.is_modify() && !event.kind.is_create() {
+                    return;
+                }
+                let map = match path_map.lock() {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                let mut debounce_guard = match debounce.lock() {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                for event_path in &event.paths {
+                    // Walk up from the event path to find a watched parent dir.
+                    for (watched, session_id) in map.iter() {
+                        if event_path.starts_with(watched) {
+                            // Debounce: skip if we already sent an event within the last 5s.
+                            let now = Instant::now();
+                            if let Some(last) = debounce_guard.get(session_id)
+                                && now.duration_since(*last) < Duration::from_secs(5)
+                            {
+                                continue;
+                            }
+                            debounce_guard.insert(session_id.clone(), now);
+                            crate::logger::debug(&format!(
+                                "[gh-integration] refs watcher: detected change at {}, debouncing for session {}",
+                                event_path.display(),
+                                session_id,
+                            ));
+                            let _ = tx.send(WorkerEvent::RefsChanged(session_id.clone()));
+                        }
+                    }
+                }
+            },
+            NotifyConfig::default(),
+        );
+
+        match watcher_result {
+            Ok(watcher) => {
+                self.refs_watcher = Some(Arc::new(Mutex::new(watcher)));
+                self.refs_watch_paths.clear();
+                // Populate the path map and start watching existing sessions.
+                let mut paths = HashMap::new();
+                for session in &self.sessions {
+                    let refs_dir = PathBuf::from(&session.worktree_path)
+                        .join(".git")
+                        .join("refs")
+                        .join("heads");
+                    if refs_dir.is_dir()
+                        && let Some(ref watcher_arc) = self.refs_watcher
+                        && let Ok(mut w) = watcher_arc.lock()
+                    {
+                        match w.watch(&refs_dir, RecursiveMode::NonRecursive) {
+                            Ok(()) => {
+                                crate::logger::debug(&format!(
+                                    "[gh-integration] refs watcher: watching {} for session {}",
+                                    refs_dir.display(),
+                                    session.id,
+                                ));
+                                paths.insert(refs_dir.clone(), session.id.clone());
+                            }
+                            Err(e) => {
+                                crate::logger::debug(&format!(
+                                    "[gh-integration] refs watcher: failed to watch {}: {}",
+                                    refs_dir.display(),
+                                    e,
+                                ));
+                            }
+                        }
+                    }
+                }
+                self.refs_watch_paths = paths.clone();
+                // Populate the closure's path map so events can route to sessions.
+                if let Ok(mut map) = path_to_session.lock() {
+                    *map = paths;
+                }
+                crate::logger::info(&format!(
+                    "[gh-integration] refs watcher: initialized, watching {} session(s)",
+                    self.refs_watch_paths.len(),
+                ));
+            }
+            Err(e) => {
+                crate::logger::warn(&format!(
+                    "[gh-integration] refs watcher: failed to create watcher (falling back to poll-only): {}",
+                    e,
+                ));
+            }
+        }
+    }
+
+    pub fn spawn_gh_status_check(&self) {
+        if !self.github_integration_enabled {
+            return;
+        }
+        let tx = self.worker_tx.clone();
+        thread::spawn(move || {
+            use crate::model::GhStatus;
+            // Step 1: Is `gh` on PATH?
+            let on_path = std::process::Command::new("which")
+                .arg("gh")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !on_path {
+                crate::logger::info("[gh-integration] gh CLI not found on PATH");
+                let _ = tx.send(WorkerEvent::GhStatusChecked(GhStatus::NotInstalled));
+                return;
+            }
+            // Step 2: Is `gh` authenticated?
+            let authed = std::process::Command::new("gh")
+                .args(["auth", "status"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !authed {
+                crate::logger::info("[gh-integration] gh CLI found but not authenticated");
+                let _ = tx.send(WorkerEvent::GhStatusChecked(GhStatus::NotAuthenticated));
+                return;
+            }
+            crate::logger::info("[gh-integration] gh CLI available and authenticated");
+            let _ = tx.send(WorkerEvent::GhStatusChecked(GhStatus::Available));
+        });
+    }
+
+    pub fn spawn_changed_files_poller(&self) {
+        let tx = self.worker_tx.clone();
+        let watched = Arc::clone(&self.watched_worktree);
+        let has_agent = Arc::clone(&self.has_active_processes);
+        thread::spawn(move || {
+            loop {
+                let interval = if has_agent.load(Ordering::Relaxed) {
+                    Duration::from_secs(2)
+                } else {
+                    Duration::from_secs(10)
+                };
+                thread::sleep(interval);
+                let path = watched.lock().ok().and_then(|guard| guard.clone());
+                if let Some(worktree_path) = path
+                    && let Ok((staged, unstaged)) = crate::git::changed_files(&worktree_path)
+                    && tx
+                        .send(WorkerEvent::ChangedFilesReady { staged, unstaged })
+                        .is_err()
+                {
+                    break; // receiver dropped, app is shutting down
+                }
+            }
+        });
+    }
 }

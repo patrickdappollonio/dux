@@ -1452,10 +1452,10 @@ impl App {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        self.spawn_changed_files_poller();
-        self.spawn_branch_sync_worker();
+        self.engine.spawn_changed_files_poller();
+        self.engine.spawn_branch_sync_worker();
         self.spawn_project_branch_status_checks();
-        self.spawn_gh_status_check();
+        self.engine.spawn_gh_status_check();
         let mut terminal = ratatui::init();
         execute!(stdout(), EnableMouseCapture)?;
 
