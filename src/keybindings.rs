@@ -2692,4 +2692,14 @@ mod tests {
         // Random byte sequence should not match
         assert!(patterns.match_sequence(&[0x01]).is_none());
     }
+
+    #[test]
+    fn empty_keys_config_resolves_all_default_bindings() {
+        // KeysConfig::default() now carries no bindings (Phase E1 option A);
+        // RuntimeBindings must still resolve defaults from BINDING_DEFS so runtime
+        // keybindings are unchanged.
+        let rb = RuntimeBindings::from_keys_config(&dux_core::config::KeysConfig::default());
+        assert!(!rb.label_for(Action::OpenPalette).is_empty());
+        assert!(!rb.label_for(Action::Quit).is_empty());
+    }
 }
