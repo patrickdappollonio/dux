@@ -10731,7 +10731,7 @@ cyan = "#00ffff"
         // should_resume_session uses started_providers + config's resume_args.
         let session = app.engine.sessions[0].clone();
         assert!(
-            app.should_resume_session(&session),
+            app.engine.should_resume_session(&session),
             "codex was launched on this worktree earlier, so resume must be active"
         );
         assert!(
@@ -14301,7 +14301,9 @@ cyan = "#00ffff"
         // running_provider_for should reflect that.
         assert_eq!(app.engine.sessions[0].provider.as_str(), "gemini");
         assert_eq!(
-            app.running_provider_for(&app.engine.sessions[0]).as_str(),
+            app.engine
+                .running_provider_for(&app.engine.sessions[0])
+                .as_str(),
             "codex"
         );
 
@@ -14336,7 +14338,9 @@ cyan = "#00ffff"
         app.engine.providers.remove(&session_id);
         app.engine.running_provider_pins.remove(&session_id);
         assert_eq!(
-            app.running_provider_for(&app.engine.sessions[0]).as_str(),
+            app.engine
+                .running_provider_for(&app.engine.sessions[0])
+                .as_str(),
             "gemini"
         );
 

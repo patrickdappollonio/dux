@@ -603,3 +603,48 @@ impl Engine {
         }
     }
 }
+
+impl Engine {
+    pub fn project_explicit_default_provider(&self, project_id: &str) -> Option<ProviderKind> {
+        self.projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .and_then(|project| project.explicit_default_provider.clone())
+    }
+
+    pub fn project_uses_explicit_default_provider(&self, project_id: &str) -> bool {
+        self.project_explicit_default_provider(project_id).is_some()
+    }
+
+    pub fn project_allows_auto_reopen(&self, project_id: &str) -> bool {
+        self.projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .and_then(|project| project.auto_reopen_agents)
+            .unwrap_or(true)
+    }
+
+    pub fn project_name_for_session(&self, session: &AgentSession) -> String {
+        self.projects
+            .iter()
+            .find(|p| p.id == session.project_id)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    /// Provider currently driving the session's live PTY, if any. After an
+    /// in-place provider swap while the agent is still running, this returns
+    /// the *original* provider until the user exits and relaunches — so the
+    /// pane title doesn't lie about what's actually on screen.
+    pub fn running_provider_for(&self, session: &AgentSession) -> ProviderKind {
+        self.running_provider_pins
+            .get(&session.id)
+            .cloned()
+            .unwrap_or_else(|| session.provider.clone())
+    }
+
+    pub fn should_resume_session(&self, session: &AgentSession) -> bool {
+        let cfg = crate::config::provider_config(&self.config, &session.provider);
+        cfg.supports_session_resume() && session.has_started_provider(&session.provider)
+    }
+}

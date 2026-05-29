@@ -518,7 +518,9 @@ impl App {
                 ));
             }
             spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
-            let has_project_override = self.project_uses_explicit_default_provider(&project.id);
+            let has_project_override = self
+                .engine
+                .project_uses_explicit_default_provider(&project.id);
             let provider_label = if has_project_override {
                 "project provider: "
             } else {
@@ -781,7 +783,7 @@ impl App {
                     } else {
                         Style::default().fg(label_color)
                     };
-                    let running_provider = self.running_provider_for(session);
+                    let running_provider = self.engine.running_provider_for(session);
                     let provider_label = if running_provider != session.provider {
                         // Swap is pending: agent is still running the old
                         // provider but will spawn with session.provider on
@@ -1234,7 +1236,7 @@ impl App {
         let session_provider_name = match active_surface {
             SessionSurface::Agent => self
                 .selected_session()
-                .map(|s| self.running_provider_for(s).as_str().to_owned()),
+                .map(|s| self.engine.running_provider_for(s).as_str().to_owned()),
             SessionSurface::Terminal => Some(
                 self.engine
                     .config
@@ -6231,7 +6233,7 @@ impl App {
             .set_style(area, Style::default().bg(self.theme.app_bg));
         let title = match self.selected_session() {
             Some(session) => {
-                let provider = capitalize(self.running_provider_for(session).as_str());
+                let provider = capitalize(self.engine.running_provider_for(session).as_str());
                 let name = session.title.as_deref().unwrap_or(&session.branch_name);
                 let pr_suffix = self
                     .engine
@@ -6621,7 +6623,7 @@ impl App {
 
     fn center_pane_agent_title(&self) -> String {
         if let Some(session) = self.selected_session() {
-            let provider = capitalize(self.running_provider_for(session).as_str());
+            let provider = capitalize(self.engine.running_provider_for(session).as_str());
             let base = format!("{provider} agent");
             let count = self.session_terminal_count(&session.id);
             if count == 1 {

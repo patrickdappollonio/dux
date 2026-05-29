@@ -489,11 +489,6 @@ impl App {
         true
     }
 
-    pub(crate) fn should_resume_session(&self, session: &AgentSession) -> bool {
-        let cfg = provider_config(&self.engine.config, &session.provider);
-        cfg.supports_session_resume() && session.has_started_provider(&session.provider)
-    }
-
     pub(crate) fn spawn_companion_terminal_for_session(
         &self,
         session: &AgentSession,
@@ -1249,7 +1244,7 @@ impl App {
         project_id: &str,
     ) -> Vec<ChangeProjectDefaultProviderOption> {
         let global_default = self.engine.config.default_provider();
-        let explicit = self.project_explicit_default_provider(project_id);
+        let explicit = self.engine.project_explicit_default_provider(project_id);
         let mut options = vec![ChangeProjectDefaultProviderOption {
             provider: None,
             is_current: explicit.is_none(),
@@ -1314,7 +1309,9 @@ impl App {
             .position(|option| option.is_current)
             .unwrap_or(0);
         let global_default = self.engine.config.default_provider();
-        let inherits_global_default = !self.project_uses_explicit_default_provider(&project.id);
+        let inherits_global_default = !self
+            .engine
+            .project_uses_explicit_default_provider(&project.id);
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.prompt =
@@ -1434,7 +1431,7 @@ impl App {
             self.set_error("Select a project first.");
             return Ok(());
         };
-        let enabled = self.project_allows_auto_reopen(&project.id);
+        let enabled = self.engine.project_allows_auto_reopen(&project.id);
         self.engine
             .spawn_project_persistence(ProjectPersistenceAction::UpdateAutoReopen {
                 project_id: project.id.clone(),
@@ -1684,7 +1681,7 @@ impl App {
 
     pub(crate) fn open_startup_command_logs(&mut self) -> Result<()> {
         let (scope_label, scope) = if let Some(session) = self.selected_session().cloned() {
-            let project_name = self.project_name_for_session(&session);
+            let project_name = self.engine.project_name_for_session(&session);
             (
                 format!(
                     "agent \"{}\" in project \"{}\"",
@@ -2056,7 +2053,7 @@ impl App {
             "restarting agent \"{}\" with fresh session (no resume args)",
             session.branch_name
         ));
-        let proj_name = self.project_name_for_session(&session);
+        let proj_name = self.engine.project_name_for_session(&session);
         let mut msg = format!(
             "Started fresh {} session for agent \"{}\" in project \"{}\". Use /sessions inside the agent to restore a prior conversation.",
             session.provider.as_str(),
@@ -2076,7 +2073,10 @@ impl App {
             .find(|p| p.id == session.project_id)
             && project.default_provider != session.provider
         {
-            let provider_label = if self.project_uses_explicit_default_provider(&project.id) {
+            let provider_label = if self
+                .engine
+                .project_uses_explicit_default_provider(&project.id)
+            {
                 "current project provider"
             } else {
                 "current global default provider"
@@ -2124,8 +2124,8 @@ impl App {
         let detached_label =
             self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
 
-        let use_resume = self.should_resume_session(&session);
-        let proj_name = self.project_name_for_session(&session);
+        let use_resume = self.engine.should_resume_session(&session);
+        let proj_name = self.engine.project_name_for_session(&session);
         let mut msg = if use_resume {
             format!(
                 "Resumed {} agent \"{}\" in project \"{}\".",
@@ -2154,7 +2154,10 @@ impl App {
             .find(|p| p.id == session.project_id)
             && project.default_provider != session.provider
         {
-            let provider_label = if self.project_uses_explicit_default_provider(&project.id) {
+            let provider_label = if self
+                .engine
+                .project_uses_explicit_default_provider(&project.id)
+            {
                 "current project provider"
             } else {
                 "current global default provider"
@@ -2404,7 +2407,7 @@ impl App {
             if !self.engine.providers.contains_key(&session.id) {
                 continue;
             }
-            let project_name = self.project_name_for_session(session);
+            let project_name = self.engine.project_name_for_session(session);
             let agent_name = self.session_label(session);
             let provider_name = session.provider.as_str();
             let label = Self::title_case_word(provider_name);
@@ -2434,7 +2437,7 @@ impl App {
                 .find(|session| session.id == terminal.session_id)
                 .map(|session| {
                     (
-                        self.project_name_for_session(session),
+                        self.engine.project_name_for_session(session),
                         self.session_label(session),
                     )
                 })
@@ -3030,17 +3033,17 @@ mod tests {
         let project = make_project("project-1", "claude");
         let mut app = test_app_with_sessions(vec![session.clone()], vec![project]);
 
-        assert!(app.should_resume_session(&session));
+        assert!(app.engine.should_resume_session(&session));
 
         app.engine.sessions[0].provider = ProviderKind::from_str("codex");
         let session = app.engine.sessions[0].clone();
-        assert!(!app.should_resume_session(&session));
+        assert!(!app.engine.should_resume_session(&session));
 
         app.engine.sessions[0]
             .started_providers
             .push("codex".to_string());
         let session = app.engine.sessions[0].clone();
-        assert!(app.should_resume_session(&session));
+        assert!(app.engine.should_resume_session(&session));
     }
 
     #[test]

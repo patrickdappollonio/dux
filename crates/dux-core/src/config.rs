@@ -829,6 +829,20 @@ impl Config {
     }
 }
 
+pub fn provider_config(
+    config: &Config,
+    provider: &crate::model::ProviderKind,
+) -> ProviderCommandConfig {
+    config
+        .providers
+        .get(provider.as_str())
+        .cloned()
+        .unwrap_or_else(|| ProviderCommandConfig {
+            command: provider.as_str().to_string(),
+            ..Default::default()
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;

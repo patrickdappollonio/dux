@@ -65,7 +65,7 @@ impl App {
                 "resume args exited without output for agent \"{}\", retrying with regular args",
                 session.branch_name
             ));
-            let proj_name = self.project_name_for_session(&session);
+            let proj_name = self.engine.project_name_for_session(&session);
             let status_message = format!(
                 "No prior session to resume for agent \"{}\". Started a fresh {} session in project \"{}\".",
                 session.branch_name,
@@ -109,7 +109,11 @@ impl App {
                 let key = self.bindings.label_for(Action::ReconnectAgent);
                 if self.session_surface == SessionSurface::Agent {
                     if *is_minimal && !excerpt.trim().is_empty() {
-                        let provider = self.running_provider_for(current).as_str().to_string();
+                        let provider = self
+                            .engine
+                            .running_provider_for(current)
+                            .as_str()
+                            .to_string();
                         logger::error(&format!(
                             "Agent CLI process for agent \"{}\" ({provider}) exited. Full captured output:\n{}",
                             current.branch_name, excerpt
@@ -909,7 +913,7 @@ impl App {
                 "resume args produced no visible output for agent \"{}\" within timeout, retrying with regular args",
                 session.branch_name
             ));
-            let proj_name = self.project_name_for_session(&session);
+            let proj_name = self.engine.project_name_for_session(&session);
             let status_message = format!(
                 "Resume timed out for agent \"{}\" with no visible output. Started a fresh {} session in project \"{}\".",
                 session.branch_name,
@@ -1815,7 +1819,7 @@ mod tests {
         let (worker_tx, worker_rx) = mpsc::channel();
         let request = AgentLaunchRequest {
             session: test_session(tmp.path()),
-            provider_config: ProviderCommandConfig {
+            provider_config: crate::config::ProviderCommandConfig {
                 command: "definitely-missing-provider-command".to_string(),
                 args: vec!["--ignored".to_string()],
                 ..Default::default()

@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::clipboard::Clipboard;
 use crate::config::{
-    Config, DuxPaths, MacroSurface, ProviderCommandConfig, check_provider_available, ensure_config,
+    Config, DuxPaths, MacroSurface, check_provider_available, ensure_config, provider_config,
     save_config, validate_keys,
 };
 use crate::diff::SyntaxCache;
@@ -1557,7 +1557,7 @@ impl App {
             if !session.desired_running
                 || !session.auto_reopen_enabled
                 || !Path::new(&session.worktree_path).exists()
-                || !self.project_allows_auto_reopen(&session.project_id)
+                || !self.engine.project_allows_auto_reopen(&session.project_id)
             {
                 continue;
             }
@@ -2267,56 +2267,11 @@ impl App {
         }
     }
 
-    pub(crate) fn project_explicit_default_provider(
-        &self,
-        project_id: &str,
-    ) -> Option<ProviderKind> {
-        self.engine
-            .projects
-            .iter()
-            .find(|project| project.id == project_id)
-            .and_then(|project| project.explicit_default_provider.clone())
-    }
-
-    pub(crate) fn project_uses_explicit_default_provider(&self, project_id: &str) -> bool {
-        self.project_explicit_default_provider(project_id).is_some()
-    }
-
-    pub(crate) fn project_allows_auto_reopen(&self, project_id: &str) -> bool {
-        self.engine
-            .projects
-            .iter()
-            .find(|project| project.id == project_id)
-            .and_then(|project| project.auto_reopen_agents)
-            .unwrap_or(true)
-    }
-
     pub(crate) fn selected_session(&self) -> Option<&AgentSession> {
         match self.left_items().get(self.selected_left) {
             Some(LeftItem::Session(index)) => self.engine.sessions.get(*index),
             _ => None,
         }
-    }
-
-    pub(crate) fn project_name_for_session(&self, session: &AgentSession) -> String {
-        self.engine
-            .projects
-            .iter()
-            .find(|p| p.id == session.project_id)
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| "unknown".to_string())
-    }
-
-    /// Provider currently driving the session's live PTY, if any. After an
-    /// in-place provider swap while the agent is still running, this returns
-    /// the *original* provider until the user exits and relaunches — so the
-    /// pane title doesn't lie about what's actually on screen.
-    pub(crate) fn running_provider_for(&self, session: &AgentSession) -> ProviderKind {
-        self.engine
-            .running_provider_pins
-            .get(&session.id)
-            .cloned()
-            .unwrap_or_else(|| session.provider.clone())
     }
 
     pub(crate) fn reload_changed_files(&mut self) {
@@ -2967,17 +2922,6 @@ pub(crate) fn runtime_project_to_config(
         startup_command: project.startup_command.clone(),
         env: project.env.clone(),
     }
-}
-
-pub(crate) fn provider_config(config: &Config, provider: &ProviderKind) -> ProviderCommandConfig {
-    config
-        .providers
-        .get(provider.as_str())
-        .cloned()
-        .unwrap_or_else(|| ProviderCommandConfig {
-            command: provider.as_str().to_string(),
-            ..Default::default()
-        })
 }
 
 #[cfg(test)]
