@@ -915,12 +915,11 @@ impl App {
         remove_outcome: Option<bool>,
         update_status: bool,
     ) -> Result<()> {
-        let session_id_owned = session_id.to_string();
         let Some(outcome) = self.engine.finish_delete_session(session_id)? else {
             return Ok(());
         };
         self.apply_finish_delete_session_outcome(
-            &session_id_owned,
+            session_id,
             outcome,
             delete_worktree,
             remove_outcome,
