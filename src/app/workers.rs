@@ -2,7 +2,7 @@ use std::sync::mpsc::Sender;
 
 use dux_core::engine::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView, EventReaction,
-    StatusUpdate,
+    ProjectPersistenceOutcome, ProjectPersistenceView, StatusUpdate,
 };
 
 use super::*;
@@ -462,8 +462,8 @@ impl App {
                 self.set_error("Config reload failed. Review the modal before retrying.");
             }
 
-            EventReaction::ProjectPersistenceCompleted { action, result } => {
-                self.apply_project_persistence_result(action, result);
+            EventReaction::ProjectPersistenceOutcome(boxed) => {
+                self.apply_project_persistence_outcome(*boxed);
             }
 
             EventReaction::StartupCommandSucceeded { project_name } => {
@@ -491,60 +491,44 @@ impl App {
         }
     }
 
-    fn apply_project_persistence_result(
-        &mut self,
-        action: ProjectPersistenceAction,
-        result: Result<(), String>,
-    ) {
-        if let Err(err) = result {
-            match action {
-                ProjectPersistenceAction::Add { project, .. } => {
-                    self.set_error(format!(
-                        "Could not save project \"{}\" to the database: {err}",
-                        project.name
-                    ));
-                }
-                ProjectPersistenceAction::Remove { project_name, .. } => {
-                    self.set_error(format!(
-                        "Could not remove project \"{project_name}\" from the database: {err}"
-                    ));
-                }
-                ProjectPersistenceAction::Delete { project_name, .. } => {
-                    self.set_error(format!(
-                        "Could not finish deleting project \"{project_name}\" from the database: {err}"
-                    ));
-                }
-                ProjectPersistenceAction::UpdateDefaultProvider { project_name, .. } => {
-                    self.set_error(format!(
-                        "Could not save the provider change for project \"{project_name}\": {err}"
-                    ));
-                }
-                ProjectPersistenceAction::UpdateAutoReopen { project_name, .. } => {
-                    self.set_error(format!(
-                        "Could not save the auto-reopen change for project \"{project_name}\": {err}"
-                    ));
-                }
-                ProjectPersistenceAction::UpdateStartupCommand { project_name, .. } => {
-                    self.set_error(format!(
-                        "Could not save the startup command for project \"{project_name}\": {err}"
-                    ));
-                }
-                ProjectPersistenceAction::UpdateEnv { project_name, .. } => {
-                    self.set_error(format!(
-                        "Could not save environment variables for project \"{project_name}\": {err}"
-                    ));
-                }
-            }
-            return;
-        }
+    fn apply_project_persistence_outcome(&mut self, outcome: ProjectPersistenceOutcome) {
+        let ProjectPersistenceOutcome { action, view } = outcome;
 
-        match action {
-            ProjectPersistenceAction::Add {
-                project,
+        match view {
+            ProjectPersistenceView::PersistenceFailed { error } => {
+                let msg = match action {
+                    ProjectPersistenceAction::Add { project, .. } => format!(
+                        "Could not save project \"{}\" to the database: {error}",
+                        project.name,
+                    ),
+                    ProjectPersistenceAction::Remove { project_name, .. } => format!(
+                        "Could not remove project \"{project_name}\" from the database: {error}"
+                    ),
+                    ProjectPersistenceAction::Delete { project_name, .. } => format!(
+                        "Could not finish deleting project \"{project_name}\" from the database: {error}"
+                    ),
+                    ProjectPersistenceAction::UpdateDefaultProvider { project_name, .. } => {
+                        format!(
+                            "Could not save the provider change for project \"{project_name}\": {error}"
+                        )
+                    }
+                    ProjectPersistenceAction::UpdateAutoReopen { project_name, .. } => format!(
+                        "Could not save the auto-reopen change for project \"{project_name}\": {error}"
+                    ),
+                    ProjectPersistenceAction::UpdateStartupCommand { project_name, .. } => format!(
+                        "Could not save the startup command for project \"{project_name}\": {error}"
+                    ),
+                    ProjectPersistenceAction::UpdateEnv { project_name, .. } => format!(
+                        "Could not save environment variables for project \"{project_name}\": {error}"
+                    ),
+                };
+                self.set_error(msg);
+            }
+
+            ProjectPersistenceView::Added {
+                project_id,
                 status_message,
             } => {
-                let project_id = project.id.clone();
-                self.engine.projects.push(project);
                 self.rebuild_left_items();
                 if let Some(index) = self.left_items().iter().position(|item| {
                     matches!(item, LeftItem::Project(project_index) if self.engine.projects[*project_index].id == project_id)
@@ -559,13 +543,8 @@ impl App {
                 }
                 self.set_info(status_message);
             }
-            ProjectPersistenceAction::Remove {
-                project_id,
-                project_name,
-            } => {
-                self.engine
-                    .projects
-                    .retain(|project| project.id != project_id);
+
+            ProjectPersistenceView::Removed { project_name } => {
                 self.rebuild_left_items();
                 self.selected_left = self.selected_left.saturating_sub(1);
                 if let Err(err) = self.persist_config_projects_from_runtime() {
@@ -576,13 +555,8 @@ impl App {
                 }
                 self.set_info(format!("Removed project \"{project_name}\" from app"));
             }
-            ProjectPersistenceAction::Delete {
-                project_id,
-                project_name,
-            } => {
-                self.engine
-                    .projects
-                    .retain(|project| project.id != project_id);
+
+            ProjectPersistenceView::Deleted { project_name } => {
                 self.rebuild_left_items();
                 self.selected_left = self.selected_left.saturating_sub(1);
                 self.reload_changed_files();
@@ -596,21 +570,12 @@ impl App {
                     "Deleted project \"{project_name}\" and all its agents"
                 ));
             }
-            ProjectPersistenceAction::UpdateDefaultProvider {
-                project_id,
+
+            ProjectPersistenceView::DefaultProviderUpdated {
                 project_name,
                 provider,
                 global_default,
             } => {
-                if let Some(project) = self
-                    .engine
-                    .projects
-                    .iter_mut()
-                    .find(|project| project.id == project_id)
-                {
-                    project.explicit_default_provider = provider.clone();
-                }
-                refresh_project_defaults(&mut self.engine.projects, &self.engine.config);
                 self.rebuild_left_items();
                 if let Err(err) = self.persist_config_projects_from_runtime() {
                     self.set_error(format!(
@@ -632,19 +597,11 @@ impl App {
                 };
                 self.set_info(message);
             }
-            ProjectPersistenceAction::UpdateAutoReopen {
-                project_id,
+
+            ProjectPersistenceView::AutoReopenUpdated {
                 project_name,
                 auto_reopen_agents,
             } => {
-                if let Some(project) = self
-                    .engine
-                    .projects
-                    .iter_mut()
-                    .find(|project| project.id == project_id)
-                {
-                    project.auto_reopen_agents = auto_reopen_agents;
-                }
                 if let Err(err) = self.persist_config_projects_from_runtime() {
                     self.set_error(format!(
                         "Auto-reopen preference saved to the database for \"{project_name}\", but config.toml could not be updated: {err:#}"
@@ -655,22 +612,14 @@ impl App {
                 self.set_info(format!(
                     "Startup auto-reopen {} for project \"{}\".",
                     if enabled { "enabled" } else { "disabled" },
-                    project_name
+                    project_name,
                 ));
             }
-            ProjectPersistenceAction::UpdateStartupCommand {
-                project_id,
+
+            ProjectPersistenceView::StartupCommandUpdated {
                 project_name,
                 startup_command,
             } => {
-                if let Some(project) = self
-                    .engine
-                    .projects
-                    .iter_mut()
-                    .find(|project| project.id == project_id)
-                {
-                    project.startup_command = startup_command.clone();
-                }
                 if let Err(err) = self.persist_config_projects_from_runtime() {
                     self.set_error(format!(
                         "Startup command saved to the database for \"{project_name}\", but config.toml could not be updated: {err:#}"
@@ -686,33 +635,24 @@ impl App {
                     )),
                 }
             }
-            ProjectPersistenceAction::UpdateEnv {
-                project_id,
+
+            ProjectPersistenceView::EnvUpdated {
                 project_name,
-                env,
+                env_count,
             } => {
-                if let Some(project) = self
-                    .engine
-                    .projects
-                    .iter_mut()
-                    .find(|project| project.id == project_id)
-                {
-                    project.env = env.clone();
-                }
                 if let Err(err) = self.persist_config_projects_from_runtime() {
                     self.set_error(format!(
                         "Environment variables saved to the database for \"{project_name}\", but config.toml could not be updated: {err:#}"
                     ));
                     return;
                 }
-                if env.is_empty() {
+                if env_count == 0 {
                     self.set_info(format!(
                         "Environment variables cleared for project \"{project_name}\"."
                     ));
                 } else {
                     self.set_info(format!(
-                        "Saved {} environment variable(s) for project \"{project_name}\". New agents and terminals will receive them.",
-                        env.len()
+                        "Saved {env_count} environment variable(s) for project \"{project_name}\". New agents and terminals will receive them.",
                     ));
                 }
             }

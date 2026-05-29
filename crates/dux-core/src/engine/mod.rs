@@ -6,7 +6,7 @@ mod events;
 
 pub use events::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView, DetachedSession,
-    EventReaction, StatusUpdate,
+    EventReaction, ProjectPersistenceOutcome, ProjectPersistenceView, StatusUpdate,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -156,6 +156,49 @@ impl Engine {
             .map_err(|err| format!("{err:#}"));
             let _ = tx.send(WorkerEvent::ProjectPersistenceCompleted { action, result });
         });
+    }
+
+    /// Validate a raw path string before registering it as a project. Checks
+    /// that the path exists, is a git repository, and is not already
+    /// registered. Returns the canonicalized path on success or a
+    /// user-facing error string on failure.
+    pub fn validate_project_add_path(
+        &self,
+        raw_path: &str,
+    ) -> std::result::Result<PathBuf, String> {
+        let trimmed = raw_path.trim();
+        let path = PathBuf::from(trimmed)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(trimmed));
+        if !path.exists() || !crate::git::is_git_repo(&path) {
+            crate::logger::error(&format!("add project rejected for {}", path.display()));
+            return Err(format!("\"{}\" is not a git repository.", path.display()));
+        }
+        if self.projects.iter().any(|project| {
+            PathBuf::from(&project.path)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(&project.path))
+                == path
+        }) {
+            return Err(format!(
+                "\"{}\" is already registered as a project.",
+                path.display()
+            ));
+        }
+        Ok(path)
+    }
+
+    /// Re-resolve the in-memory `default_provider` for each project against
+    /// the current config. Projects with an explicit `default_provider` keep
+    /// their override; projects without one pick up the new global default.
+    pub fn refresh_project_defaults(&mut self) {
+        let fallback = self.config.default_provider();
+        for project in self.projects.iter_mut() {
+            project.default_provider = project
+                .explicit_default_provider
+                .clone()
+                .unwrap_or_else(|| fallback.clone());
+        }
     }
 
     pub fn spawn_branch_sync_worker(&self) {

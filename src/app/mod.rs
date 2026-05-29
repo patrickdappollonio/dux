@@ -2067,7 +2067,7 @@ impl App {
         )?;
         self.engine.config = config;
 
-        refresh_project_defaults(&mut self.engine.projects, &self.engine.config);
+        self.engine.refresh_project_defaults();
         self.selected_left = self
             .selected_left
             .min(self.engine.projects.len().saturating_sub(1));
@@ -2605,19 +2605,6 @@ impl App {
         } else {
             false
         }
-    }
-}
-
-/// Re-resolve the in-memory `default_provider` for each project against the
-/// current config. Projects with an explicit `default_provider` keep their
-/// override; projects without one pick up the new global default.
-pub(crate) fn refresh_project_defaults(projects: &mut [Project], config: &Config) {
-    let fallback = config.default_provider();
-    for project in projects.iter_mut() {
-        project.default_provider = project
-            .explicit_default_provider
-            .clone()
-            .unwrap_or_else(|| fallback.clone());
     }
 }
 

@@ -45,7 +45,7 @@ impl App {
     }
 
     pub(crate) fn add_project(&mut self, raw_path: String, name: String) -> Result<()> {
-        let path = match self.validate_project_add_path(&raw_path) {
+        let path = match self.engine.validate_project_add_path(&raw_path) {
             Ok(path) => path,
             Err(message) => {
                 self.set_error(message);
@@ -78,32 +78,6 @@ impl App {
 
         let path_str = path.to_string_lossy().to_string();
         self.finish_add_project(path_str, name, branch, leading_branch)
-    }
-
-    pub(crate) fn validate_project_add_path(
-        &self,
-        raw_path: &str,
-    ) -> std::result::Result<PathBuf, String> {
-        let trimmed = raw_path.trim();
-        let path = PathBuf::from(trimmed)
-            .canonicalize()
-            .unwrap_or_else(|_| PathBuf::from(trimmed));
-        if !path.exists() || !git::is_git_repo(&path) {
-            logger::error(&format!("add project rejected for {}", path.display()));
-            return Err(format!("\"{}\" is not a git repository.", path.display()));
-        }
-        if self.engine.projects.iter().any(|project| {
-            PathBuf::from(&project.path)
-                .canonicalize()
-                .unwrap_or_else(|_| PathBuf::from(&project.path))
-                == path
-        }) {
-            return Err(format!(
-                "\"{}\" is already registered as a project.",
-                path.display()
-            ));
-        }
-        Ok(path)
     }
 
     /// Starts saving the project to SQLite and adds it to the runtime project
@@ -1362,7 +1336,7 @@ impl App {
             ));
             return Ok(());
         }
-        refresh_project_defaults(&mut self.engine.projects, &self.engine.config);
+        self.engine.refresh_project_defaults();
         self.rebuild_left_items();
         self.set_info(format!(
             "Global default provider changed to {}. New agents in projects without a project-specific override will use it; existing agents keep their current provider. Use \"change-project-default-provider\" to override one project or \"change-agent-provider\" to switch an existing worktree.",

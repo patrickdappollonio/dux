@@ -4427,7 +4427,7 @@ impl App {
 
     fn add_project_from_browser_path(&mut self, path: String) {
         let return_prompt = self.prompt.clone();
-        if let Err(message) = self.validate_project_add_path(&path) {
+        if let Err(message) = self.engine.validate_project_add_path(&path) {
             self.open_add_project_failed_modal(message, return_prompt);
             return;
         }

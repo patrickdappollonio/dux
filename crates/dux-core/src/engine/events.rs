@@ -15,7 +15,9 @@ use chrono::Utc;
 use crate::config::Config;
 use crate::engine::Engine;
 use crate::logger;
-use crate::model::{AgentSession, GhStatus, PrState, Project, ProjectBranchStatus, SessionStatus};
+use crate::model::{
+    AgentSession, GhStatus, PrState, Project, ProjectBranchStatus, ProviderKind, SessionStatus,
+};
 use crate::startup::StartupCommandLatestLog;
 use crate::statusline::StatusTone;
 use crate::storage::StoredPr;
@@ -136,11 +138,8 @@ pub enum EventReaction {
     ApplyReloadedConfig(Box<Config>),
     OpenConfigReloadFailedModal(String),
 
-    // -- Project persistence (App helper stays put for T3). --
-    ProjectPersistenceCompleted {
-        action: ProjectPersistenceAction,
-        result: Result<(), String>,
-    },
+    // -- Project persistence (App applies view follow-up; Engine performed mutations). --
+    ProjectPersistenceOutcome(Box<ProjectPersistenceOutcome>),
 
     // -- Startup command / log viewer (App formats key + opens overlay). --
     StartupCommandSucceeded {
@@ -222,6 +221,52 @@ pub enum AgentLaunchFailedOutcome {
     StartupAutoReopen {
         branch_name: String,
         message: String,
+    },
+}
+
+/// Domain mutations the Engine performed in response to a
+/// `ProjectPersistenceCompleted` worker event; carries everything the App
+/// needs for view follow-up (rebuild_left_items, persist_config_projects_from_runtime,
+/// reload_changed_files for Delete, selected_left adjustment, status).
+///
+/// The Engine never calls `persist_config_projects_from_runtime` because
+/// that helper uses binary-only `RuntimeBindings` / `save_config` — it lives
+/// on App until Phase E5 carves dux-tui.
+pub struct ProjectPersistenceOutcome {
+    pub action: ProjectPersistenceAction,
+    pub view: ProjectPersistenceView,
+}
+
+pub enum ProjectPersistenceView {
+    PersistenceFailed {
+        error: String,
+    },
+    Added {
+        project_id: String,
+        status_message: String,
+    },
+    Removed {
+        project_name: String,
+    },
+    Deleted {
+        project_name: String,
+    },
+    DefaultProviderUpdated {
+        project_name: String,
+        provider: Option<ProviderKind>,
+        global_default: ProviderKind,
+    },
+    AutoReopenUpdated {
+        project_name: String,
+        auto_reopen_agents: Option<bool>,
+    },
+    StartupCommandUpdated {
+        project_name: String,
+        startup_command: Option<String>,
+    },
+    EnvUpdated {
+        project_name: String,
+        env_count: usize,
     },
 }
 
@@ -381,6 +426,109 @@ impl Engine {
             detached_session_id: detached.map(|d| d.id),
             view,
         }
+    }
+
+    pub fn process_project_persistence_completed(
+        &mut self,
+        action: ProjectPersistenceAction,
+        result: Result<(), String>,
+    ) -> ProjectPersistenceOutcome {
+        if let Err(error) = result {
+            return ProjectPersistenceOutcome {
+                action,
+                view: ProjectPersistenceView::PersistenceFailed { error },
+            };
+        }
+
+        let view = match &action {
+            ProjectPersistenceAction::Add {
+                project,
+                status_message,
+            } => {
+                let project_id = project.id.clone();
+                self.projects.push(project.clone());
+                ProjectPersistenceView::Added {
+                    project_id,
+                    status_message: status_message.clone(),
+                }
+            }
+            ProjectPersistenceAction::Remove {
+                project_id,
+                project_name,
+            } => {
+                self.projects.retain(|p| p.id != *project_id);
+                ProjectPersistenceView::Removed {
+                    project_name: project_name.clone(),
+                }
+            }
+            ProjectPersistenceAction::Delete {
+                project_id,
+                project_name,
+            } => {
+                self.projects.retain(|p| p.id != *project_id);
+                ProjectPersistenceView::Deleted {
+                    project_name: project_name.clone(),
+                }
+            }
+            ProjectPersistenceAction::UpdateDefaultProvider {
+                project_id,
+                project_name,
+                provider,
+                global_default,
+            } => {
+                if let Some(project) = self.projects.iter_mut().find(|p| p.id == *project_id) {
+                    project.explicit_default_provider = provider.clone();
+                }
+                self.refresh_project_defaults();
+                ProjectPersistenceView::DefaultProviderUpdated {
+                    project_name: project_name.clone(),
+                    provider: provider.clone(),
+                    global_default: global_default.clone(),
+                }
+            }
+            ProjectPersistenceAction::UpdateAutoReopen {
+                project_id,
+                project_name,
+                auto_reopen_agents,
+            } => {
+                if let Some(project) = self.projects.iter_mut().find(|p| p.id == *project_id) {
+                    project.auto_reopen_agents = *auto_reopen_agents;
+                }
+                ProjectPersistenceView::AutoReopenUpdated {
+                    project_name: project_name.clone(),
+                    auto_reopen_agents: *auto_reopen_agents,
+                }
+            }
+            ProjectPersistenceAction::UpdateStartupCommand {
+                project_id,
+                project_name,
+                startup_command,
+            } => {
+                if let Some(project) = self.projects.iter_mut().find(|p| p.id == *project_id) {
+                    project.startup_command = startup_command.clone();
+                }
+                ProjectPersistenceView::StartupCommandUpdated {
+                    project_name: project_name.clone(),
+                    startup_command: startup_command.clone(),
+                }
+            }
+            ProjectPersistenceAction::UpdateEnv {
+                project_id,
+                project_name,
+                env,
+            } => {
+                if let Some(project) = self.projects.iter_mut().find(|p| p.id == *project_id) {
+                    project.env = env.clone();
+                }
+                let env_count = env.len();
+                ProjectPersistenceView::EnvUpdated {
+                    project_name: project_name.clone(),
+                    env_count,
+                }
+            }
+        };
+
+        ProjectPersistenceOutcome { action, view }
     }
 
     pub fn process_agent_launch_failed(
@@ -815,7 +963,8 @@ impl Engine {
                 ))),
             },
             WorkerEvent::ProjectPersistenceCompleted { action, result } => {
-                EventReaction::ProjectPersistenceCompleted { action, result }
+                let outcome = self.process_project_persistence_completed(action, result);
+                EventReaction::ProjectPersistenceOutcome(Box::new(outcome))
             }
             WorkerEvent::GlobalEnvPersistenceCompleted { env, result } => match result {
                 Ok(()) => {
@@ -1010,7 +1159,7 @@ mod tests {
             }
             EventReaction::ApplyReloadedConfig(_) => "ApplyReloadedConfig",
             EventReaction::OpenConfigReloadFailedModal(_) => "OpenConfigReloadFailedModal",
-            EventReaction::ProjectPersistenceCompleted { .. } => "ProjectPersistenceCompleted",
+            EventReaction::ProjectPersistenceOutcome(_) => "ProjectPersistenceOutcome",
             EventReaction::StartupCommandSucceeded { .. } => "StartupCommandSucceeded",
             EventReaction::StartupLogArrived { .. } => "StartupLogArrived",
         }
@@ -1461,5 +1610,84 @@ mod tests {
         engine.sessions.push(s1);
         let detached = engine.detach_conflicting_worktree_session("/tmp/wt/a", "s1");
         assert!(detached.is_none());
+    }
+
+    // ── process_project_persistence_completed ────────────────────────────
+
+    #[test]
+    fn process_project_persistence_completed_add_pushes_project_and_returns_added() {
+        let (mut engine, _tmp) = test_engine();
+        let project = sample_project("p1", "/tmp/p1");
+        let action = ProjectPersistenceAction::Add {
+            project: project.clone(),
+            status_message: "Added project \"p1\" to workspace.".to_string(),
+        };
+        let outcome = engine.process_project_persistence_completed(action, Ok(()));
+        assert_eq!(engine.projects.len(), 1);
+        assert_eq!(engine.projects[0].id, "p1");
+        assert!(matches!(
+            outcome.view,
+            ProjectPersistenceView::Added { ref project_id, ref status_message }
+                if project_id == "p1" && status_message == "Added project \"p1\" to workspace."
+        ));
+    }
+
+    #[test]
+    fn process_project_persistence_completed_remove_drops_project_and_returns_removed() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let action = ProjectPersistenceAction::Remove {
+            project_id: "p1".to_string(),
+            project_name: "Pee One".to_string(),
+        };
+        let outcome = engine.process_project_persistence_completed(action, Ok(()));
+        assert!(engine.projects.is_empty());
+        assert!(matches!(
+            outcome.view,
+            ProjectPersistenceView::Removed { ref project_name } if project_name == "Pee One"
+        ));
+    }
+
+    #[test]
+    fn process_project_persistence_completed_update_default_provider_mutates_project() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let action = ProjectPersistenceAction::UpdateDefaultProvider {
+            project_id: "p1".to_string(),
+            project_name: "Pee One".to_string(),
+            provider: Some(ProviderKind::from_str("claude")),
+            global_default: ProviderKind::from_str("codex"),
+        };
+        let outcome = engine.process_project_persistence_completed(action, Ok(()));
+        assert_eq!(
+            engine.projects[0]
+                .explicit_default_provider
+                .as_ref()
+                .map(|p| p.as_str()),
+            Some("claude"),
+        );
+        assert!(matches!(
+            outcome.view,
+            ProjectPersistenceView::DefaultProviderUpdated { ref project_name, .. }
+                if project_name == "Pee One"
+        ));
+    }
+
+    #[test]
+    fn process_project_persistence_completed_err_returns_persistence_failed() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let action = ProjectPersistenceAction::Remove {
+            project_id: "p1".to_string(),
+            project_name: "Pee One".to_string(),
+        };
+        let outcome =
+            engine.process_project_persistence_completed(action, Err("disk full".to_string()));
+        // Engine did NOT mutate state on error.
+        assert_eq!(engine.projects.len(), 1);
+        assert!(matches!(
+            outcome.view,
+            ProjectPersistenceView::PersistenceFailed { ref error } if error == "disk full"
+        ));
     }
 }
