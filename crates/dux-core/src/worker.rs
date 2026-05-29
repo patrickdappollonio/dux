@@ -148,6 +148,46 @@ pub struct AgentLaunchFailedData {
     pub message: String,
 }
 
+#[derive(Clone, Debug)]
+pub enum CreateAgentRequest {
+    NewProject {
+        project: Project,
+        custom_name: Option<String>,
+        use_existing_branch: bool,
+        pull_before_create: bool,
+    },
+    PullRequest {
+        project: Project,
+        host: String,
+        owner_repo: String,
+        number: u64,
+        title: String,
+        state: String,
+        head_branch: String,
+        custom_name: Option<String>,
+        use_existing_branch: bool,
+    },
+    ForkSession {
+        project: Project,
+        source_session: Box<AgentSession>,
+        source_label: String,
+        custom_name: Option<String>,
+    },
+    ExistingManagedWorktree {
+        project: Project,
+        worktree_path: PathBuf,
+        branch_name: String,
+        custom_name: Option<String>,
+    },
+    ForkExternalWorktree {
+        project: Project,
+        source_worktree_path: PathBuf,
+        source_label: String,
+        source_branch: String,
+        custom_name: Option<String>,
+    },
+}
+
 pub enum WorkerEvent {
     CreateAgentProgress(String),
     CreateAgentFailed(String),

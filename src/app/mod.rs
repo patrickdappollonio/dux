@@ -26,8 +26,7 @@ use uuid::Uuid;
 
 use crate::clipboard::Clipboard;
 use crate::config::{
-    Config, DuxPaths, MacroSurface, check_provider_available, ensure_config, provider_config,
-    save_config, validate_keys,
+    Config, DuxPaths, MacroSurface, ensure_config, provider_config, save_config, validate_keys,
 };
 use crate::diff::SyntaxCache;
 use crate::editor::DetectedEditor;
@@ -53,14 +52,14 @@ pub(crate) use dux_core::model::CompanionTerminal;
 
 use text_input::TextInput;
 
-#[cfg(test)]
-pub(crate) use dux_core::worker::ProcessInfo;
 pub(crate) use dux_core::worker::{
-    AgentLaunchFailedData, AgentLaunchKind, AgentLaunchReadyData, AgentLaunchRequest,
-    BranchWarningKind, BrowserEntry, CreateAgentBranchInspection, NonDefaultBranchAction,
+    AgentLaunchKind, AgentLaunchRequest, BranchWarningKind, BrowserEntry,
+    CreateAgentBranchInspection, CreateAgentRequest, NonDefaultBranchAction,
     ProjectPersistenceAction, ProjectWorktreeEntry, PullTarget, ResolvedPullRequest, ResourceStats,
     WorkerEvent,
 };
+#[cfg(test)]
+pub(crate) use dux_core::worker::{AgentLaunchReadyData, ProcessInfo};
 
 pub struct App {
     pub(crate) engine: Engine,
@@ -1139,46 +1138,6 @@ fn push_project_left_items(
             items.push(LeftItem::Session(session_index));
         }
     }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) enum CreateAgentRequest {
-    NewProject {
-        project: Project,
-        custom_name: Option<String>,
-        use_existing_branch: bool,
-        pull_before_create: bool,
-    },
-    PullRequest {
-        project: Project,
-        host: String,
-        owner_repo: String,
-        number: u64,
-        title: String,
-        state: String,
-        head_branch: String,
-        custom_name: Option<String>,
-        use_existing_branch: bool,
-    },
-    ForkSession {
-        project: Project,
-        source_session: Box<AgentSession>,
-        source_label: String,
-        custom_name: Option<String>,
-    },
-    ExistingManagedWorktree {
-        project: Project,
-        worktree_path: PathBuf,
-        branch_name: String,
-        custom_name: Option<String>,
-    },
-    ForkExternalWorktree {
-        project: Project,
-        source_worktree_path: PathBuf,
-        source_label: String,
-        source_branch: String,
-        custom_name: Option<String>,
-    },
 }
 
 mod components;

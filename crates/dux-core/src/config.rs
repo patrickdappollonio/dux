@@ -843,6 +843,63 @@ pub fn provider_config(
         })
 }
 
+/// Check whether a provider command is available on PATH.
+/// Returns `Ok(())` if found, or `Err(message)` with a user-friendly install hint.
+pub fn check_provider_available(config: &ProviderCommandConfig) -> std::result::Result<(), String> {
+    if provider_command_available(&config.command) {
+        return Ok(());
+    }
+
+    let hint = config
+        .install_hint
+        .as_ref()
+        .map(|h| format!("Install with: {h}"))
+        .unwrap_or_else(|| {
+            format!(
+                "Make sure '{}' is installed and on your PATH.",
+                config.command
+            )
+        });
+    Err(format!(
+        "CLI tool '{}' not found on PATH. {hint}",
+        config.command
+    ))
+}
+
+fn provider_command_available(command: &str) -> bool {
+    if command.trim().is_empty() {
+        return false;
+    }
+
+    let path = Path::new(command);
+    if path.components().count() > 1 {
+        return is_executable_file(path);
+    }
+
+    env::var_os("PATH")
+        .map(|paths| provider_command_available_in_path(command, &paths))
+        .unwrap_or(false)
+}
+
+fn provider_command_available_in_path(command: &str, paths: &std::ffi::OsStr) -> bool {
+    env::split_paths(paths).any(|dir| {
+        let candidate = dir.join(command);
+        is_executable_file(&candidate)
+    })
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -1043,5 +1100,70 @@ mod tests {
         assert!(resolved.contains(&("EDITOR".to_string(), "true".to_string())));
         assert!(resolved.contains(&("API_KEY".to_string(), "project".to_string())));
         assert!(!resolved.contains(&("API_KEY".to_string(), "global".to_string())));
+    }
+
+    fn write_executable(path: &Path) {
+        std::fs::write(path, "#!/bin/sh\nexit 0\n").expect("write fixture command");
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(path)
+            .expect("fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("chmod fixture command");
+    }
+
+    #[test]
+    fn provider_command_path_lookup_accepts_executable_from_path() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let command = dir.path().join("custom-tool");
+        write_executable(&command);
+        let paths = std::env::join_paths([dir.path()]).expect("join path");
+
+        assert!(provider_command_available_in_path(
+            "custom-tool",
+            paths.as_os_str()
+        ));
+    }
+
+    #[test]
+    fn provider_command_path_lookup_rejects_missing_command() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let paths = std::env::join_paths([dir.path()]).expect("join path");
+
+        assert!(!provider_command_available_in_path(
+            "missing-tool",
+            paths.as_os_str()
+        ));
+    }
+
+    #[test]
+    fn provider_command_path_lookup_accepts_absolute_executable() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let command = dir.path().join("custom-tool");
+        write_executable(&command);
+
+        assert!(provider_command_available(&command.to_string_lossy()));
+    }
+
+    #[test]
+    fn provider_command_path_lookup_rejects_non_executable_path() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let command = dir.path().join("custom-tool");
+        std::fs::write(&command, "#!/bin/sh\n").expect("write fixture command");
+
+        assert!(!provider_command_available(&command.to_string_lossy()));
+    }
+
+    #[test]
+    fn provider_availability_error_uses_install_hint() {
+        let cfg = ProviderCommandConfig {
+            command: "definitely-missing-provider-command".to_string(),
+            install_hint: Some("install custom-tool".to_string()),
+            ..Default::default()
+        };
+
+        let err = check_provider_available(&cfg).expect_err("command should be missing");
+        assert!(err.contains("definitely-missing-provider-command"));
+        assert!(err.contains("Install with: install custom-tool"));
     }
 }

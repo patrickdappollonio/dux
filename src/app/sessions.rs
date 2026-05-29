@@ -403,7 +403,7 @@ impl App {
         let worker_tx = self.engine.worker_tx.clone();
         let term_size = crossterm::terminal::size().unwrap_or((80, 24));
         thread::spawn(move || {
-            super::workers::run_create_agent_job(request, paths, config, worker_tx, term_size);
+            dux_core::agent_job::run_create_agent_job(request, paths, config, worker_tx, term_size);
         });
         Ok(())
     }
@@ -458,7 +458,7 @@ impl App {
         }
         let tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
-            super::workers::run_agent_launch_job(request, tx);
+            dux_core::agent_job::run_agent_launch_job(request, tx);
         });
         true
     }
