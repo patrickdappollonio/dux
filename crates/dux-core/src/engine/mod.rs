@@ -6,7 +6,8 @@ mod events;
 
 pub use events::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView, DetachedSession,
-    EventReaction, ProjectPersistenceOutcome, ProjectPersistenceView, StatusUpdate,
+    EventReaction, FinishDeleteSessionOutcome, ProjectPersistenceOutcome, ProjectPersistenceView,
+    StatusUpdate,
 };
 
 use std::collections::{HashMap, HashSet};

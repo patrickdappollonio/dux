@@ -1,6 +1,7 @@
 use super::*;
 use crate::browser;
 use crate::editor;
+use dux_core::engine::FinishDeleteSessionOutcome;
 
 impl App {
     pub(crate) fn open_project_browser(&mut self) -> Result<()> {
@@ -914,52 +915,39 @@ impl App {
         remove_outcome: Option<bool>,
         update_status: bool,
     ) -> Result<()> {
-        let Some(session) = self
-            .engine
-            .sessions
-            .iter()
-            .find(|s| s.id == session_id)
-            .cloned()
-        else {
+        let session_id_owned = session_id.to_string();
+        let Some(outcome) = self.engine.finish_delete_session(session_id)? else {
             return Ok(());
         };
-        let project = self
-            .engine
-            .projects
-            .iter()
-            .find(|project| project.id == session.project_id)
-            .cloned();
-        let other_sessions_on_worktree = self
-            .engine
-            .sessions
-            .iter()
-            .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
+        self.apply_finish_delete_session_outcome(
+            &session_id_owned,
+            outcome,
+            delete_worktree,
+            remove_outcome,
+            update_status,
+        )
+    }
 
-        // Persist the deletion FIRST so a DB failure leaves in-memory state
-        // untouched and the session remains visible in the UI. If we cleared
-        // in-memory state first and the DB call then failed, the session
-        // would vanish from the UI but reappear on restart.
-        self.engine.session_store.delete_session(&session.id)?;
-        dux_core::startup::spawn_delete_startup_command_logs(
-            self.engine.paths.clone(),
-            session.project_id.clone(),
-            session.id.clone(),
-        );
+    fn apply_finish_delete_session_outcome(
+        &mut self,
+        session_id: &str,
+        outcome: FinishDeleteSessionOutcome,
+        delete_worktree: bool,
+        remove_outcome: Option<bool>,
+        update_status: bool,
+    ) -> Result<()> {
+        let FinishDeleteSessionOutcome {
+            session,
+            project,
+            other_sessions_on_worktree,
+            project_still_has_sessions,
+        } = outcome;
 
-        self.engine.providers.remove(&session.id);
-        self.engine.running_provider_pins.remove(&session.id);
-        self.last_pty_activity.remove(&session.id);
-        self.engine.resume_fallback_candidates.remove(&session.id);
-        self.clear_companion_terminals_for_session(&session.id);
-        self.engine
-            .sessions
-            .retain(|candidate| candidate.id != session.id);
-        self.engine.update_branch_sync_sessions();
-        let project_still_has_sessions = self
-            .engine
-            .sessions
-            .iter()
-            .any(|candidate| candidate.project_id == session.project_id);
+        // View-side cleanup the engine couldn't do.
+        self.last_pty_activity.remove(session_id);
+        self.clear_companion_terminals_for_session(session_id);
+
+        // Derived view state.
         self.rebuild_left_items();
         if project_still_has_sessions {
             self.selected_left = self.selected_left.saturating_sub(1);
@@ -971,14 +959,8 @@ impl App {
         }
         self.reload_changed_files();
 
-        // Detect contract violation unconditionally, regardless of
-        // update_status. Callers that pass delete_worktree=true with no
-        // siblings must have already run git::remove_worktree and produced
-        // Some(outcome). Return Err so the violation surfaces in callers
-        // and tests rather than being silently treated as a success.
-        // Note: session cleanup above already ran (DB + memory), so the
-        // session is gone; the Err signals the broken invariant, not an
-        // incomplete deletion.
+        // Contract-violation check (unchanged from original — kept here because
+        // it's a violation of the caller's contract, not an engine error).
         if !other_sessions_on_worktree && delete_worktree && remove_outcome.is_none() {
             return Err(anyhow::anyhow!(
                 "Internal error: worktree deletion flagged but no removal result provided."

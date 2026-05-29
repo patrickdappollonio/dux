@@ -270,6 +270,18 @@ pub enum ProjectPersistenceView {
     },
 }
 
+/// Result of `Engine::finish_delete_session`. Carries the deleted session
+/// and project context the App needs to apply view follow-up
+/// (`last_pty_activity` clear, `clear_companion_terminals_for_session`,
+/// `rebuild_left_items`, `selected_left` adjustment, `reload_changed_files`)
+/// and to format the 4-branch status message.
+pub struct FinishDeleteSessionOutcome {
+    pub session: AgentSession,
+    pub project: Option<Project>,
+    pub other_sessions_on_worktree: bool,
+    pub project_still_has_sessions: bool,
+}
+
 /// Display name for a session — title if present, branch name otherwise.
 /// (Engine-internal helper; the binary keeps `App::session_label` for the
 /// ~8 view-side callers in `sessions.rs`.)
@@ -529,6 +541,60 @@ impl Engine {
         };
 
         ProjectPersistenceOutcome { action, view }
+    }
+
+    /// Engine half of the session-deletion cascade. Removes the session from
+    /// the store + providers + runtime maps + the sessions vector; refreshes
+    /// branch-sync entries; spawns the startup-log deletion worker. Returns
+    /// `Ok(None)` if the session was already gone; `Ok(Some(outcome))` with
+    /// the context the App needs for its view-side follow-up; `Err` on a
+    /// store failure (in-memory state untouched in that case so the UI keeps
+    /// showing the session).
+    pub fn finish_delete_session(
+        &mut self,
+        session_id: &str,
+    ) -> anyhow::Result<Option<FinishDeleteSessionOutcome>> {
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
+            return Ok(None);
+        };
+        let project = self
+            .projects
+            .iter()
+            .find(|project| project.id == session.project_id)
+            .cloned();
+        let other_sessions_on_worktree = self
+            .sessions
+            .iter()
+            .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
+
+        // Persist the deletion FIRST so a DB failure leaves in-memory state
+        // untouched and the session remains visible in the UI. If we cleared
+        // in-memory state first and the DB call then failed, the session
+        // would vanish from the UI but reappear on restart.
+        self.session_store.delete_session(&session.id)?;
+        crate::startup::spawn_delete_startup_command_logs(
+            self.paths.clone(),
+            session.project_id.clone(),
+            session.id.clone(),
+        );
+
+        self.providers.remove(&session.id);
+        self.running_provider_pins.remove(&session.id);
+        self.resume_fallback_candidates.remove(&session.id);
+        self.sessions.retain(|candidate| candidate.id != session.id);
+        self.update_branch_sync_sessions();
+
+        let project_still_has_sessions = self
+            .sessions
+            .iter()
+            .any(|candidate| candidate.project_id == session.project_id);
+
+        Ok(Some(FinishDeleteSessionOutcome {
+            session,
+            project,
+            other_sessions_on_worktree,
+            project_still_has_sessions,
+        }))
     }
 
     pub fn process_agent_launch_failed(
@@ -1123,6 +1189,55 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[test]
+    fn finish_delete_session_unknown_id_returns_none() {
+        let (mut engine, _tmp) = test_engine();
+        assert!(engine.finish_delete_session("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn finish_delete_session_removes_session_and_returns_outcome() {
+        let (mut engine, _tmp) = test_engine();
+        let project = sample_project("p1", "/tmp/p1");
+        engine.projects.push(project.clone());
+        let session = sample_session("s1", "p1", "feat/x");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session.clone());
+
+        let outcome = engine
+            .finish_delete_session("s1")
+            .unwrap()
+            .expect("outcome");
+        assert!(engine.sessions.is_empty());
+        assert!(!engine.providers.contains_key("s1"));
+        assert_eq!(outcome.session.id, "s1");
+        assert_eq!(outcome.project.as_ref().map(|p| p.id.as_str()), Some("p1"));
+        assert!(!outcome.other_sessions_on_worktree);
+        assert!(!outcome.project_still_has_sessions);
+    }
+
+    #[test]
+    fn finish_delete_session_detects_sibling_on_same_worktree() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let mut sibling = sample_session("s1", "p1", "feat/x");
+        let mut deleted = sample_session("s2", "p1", "feat/y");
+        // Force both to share a worktree path.
+        sibling.worktree_path = "/tmp/wt/shared".to_string();
+        deleted.worktree_path = "/tmp/wt/shared".to_string();
+        engine.session_store.upsert_session(&sibling).unwrap();
+        engine.session_store.upsert_session(&deleted).unwrap();
+        engine.sessions.push(sibling);
+        engine.sessions.push(deleted);
+
+        let outcome = engine
+            .finish_delete_session("s2")
+            .unwrap()
+            .expect("outcome");
+        assert!(outcome.other_sessions_on_worktree);
+        assert!(outcome.project_still_has_sessions);
     }
 
     fn unwrap_status(reaction: EventReaction) -> StatusUpdate {
