@@ -1,8 +1,9 @@
 use std::sync::mpsc::Sender;
 
 use dux_core::engine::{
-    AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView, EventReaction,
-    ProjectPersistenceOutcome, ProjectPersistenceView, StatusUpdate,
+    AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
+    BeginDeleteSessionOutcome, BeginDeleteSessionView, DoDeleteSessionView, EventReaction,
+    FinishDeleteSessionView, ProjectPersistenceOutcome, ProjectPersistenceView, StatusUpdate,
 };
 
 use super::*;
@@ -192,7 +193,7 @@ impl App {
             .store(self.running_process_count() > 0, Ordering::Relaxed);
     }
 
-    fn apply_reaction(&mut self, reaction: EventReaction) {
+    pub(super) fn apply_reaction(&mut self, reaction: EventReaction) {
         match reaction {
             EventReaction::Nothing => {}
             EventReaction::Status(StatusUpdate { tone, message }) => match tone {
@@ -487,6 +488,68 @@ impl App {
                     search: TextInput::new(),
                     searching: false,
                 });
+            }
+
+            EventReaction::FinishDeleteSessionView(view) => {
+                let FinishDeleteSessionView {
+                    session_id,
+                    outcome,
+                    delete_worktree,
+                    remove_outcome,
+                    update_status,
+                } = *view;
+                if let Err(e) = self.apply_finish_delete_session_outcome(
+                    &session_id,
+                    outcome,
+                    delete_worktree,
+                    remove_outcome,
+                    update_status,
+                ) {
+                    self.set_error(format!("{e:#}"));
+                }
+            }
+
+            EventReaction::DoDeleteSessionView(view) => {
+                let DoDeleteSessionView {
+                    session_id,
+                    outcome,
+                    delete_worktree,
+                } = *view;
+                if let Err(e) = self.apply_finish_delete_session_outcome(
+                    &session_id,
+                    outcome.finish,
+                    delete_worktree,
+                    outcome.remove_outcome,
+                    true,
+                ) {
+                    self.set_error(format!("{e:#}"));
+                }
+            }
+
+            EventReaction::BeginDeleteSessionView(view) => {
+                let BeginDeleteSessionView {
+                    session_id,
+                    outcome,
+                    delete_worktree,
+                } = *view;
+                match outcome {
+                    BeginDeleteSessionOutcome::AlreadyInFlight => {
+                        self.set_error(
+                            "Deletion already in progress for this agent. Wait for it to finish.",
+                        );
+                    }
+                    BeginDeleteSessionOutcome::NotFound => {}
+                    BeginDeleteSessionOutcome::AsyncStarted { busy_message } => {
+                        self.set_busy(busy_message);
+                    }
+                    BeginDeleteSessionOutcome::Inline => {
+                        if let Err(e) =
+                            self.finish_delete_session(&session_id, delete_worktree, None, true)
+                        {
+                            self.set_error(format!("{e:#}"));
+                        }
+                    }
+                }
             }
         }
     }

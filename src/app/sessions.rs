@@ -1,7 +1,7 @@
 use super::*;
 use crate::browser;
 use crate::editor;
-use dux_core::engine::{BeginDeleteSessionOutcome, FinishDeleteSessionOutcome};
+use dux_core::engine::{Command, FinishDeleteSessionOutcome};
 
 impl App {
     pub(crate) fn open_project_browser(&mut self) -> Result<()> {
@@ -745,16 +745,12 @@ impl App {
         session_id: &str,
         delete_worktree: bool,
     ) -> Result<()> {
-        let Some(outcome) = self.engine.do_delete_session(session_id, delete_worktree)? else {
-            return Ok(());
-        };
-        self.apply_finish_delete_session_outcome(
-            session_id,
-            outcome.finish,
+        let reaction = self.engine.apply(Command::DoDeleteSession {
+            session_id: session_id.to_string(),
             delete_worktree,
-            outcome.remove_outcome,
-            true,
-        )
+        })?;
+        self.apply_reaction(reaction);
+        Ok(())
     }
 
     /// Kick off deletion of `session_id` from the user-facing modal.
@@ -768,25 +764,12 @@ impl App {
     /// path only touches in-memory state and SQLite, which is effectively
     /// instantaneous.
     pub(crate) fn begin_delete_session(&mut self, session_id: &str, delete_worktree: bool) {
-        match self
-            .engine
-            .begin_delete_session(session_id, delete_worktree)
-        {
-            BeginDeleteSessionOutcome::AlreadyInFlight => {
-                self.set_error(
-                    "Deletion already in progress for this agent. Wait for it to finish.",
-                );
-            }
-            BeginDeleteSessionOutcome::NotFound => {}
-            BeginDeleteSessionOutcome::AsyncStarted { busy_message } => {
-                self.set_busy(busy_message);
-            }
-            BeginDeleteSessionOutcome::Inline => {
-                if let Err(e) = self.finish_delete_session(session_id, delete_worktree, None, true)
-                {
-                    self.set_error(format!("{e:#}"));
-                }
-            }
+        match self.engine.apply(Command::BeginDeleteSession {
+            session_id: session_id.to_string(),
+            delete_worktree,
+        }) {
+            Ok(reaction) => self.apply_reaction(reaction),
+            Err(e) => self.set_error(format!("{e:#}")),
         }
     }
 
@@ -810,19 +793,17 @@ impl App {
         remove_outcome: Option<bool>,
         update_status: bool,
     ) -> Result<()> {
-        let Some(outcome) = self.engine.finish_delete_session(session_id)? else {
-            return Ok(());
-        };
-        self.apply_finish_delete_session_outcome(
-            session_id,
-            outcome,
+        let reaction = self.engine.apply(Command::FinishDeleteSession {
+            session_id: session_id.to_string(),
             delete_worktree,
             remove_outcome,
             update_status,
-        )
+        })?;
+        self.apply_reaction(reaction);
+        Ok(())
     }
 
-    fn apply_finish_delete_session_outcome(
+    pub(super) fn apply_finish_delete_session_outcome(
         &mut self,
         session_id: &str,
         outcome: FinishDeleteSessionOutcome,

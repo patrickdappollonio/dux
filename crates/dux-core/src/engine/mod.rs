@@ -2,12 +2,15 @@
 //! TUI `App` today, the web server later) embed/drive it. In E2 it is a passive
 //! state container; domain operations and workers move into `Engine` methods in E3.
 
+pub mod command;
 mod events;
 
+pub use command::Command;
 pub use events::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
-    BeginDeleteSessionOutcome, DetachedSession, DoDeleteSessionOutcome, EventReaction,
-    FinishDeleteSessionOutcome, ProjectPersistenceOutcome, ProjectPersistenceView, StatusUpdate,
+    BeginDeleteSessionOutcome, BeginDeleteSessionView, DetachedSession, DoDeleteSessionOutcome,
+    DoDeleteSessionView, EventReaction, FinishDeleteSessionOutcome, FinishDeleteSessionView,
+    ProjectPersistenceOutcome, ProjectPersistenceView, StatusUpdate,
 };
 
 use std::collections::{HashMap, HashSet};

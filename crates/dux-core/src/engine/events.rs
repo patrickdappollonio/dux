@@ -113,6 +113,11 @@ pub enum EventReaction {
         message: String,
     },
 
+    // -- Deletion `Command` view follow-ups (E4a). --
+    FinishDeleteSessionView(Box<FinishDeleteSessionView>),
+    DoDeleteSessionView(Box<DoDeleteSessionView>),
+    BeginDeleteSessionView(Box<BeginDeleteSessionView>),
+
     // -- Resource monitor. --
     ResourceStatsArrived(Vec<ResourceStats>),
 
@@ -315,6 +320,34 @@ pub enum BeginDeleteSessionOutcome {
     /// `finish_delete_session(session_id, delete_worktree, None, true)`
     /// wrapper to complete cleanup + emit status.
     Inline,
+}
+
+/// View follow-up data for a `Command::FinishDeleteSession`. Wraps the
+/// engine outcome with the App-context fields needed for status
+/// formatting and the contract-violation check.
+pub struct FinishDeleteSessionView {
+    pub session_id: String,
+    pub outcome: FinishDeleteSessionOutcome,
+    pub delete_worktree: bool,
+    pub remove_outcome: Option<bool>,
+    pub update_status: bool,
+}
+
+/// View follow-up data for a `Command::DoDeleteSession`. Wraps the engine
+/// outcome with the App-context fields needed for status formatting.
+pub struct DoDeleteSessionView {
+    pub session_id: String,
+    pub outcome: DoDeleteSessionOutcome,
+    pub delete_worktree: bool,
+}
+
+/// View follow-up data for a `Command::BeginDeleteSession`. Wraps the
+/// engine outcome with the App-context fields needed for status
+/// formatting and the inline cleanup follow-up.
+pub struct BeginDeleteSessionView {
+    pub session_id: String,
+    pub outcome: BeginDeleteSessionOutcome,
+    pub delete_worktree: bool,
 }
 
 /// Display name for a session — title if present, branch name otherwise.
@@ -1451,6 +1484,9 @@ mod tests {
             EventReaction::ProjectPersistenceOutcome(_) => "ProjectPersistenceOutcome",
             EventReaction::StartupCommandSucceeded { .. } => "StartupCommandSucceeded",
             EventReaction::StartupLogArrived { .. } => "StartupLogArrived",
+            EventReaction::FinishDeleteSessionView(_) => "FinishDeleteSessionView",
+            EventReaction::DoDeleteSessionView(_) => "DoDeleteSessionView",
+            EventReaction::BeginDeleteSessionView(_) => "BeginDeleteSessionView",
         }
     }
 
@@ -2022,5 +2058,66 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    // ── Engine::apply on the deletion family (E4a) ───────────────────────
+
+    #[test]
+    fn apply_begin_delete_session_returns_already_in_flight_when_pending() {
+        let (mut engine, _tmp) = test_engine();
+        engine.pending_deletions.insert("s1".to_string());
+        let reaction = engine
+            .apply(crate::engine::Command::BeginDeleteSession {
+                session_id: "s1".to_string(),
+                delete_worktree: true,
+            })
+            .unwrap();
+        assert!(matches!(
+            reaction,
+            EventReaction::BeginDeleteSessionView(view)
+                if matches!(view.outcome, BeginDeleteSessionOutcome::AlreadyInFlight)
+        ));
+    }
+
+    #[test]
+    fn apply_begin_delete_session_returns_not_found_for_unknown_id() {
+        let (mut engine, _tmp) = test_engine();
+        let reaction = engine
+            .apply(crate::engine::Command::BeginDeleteSession {
+                session_id: "missing".to_string(),
+                delete_worktree: false,
+            })
+            .unwrap();
+        assert!(matches!(
+            reaction,
+            EventReaction::BeginDeleteSessionView(view)
+                if matches!(view.outcome, BeginDeleteSessionOutcome::NotFound)
+        ));
+    }
+
+    #[test]
+    fn apply_do_delete_session_returns_nothing_for_unknown_id() {
+        let (mut engine, _tmp) = test_engine();
+        let reaction = engine
+            .apply(crate::engine::Command::DoDeleteSession {
+                session_id: "missing".to_string(),
+                delete_worktree: false,
+            })
+            .unwrap();
+        assert!(matches!(reaction, EventReaction::Nothing));
+    }
+
+    #[test]
+    fn apply_finish_delete_session_returns_nothing_for_unknown_id() {
+        let (mut engine, _tmp) = test_engine();
+        let reaction = engine
+            .apply(crate::engine::Command::FinishDeleteSession {
+                session_id: "missing".to_string(),
+                delete_worktree: false,
+                remove_outcome: None,
+                update_status: true,
+            })
+            .unwrap();
+        assert!(matches!(reaction, EventReaction::Nothing));
     }
 }
