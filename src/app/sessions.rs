@@ -767,16 +767,6 @@ impl App {
     /// git work is required the session is cleaned up synchronously — that
     /// path only touches in-memory state and SQLite, which is effectively
     /// instantaneous.
-    /// Kick off deletion of `session_id` from the user-facing modal.
-    ///
-    /// When the git worktree needs to be removed, the `git worktree remove`
-    /// call is dispatched to a background thread and the session record is
-    /// left in place until the worker reports success via
-    /// [`WorkerEvent::WorktreeRemoveCompleted`]. This keeps the UI responsive
-    /// even when git stalls (slow disk, held lock, large worktree). When no
-    /// git work is required the session is cleaned up synchronously — that
-    /// path only touches in-memory state and SQLite, which is effectively
-    /// instantaneous.
     pub(crate) fn begin_delete_session(&mut self, session_id: &str, delete_worktree: bool) {
         match self
             .engine
