@@ -282,6 +282,41 @@ pub struct FinishDeleteSessionOutcome {
     pub project_still_has_sessions: bool,
 }
 
+/// Result of `Engine::do_delete_session`. Engine has performed the git
+/// worktree removal (if needed) and the full finish-delete-session cascade
+/// (store delete + providers/pins/resume_fallback removal + sessions retain
+/// + branch-sync refresh); the App still has to apply view follow-up.
+pub struct DoDeleteSessionOutcome {
+    /// Finish-cascade outcome (same shape T3f-1 introduced).
+    pub finish: FinishDeleteSessionOutcome,
+    /// `Some(branch_already_deleted)` if Engine ran `git::remove_worktree`;
+    /// `None` if the worktree was preserved because a sibling session shares
+    /// it or `delete_worktree` was false. Drives the 4-case status formatting
+    /// in `apply_finish_delete_session_outcome`.
+    pub remove_outcome: Option<bool>,
+}
+
+/// Result of `Engine::begin_delete_session`. The four branches mirror the
+/// original App method's control flow.
+pub enum BeginDeleteSessionOutcome {
+    /// `pending_deletions` already contains this session — App emits the
+    /// "already in progress" error.
+    AlreadyInFlight,
+    /// Session or project lookup failed — silent no-op (preserves the
+    /// original early-return behaviour).
+    NotFound,
+    /// Async path: Engine inserted into `pending_deletions`, spawned the
+    /// `git::remove_worktree` worker (which posts `WorktreeRemoveCompleted`
+    /// back), and stored `busy_message` in `deletion_busy_messages`. App
+    /// only needs to set the status line.
+    AsyncStarted { busy_message: String },
+    /// Inline path: no worktree removal needed (no `delete_worktree` request
+    /// or shared with siblings). App should call the existing
+    /// `finish_delete_session(session_id, delete_worktree, None, true)`
+    /// wrapper to complete cleanup + emit status.
+    Inline,
+}
+
 /// Display name for a session — title if present, branch name otherwise.
 /// (Engine-internal helper; the binary keeps `App::session_label` for the
 /// ~8 view-side callers in `sessions.rs`.)
@@ -595,6 +630,145 @@ impl Engine {
             other_sessions_on_worktree,
             project_still_has_sessions,
         }))
+    }
+
+    /// Synchronous engine half of "delete this session" — looks up the session
+    /// and project, optionally calls `git::remove_worktree`, then runs the full
+    /// `finish_delete_session` cascade.
+    ///
+    /// Returns `Ok(None)` if the session was already gone or the project record
+    /// is missing; `Ok(Some(outcome))` otherwise; `Err` if
+    /// `git::remove_worktree` or `session_store.delete_session` fails.
+    ///
+    /// Callers must ensure no async worker is already removing this worktree
+    /// (`pending_deletions` should not contain `session_id`). The debug_assert
+    /// surfaces the violation in debug builds; release builds race silently.
+    pub fn do_delete_session(
+        &mut self,
+        session_id: &str,
+        delete_worktree: bool,
+    ) -> anyhow::Result<Option<DoDeleteSessionOutcome>> {
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
+            return Ok(None);
+        };
+        logger::info(&format!(
+            "deleting session {} at {} (delete_worktree={}, sync)",
+            session.id, session.worktree_path, delete_worktree
+        ));
+        let Some(project) = self
+            .projects
+            .iter()
+            .find(|project| project.id == session.project_id)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let other_sessions_on_worktree = self
+            .sessions
+            .iter()
+            .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
+
+        let should_remove_worktree = delete_worktree && !other_sessions_on_worktree;
+
+        debug_assert!(
+            !self.pending_deletions.contains(session_id),
+            "do_delete_session called while an async delete worker is in-flight for {}",
+            session_id,
+        );
+        let remove_outcome = if should_remove_worktree {
+            let result = crate::git::remove_worktree(
+                std::path::Path::new(&project.path),
+                std::path::Path::new(&session.worktree_path),
+                &session.branch_name,
+            )?;
+            Some(result.branch_already_deleted)
+        } else {
+            None
+        };
+
+        let Some(finish) = self.finish_delete_session(session_id)? else {
+            // Should be unreachable — we just confirmed the session exists
+            // above — but if a concurrent path removed it, treat as no-op.
+            return Ok(None);
+        };
+        Ok(Some(DoDeleteSessionOutcome {
+            finish,
+            remove_outcome,
+        }))
+    }
+
+    /// Engine half of the modal "begin delete" action. Branches between the
+    /// async path (spawns `git::remove_worktree` worker, posts
+    /// `WorktreeRemoveCompleted` back to `worker_tx`) and the inline path
+    /// (lets the App caller invoke `finish_delete_session` synchronously).
+    /// Never returns `Err` — failures route through the worker callback.
+    pub fn begin_delete_session(
+        &mut self,
+        session_id: &str,
+        delete_worktree: bool,
+    ) -> BeginDeleteSessionOutcome {
+        if self.pending_deletions.contains(session_id) {
+            return BeginDeleteSessionOutcome::AlreadyInFlight;
+        }
+
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
+            return BeginDeleteSessionOutcome::NotFound;
+        };
+        let Some(project) = self
+            .projects
+            .iter()
+            .find(|project| project.id == session.project_id)
+            .cloned()
+        else {
+            return BeginDeleteSessionOutcome::NotFound;
+        };
+        let other_sessions_on_worktree = self
+            .sessions
+            .iter()
+            .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
+        let should_remove_worktree = delete_worktree && !other_sessions_on_worktree;
+
+        if should_remove_worktree {
+            logger::info(&format!(
+                "deleting session {} at {} (delete_worktree=true, async)",
+                session.id, session.worktree_path
+            ));
+            // Mark in-flight BEFORE spawning so a fast follow-up action from
+            // the same event loop tick can see the guard. The worker event
+            // handler clears the entry on completion (Ok or Err).
+            self.pending_deletions.insert(session.id.clone());
+            let sid = session.id.clone();
+            let project_path = project.path.clone();
+            let worktree_path = session.worktree_path.clone();
+            let branch_name = session.branch_name.clone();
+            let tx = self.worker_tx.clone();
+            std::thread::spawn(move || {
+                let result = crate::git::remove_worktree(
+                    std::path::Path::new(&project_path),
+                    std::path::Path::new(&worktree_path),
+                    &branch_name,
+                )
+                .map(|r| r.branch_already_deleted)
+                .map_err(|e| format!("{e:#}"));
+                let _ = tx.send(crate::worker::WorkerEvent::WorktreeRemoveCompleted {
+                    session_id: sid,
+                    result,
+                });
+            });
+            let busy_message = format!(
+                "Removing worktree for agent \"{}\"\u{2026}",
+                session.branch_name
+            );
+            self.deletion_busy_messages
+                .insert(session.id.clone(), busy_message.clone());
+            BeginDeleteSessionOutcome::AsyncStarted { busy_message }
+        } else {
+            logger::info(&format!(
+                "deleting session {} at {} (delete_worktree={}, inline)",
+                session.id, session.worktree_path, delete_worktree
+            ));
+            BeginDeleteSessionOutcome::Inline
+        }
     }
 
     pub fn process_agent_launch_failed(
@@ -1804,5 +1978,49 @@ mod tests {
             outcome.view,
             ProjectPersistenceView::PersistenceFailed { ref error } if error == "disk full"
         ));
+    }
+
+    // ── Engine::do_delete_session + Engine::begin_delete_session ────────────
+
+    #[test]
+    fn begin_delete_session_already_in_flight_returns_already_in_flight() {
+        let (mut engine, _tmp) = test_engine();
+        engine.pending_deletions.insert("s1".to_string());
+        let outcome = engine.begin_delete_session("s1", true);
+        assert!(matches!(
+            outcome,
+            BeginDeleteSessionOutcome::AlreadyInFlight
+        ));
+    }
+
+    #[test]
+    fn begin_delete_session_unknown_id_returns_not_found() {
+        let (mut engine, _tmp) = test_engine();
+        let outcome = engine.begin_delete_session("missing", true);
+        assert!(matches!(outcome, BeginDeleteSessionOutcome::NotFound));
+    }
+
+    #[test]
+    fn begin_delete_session_inline_when_no_worktree_removal_needed() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat/x");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        // delete_worktree=false → no git work needed → inline path
+        let outcome = engine.begin_delete_session("s1", false);
+        assert!(matches!(outcome, BeginDeleteSessionOutcome::Inline));
+        assert!(!engine.pending_deletions.contains("s1"));
+    }
+
+    #[test]
+    fn do_delete_session_unknown_id_returns_none() {
+        let (mut engine, _tmp) = test_engine();
+        assert!(
+            engine
+                .do_delete_session("missing", false)
+                .unwrap()
+                .is_none()
+        );
     }
 }
