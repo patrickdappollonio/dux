@@ -2311,7 +2311,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_delete_terminal_returns_view_with_label_when_present() {
+    fn apply_delete_terminal_returns_view_with_none_label_when_terminal_missing() {
         let (mut engine, _tmp) = test_engine();
         // Without a real PtyClient we can't construct a CompanionTerminal —
         // exercise only the "not present" path here. The label-present
