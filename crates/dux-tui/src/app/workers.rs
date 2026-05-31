@@ -555,6 +555,7 @@ impl App {
 
             EventReaction::DispatchAgentLaunchView(view) => {
                 let DispatchAgentLaunchView {
+                    session_id: _,
                     launched: _,
                     status,
                 } = *view;
@@ -562,7 +563,8 @@ impl App {
                     self.apply_reaction(EventReaction::Status(status));
                 }
                 // The `launched` bool is consumed by the App wrapper before
-                // `apply_reaction` is called; nothing more to do here.
+                // `apply_reaction` is called; `session_id` is currently only
+                // useful to downstream observers (web layer).
             }
 
             EventReaction::DeleteTerminalView(view) => {

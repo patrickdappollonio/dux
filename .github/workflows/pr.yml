@@ -48,3 +48,25 @@ jobs:
 
       - name: Run tests
         run: cargo test
+
+  dep-isolation:
+    name: dux-web dependency isolation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `alacritty_terminal` and `portable-pty` are intentional `dux-core`
+      # deps (the PTY-based provider and the embedded terminal grid both
+      # live in the core engine, not the TUI), so they appear in this
+      # graph by design and are excluded from the deny-list below.
+      - name: Verify dux-web does not depend on TUI crates
+        run: |
+          if cargo tree -p dux-web --edges normal,build,dev 2>&1 | grep -E '\b(dux-tui|ratatui|crossterm|crokey)\b'; then
+            echo "FAIL: dux-web pulled in a TUI-only dependency" >&2
+            exit 1
+          fi
+          echo "OK: dux-web dependency graph is TUI-free"

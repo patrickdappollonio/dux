@@ -1,25 +1,31 @@
 //! Placeholder for sub-project #3 — the web layer that will expose the
 //! `dux-core` engine over HTTP/WebSocket. Empty for now so the workspace
-//! topology is ready: this crate depends on `dux-core` (not `dux-tui`),
-//! proving the headless engine is reusable.
+//! topology is ready: this crate depends on `dux-core` (not `dux-tui`).
+//!
+//! Dependency isolation is enforced by the `dep-isolation` CI job, which
+//! runs `cargo tree -p dux-web` and fails if any TUI-only crate appears.
 
 #[cfg(test)]
 mod tests {
-    /// Compile-time check that `dux-web` can construct types from
-    /// `dux-core` without dragging in any TUI deps. If sub-project #3
-    /// (or a future architectural drift) accidentally pulls `dux-tui`
-    /// into `dux-web`'s dependency graph, this test would still pass —
-    /// the real invariant is enforced by `cargo tree` checks in CI /
-    /// the E5 plan. This test exists so the crate has at least one
-    /// piece of executable code proving the dep wiring works.
+    use dux_core::engine::Command;
+
+    /// Light smoke test that the public dux-core API can be invoked from
+    /// dux-web without TUI imports. Real architectural enforcement of the
+    /// "no TUI deps" rule lives in the `dep-isolation` CI job.
     #[test]
-    fn dux_core_types_are_reachable() {
-        // Engine has a public constructor only through `bootstrap_with_lock`
-        // which needs paths + a lock; we don't construct one here. Just
-        // referencing the path proves the symbol is reachable from this
-        // crate without any TUI imports.
-        let _ = std::any::TypeId::of::<dux_core::engine::Engine>();
-        let _ = std::any::TypeId::of::<dux_core::engine::Command>();
-        let _ = std::any::TypeId::of::<dux_core::engine::EventReaction>();
+    fn dux_core_command_is_constructible() {
+        let cmd = Command::OpenPath {
+            path: std::path::PathBuf::from("/tmp/dux-web-smoke"),
+            target: "session worktree".to_string(),
+        };
+        // Exercise pattern-matching so the variant fields are actually
+        // referenced — a dead-code construction wouldn't catch API drift.
+        match cmd {
+            Command::OpenPath { path, target } => {
+                assert_eq!(target, "session worktree");
+                assert_eq!(path.display().to_string(), "/tmp/dux-web-smoke");
+            }
+            _ => unreachable!("constructed an OpenPath variant"),
+        }
     }
 }

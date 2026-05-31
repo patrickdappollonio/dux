@@ -301,22 +301,31 @@ impl Engine {
                         .join("heads");
                     if refs_dir.is_dir()
                         && let Some(ref watcher_arc) = self.refs_watcher
-                        && let Ok(mut w) = watcher_arc.lock()
                     {
-                        match w.watch(&refs_dir, RecursiveMode::NonRecursive) {
-                            Ok(()) => {
-                                crate::logger::debug(&format!(
-                                    "[gh-integration] refs watcher: watching {} for session {}",
+                        match watcher_arc.lock() {
+                            Ok(mut w) => match w.watch(&refs_dir, RecursiveMode::NonRecursive) {
+                                Ok(()) => {
+                                    crate::logger::debug(&format!(
+                                        "[gh-integration] refs watcher: watching {} for session {}",
+                                        refs_dir.display(),
+                                        session.id,
+                                    ));
+                                    paths.insert(refs_dir.clone(), session.id.clone());
+                                }
+                                Err(e) => {
+                                    crate::logger::debug(&format!(
+                                        "[gh-integration] refs watcher: failed to watch {}: {}",
+                                        refs_dir.display(),
+                                        e,
+                                    ));
+                                }
+                            },
+                            Err(poison) => {
+                                crate::logger::error(&format!(
+                                    "[gh-integration] refs watcher mutex poisoned, will not watch {} for session {} \u{2014} PR updates for this session will not arrive until dux restarts: {}",
                                     refs_dir.display(),
                                     session.id,
-                                ));
-                                paths.insert(refs_dir.clone(), session.id.clone());
-                            }
-                            Err(e) => {
-                                crate::logger::debug(&format!(
-                                    "[gh-integration] refs watcher: failed to watch {}: {}",
-                                    refs_dir.display(),
-                                    e,
+                                    poison,
                                 ));
                             }
                         }
@@ -524,7 +533,13 @@ impl Engine {
 
     /// Trigger a one-shot PR check for a single session, unless it was checked
     /// recently (within 10 seconds).
-    pub fn spawn_pr_check_for_session(&self, session_id: &str) {
+    ///
+    /// The timestamp is recorded BEFORE the worker thread is spawned so a burst
+    /// of triggers within a single event-loop tick — e.g. several callers each
+    /// invoking this for the same session before the first worker's
+    /// `PrStatusReady` event has been processed — does not bypass the
+    /// rate-limit and spawn N concurrent `gh` subprocesses.
+    pub fn spawn_pr_check_for_session(&mut self, session_id: &str) {
         if !self.github_integration_enabled
             || !matches!(self.gh_status, crate::model::GhStatus::Available)
         {
@@ -536,6 +551,8 @@ impl Engine {
         {
             return;
         }
+        self.pr_last_checked
+            .insert(session_id.to_string(), Instant::now());
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
             return;
         };

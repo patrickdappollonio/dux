@@ -368,8 +368,12 @@ pub struct BeginDeleteSessionView {
 /// the in-flight check + spawn; the App caller uses `launched` to decide
 /// site-specific follow-up (busy messages, status updates, fallback
 /// branches). `status` is `Some(StatusUpdate::info(…))` only on the
-/// already-in-flight path.
+/// already-in-flight path. `session_id` is the id of the session whose
+/// launch was attempted, populated on both branches so downstream
+/// observers (e.g. the future web layer) can correlate the dispatch
+/// with its session without re-deriving it from the request.
 pub struct DispatchAgentLaunchView {
+    pub session_id: String,
     pub launched: bool,
     pub status: Option<StatusUpdate>,
 }
@@ -651,6 +655,19 @@ impl Engine {
     /// the context the App needs for its view-side follow-up; `Err` on a
     /// store failure (in-memory state untouched in that case so the UI keeps
     /// showing the session).
+    ///
+    /// **Ordering invariant for engine-side helpers**: this method performs
+    /// all engine-state cleanup (providers, running_provider_pins,
+    /// resume_fallback_candidates, sessions.retain, update_branch_sync_sessions)
+    /// before returning. The caller is then responsible for view-side cleanup
+    /// (e.g. `App::last_pty_activity.remove(session_id)`, companion-terminal
+    /// teardown). During the gap between this method returning and the
+    /// App-side applier running, those view-only maps still hold stale
+    /// entries for the deleted session_id. Engine helpers invoked from inside
+    /// this method MUST NOT read those view-only maps for the deleted
+    /// session_id — they will see stale data. If a future helper needs to
+    /// observe view state during deletion, the deletion sequence must be
+    /// re-architected to invert the engine/view ordering.
     pub fn finish_delete_session(
         &mut self,
         session_id: &str,
@@ -702,13 +719,17 @@ impl Engine {
     /// and project, optionally calls `git::remove_worktree`, then runs the full
     /// `finish_delete_session` cascade.
     ///
-    /// Returns `Ok(None)` if the session was already gone or the project record
-    /// is missing; `Ok(Some(outcome))` otherwise; `Err` if
-    /// `git::remove_worktree` or `session_store.delete_session` fails.
+    /// Returns `Ok(None)` if the session was already gone, the project record
+    /// is missing, or an async delete worker is already in flight for this
+    /// session; `Ok(Some(outcome))` otherwise; `Err` if `git::remove_worktree`
+    /// or `session_store.delete_session` fails.
     ///
     /// Callers must ensure no async worker is already removing this worktree
-    /// (`pending_deletions` should not contain `session_id`). The debug_assert
-    /// surfaces the violation in debug builds; release builds race silently.
+    /// (`pending_deletions` should not contain `session_id`). If a caller
+    /// bypasses that contract, this method soft-returns `Ok(None)` and logs an
+    /// error rather than racing `git::remove_worktree` against the in-flight
+    /// async deletion — debug-only checks would not catch this in release
+    /// builds, and the path is destructive (worktrees are user data).
     pub fn do_delete_session(
         &mut self,
         session_id: &str,
@@ -736,11 +757,12 @@ impl Engine {
 
         let should_remove_worktree = delete_worktree && !other_sessions_on_worktree;
 
-        debug_assert!(
-            !self.pending_deletions.contains(session_id),
-            "do_delete_session called while an async delete worker is in-flight for {}",
-            session_id,
-        );
+        if self.pending_deletions.contains(session_id) {
+            crate::logger::error(&format!(
+                "do_delete_session called while an async delete worker is in-flight for {session_id} \u{2014} refusing to proceed to avoid racing git::remove_worktree",
+            ));
+            return Ok(None);
+        }
         let remove_outcome = if should_remove_worktree {
             let result = crate::git::remove_worktree(
                 std::path::Path::new(&project.path),
@@ -2096,6 +2118,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn do_delete_session_soft_returns_when_async_worker_in_flight() {
+        // Fix #9: the in-flight guard must hold in release builds. If an
+        // async delete worker is already running for this session, the
+        // synchronous path must NOT proceed to `git::remove_worktree` or
+        // touch in-memory state — otherwise the two paths would race on
+        // the worktree.
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat/x");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        engine.pending_deletions.insert("s1".to_string());
+
+        let outcome = engine
+            .do_delete_session("s1", true)
+            .expect("soft-return does not error");
+        assert!(
+            outcome.is_none(),
+            "do_delete_session must soft-return Ok(None) when an async worker is in-flight",
+        );
+        // The session must still be present — we soft-returned, did not delete.
+        assert!(
+            engine.sessions.iter().any(|s| s.id == "s1"),
+            "session should be untouched when the in-flight guard fires",
+        );
+    }
+
     // ── Engine::apply on the deletion family (E4a) ───────────────────────
 
     #[test]
@@ -2338,4 +2388,63 @@ mod tests {
     // desktop notification on dev machines and a flaky failure in CI. The
     // status-message formatting is trivial and exercised end-to-end by the
     // App-level startup-command-log open flow.
+
+    // ── spawn_pr_check_for_session rate-limit (fix #1) ─────────────────────
+
+    #[test]
+    fn spawn_pr_check_for_session_skips_when_recently_checked() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = GhStatus::Available;
+        engine.sessions.push(sample_session("s1", "p1", "feat/x"));
+        // Pre-populate the rate-limit map with a fresh timestamp so the
+        // 10-second guard short-circuits before any worker thread spawns.
+        engine
+            .pr_last_checked
+            .insert("s1".to_string(), Instant::now());
+
+        engine.spawn_pr_check_for_session("s1");
+
+        // No worker was spawned, so nothing should have been posted to the
+        // channel. A short timeout keeps the test responsive while still
+        // proving the rate-limit short-circuit fired.
+        assert!(
+            engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "expected no worker event when rate-limit suppresses the check",
+        );
+    }
+
+    #[test]
+    fn spawn_pr_check_for_session_records_timestamp_before_spawning() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = GhStatus::Available;
+        engine.sessions.push(sample_session("s1", "p1", "feat/x"));
+        assert!(!engine.pr_last_checked.contains_key("s1"));
+
+        let before = Instant::now();
+        engine.spawn_pr_check_for_session("s1");
+
+        // The timestamp must be recorded synchronously — before the worker
+        // thread is spawned — so a burst of triggers within one tick cannot
+        // all bypass the rate-limit. The exact Instant value isn't observable
+        // across threads cleanly, so just verify an entry now exists and
+        // that it is no older than the call site.
+        let recorded = engine
+            .pr_last_checked
+            .get("s1")
+            .copied()
+            .expect("pr_last_checked entry should be recorded synchronously");
+        assert!(
+            recorded >= before,
+            "recorded instant should be at or after the call site instant",
+        );
+        assert!(
+            recorded.elapsed() < std::time::Duration::from_secs(1),
+            "recorded instant should be very recent",
+        );
+    }
 }

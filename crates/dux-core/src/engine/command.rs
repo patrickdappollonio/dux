@@ -226,9 +226,10 @@ impl Engine {
             Command::DispatchAgentLaunch { request } => {
                 let branch_name = request.session.branch_name.clone();
                 let session_id = request.session.id.clone();
-                if !self.agent_launches_in_flight.insert(session_id) {
+                if !self.agent_launches_in_flight.insert(session_id.clone()) {
                     return Ok(EventReaction::DispatchAgentLaunchView(Box::new(
                         DispatchAgentLaunchView {
+                            session_id,
                             launched: false,
                             status: Some(StatusUpdate::info(format!(
                                 "Agent \"{}\" is already launching.",
@@ -243,6 +244,7 @@ impl Engine {
                 });
                 Ok(EventReaction::DispatchAgentLaunchView(Box::new(
                     DispatchAgentLaunchView {
+                        session_id,
                         launched: true,
                         status: None,
                     },
