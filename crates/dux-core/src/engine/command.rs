@@ -363,9 +363,15 @@ impl Engine {
                 new_enabled,
             } => {
                 if let Some(current) = self.sessions.iter_mut().find(|c| c.id == session_id) {
-                    current.auto_reopen_enabled = new_enabled;
-                    current.updated_at = chrono::Utc::now();
-                    self.session_store.upsert_session(current)?;
+                    // Persist FIRST so a DB failure leaves in-memory state
+                    // untouched and the UI continues showing the prior
+                    // (still-true) value. Mirrors finish_delete_session's
+                    // DB-first pattern.
+                    let mut candidate = current.clone();
+                    candidate.auto_reopen_enabled = new_enabled;
+                    candidate.updated_at = chrono::Utc::now();
+                    self.session_store.upsert_session(&candidate)?;
+                    *current = candidate;
                 } else {
                     self.session_store
                         .set_auto_reopen_enabled(&session_id, new_enabled)?;

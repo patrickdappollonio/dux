@@ -1009,7 +1009,12 @@ impl Engine {
                     if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
                         session.branch_name = new_branch.clone();
                         session.updated_at = Utc::now();
-                        let _ = self.session_store.upsert_session(session);
+                        if let Err(err) = self.session_store.upsert_session(session) {
+                            logger::error(&format!(
+                                "failed to persist branch rename for {} (new branch: {}): {err}",
+                                session.id, new_branch,
+                            ));
+                        }
                     }
                     self.update_branch_sync_sessions();
                     EventReaction::Multi(vec![
@@ -1026,7 +1031,12 @@ impl Engine {
                     if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
                         session.title = previous_title;
                         session.updated_at = Utc::now();
-                        let _ = self.session_store.upsert_session(session);
+                        if let Err(err) = self.session_store.upsert_session(session) {
+                            logger::error(&format!(
+                                "failed to persist branch-rename revert for {}: {err}",
+                                session.id,
+                            ));
+                        }
                     }
                     EventReaction::Multi(vec![
                         EventReaction::RebuildLeftItems,
@@ -1048,7 +1058,12 @@ impl Engine {
                         ));
                         session.branch_name = actual_branch;
                         session.updated_at = Utc::now();
-                        let _ = self.session_store.upsert_session(session);
+                        if let Err(err) = self.session_store.upsert_session(session) {
+                            logger::error(&format!(
+                                "failed to persist branch-sync update for {} (new branch: {}): {err}",
+                                session.id, session.branch_name,
+                            ));
+                        }
                         changed = true;
                     }
                 }
@@ -1090,15 +1105,20 @@ impl Engine {
                                 PrState::Merged => "MERGED",
                                 PrState::Closed => "CLOSED",
                             };
-                            let _ = self.session_store.upsert_pr(&StoredPr {
+                            let pr_number = pr.number;
+                            if let Err(err) = self.session_store.upsert_pr(&StoredPr {
                                 session_id: session_id.clone(),
-                                pr_number: pr.number,
+                                pr_number,
                                 host: pr.host.clone(),
                                 owner_repo: pr.owner_repo.clone(),
                                 state: state_str.to_string(),
                                 title: pr.title.clone(),
                                 url: pr.url.clone(),
-                            });
+                            }) {
+                                logger::error(&format!(
+                                    "failed to persist PR status for {session_id} (PR #{pr_number}): {err}",
+                                ));
+                            }
                             self.pr_statuses.insert(session_id, pr);
                             changed = true;
                         }
@@ -2358,6 +2378,43 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn apply_toggle_agent_auto_reopen_keeps_in_memory_state_when_db_write_fails() {
+        // DB-first invariant: if the upsert fails, the in-memory session
+        // must still hold the prior auto_reopen_enabled value so the UI
+        // and the database stay consistent. Otherwise the user sees the
+        // toggle "succeed" visually but silently revert on next restart.
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat/x");
+        session.auto_reopen_enabled = false;
+        engine.session_store.upsert_session(&session).unwrap();
+        let previous_updated_at = session.updated_at;
+        engine.sessions.push(session);
+
+        // Force the next upsert_session call to fail by dropping the
+        // backing table out from under the engine.
+        engine
+            .session_store
+            .break_sessions_table_for_test()
+            .expect("break sessions table");
+
+        let result = engine.apply(crate::engine::Command::ToggleAgentAutoReopen {
+            session_id: "s1".to_string(),
+            branch_name: "feat/x".to_string(),
+            new_enabled: true,
+        });
+
+        assert!(result.is_err(), "expected toggle to surface the DB error");
+        assert!(
+            !engine.sessions[0].auto_reopen_enabled,
+            "in-memory auto_reopen_enabled must not flip when the DB write fails",
+        );
+        assert_eq!(
+            engine.sessions[0].updated_at, previous_updated_at,
+            "updated_at must not advance when the DB write fails",
+        );
     }
 
     #[test]

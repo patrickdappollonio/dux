@@ -588,7 +588,12 @@ impl Engine {
             }
             session.status = status;
             session.updated_at = Utc::now();
-            let _ = self.session_store.upsert_session(session);
+            if let Err(err) = self.session_store.upsert_session(session) {
+                crate::logger::error(&format!(
+                    "failed to persist session status update for {}: {err}",
+                    session.id,
+                ));
+            }
         }
     }
 
@@ -603,9 +608,16 @@ impl Engine {
             }
             session.desired_running = desired;
             session.updated_at = Utc::now();
-            let _ = self.session_store.upsert_session(session);
-        } else {
-            let _ = self.session_store.set_desired_running(session_id, desired);
+            if let Err(err) = self.session_store.upsert_session(session) {
+                crate::logger::error(&format!(
+                    "failed to persist session desired_running for {}: {err}",
+                    session.id,
+                ));
+            }
+        } else if let Err(err) = self.session_store.set_desired_running(session_id, desired) {
+            crate::logger::error(&format!(
+                "failed to persist desired_running override for {session_id}: {err}",
+            ));
         }
     }
 
@@ -624,7 +636,12 @@ impl Engine {
         }
 
         session.updated_at = Utc::now();
-        let _ = self.session_store.upsert_session(session);
+        if let Err(err) = self.session_store.upsert_session(session) {
+            crate::logger::error(&format!(
+                "failed to persist provider_started state for {}: {err}",
+                session.id,
+            ));
+        }
     }
 
     /// Refreshes the shared session snapshot used by the branch-sync background

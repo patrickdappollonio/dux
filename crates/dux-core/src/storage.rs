@@ -523,6 +523,16 @@ impl SessionStore {
         )?;
         Ok(())
     }
+
+    /// Test-only fault injection: drops the `agent_sessions` table so the
+    /// next session-write call (upsert/delete/set_*) returns an error.
+    /// Used to verify DB-first failure semantics in the engine.
+    #[cfg(test)]
+    pub(crate) fn break_sessions_table_for_test(&self) -> Result<()> {
+        self.conn
+            .execute_batch("drop table if exists agent_sessions;")?;
+        Ok(())
+    }
 }
 
 fn parse_time(value: &str) -> Option<DateTime<Utc>> {
