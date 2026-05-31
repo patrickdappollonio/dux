@@ -748,22 +748,6 @@ impl App {
         }
     }
 
-    pub(crate) fn spawn_global_env_persistence(
-        &self,
-        env: std::collections::BTreeMap<String, String>,
-    ) {
-        let mut config = self.engine.config.clone();
-        config.env = env.clone();
-        let config_path = self.engine.paths.config_path.clone();
-        let tx = self.engine.worker_tx.clone();
-        thread::spawn(move || {
-            let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
-            let result = crate::config::save_config(&config_path, &config, &bindings)
-                .map_err(|err| format!("{err:#}"));
-            let _ = tx.send(WorkerEvent::GlobalEnvPersistenceCompleted { env, result });
-        });
-    }
-
     fn apply_agent_launch_ready_view(&mut self, outcome: AgentLaunchReadyOutcome) {
         self.last_pty_size = outcome.pty_size;
         if let Some(id) = outcome.detached_session_id {
@@ -851,54 +835,6 @@ impl App {
                 ));
             }
         }
-    }
-
-    pub(crate) fn spawn_config_reload_worker(&self) {
-        let tx = self.engine.worker_tx.clone();
-        let paths = self.engine.paths.clone();
-        thread::spawn(move || {
-            let result = crate::config::ensure_config(&paths)
-                .map_err(|err| format!("{err:#}"))
-                .and_then(
-                    |mut config| match crate::config::validate_keys(&config.keys) {
-                        Ok(()) => {
-                            let bindings = RuntimeBindings::from_keys_config(&config.keys);
-                            let store = SessionStore::open(&paths.sessions_db_path)
-                                .map_err(|err| format!("{err:#}"))?;
-                            sync_config_projects_with_store(&mut config, &paths, &bindings, &store)
-                                .map_err(|err| format!("{err:#}"))?;
-                            let projects = load_projects(
-                                &store.load_projects().map_err(|err| format!("{err:#}"))?,
-                                &config,
-                            );
-                            persist_runtime_projects_to_config_and_store(
-                                &projects,
-                                &mut config,
-                                &paths,
-                                &bindings,
-                                &store,
-                            )
-                            .map_err(|err| format!("{err:#}"))?;
-                            Ok(config)
-                        }
-                        Err(message) => Err(message),
-                    },
-                );
-            let _ = tx.send(WorkerEvent::ConfigReloadReady(Box::new(result)));
-        });
-    }
-
-    pub(crate) fn spawn_config_recover_worker(&self) {
-        let tx = self.engine.worker_tx.clone();
-        let config_path = self.engine.paths.config_path.clone();
-        let config = self.engine.config.clone();
-        thread::spawn(move || {
-            let bindings = RuntimeBindings::from_keys_config(&config.keys);
-            let rendered = crate::config::render_config_with(&config, &bindings);
-            let result = std::fs::write(&config_path, rendered)
-                .map_err(|err| format!("failed to write {}: {err}", config_path.display()));
-            let _ = tx.send(WorkerEvent::ConfigRecoverCompleted(result));
-        });
     }
 
     fn retry_hung_resume_sessions(&mut self) {

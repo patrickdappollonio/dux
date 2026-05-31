@@ -1413,6 +1413,7 @@ mod tests {
             single_instance_lock,
             worker_tx,
             worker_rx,
+            config_saver: Box::new(crate::engine::NoopConfigSaver),
             providers: HashMap::new(),
             running_provider_pins: HashMap::new(),
             companion_terminals: HashMap::new(),
@@ -2502,6 +2503,101 @@ mod tests {
         assert!(
             recorded.elapsed() < std::time::Duration::from_secs(1),
             "recorded instant should be very recent",
+        );
+    }
+
+    // ── Command::PersistGlobalEnv / ReloadConfig / RecoverConfig ────────────
+    //
+    // These three tests prove that `Engine::apply` dispatches into the
+    // `ConfigSaver` trait. Any front-end (TUI, web) can plug in its own
+    // saver and observe the same dispatch shape.
+
+    /// A recording `ConfigSaver` used by the three dispatch tests below. It
+    /// logs which method was called (with a small distinguishing payload)
+    /// into a shared `Vec<String>` so the test can assert on dispatch.
+    #[derive(Clone)]
+    struct RecordingConfigSaver(Arc<Mutex<Vec<String>>>);
+
+    impl crate::engine::ConfigSaver for RecordingConfigSaver {
+        fn persist_global_env(
+            &self,
+            env: BTreeMap<String, String>,
+            _config: crate::config::Config,
+            _config_path: PathBuf,
+            worker_tx: std::sync::mpsc::Sender<crate::worker::WorkerEvent>,
+        ) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("persist_global_env:{}", env.len()));
+            let _ = worker_tx.send(crate::worker::WorkerEvent::GlobalEnvPersistenceCompleted {
+                env,
+                result: Ok(()),
+            });
+        }
+
+        fn reload_config(
+            &self,
+            _paths: crate::config::DuxPaths,
+            _worker_tx: std::sync::mpsc::Sender<crate::worker::WorkerEvent>,
+        ) {
+            self.0.lock().unwrap().push("reload_config".into());
+        }
+
+        fn recover_config(
+            &self,
+            _config_path: PathBuf,
+            _config: crate::config::Config,
+            _worker_tx: std::sync::mpsc::Sender<crate::worker::WorkerEvent>,
+        ) {
+            self.0.lock().unwrap().push("recover_config".into());
+        }
+    }
+
+    #[test]
+    fn apply_persist_global_env_invokes_config_saver() {
+        let (mut engine, _tmp) = test_engine();
+        let recorder = Arc::new(Mutex::new(Vec::new()));
+        engine.config_saver = Box::new(RecordingConfigSaver(recorder.clone()));
+
+        let mut env = BTreeMap::new();
+        env.insert("FOO".into(), "bar".into());
+        let reaction = engine
+            .apply(crate::engine::Command::PersistGlobalEnv { env })
+            .expect("apply PersistGlobalEnv");
+        assert!(matches!(reaction, EventReaction::Nothing));
+        assert_eq!(
+            *recorder.lock().unwrap(),
+            vec!["persist_global_env:1".to_string()],
+        );
+    }
+
+    #[test]
+    fn apply_reload_config_invokes_config_saver() {
+        let (mut engine, _tmp) = test_engine();
+        let recorder = Arc::new(Mutex::new(Vec::new()));
+        engine.config_saver = Box::new(RecordingConfigSaver(recorder.clone()));
+
+        let reaction = engine
+            .apply(crate::engine::Command::ReloadConfig)
+            .expect("apply ReloadConfig");
+        assert!(matches!(reaction, EventReaction::Nothing));
+        assert_eq!(*recorder.lock().unwrap(), vec!["reload_config".to_string()],);
+    }
+
+    #[test]
+    fn apply_recover_config_invokes_config_saver() {
+        let (mut engine, _tmp) = test_engine();
+        let recorder = Arc::new(Mutex::new(Vec::new()));
+        engine.config_saver = Box::new(RecordingConfigSaver(recorder.clone()));
+
+        let reaction = engine
+            .apply(crate::engine::Command::RecoverConfig)
+            .expect("apply RecoverConfig");
+        assert!(matches!(reaction, EventReaction::Nothing));
+        assert_eq!(
+            *recorder.lock().unwrap(),
+            vec!["recover_config".to_string()],
         );
     }
 }

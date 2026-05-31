@@ -4,11 +4,14 @@ mod app;
 mod cli;
 mod clipboard;
 mod config;
+mod config_saver;
 mod diff;
 mod keybindings;
 mod raw_input;
 mod theme;
 mod tui_color;
+
+pub(crate) use config_saver::TuiConfigSaver;
 
 // Domain modules now live in dux-core. Re-export them at the crate root so
 // existing `crate::<mod>::…` paths across the binary keep resolving unchanged.

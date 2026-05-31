@@ -1393,7 +1393,8 @@ impl App {
         };
         self.prompt = PromptState::None;
         self.input_target = InputTarget::None;
-        self.spawn_global_env_persistence(env);
+        let reaction = self.engine.apply(Command::PersistGlobalEnv { env })?;
+        self.apply_reaction(reaction);
         self.set_busy("Saving global environment variables to config.toml...");
         Ok(())
     }
@@ -2603,6 +2604,7 @@ mod tests {
             single_instance_lock,
             worker_tx,
             worker_rx,
+            config_saver: Box::new(crate::TuiConfigSaver),
             providers: std::collections::HashMap::new(),
             running_provider_pins: std::collections::HashMap::new(),
             companion_terminals: std::collections::HashMap::new(),

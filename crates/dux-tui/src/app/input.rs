@@ -5444,8 +5444,15 @@ impl App {
         }
         self.prompt = PromptState::None;
         if apply && recover {
-            self.spawn_config_recover_worker();
-            self.set_busy("Restoring the last working config.toml.");
+            match self.engine.apply(Command::RecoverConfig) {
+                Ok(reaction) => {
+                    self.apply_reaction(reaction);
+                    self.set_busy("Restoring the last working config.toml.");
+                }
+                Err(err) => {
+                    self.set_error(format!("Could not start config recovery: {err:#}"));
+                }
+            }
         }
         false
     }
@@ -6488,6 +6495,7 @@ mod tests {
             single_instance_lock,
             worker_tx,
             worker_rx,
+            config_saver: Box::new(crate::TuiConfigSaver),
             providers: std::collections::HashMap::new(),
             running_provider_pins: std::collections::HashMap::new(),
             companion_terminals: std::collections::HashMap::new(),

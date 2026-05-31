@@ -29,3 +29,71 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod config_saver_tests {
+    use dux_core::config::{Config, DuxPaths};
+    use dux_core::engine::ConfigSaver;
+    use dux_core::worker::WorkerEvent;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::sync::mpsc::{self, Sender};
+
+    /// Web-layer placeholder: today no-op. Sub-project #3 will replace this
+    /// with whatever persistence semantics the web layer actually needs.
+    struct WebConfigSaver;
+
+    impl ConfigSaver for WebConfigSaver {
+        fn persist_global_env(
+            &self,
+            env: BTreeMap<String, String>,
+            _config: Config,
+            _config_path: PathBuf,
+            worker_tx: Sender<WorkerEvent>,
+        ) {
+            let _ = worker_tx.send(WorkerEvent::GlobalEnvPersistenceCompleted {
+                env,
+                result: Ok(()),
+            });
+        }
+
+        fn reload_config(&self, _paths: DuxPaths, worker_tx: Sender<WorkerEvent>) {
+            let _ = worker_tx.send(WorkerEvent::ConfigReloadReady(Box::new(Ok(
+                Config::default(),
+            ))));
+        }
+
+        fn recover_config(
+            &self,
+            _config_path: PathBuf,
+            _config: Config,
+            worker_tx: Sender<WorkerEvent>,
+        ) {
+            let _ = worker_tx.send(WorkerEvent::ConfigRecoverCompleted(Ok(())));
+        }
+    }
+
+    /// Proves the web layer can implement `ConfigSaver` against `dux-core`
+    /// alone (no TUI deps). This is what unblocks sub-project #3 from
+    /// reusing the engine's config-persistence command dispatch.
+    #[test]
+    fn web_can_implement_config_saver() {
+        let (tx, rx) = mpsc::channel();
+        let saver: Box<dyn ConfigSaver> = Box::new(WebConfigSaver);
+        let mut env = BTreeMap::new();
+        env.insert("X".into(), "1".into());
+        saver.persist_global_env(
+            env,
+            Config::default(),
+            PathBuf::from("/tmp/dux-web-test"),
+            tx,
+        );
+        let event = rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("event");
+        assert!(matches!(
+            event,
+            WorkerEvent::GlobalEnvPersistenceCompleted { result: Ok(()), .. }
+        ));
+    }
+}

@@ -47,7 +47,7 @@ use crate::pty::TerminalSnapshot;
 use crate::statusline::{StatusLine, StatusTone};
 use crate::storage::SessionStore;
 use crate::theme::Theme;
-use dux_core::engine::Engine;
+use dux_core::engine::{Command, Engine};
 pub(crate) use dux_core::model::CompanionTerminal;
 
 use text_input::TextInput;
@@ -1221,6 +1221,7 @@ impl App {
             single_instance_lock,
             worker_tx,
             worker_rx,
+            config_saver: Box::new(crate::TuiConfigSaver),
             providers: HashMap::new(),
             running_provider_pins: HashMap::new(),
             companion_terminals: HashMap::new(),
@@ -1982,7 +1983,8 @@ impl App {
     }
 
     pub(crate) fn reload_config_from_disk(&mut self) -> Result<()> {
-        self.spawn_config_reload_worker();
+        let reaction = self.engine.apply(Command::ReloadConfig)?;
+        self.apply_reaction(reaction);
         self.set_busy("Reloading config.toml.");
         Ok(())
     }

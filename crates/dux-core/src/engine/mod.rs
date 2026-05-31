@@ -3,9 +3,11 @@
 //! state container; domain operations and workers move into `Engine` methods in E3.
 
 pub mod command;
+pub mod config_saver;
 mod events;
 
 pub use command::Command;
+pub use config_saver::{ConfigSaver, NoopConfigSaver};
 pub use events::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
     BeginDeleteSessionOutcome, BeginDeleteSessionView, DeleteTerminalView, DetachedSession,
@@ -49,6 +51,11 @@ pub struct Engine {
     // Batch B fields
     pub worker_tx: Sender<WorkerEvent>,
     pub worker_rx: Receiver<WorkerEvent>,
+    /// Front-end-specific configuration persistence. Engine delegates the
+    /// three `Command::PersistGlobalEnv` / `ReloadConfig` / `RecoverConfig`
+    /// arms here so the web layer can plug in its own implementation
+    /// without depending on TUI-only helpers (e.g., `RuntimeBindings`).
+    pub config_saver: Box<dyn ConfigSaver>,
     pub providers: HashMap<String, PtyClient>,
     /// When a provider swap happens while the agent's PTY is still running,
     /// the currently-spawned provider is pinned here so UI labels keep

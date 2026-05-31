@@ -139,6 +139,26 @@ pub enum Command {
     /// the child). Returns a typed view carrying the terminal's label so the
     /// App can format status + reconcile `active_terminal_id` (view field).
     DeleteTerminal { terminal_id: String },
+
+    /// Persist the global `env` block to the user config file. The engine
+    /// delegates to `Engine::config_saver` so the TUI can render the
+    /// `[keys]` section with `RuntimeBindings` while the web layer can plug
+    /// in its own persistence. Fire-and-forget: completion arrives as
+    /// `WorkerEvent::GlobalEnvPersistenceCompleted`.
+    PersistGlobalEnv {
+        env: std::collections::BTreeMap<String, String>,
+    },
+
+    /// Reload the user config from disk, validate it, and resync project
+    /// records against the session store. Fire-and-forget: completion
+    /// arrives as `WorkerEvent::ConfigReloadReady`.
+    ReloadConfig,
+
+    /// Write a canonical (fully-templated) config to disk, overwriting the
+    /// existing file. Used by the config-reload-failed modal to restore a
+    /// known-good config. Fire-and-forget: completion arrives as
+    /// `WorkerEvent::ConfigRecoverCompleted`.
+    RecoverConfig,
 }
 
 impl Engine {
@@ -393,6 +413,33 @@ impl Engine {
                 Ok(EventReaction::DeleteTerminalView(Box::new(
                     DeleteTerminalView { terminal_id, label },
                 )))
+            }
+
+            Command::PersistGlobalEnv { env } => {
+                let mut config = self.config.clone();
+                config.env = env.clone();
+                self.config_saver.persist_global_env(
+                    env,
+                    config,
+                    self.paths.config_path.clone(),
+                    self.worker_tx.clone(),
+                );
+                Ok(EventReaction::Nothing)
+            }
+
+            Command::ReloadConfig => {
+                self.config_saver
+                    .reload_config(self.paths.clone(), self.worker_tx.clone());
+                Ok(EventReaction::Nothing)
+            }
+
+            Command::RecoverConfig => {
+                self.config_saver.recover_config(
+                    self.paths.config_path.clone(),
+                    self.config.clone(),
+                    self.worker_tx.clone(),
+                );
+                Ok(EventReaction::Nothing)
             }
         }
     }
