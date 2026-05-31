@@ -140,11 +140,13 @@ impl App {
             path_missing: false,
         };
         logger::info(&format!("registered project {}", path_buf.display()));
-        self.engine
-            .spawn_project_persistence(ProjectPersistenceAction::Add {
+        let reaction = self.engine.apply(Command::PersistProject(Box::new(
+            ProjectPersistenceAction::Add {
                 project,
                 status_message,
-            });
+            },
+        )))?;
+        self.apply_reaction(reaction);
         self.set_busy(format!("Saving project \"{display_name}\" to workspace..."));
         Ok(())
     }
@@ -1243,13 +1245,15 @@ impl App {
             return Ok(());
         }
 
-        self.engine
-            .spawn_project_persistence(ProjectPersistenceAction::UpdateDefaultProvider {
+        let reaction = self.engine.apply(Command::PersistProject(Box::new(
+            ProjectPersistenceAction::UpdateDefaultProvider {
                 project_id: prompt.project_id,
                 project_name: prompt.project_name.clone(),
                 provider: selected.provider,
                 global_default: prompt.global_default,
-            });
+            },
+        )))?;
+        self.apply_reaction(reaction);
         self.set_busy(format!(
             "Saving provider preference for project \"{}\"...",
             prompt.project_name
@@ -1263,12 +1267,14 @@ impl App {
             return Ok(());
         };
         let enabled = self.engine.project_allows_auto_reopen(&project.id);
-        self.engine
-            .spawn_project_persistence(ProjectPersistenceAction::UpdateAutoReopen {
+        let reaction = self.engine.apply(Command::PersistProject(Box::new(
+            ProjectPersistenceAction::UpdateAutoReopen {
                 project_id: project.id.clone(),
                 project_name: project.name.clone(),
                 auto_reopen_agents: if enabled { Some(false) } else { None },
-            });
+            },
+        )))?;
+        self.apply_reaction(reaction);
         self.set_busy(format!(
             "Saving auto-reopen preference for project \"{}\"...",
             project.name
@@ -1347,12 +1353,14 @@ impl App {
             self.set_error(format!("Could not find project \"{project_name}\"."));
             return Ok(());
         }
-        self.engine
-            .spawn_project_persistence(ProjectPersistenceAction::UpdateStartupCommand {
+        let reaction = self.engine.apply(Command::PersistProject(Box::new(
+            ProjectPersistenceAction::UpdateStartupCommand {
                 project_id,
                 project_name: project_name.clone(),
                 startup_command: (!command.is_empty()).then_some(command),
-            });
+            },
+        )))?;
+        self.apply_reaction(reaction);
         self.set_busy(format!(
             "Saving startup command for project \"{project_name}\"..."
         ));
@@ -1445,12 +1453,14 @@ impl App {
             self.set_error(format!("Could not find project \"{project_name}\"."));
             return Ok(());
         }
-        self.engine
-            .spawn_project_persistence(ProjectPersistenceAction::UpdateEnv {
+        let reaction = self.engine.apply(Command::PersistProject(Box::new(
+            ProjectPersistenceAction::UpdateEnv {
                 project_id,
                 project_name: project_name.clone(),
                 env,
-            });
+            },
+        )))?;
+        self.apply_reaction(reaction);
         self.set_busy(format!(
             "Saving environment variables for project \"{project_name}\"..."
         ));
@@ -1782,11 +1792,13 @@ impl App {
             self.set_error("Delete all agents in this project first.");
             return Ok(());
         }
-        self.engine
-            .spawn_project_persistence(ProjectPersistenceAction::Remove {
+        let reaction = self.engine.apply(Command::PersistProject(Box::new(
+            ProjectPersistenceAction::Remove {
                 project_id: project.id.clone(),
                 project_name: project.name.clone(),
-            });
+            },
+        )))?;
+        self.apply_reaction(reaction);
         self.set_busy(format!(
             "Removing project \"{}\" from workspace...",
             project.name
@@ -1845,11 +1857,13 @@ impl App {
                 self.do_delete_session(&session_id, true)?;
             }
         }
-        self.engine
-            .spawn_project_persistence(ProjectPersistenceAction::Delete {
+        let reaction = self.engine.apply(Command::PersistProject(Box::new(
+            ProjectPersistenceAction::Delete {
                 project_id: project.id.clone(),
                 project_name: project.name.clone(),
-            });
+            },
+        )))?;
+        self.apply_reaction(reaction);
         self.set_busy(format!(
             "Finishing deletion for project \"{}\" after removing its agents...",
             project.name

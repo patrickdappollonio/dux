@@ -7,6 +7,7 @@ use crate::engine::Engine;
 use crate::engine::events::{
     BeginDeleteSessionView, DoDeleteSessionView, EventReaction, FinishDeleteSessionView,
 };
+use crate::worker::ProjectPersistenceAction;
 
 /// What the Engine should do. Variants are payload-carrying — the caller
 /// computes the context (selected session id, prompt state, etc.) and
@@ -34,6 +35,14 @@ pub enum Command {
         session_id: String,
         delete_worktree: bool,
     },
+    /// Persist a project mutation via the background worker. Fire-and-
+    /// forget — the worker posts `WorkerEvent::ProjectPersistenceCompleted`
+    /// back, which surfaces as `EventReaction::ProjectPersistenceOutcome`
+    /// in the next `drain_events` pass.
+    ///
+    /// Boxed to keep the enum size within the clippy `large_enum_variant`
+    /// threshold (`ProjectPersistenceAction` is 248 bytes unboxed).
+    PersistProject(Box<ProjectPersistenceAction>),
 }
 
 impl Engine {
@@ -90,6 +99,10 @@ impl Engine {
                         delete_worktree,
                     },
                 )))
+            }
+            Command::PersistProject(action) => {
+                self.spawn_project_persistence(*action);
+                Ok(EventReaction::Nothing)
             }
         }
     }

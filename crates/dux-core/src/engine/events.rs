@@ -2120,4 +2120,33 @@ mod tests {
             .unwrap();
         assert!(matches!(reaction, EventReaction::Nothing));
     }
+
+    #[test]
+    fn apply_persist_project_returns_nothing_and_dispatches_worker() {
+        use crate::worker::ProjectPersistenceAction;
+        let (mut engine, _tmp) = test_engine();
+        let project = sample_project("p1", "/tmp/p1");
+        let action = ProjectPersistenceAction::Add {
+            project,
+            status_message: "added".to_string(),
+        };
+        let reaction = engine
+            .apply(crate::engine::Command::PersistProject(Box::new(action)))
+            .expect("apply succeeds");
+        assert!(matches!(reaction, EventReaction::Nothing));
+        // Drain the worker channel to confirm ProjectPersistenceCompleted was
+        // posted. The worker only does an in-memory SQLite write so it returns
+        // quickly; a 2-second timeout is generous.
+        let event = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("worker posted a result");
+        assert!(matches!(
+            event,
+            WorkerEvent::ProjectPersistenceCompleted {
+                action: ProjectPersistenceAction::Add { .. },
+                ..
+            }
+        ));
+    }
 }
