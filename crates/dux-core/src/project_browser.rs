@@ -63,6 +63,16 @@ fn canonical_or_original(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Resolve the leading branch for a project. Prefer the remote's default
+/// branch (origin/HEAD) when available, otherwise fall back to whatever
+/// branch is currently checked out. Pure helper — only touches git plumbing.
+pub fn leading_branch_for_project(path: &Path, current_branch: &str) -> String {
+    match git::remote_default_branch(path) {
+        Some(default) => default,
+        None => current_branch.to_string(),
+    }
+}
+
 pub fn classify_project_worktrees(
     project: &Project,
     paths: &DuxPaths,

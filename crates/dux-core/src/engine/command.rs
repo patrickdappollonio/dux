@@ -3,12 +3,16 @@
 //! TUI key or a web-UI click is named here and dispatched through
 //! `Engine::apply`.
 
+use std::path::PathBuf;
+
 use crate::engine::Engine;
 use crate::engine::events::{
     BeginDeleteSessionView, DispatchAgentLaunchView, DoDeleteSessionView, EventReaction,
     FinishDeleteSessionView, StatusUpdate,
 };
-use crate::worker::{AgentLaunchRequest, CreateAgentRequest, ProjectPersistenceAction};
+use crate::worker::{
+    AgentLaunchRequest, CreateAgentRequest, ProjectPersistenceAction, PullTarget, WorkerEvent,
+};
 
 /// What the Engine should do. Variants are payload-carrying — the caller
 /// computes the context (selected session id, prompt state, etc.) and
@@ -68,6 +72,51 @@ pub enum Command {
     /// Boxed to keep the enum size within the clippy `large_enum_variant`
     /// threshold (`AgentLaunchRequest` carries `AgentSession` + env vector).
     DispatchAgentLaunch { request: Box<AgentLaunchRequest> },
+
+    /// Stage a single file. Synchronous git call (microseconds for the
+    /// typical case). Returns `EventReaction::Nothing` on success; an `Err`
+    /// propagates to the App caller which surfaces it.
+    StageFile {
+        worktree_path: PathBuf,
+        path: String,
+    },
+
+    /// Unstage a single file. Same shape as `StageFile` — synchronous git
+    /// call, `EventReaction::Nothing` on success, `Err` on failure.
+    UnstageFile {
+        worktree_path: PathBuf,
+        path: String,
+    },
+
+    /// Run `git commit -m <message>` synchronously. Returns
+    /// `EventReaction::Status(Info(success_message))` on success or
+    /// `EventReaction::Status(Error("Commit failed: <e>"))` on failure. The
+    /// caller pre-formats `success_message` because it depends on
+    /// view-side bindings the engine cannot resolve.
+    CommitChanges {
+        worktree_path: PathBuf,
+        message: String,
+        success_message: String,
+    },
+
+    /// Spawn a `git push` worker. Returns `EventReaction::Status(Busy("Pushing
+    /// to remote\u{2026}"))` immediately; completion is reported via
+    /// `WorkerEvent::PushCompleted`.
+    Push { worktree_path: PathBuf },
+
+    /// Spawn a `git pull` worker for either a project's leading branch or
+    /// the current session's branch. Returns
+    /// `EventReaction::Status(Busy(busy_message))` if the in-flight guard
+    /// accepted the request, or `EventReaction::Status(Warning(
+    /// already_running_message))` if another pull is already running for
+    /// the same repo path. Completion is reported via
+    /// `WorkerEvent::PullCompleted`.
+    Pull {
+        repo_path: PathBuf,
+        target: PullTarget,
+        busy_message: String,
+        already_running_message: String,
+    },
 }
 
 impl Engine {
@@ -176,6 +225,96 @@ impl Engine {
                         status: None,
                     },
                 )))
+            }
+
+            Command::StageFile {
+                worktree_path,
+                path,
+            } => {
+                crate::git::stage_file(&worktree_path, &path)?;
+                Ok(EventReaction::Nothing)
+            }
+
+            Command::UnstageFile {
+                worktree_path,
+                path,
+            } => {
+                crate::git::unstage_file(&worktree_path, &path)?;
+                Ok(EventReaction::Nothing)
+            }
+
+            Command::CommitChanges {
+                worktree_path,
+                message,
+                success_message,
+            } => match crate::git::commit(&worktree_path, &message) {
+                Ok(_) => Ok(EventReaction::Status(StatusUpdate::info(success_message))),
+                Err(e) => Ok(EventReaction::Status(StatusUpdate::error(format!(
+                    "Commit failed: {e}"
+                )))),
+            },
+
+            Command::Push { worktree_path } => {
+                let tx = self.worker_tx.clone();
+                std::thread::spawn(move || {
+                    let result = crate::git::push(&worktree_path)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(WorkerEvent::PushCompleted(result));
+                });
+                Ok(EventReaction::Status(StatusUpdate::busy(
+                    "Pushing to remote\u{2026}",
+                )))
+            }
+
+            Command::Pull {
+                repo_path,
+                target,
+                busy_message,
+                already_running_message,
+            } => {
+                let repo_key = repo_path.to_string_lossy().into_owned();
+                if !self.pulls_in_flight.insert(repo_key.clone()) {
+                    return Ok(EventReaction::Status(StatusUpdate::warning(
+                        already_running_message,
+                    )));
+                }
+                let tx = self.worker_tx.clone();
+                std::thread::spawn(move || {
+                    let result = match &target {
+                        PullTarget::Project { leading_branch, .. } => {
+                            let leading_branch = match leading_branch.clone() {
+                                Some(branch) => Ok(branch),
+                                None => crate::git::current_branch(&repo_path).map(|branch| {
+                                    crate::project_browser::leading_branch_for_project(
+                                        &repo_path, &branch,
+                                    )
+                                }),
+                            };
+                            leading_branch
+                                .and_then(|branch| {
+                                    crate::git::switch_branch_if_needed(&repo_path, &branch)?;
+                                    if crate::git::has_tracked_changes(&repo_path)? {
+                                        return Err(anyhow::anyhow!(
+                                            "Refresh blocked because the source checkout has uncommitted changes."
+                                        ));
+                                    }
+                                    crate::git::pull_branch(&repo_path, &branch)
+                                })
+                                .map(|_| crate::git::current_branch(&repo_path).ok())
+                                .map_err(|e| e.to_string())
+                        }
+                        PullTarget::Session => crate::git::pull_current_branch(&repo_path)
+                            .map(|_| None)
+                            .map_err(|e| e.to_string()),
+                    };
+                    let _ = tx.send(WorkerEvent::PullCompleted {
+                        repo_path: repo_key,
+                        target,
+                        result,
+                    });
+                });
+                Ok(EventReaction::Status(StatusUpdate::busy(busy_message)))
             }
         }
     }

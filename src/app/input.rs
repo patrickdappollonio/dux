@@ -1,6 +1,8 @@
 use super::components::{ButtonPressedTarget, PressedButton};
 use super::*;
 use chrono::Local;
+use dux_core::engine::{Command, EventReaction, StatusUpdate};
+use dux_core::statusline::StatusTone;
 const MOUSE_WHEEL_LINES: usize = 3;
 const MIN_LEFT_WIDTH_PCT: u16 = 14;
 const MAX_LEFT_WIDTH_PCT: u16 = 38;
@@ -1187,15 +1189,18 @@ impl App {
         };
         let Some(file) = file else { return Ok(()) };
         let path = file.path.clone();
-        match self.right_section {
-            RightSection::Unstaged => {
-                git::stage_file(&worktree, &path)?;
-            }
-            RightSection::Staged => {
-                git::unstage_file(&worktree, &path)?;
-            }
-            RightSection::CommitInput => {}
-        }
+        let reaction = match self.right_section {
+            RightSection::Unstaged => self.engine.apply(Command::StageFile {
+                worktree_path: worktree,
+                path,
+            })?,
+            RightSection::Staged => self.engine.apply(Command::UnstageFile {
+                worktree_path: worktree,
+                path,
+            })?,
+            RightSection::CommitInput => return Ok(()),
+        };
+        self.apply_reaction(reaction);
         self.reload_changed_files();
         // If the section we were in is now empty, move to the other one.
         if self.right_section == RightSection::Staged && self.engine.staged_files.is_empty() {
@@ -1289,15 +1294,28 @@ impl App {
             return Ok(());
         };
         let worktree = PathBuf::from(&session.worktree_path);
-        match git::commit(&worktree, &self.commit_input.text) {
-            Ok(_) => {
-                self.commit_input.clear();
-                let push_key = self.bindings.label_for(Action::PushToRemote);
-                let ai_key = self.bindings.label_for(Action::GenerateCommitMessage);
-                self.set_info(format!("Changes committed successfully. Press {push_key} to push to remote, or {ai_key} to generate an AI message."));
-                self.reload_changed_files();
-            }
-            Err(e) => self.set_error(format!("Commit failed: {e}")),
+        let message = self.commit_input.text.clone();
+        let push_key = self.bindings.label_for(Action::PushToRemote);
+        let ai_key = self.bindings.label_for(Action::GenerateCommitMessage);
+        let success_message = format!(
+            "Changes committed successfully. Press {push_key} to push to remote, or {ai_key} to generate an AI message."
+        );
+        let reaction = self.engine.apply(Command::CommitChanges {
+            worktree_path: worktree,
+            message,
+            success_message,
+        })?;
+        let success = matches!(
+            &reaction,
+            EventReaction::Status(StatusUpdate {
+                tone: StatusTone::Info,
+                ..
+            })
+        );
+        self.apply_reaction(reaction);
+        if success {
+            self.commit_input.clear();
+            self.reload_changed_files();
         }
         Ok(())
     }
@@ -1308,61 +1326,11 @@ impl App {
             return Ok(());
         };
         let worktree = PathBuf::from(&session.worktree_path);
-        let tx = self.engine.worker_tx.clone();
-        self.set_busy("Pushing to remote…");
-        thread::spawn(move || {
-            let result = git::push(&worktree).map(|_| ()).map_err(|e| e.to_string());
-            let _ = tx.send(WorkerEvent::PushCompleted(result));
-        });
+        let reaction = self.engine.apply(Command::Push {
+            worktree_path: worktree,
+        })?;
+        self.apply_reaction(reaction);
         Ok(())
-    }
-
-    pub(crate) fn start_pull(
-        &mut self,
-        repo_path: PathBuf,
-        target: PullTarget,
-        busy_message: impl Into<String>,
-        already_running_message: impl Into<String>,
-    ) {
-        let repo_key = repo_path.to_string_lossy().into_owned();
-        if !self.engine.pulls_in_flight.insert(repo_key.clone()) {
-            self.set_warning(already_running_message);
-            return;
-        }
-
-        let tx = self.engine.worker_tx.clone();
-        self.set_busy(busy_message);
-        thread::spawn(move || {
-            let result = match &target {
-                PullTarget::Project { leading_branch, .. } => {
-                    let leading_branch = match leading_branch.clone() {
-                        Some(branch) => Ok(branch),
-                        None => git::current_branch(&repo_path)
-                            .map(|branch| leading_branch_for_project(&repo_path, &branch)),
-                    };
-                    leading_branch
-                        .and_then(|branch| {
-                            git::switch_branch_if_needed(&repo_path, &branch)?;
-                            if git::has_tracked_changes(&repo_path)? {
-                                return Err(anyhow::anyhow!(
-                                    "Refresh blocked because the source checkout has uncommitted changes."
-                                ));
-                            }
-                            git::pull_branch(&repo_path, &branch)
-                        })
-                        .map(|_| git::current_branch(&repo_path).ok())
-                        .map_err(|e| e.to_string())
-                }
-                PullTarget::Session => git::pull_current_branch(&repo_path)
-                    .map(|_| None)
-                    .map_err(|e| e.to_string()),
-            };
-            let _ = tx.send(WorkerEvent::PullCompleted {
-                repo_path: repo_key,
-                target,
-                result,
-            });
-        });
     }
 
     fn pull_from_remote(&mut self) -> Result<()> {
@@ -1370,12 +1338,15 @@ impl App {
             self.set_error("Select a session first.");
             return Ok(());
         };
-        self.start_pull(
-            PathBuf::from(&session.worktree_path),
-            PullTarget::Session,
-            "Pulling latest changes from remote…",
-            "Pull already in progress for this worktree. Wait for the current pull to finish.",
-        );
+        let reaction = self.engine.apply(Command::Pull {
+            repo_path: PathBuf::from(&session.worktree_path),
+            target: PullTarget::Session,
+            busy_message: "Pulling latest changes from remote\u{2026}".to_string(),
+            already_running_message:
+                "Pull already in progress for this worktree. Wait for the current pull to finish."
+                    .to_string(),
+        })?;
+        self.apply_reaction(reaction);
         Ok(())
     }
 

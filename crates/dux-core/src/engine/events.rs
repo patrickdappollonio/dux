@@ -2232,4 +2232,38 @@ mod tests {
         assert!(!view.launched);
         assert!(view.status.is_some());
     }
+
+    #[test]
+    fn apply_stage_file_propagates_git_error_for_missing_worktree() {
+        let (mut engine, _tmp) = test_engine();
+        let result = engine.apply(crate::engine::Command::StageFile {
+            worktree_path: PathBuf::from("/nonexistent/worktree"),
+            path: "missing.rs".to_string(),
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn apply_pull_rejects_concurrent_pulls_for_same_repo() {
+        let (mut engine, _tmp) = test_engine();
+        let repo_path = PathBuf::from("/tmp/dummy-repo");
+        engine
+            .pulls_in_flight
+            .insert(repo_path.to_string_lossy().into_owned());
+        let reaction = engine
+            .apply(crate::engine::Command::Pull {
+                repo_path: repo_path.clone(),
+                target: PullTarget::Session,
+                busy_message: "busy".to_string(),
+                already_running_message: "Pull already in progress".to_string(),
+            })
+            .expect("apply succeeds");
+        assert!(matches!(
+            reaction,
+            EventReaction::Status(StatusUpdate {
+                tone: StatusTone::Warning,
+                ..
+            })
+        ));
+    }
 }

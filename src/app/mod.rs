@@ -639,12 +639,7 @@ pub(crate) enum PromptState {
     },
 }
 
-pub(crate) fn leading_branch_for_project(path: &Path, current_branch: &str) -> String {
-    match git::remote_default_branch(path) {
-        Some(default) => default,
-        None => current_branch.to_string(),
-    }
-}
+pub(crate) use dux_core::project_browser::leading_branch_for_project;
 
 #[derive(Clone, Debug)]
 pub(crate) enum VisualRow {

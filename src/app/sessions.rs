@@ -687,19 +687,20 @@ impl App {
             return Ok(());
         }
         logger::info(&format!("refreshing project {}", project.path));
-        self.start_pull(
-            PathBuf::from(&project.path),
-            PullTarget::Project {
+        let reaction = self.engine.apply(Command::Pull {
+            repo_path: PathBuf::from(&project.path),
+            target: PullTarget::Project {
                 project_id: project.id,
                 project_name: project.name.clone(),
                 leading_branch: project.leading_branch.clone(),
             },
-            format!("Refreshing project \"{}\" from remote…", project.name),
-            format!(
+            busy_message: format!("Refreshing project \"{}\" from remote\u{2026}", project.name),
+            already_running_message: format!(
                 "Project refresh already in progress for \"{}\". Wait for the current pull to finish.",
                 project.name,
             ),
-        );
+        })?;
+        self.apply_reaction(reaction);
         Ok(())
     }
 
