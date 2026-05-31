@@ -2790,4 +2790,51 @@ mod tests {
             "no worker event should arrive when panic_event is None",
         );
     }
+
+    // ── spawn_loop_worker primitive ───────────────────────────────────────
+
+    #[test]
+    fn loop_worker_continues_after_iteration_panic() {
+        use crate::engine::{LoopControl, LoopWorkerSpec};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Documents the behaviour that distinguishes the loop primitive from
+        // the one-shot ones: a panicking iteration must NOT kill the
+        // long-running watcher. The body panics on iteration 0, returns
+        // `Break` on iteration 1, and would return `Continue` thereafter.
+        // The test passes if iteration 1 runs at all — that is only possible
+        // if the panic on iteration 0 was caught and the loop continued.
+        let (engine, _tmp) = test_engine();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_for_body = Arc::clone(&counter);
+        engine.spawn_loop_worker(
+            LoopWorkerSpec {
+                label: "panic-loop-test".into(),
+            },
+            move |_tx| {
+                let n = counter_for_body.fetch_add(1, Ordering::Relaxed);
+                if n == 0 {
+                    panic!("first iteration panics");
+                }
+                if n == 1 {
+                    LoopControl::Break
+                } else {
+                    LoopControl::Continue
+                }
+            },
+        );
+
+        // Wait until the second iteration has run.
+        for _ in 0..200 {
+            if counter.load(Ordering::Relaxed) >= 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            counter.load(Ordering::Relaxed) >= 2,
+            "loop did not continue past panic; counter = {}",
+            counter.load(Ordering::Relaxed),
+        );
+    }
 }

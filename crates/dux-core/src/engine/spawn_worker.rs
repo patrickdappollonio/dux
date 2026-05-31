@@ -246,3 +246,72 @@ impl Engine {
         }
     }
 }
+
+/// Specification for a single long-running loop-worker spawn. Used by
+/// `Engine::spawn_loop_worker`, which owns the outer loop and per-iteration
+/// panic recovery. The body closure runs once per loop tick and decides
+/// whether the loop continues or exits.
+pub struct LoopWorkerSpec {
+    /// Short human-readable label. Used as a thread-name suffix and as the
+    /// log prefix on any per-iteration panic.
+    pub label: String,
+}
+
+/// Per-iteration return value for a `spawn_loop_worker` body. `Continue`
+/// keeps the watcher running for another iteration; `Break` exits the loop
+/// (typically because the receiver was dropped or a kill switch fired).
+pub enum LoopControl {
+    Continue,
+    Break,
+}
+
+impl Engine {
+    /// Spawn a long-running loop worker that survives per-iteration panics.
+    ///
+    /// The primitive owns the outer `loop`: each iteration runs `body(&tx)`
+    /// inside `catch_unwind`. On `Ok(Continue)` the loop runs again; on
+    /// `Ok(Break)` it exits; on a caught panic the primitive logs at `error`
+    /// level (so repeated panics surface in `dux.log`) and continues — one
+    /// bad iteration must not kill the watcher.
+    ///
+    /// Takes `&self`, not `&mut self`, because loop workers do not touch
+    /// in-flight state and callers commonly spawn them at bootstrap.
+    pub fn spawn_loop_worker<F>(&self, spec: LoopWorkerSpec, mut body: F)
+    where
+        F: FnMut(&Sender<WorkerEvent>) -> LoopControl + Send + 'static,
+    {
+        let worker_tx = self.worker_tx.clone();
+        let label = spec.label;
+        let label_for_thread = label.clone();
+
+        let spawn_result = thread::Builder::new()
+            .name(format!("dux-loop-{label_for_thread}"))
+            .spawn(move || {
+                loop {
+                    // AssertUnwindSafe: the body's captured state is owned by
+                    // this thread and is not shared with the main engine. A
+                    // panic strands at most that owned state; we log and run
+                    // the next iteration so a transient bad tick cannot kill
+                    // the watcher.
+                    let result =
+                        std::panic::catch_unwind(AssertUnwindSafe(|| body(&worker_tx)));
+                    match result {
+                        Ok(LoopControl::Continue) => continue,
+                        Ok(LoopControl::Break) => break,
+                        Err(payload) => {
+                            let reason = format_panic_payload(payload);
+                            crate::logger::error(&format!(
+                                "spawn_loop_worker[{label}] iteration panicked, continuing: {reason}",
+                            ));
+                        }
+                    }
+                }
+            });
+
+        if let Err(err) = spawn_result {
+            crate::logger::error(&format!(
+                "spawn_loop_worker[{label_for_thread}] failed to spawn thread: {err}",
+            ));
+        }
+    }
+}

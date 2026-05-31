@@ -18,7 +18,7 @@ pub use events::{
     ProjectPersistenceView, StatusUpdate,
 };
 pub use in_flight::{InFlightKey, InFlightSet};
-pub use spawn_worker::{BackgroundWorkerSpec, CommandWorkerSpec};
+pub use spawn_worker::{BackgroundWorkerSpec, CommandWorkerSpec, LoopControl, LoopWorkerSpec};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -251,15 +251,17 @@ impl Engine {
         if interval_secs == 0 {
             return; // disabled by config
         }
-        let tx = self.worker_tx.clone();
+        let interval = Duration::from_secs(u64::from(interval_secs));
         let sessions = Arc::clone(&self.branch_sync_sessions);
-        thread::spawn(move || {
-            let interval = Duration::from_secs(u64::from(interval_secs));
-            loop {
+        self.spawn_loop_worker(
+            LoopWorkerSpec {
+                label: "branch-sync".into(),
+            },
+            move |tx| {
                 thread::sleep(interval);
                 let snapshot = match sessions.lock() {
                     Ok(guard) => guard.clone(),
-                    Err(_) => continue,
+                    Err(_) => return LoopControl::Continue,
                 };
                 let mut updates = Vec::new();
                 for entry in &snapshot {
@@ -270,10 +272,11 @@ impl Engine {
                     }
                 }
                 if !updates.is_empty() && tx.send(WorkerEvent::BranchSyncReady(updates)).is_err() {
-                    break; // receiver dropped, app is shutting down
+                    return LoopControl::Break; // receiver dropped, app is shutting down
                 }
-            }
-        });
+                LoopControl::Continue
+            },
+        );
     }
 
     pub fn spawn_refs_watcher(&mut self) {
@@ -440,11 +443,13 @@ impl Engine {
     }
 
     pub fn spawn_changed_files_poller(&self) {
-        let tx = self.worker_tx.clone();
         let watched = Arc::clone(&self.watched_worktree);
         let has_agent = Arc::clone(&self.has_active_processes);
-        thread::spawn(move || {
-            loop {
+        self.spawn_loop_worker(
+            LoopWorkerSpec {
+                label: "changed-files-poller".into(),
+            },
+            move |tx| {
                 let interval = if has_agent.load(Ordering::Relaxed) {
                     Duration::from_secs(2)
                 } else {
@@ -458,10 +463,11 @@ impl Engine {
                         .send(WorkerEvent::ChangedFilesReady { staged, unstaged })
                         .is_err()
                 {
-                    break; // receiver dropped, app is shutting down
+                    return LoopControl::Break; // receiver dropped, app is shutting down
                 }
-            }
-        });
+                LoopControl::Continue
+            },
+        );
     }
 
     pub fn spawn_browser_entries(&mut self, dir: &Path) {
@@ -555,23 +561,28 @@ impl Engine {
     // -- GitHub PR integration workers --
 
     pub fn spawn_pr_sync_worker(&self) {
-        let tx = self.worker_tx.clone();
         let sessions = Arc::clone(&self.pr_sync_sessions);
         let enabled = Arc::clone(&self.pr_sync_enabled);
+        // Signal that the worker is running BEFORE spawning so the kill switch
+        // observes the live state on first iteration.
         enabled.store(true, Ordering::Relaxed);
-        thread::spawn(move || {
-            let interval = Duration::from_secs(45);
-            loop {
+        self.spawn_loop_worker(
+            LoopWorkerSpec {
+                label: "pr-sync".into(),
+            },
+            move |tx| {
+                let interval = Duration::from_secs(45);
                 thread::sleep(interval);
                 if !enabled.load(Ordering::Relaxed) {
-                    break;
+                    return LoopControl::Break;
                 }
                 let results = crate::gh::run_pr_sync(&sessions);
                 if !results.is_empty() && tx.send(WorkerEvent::PrStatusReady(results)).is_err() {
-                    break;
+                    return LoopControl::Break;
                 }
-            }
-        });
+                LoopControl::Continue
+            },
+        );
     }
 
     pub fn spawn_initial_pr_refresh(&mut self) {
