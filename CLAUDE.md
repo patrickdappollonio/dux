@@ -75,7 +75,7 @@ The current app provides:
 
 ## App Module Structure
 
-The `src/app/` directory splits the TUI into focused submodules. Each file contains an `impl App` block for a specific concern:
+The `crates/dux-tui/src/app/` directory splits the TUI into focused submodules. Each file contains an `impl App` block for a specific concern:
 
 - **`mod.rs`** — `App` struct, types, enums, bootstrap, run loop, and state helpers. Read this first to understand the data model.
 - **`input.rs`** — All keyboard/mouse event handling (`handle_key`, `handle_left_key`, etc.).
@@ -133,7 +133,7 @@ When shelling out to git, **always ensure the command output is immune to user-s
 
 ## Recommendations For Editing
 
-- Follow the existing `src/app/` submodule pattern when adding new concerns. If a new feature area grows beyond ~200 lines, extract it into its own submodule with `use super::*;` and an `impl App` block.
+- Follow the existing `crates/dux-tui/src/app/` submodule pattern when adding new concerns. If a new feature area grows beyond ~200 lines, extract it into its own submodule with `use super::*;` and an `impl App` block.
 - Keep changes scoped to one submodule at a time; avoid cross-cutting edits across multiple app submodules in the same PR when possible.
 - Use `theme.rs` constants for all colors and styles — never use raw `Color::*` values in rendering code.
 - When adding new UI elements, reuse existing semantic color names in `Theme` when they fit. Define a new semantic color only when no existing token fits, and update every supported theme/default mapping in the same change. `theme.rs` is the single source of truth for visual styling.
