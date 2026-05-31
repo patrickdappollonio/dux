@@ -2759,4 +2759,35 @@ mod tests {
         // No further events should be queued.
         assert!(engine.worker_rx.try_recv().is_err());
     }
+
+    // ── spawn_background_worker primitive ─────────────────────────────────
+
+    #[test]
+    fn background_worker_logs_panic_without_event_when_panic_event_none() {
+        use crate::engine::BackgroundWorkerSpec;
+
+        // Documents the log-only panic path used by background workers whose
+        // completion event has no failure variant (e.g. the PR-refresh
+        // workers and `spawn_project_branch_status_checks`). The worker
+        // panics; the primitive must not synthesise an event onto the
+        // worker channel.
+        let (mut engine, _tmp) = test_engine();
+        engine.spawn_background_worker(
+            BackgroundWorkerSpec {
+                label: "panic-no-event".into(),
+                in_flight_key: None,
+                panic_event: None,
+            },
+            |_tx| panic!("boom"),
+        );
+
+        // Wait long enough for the spawned thread to run and panic. The
+        // primitive's catch_unwind catches the unwinding and logs; with
+        // `panic_event: None` nothing is sent on the channel.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            engine.worker_rx.try_recv().is_err(),
+            "no worker event should arrive when panic_event is None",
+        );
+    }
 }

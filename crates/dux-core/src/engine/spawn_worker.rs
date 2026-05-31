@@ -150,3 +150,99 @@ impl Engine {
         }
     }
 }
+
+/// Specification for a single one-shot background-worker spawn. Used by
+/// `Engine::spawn_background_worker`, which has no caller-facing reaction
+/// (background work is fire-and-forget) and no busy-status delivery
+/// (background workers run silently). Panic safety still applies — see
+/// `panic_event`.
+pub struct BackgroundWorkerSpec {
+    /// Short human-readable label. Used as a thread-name suffix and as the
+    /// log prefix on any panic.
+    pub label: String,
+    /// Most background workers have no in-flight tracking. The option exists
+    /// for the few that legitimately need single-instance semantics.
+    pub in_flight_key: Option<InFlightKey>,
+    /// Posted on `worker_tx` if the worker thread panics, so
+    /// `process_worker_event` can clear the in-flight key through its
+    /// existing failure handler. `None` means a panic is logged but no event
+    /// is synthesised — appropriate for workers whose completion event has
+    /// no failure variant (or no completion event at all).
+    pub panic_event: Option<Box<dyn FnOnce(String) -> WorkerEvent + Send>>,
+}
+
+impl Engine {
+    /// Spawn a one-shot background worker with panic safety and optional
+    /// in-flight tracking. See `BackgroundWorkerSpec` for the per-site
+    /// fields.
+    ///
+    /// Unlike `spawn_command_worker`, this primitive returns `()` because
+    /// background work is fire-and-forget: there is no caller-side
+    /// `EventReaction` to apply. A synchronous spawn failure is logged and
+    /// the in-flight key (if any) is cleared so a future retry can proceed.
+    pub fn spawn_background_worker<F>(&mut self, spec: BackgroundWorkerSpec, job: F)
+    where
+        F: FnOnce(Sender<WorkerEvent>) + Send + 'static,
+    {
+        // 1. In-flight guard. Background workers silently skip when the key
+        //    is already present — they have no caller to surface a warning to.
+        if let Some(ref key) = spec.in_flight_key
+            && self.is_in_flight(key)
+        {
+            crate::logger::debug(&format!(
+                "spawn_background_worker[{}] skipped: {key:?} already in flight",
+                spec.label,
+            ));
+            return;
+        }
+        if let Some(ref key) = spec.in_flight_key {
+            self.mark_in_flight(key.clone());
+        }
+
+        // 2. Spawn with catch_unwind. On panic, log and post the synthesised
+        //    completion event (if any) so the existing handler clears the
+        //    in-flight key through the same path it would for a normal
+        //    failure.
+        let worker_tx = self.worker_tx.clone();
+        let label = spec.label.clone();
+        let panic_event = spec.panic_event;
+        let key_for_panic = spec.in_flight_key.clone();
+        let label_for_thread = label.clone();
+        let label_for_log = label.clone();
+        let tx_for_job = worker_tx.clone();
+
+        let spawn_result = thread::Builder::new()
+            .name(format!("dux-bg-{label_for_thread}"))
+            .spawn(move || {
+                // AssertUnwindSafe: same rationale as `spawn_command_worker`.
+                // The job's captured state is owned by this thread; any
+                // in-flight key it left set is restored by the synthesised
+                // completion event posted below.
+                let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    job(tx_for_job);
+                }));
+                if let Err(payload) = result {
+                    let reason = format_panic_payload(payload);
+                    crate::logger::error(&format!(
+                        "spawn_background_worker[{label_for_log}] panicked: {reason}",
+                    ));
+                    if let Some(builder) = panic_event {
+                        let _ = worker_tx.send(builder(reason));
+                    } else if let Some(key) = key_for_panic {
+                        crate::logger::error(&format!(
+                            "spawn_background_worker[{label_for_log}] has no panic_event; in-flight key {key:?} will not be cleared automatically",
+                        ));
+                    }
+                }
+            });
+
+        if let Err(err) = spawn_result {
+            if let Some(key) = &spec.in_flight_key {
+                self.clear_in_flight(key);
+            }
+            crate::logger::error(&format!(
+                "spawn_background_worker[{label}] failed to spawn thread: {err}",
+            ));
+        }
+    }
+}

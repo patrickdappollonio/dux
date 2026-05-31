@@ -18,7 +18,7 @@ pub use events::{
     ProjectPersistenceView, StatusUpdate,
 };
 pub use in_flight::{InFlightKey, InFlightSet};
-pub use spawn_worker::CommandWorkerSpec;
+pub use spawn_worker::{BackgroundWorkerSpec, CommandWorkerSpec};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -125,70 +125,82 @@ impl Engine {
         self.in_flight.contains(key)
     }
 
-    pub fn spawn_project_persistence(&self, action: ProjectPersistenceAction) {
+    pub fn spawn_project_persistence(&mut self, action: ProjectPersistenceAction) {
         let db_path = self.paths.sessions_db_path.clone();
-        let tx = self.worker_tx.clone();
-        thread::spawn(move || {
-            let result = (|| -> anyhow::Result<()> {
-                let store = SessionStore::open(&db_path)?;
-                match &action {
-                    ProjectPersistenceAction::Add { project, .. } => {
-                        store.upsert_project(&ProjectConfig {
-                            id: project.id.clone(),
-                            path: project.path.clone(),
-                            name: Some(project.name.clone()),
-                            default_provider: project
-                                .explicit_default_provider
-                                .as_ref()
-                                .map(|provider| provider.as_str().to_string()),
-                            leading_branch: project.leading_branch.clone(),
-                            auto_reopen_agents: project.auto_reopen_agents,
-                            startup_command: project.startup_command.clone(),
-                            env: project.env.clone(),
-                        })?;
+        let action_for_panic = action.clone();
+        self.spawn_background_worker(
+            BackgroundWorkerSpec {
+                label: "project-persistence".into(),
+                in_flight_key: None,
+                panic_event: Some(Box::new(move |reason| {
+                    WorkerEvent::ProjectPersistenceCompleted {
+                        action: action_for_panic,
+                        result: Err(format!("Project-persistence worker panicked: {reason}")),
                     }
-                    ProjectPersistenceAction::Remove { project_id, .. }
-                    | ProjectPersistenceAction::Delete { project_id, .. } => {
-                        store.delete_project(project_id)?;
-                    }
-                    ProjectPersistenceAction::UpdateDefaultProvider {
-                        project_id,
-                        provider,
-                        ..
-                    } => {
-                        store.update_project_default_provider(
+                })),
+            },
+            move |tx| {
+                let result = (|| -> anyhow::Result<()> {
+                    let store = SessionStore::open(&db_path)?;
+                    match &action {
+                        ProjectPersistenceAction::Add { project, .. } => {
+                            store.upsert_project(&ProjectConfig {
+                                id: project.id.clone(),
+                                path: project.path.clone(),
+                                name: Some(project.name.clone()),
+                                default_provider: project
+                                    .explicit_default_provider
+                                    .as_ref()
+                                    .map(|provider| provider.as_str().to_string()),
+                                leading_branch: project.leading_branch.clone(),
+                                auto_reopen_agents: project.auto_reopen_agents,
+                                startup_command: project.startup_command.clone(),
+                                env: project.env.clone(),
+                            })?;
+                        }
+                        ProjectPersistenceAction::Remove { project_id, .. }
+                        | ProjectPersistenceAction::Delete { project_id, .. } => {
+                            store.delete_project(project_id)?;
+                        }
+                        ProjectPersistenceAction::UpdateDefaultProvider {
                             project_id,
-                            provider.as_ref().map(|provider| provider.as_str()),
-                        )?;
-                    }
-                    ProjectPersistenceAction::UpdateAutoReopen {
-                        project_id,
-                        auto_reopen_agents,
-                        ..
-                    } => {
-                        store.update_project_auto_reopen(project_id, *auto_reopen_agents)?;
-                    }
-                    ProjectPersistenceAction::UpdateStartupCommand {
-                        project_id,
-                        startup_command,
-                        ..
-                    } => {
-                        store.update_project_startup_command(
+                            provider,
+                            ..
+                        } => {
+                            store.update_project_default_provider(
+                                project_id,
+                                provider.as_ref().map(|provider| provider.as_str()),
+                            )?;
+                        }
+                        ProjectPersistenceAction::UpdateAutoReopen {
                             project_id,
-                            startup_command.as_deref(),
-                        )?;
+                            auto_reopen_agents,
+                            ..
+                        } => {
+                            store.update_project_auto_reopen(project_id, *auto_reopen_agents)?;
+                        }
+                        ProjectPersistenceAction::UpdateStartupCommand {
+                            project_id,
+                            startup_command,
+                            ..
+                        } => {
+                            store.update_project_startup_command(
+                                project_id,
+                                startup_command.as_deref(),
+                            )?;
+                        }
+                        ProjectPersistenceAction::UpdateEnv {
+                            project_id, env, ..
+                        } => {
+                            store.update_project_env(project_id, env)?;
+                        }
                     }
-                    ProjectPersistenceAction::UpdateEnv {
-                        project_id, env, ..
-                    } => {
-                        store.update_project_env(project_id, env)?;
-                    }
-                }
-                Ok(())
-            })()
-            .map_err(|err| format!("{err:#}"));
-            let _ = tx.send(WorkerEvent::ProjectPersistenceCompleted { action, result });
-        });
+                    Ok(())
+                })()
+                .map_err(|err| format!("{err:#}"));
+                let _ = tx.send(WorkerEvent::ProjectPersistenceCompleted { action, result });
+            },
+        );
     }
 
     /// Validate a raw path string before registering it as a project. Checks
@@ -378,42 +390,53 @@ impl Engine {
         }
     }
 
-    pub fn spawn_gh_status_check(&self) {
+    pub fn spawn_gh_status_check(&mut self) {
         if !self.github_integration_enabled {
             return;
         }
-        let tx = self.worker_tx.clone();
-        thread::spawn(move || {
-            use crate::model::GhStatus;
-            // Step 1: Is `gh` on PATH?
-            let on_path = std::process::Command::new("which")
-                .arg("gh")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !on_path {
-                crate::logger::info("[gh-integration] gh CLI not found on PATH");
-                let _ = tx.send(WorkerEvent::GhStatusChecked(GhStatus::NotInstalled));
-                return;
-            }
-            // Step 2: Is `gh` authenticated?
-            let authed = std::process::Command::new("gh")
-                .args(["auth", "status"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !authed {
-                crate::logger::info("[gh-integration] gh CLI found but not authenticated");
-                let _ = tx.send(WorkerEvent::GhStatusChecked(GhStatus::NotAuthenticated));
-                return;
-            }
-            crate::logger::info("[gh-integration] gh CLI available and authenticated");
-            let _ = tx.send(WorkerEvent::GhStatusChecked(GhStatus::Available));
-        });
+        self.spawn_background_worker(
+            BackgroundWorkerSpec {
+                label: "gh-status-check".into(),
+                in_flight_key: None,
+                panic_event: Some(Box::new(|_reason| {
+                    // Fall back to `NotInstalled` on panic so the UI does not
+                    // sit in an indeterminate state — the worst case is a
+                    // harmless "gh CLI not found" message.
+                    WorkerEvent::GhStatusChecked(crate::model::GhStatus::NotInstalled)
+                })),
+            },
+            move |tx| {
+                use crate::model::GhStatus;
+                // Step 1: Is `gh` on PATH?
+                let on_path = std::process::Command::new("which")
+                    .arg("gh")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if !on_path {
+                    crate::logger::info("[gh-integration] gh CLI not found on PATH");
+                    let _ = tx.send(WorkerEvent::GhStatusChecked(GhStatus::NotInstalled));
+                    return;
+                }
+                // Step 2: Is `gh` authenticated?
+                let authed = std::process::Command::new("gh")
+                    .args(["auth", "status"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if !authed {
+                    crate::logger::info("[gh-integration] gh CLI found but not authenticated");
+                    let _ = tx.send(WorkerEvent::GhStatusChecked(GhStatus::NotAuthenticated));
+                    return;
+                }
+                crate::logger::info("[gh-integration] gh CLI available and authenticated");
+                let _ = tx.send(WorkerEvent::GhStatusChecked(GhStatus::Available));
+            },
+        );
     }
 
     pub fn spawn_changed_files_poller(&self) {
@@ -441,49 +464,91 @@ impl Engine {
         });
     }
 
-    pub fn spawn_browser_entries(&self, dir: &Path) {
-        let tx = self.worker_tx.clone();
+    pub fn spawn_browser_entries(&mut self, dir: &Path) {
         let dir = dir.to_path_buf();
-        thread::spawn(move || {
-            let entries = crate::project_browser::browser_entries(&dir);
-            crate::logger::debug(&format!(
-                "browser loaded {} with {} entries",
-                dir.display(),
-                entries.len()
-            ));
-            let _ = tx.send(WorkerEvent::BrowserEntriesReady {
-                dir: dir.clone(),
-                entries,
-            });
-        });
+        let dir_for_panic = dir.clone();
+        self.spawn_background_worker(
+            BackgroundWorkerSpec {
+                label: format!("browser-entries:{}", dir.display()),
+                in_flight_key: None,
+                panic_event: Some(Box::new(move |_reason| {
+                    // Synthesise an empty entries list so the browser prompt
+                    // exits its loading state rather than spinning forever.
+                    WorkerEvent::BrowserEntriesReady {
+                        dir: dir_for_panic,
+                        entries: Vec::new(),
+                    }
+                })),
+            },
+            move |tx| {
+                let entries = crate::project_browser::browser_entries(&dir);
+                crate::logger::debug(&format!(
+                    "browser loaded {} with {} entries",
+                    dir.display(),
+                    entries.len()
+                ));
+                let _ = tx.send(WorkerEvent::BrowserEntriesReady {
+                    dir: dir.clone(),
+                    entries,
+                });
+            },
+        );
     }
 
-    pub fn spawn_project_worktrees_worker(&self, project: Project) {
-        let tx = self.worker_tx.clone();
+    pub fn spawn_project_worktrees_worker(&mut self, project: Project) {
         let paths = self.paths.clone();
         let sessions = self.sessions.clone();
-        thread::spawn(move || {
-            let result = crate::git::list_worktrees(Path::new(&project.path))
-                .map(|worktrees| {
-                    crate::project_browser::classify_project_worktrees(
-                        &project, &paths, &sessions, worktrees,
-                    )
-                })
-                .map_err(|err| format!("{err:#}"));
-            let _ = tx.send(WorkerEvent::ProjectWorktreesReady {
-                project_id: project.id,
-                result,
-            });
-        });
+        let project_id_for_panic = project.id.clone();
+        self.spawn_background_worker(
+            BackgroundWorkerSpec {
+                label: format!("project-worktrees:{}", project.id),
+                in_flight_key: None,
+                panic_event: Some(Box::new(move |reason| WorkerEvent::ProjectWorktreesReady {
+                    project_id: project_id_for_panic,
+                    result: Err(format!("Project-worktrees worker panicked: {reason}")),
+                })),
+            },
+            move |tx| {
+                let result = crate::git::list_worktrees(Path::new(&project.path))
+                    .map(|worktrees| {
+                        crate::project_browser::classify_project_worktrees(
+                            &project, &paths, &sessions, worktrees,
+                        )
+                    })
+                    .map_err(|err| format!("{err:#}"));
+                let _ = tx.send(WorkerEvent::ProjectWorktreesReady {
+                    project_id: project.id,
+                    result,
+                });
+            },
+        );
     }
 
-    pub fn spawn_project_branch_status_checks(&self) {
-        for project in self.projects.iter().filter(|project| !project.path_missing) {
-            let project = project.clone();
-            let worker_tx = self.worker_tx.clone();
-            thread::spawn(move || {
-                crate::project_browser::run_project_branch_status_job(project, worker_tx);
-            });
+    pub fn spawn_project_branch_status_checks(&mut self) {
+        // Snapshot the project list before iterating: `spawn_background_worker`
+        // takes `&mut self`, so we cannot hold a borrow of `self.projects`
+        // across the per-project spawn calls.
+        let projects: Vec<Project> = self
+            .projects
+            .iter()
+            .filter(|project| !project.path_missing)
+            .cloned()
+            .collect();
+        for project in projects {
+            let label = format!("project-branch-status:{}", project.id);
+            self.spawn_background_worker(
+                BackgroundWorkerSpec {
+                    label,
+                    in_flight_key: None,
+                    // `run_project_branch_status_job` posts per-branch events
+                    // internally and has no single completion event we could
+                    // synthesise on panic. Log-only is the right policy.
+                    panic_event: None,
+                },
+                move |tx| {
+                    crate::project_browser::run_project_branch_status_job(project, tx);
+                },
+            );
         }
     }
 
@@ -509,15 +574,23 @@ impl Engine {
         });
     }
 
-    pub fn spawn_initial_pr_refresh(&self) {
-        let tx = self.worker_tx.clone();
+    pub fn spawn_initial_pr_refresh(&mut self) {
         let sessions = Arc::clone(&self.pr_sync_sessions);
-        thread::spawn(move || {
-            let results = crate::gh::run_pr_sync(&sessions);
-            if !results.is_empty() {
-                let _ = tx.send(WorkerEvent::PrStatusReady(results));
-            }
-        });
+        self.spawn_background_worker(
+            BackgroundWorkerSpec {
+                label: "initial-pr-refresh".into(),
+                in_flight_key: None,
+                // PR sync has no failure event; the next poll cycle will
+                // re-attempt regardless. Log-only is sufficient.
+                panic_event: None,
+            },
+            move |tx| {
+                let results = crate::gh::run_pr_sync(&sessions);
+                if !results.is_empty() {
+                    let _ = tx.send(WorkerEvent::PrStatusReady(results));
+                }
+            },
+        );
     }
 
     /// Gather the labeled PIDs that the resource monitor should report on.
@@ -622,11 +695,21 @@ impl Engine {
             known_pr,
             agent_exited: !self.providers.contains_key(session_id),
         };
-        let tx = self.worker_tx.clone();
-        thread::spawn(move || {
-            let result = crate::gh::check_pr_for_entry(&entry);
-            let _ = tx.send(WorkerEvent::PrStatusReady(vec![(entry.session_id, result)]));
-        });
+        let label = format!("pr-check:{}", entry.session_id);
+        self.spawn_background_worker(
+            BackgroundWorkerSpec {
+                label,
+                in_flight_key: None,
+                // A panic here means we just skip this PR-check; the next
+                // tick of the PR sync loop (or the next call site) will
+                // re-attempt. Log-only is appropriate.
+                panic_event: None,
+            },
+            move |tx| {
+                let result = crate::gh::check_pr_for_entry(&entry);
+                let _ = tx.send(WorkerEvent::PrStatusReady(vec![(entry.session_id, result)]));
+            },
+        );
     }
 }
 
