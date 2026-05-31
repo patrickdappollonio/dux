@@ -276,6 +276,10 @@ impl Engine {
     ///
     /// Takes `&self`, not `&mut self`, because loop workers do not touch
     /// in-flight state and callers commonly spawn them at bootstrap.
+    ///
+    /// `catch_unwind` runs once per iteration; with the in-tree loop
+    /// intervals measured in seconds (2s, 10s, 45s) the overhead is
+    /// negligible and not worth optimising.
     pub fn spawn_loop_worker<F>(&self, spec: LoopWorkerSpec, mut body: F)
     where
         F: FnMut(&Sender<WorkerEvent>) -> LoopControl + Send + 'static,
