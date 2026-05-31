@@ -1,0 +1,8 @@
+[package]
+name = "dux"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dux-tui = { path = "../dux-tui" }
+anyhow.workspace = true

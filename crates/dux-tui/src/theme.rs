@@ -16,7 +16,7 @@ pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', 
 
 /// The bundled `dux_dark` theme TOML, embedded at compile time so the default
 /// path never depends on a file on disk.
-const DUX_DARK_TOML: &str = include_str!("../assets/themes/dux_dark.toml");
+const DUX_DARK_TOML: &str = include_str!("../../../assets/themes/dux_dark.toml");
 
 const GITHUB_PR_OPEN_BG: OpalineColor = OpalineColor::new(35, 134, 54);
 const GITHUB_PR_MERGED_BG: OpalineColor = OpalineColor::new(130, 80, 223);

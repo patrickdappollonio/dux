@@ -1,3 +1,5 @@
+//! Dux TUI library — the terminal user-interface surface over `dux-core`.
+
 mod app;
 mod cli;
 mod clipboard;
@@ -19,7 +21,9 @@ use std::path::Path;
 
 use anyhow::Result;
 
-fn main() -> Result<()> {
+/// Run dux (TUI mode or a `config` subcommand). Called by the `dux` binary
+/// crate.
+pub fn run() -> Result<()> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
 
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
@@ -70,7 +74,7 @@ fn main() -> Result<()> {
     app.run()
 }
 
-fn print_help() {
+pub fn print_help() {
     println!(
         "dux\n\n\
          Terminal UI for AI worktree sessions.\n\n\

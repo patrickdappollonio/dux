@@ -539,6 +539,37 @@ name = "dux"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dux-tui",
+]
+
+[[package]]
+name = "dux-core"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "chrono",
+ "compact_str",
+ "content_inspector",
+ "home",
+ "indexmap",
+ "notify",
+ "petname",
+ "portable-pty",
+ "rusqlite",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "dux-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "arboard",
  "chrono",
  "content_inspector",
@@ -564,26 +595,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "dux-core"
+name = "dux-web"
 version = "0.1.0"
 dependencies = [
- "alacritty_terminal",
- "anyhow",
- "chrono",
- "compact_str",
- "content_inspector",
- "home",
- "indexmap",
- "notify",
- "petname",
- "portable-pty",
- "rusqlite",
- "rustix",
- "serde",
- "serde_json",
- "sysinfo",
- "tempfile",
- "uuid",
+ "dux-core",
 ]
 
 [[package]]

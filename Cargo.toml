@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/dux-core"]
+members = [
+    "crates/dux-core",
+    "crates/dux-tui",
+    "crates/dux",
+    "crates/dux-web",
+]
 resolver = "3"
 
 [workspace.dependencies]
@@ -16,38 +21,6 @@ content_inspector = "0.2.4"
 tempfile = "3.20.0"
 notify = "7"
 sysinfo = "0.35"
-
-[package]
-name = "dux"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-dux-core.workspace = true
-anyhow.workspace = true
-arboard = "3.4.1"
-chrono.workspace = true
-content_inspector.workspace = true
-crossterm = "0.29.0"
-home.workspace = true
-ratatui = "0.30.0"
-serde.workspace = true
-serde_json.workspace = true
-toml = { version = "1.1.2", features = ["preserve_order"] }
-toml_edit = "0.25"
-uuid.workspace = true
-rustix.workspace = true
-signal-hook = "0.4"
-similar = "3"
-syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }
-crokey = "1.4.0"
-indexmap.workspace = true
-sysinfo.workspace = true
-notify.workspace = true
-opaline = { version = "0.4", features = ["ratatui", "builtin-themes"] }
-
-[dev-dependencies]
-tempfile.workspace = true
 
 [profile.release]
 opt-level = "z"   # Optimize for size.
