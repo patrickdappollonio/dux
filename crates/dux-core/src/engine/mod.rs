@@ -6,6 +6,7 @@ pub mod command;
 pub mod config_saver;
 mod events;
 mod in_flight;
+mod spawn_worker;
 
 pub use command::Command;
 pub use config_saver::{ConfigSaver, NoopConfigSaver};
@@ -17,6 +18,7 @@ pub use events::{
     ProjectPersistenceView, StatusUpdate,
 };
 pub use in_flight::{InFlightKey, InFlightSet};
+pub use spawn_worker::CommandWorkerSpec;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -545,15 +547,42 @@ impl Engine {
     }
 
     pub fn spawn_resource_stats_worker(&mut self) {
-        if !self.mark_in_flight(InFlightKey::ResourceStats) {
+        // The resource monitor refreshes itself periodically; an
+        // already-in-flight refresh is a silent skip rather than a
+        // user-visible warning, so we short-circuit before invoking the
+        // primitive's already-running path.
+        if self.is_in_flight(&InFlightKey::ResourceStats) {
             return;
         }
         let targets = self.resource_monitor_targets();
-        let tx = self.worker_tx.clone();
-        thread::spawn(move || {
-            let rows = crate::resource_stats::collect_resource_stats(targets);
-            let _ = tx.send(WorkerEvent::ResourceStatsReady(rows));
-        });
+        let reaction = self.spawn_command_worker(
+            CommandWorkerSpec {
+                label: "resource-stats".into(),
+                in_flight_key: Some(InFlightKey::ResourceStats),
+                busy_status: None,
+                already_running_status: None,
+                panic_event: Some(Box::new(|_reason| {
+                    // No error variant exists for resource stats; an empty
+                    // refresh is the most defensible signal — the in-flight
+                    // key clears and the next refresh runs normally.
+                    WorkerEvent::ResourceStatsReady(Vec::new())
+                })),
+            },
+            move |tx| {
+                let rows = crate::resource_stats::collect_resource_stats(targets);
+                let _ = tx.send(WorkerEvent::ResourceStatsReady(rows));
+            },
+        );
+        // Historical signature is `&mut self` → `()`. The primitive returns
+        // `EventReaction::Nothing` on the happy path. Forward the rare
+        // synchronous spawn failure through the worker channel so the
+        // status line still surfaces it via the existing
+        // `CommandWorkerStarted` handler.
+        if let EventReaction::Status(status) = reaction {
+            let _ = self
+                .worker_tx
+                .send(WorkerEvent::CommandWorkerStarted(status));
+        }
     }
 
     /// Trigger a one-shot PR check for a single session, unless it was checked

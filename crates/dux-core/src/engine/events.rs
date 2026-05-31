@@ -908,6 +908,7 @@ impl Engine {
     /// via `EventReaction` for the App to apply.
     pub fn process_worker_event(&mut self, event: WorkerEvent) -> EventReaction {
         match event {
+            WorkerEvent::CommandWorkerStarted(status) => EventReaction::Status(status),
             WorkerEvent::CreateAgentProgress(message) => {
                 EventReaction::Status(StatusUpdate::busy(message))
             }
@@ -2594,5 +2595,168 @@ mod tests {
             *recorder.lock().unwrap(),
             vec!["recover_config".to_string()],
         );
+    }
+
+    // ── spawn_command_worker primitive ────────────────────────────────────
+
+    /// Drain a single `WorkerEvent` from `engine.worker_rx`, polling with a
+    /// bounded sleep so a slow CI runner still gets a chance to deliver the
+    /// background thread's event. Returns `None` if the budget is exhausted.
+    fn try_recv_worker_event(engine: &Engine) -> Option<WorkerEvent> {
+        for _ in 0..200 {
+            if let Ok(event) = engine.worker_rx.try_recv() {
+                return Some(event);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        None
+    }
+
+    #[test]
+    fn command_worker_already_in_flight_returns_status() {
+        use crate::engine::CommandWorkerSpec;
+
+        let (mut engine, _tmp) = test_engine();
+        engine.mark_in_flight(InFlightKey::CreateAgent);
+        let reaction = engine.spawn_command_worker(
+            CommandWorkerSpec {
+                label: "create-agent".into(),
+                in_flight_key: Some(InFlightKey::CreateAgent),
+                busy_status: Some(StatusUpdate::busy("starting")),
+                already_running_status: Some(StatusUpdate::error("already")),
+                panic_event: None,
+            },
+            |_tx| panic!("job must not run when already in flight"),
+        );
+        match reaction {
+            EventReaction::Status(status) => assert_eq!(status.message, "already"),
+            other => panic!("expected Status, got {}", reaction_kind(&other)),
+        }
+        // The pre-existing in-flight key must still be present — the
+        // primitive's guard does not clear keys it did not insert.
+        assert!(engine.is_in_flight(&InFlightKey::CreateAgent));
+        // No worker event should arrive — the job was never spawned.
+        assert!(engine.worker_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn command_worker_busy_status_arrives_before_completion() {
+        use crate::engine::CommandWorkerSpec;
+
+        let (mut engine, _tmp) = test_engine();
+        let reaction = engine.spawn_command_worker(
+            CommandWorkerSpec {
+                label: "fifo-test".into(),
+                in_flight_key: None,
+                busy_status: Some(StatusUpdate::busy("starting")),
+                already_running_status: None,
+                panic_event: None,
+            },
+            |tx| {
+                // The job's only side-effect is delivering a second event,
+                // which lets the test assert FIFO ordering against the busy
+                // status the primitive enqueued synchronously.
+                let _ = tx.send(WorkerEvent::CommandWorkerStarted(StatusUpdate::info(
+                    "done",
+                )));
+            },
+        );
+        assert!(matches!(reaction, EventReaction::Nothing));
+
+        let first = engine
+            .worker_rx
+            .try_recv()
+            .expect("busy status must be enqueued synchronously before the worker thread starts");
+        match first {
+            WorkerEvent::CommandWorkerStarted(status) => {
+                assert_eq!(status.message, "starting");
+            }
+            other => panic!(
+                "expected CommandWorkerStarted(starting), got {other:?}",
+                other = std::any::type_name_of_val(&other)
+            ),
+        }
+
+        let second = try_recv_worker_event(&engine).expect("worker completion event missing");
+        match second {
+            WorkerEvent::CommandWorkerStarted(status) => {
+                assert_eq!(status.message, "done");
+            }
+            other => panic!(
+                "expected CommandWorkerStarted(done), got {other:?}",
+                other = std::any::type_name_of_val(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn command_worker_clears_in_flight_on_panic() {
+        use crate::engine::CommandWorkerSpec;
+
+        let (mut engine, _tmp) = test_engine();
+        let reaction = engine.spawn_command_worker(
+            CommandWorkerSpec {
+                label: "panic-test".into(),
+                in_flight_key: Some(InFlightKey::CreateAgent),
+                busy_status: None,
+                already_running_status: None,
+                panic_event: Some(Box::new(|reason| {
+                    WorkerEvent::CreateAgentFailed(format!("panic: {reason}"))
+                })),
+            },
+            |_tx| panic!("boom"),
+        );
+        assert!(matches!(reaction, EventReaction::Nothing));
+        // The primitive marked the key synchronously; the worker is still
+        // running, so the key is present until the synthesised failure
+        // event is processed.
+        assert!(engine.is_in_flight(&InFlightKey::CreateAgent));
+
+        let event = try_recv_worker_event(&engine)
+            .expect("synthesised CreateAgentFailed event must arrive after the panic");
+        let message_contains_panic =
+            matches!(&event, WorkerEvent::CreateAgentFailed(m) if m.contains("boom"));
+        assert!(
+            message_contains_panic,
+            "expected the synthesised failure event to carry the panic message",
+        );
+
+        // Routing through the normal completion-event handler is what
+        // actually clears the in-flight key — the primitive does not
+        // double-up on the cleanup path.
+        let _ = engine.process_worker_event(event);
+        assert!(!engine.is_in_flight(&InFlightKey::CreateAgent));
+    }
+
+    #[test]
+    fn command_worker_no_busy_status_emits_no_started_event() {
+        use crate::engine::CommandWorkerSpec;
+
+        // Documents the silent-spawn path used by `spawn_resource_stats_worker`
+        // and `Command::DispatchAgentLaunch`: when `busy_status` is `None`,
+        // the primitive does not enqueue a `CommandWorkerStarted` event,
+        // so the only thing on the channel is whatever the job itself sends.
+        let (mut engine, _tmp) = test_engine();
+        let reaction = engine.spawn_command_worker(
+            CommandWorkerSpec {
+                label: "silent".into(),
+                in_flight_key: None,
+                busy_status: None,
+                already_running_status: None,
+                panic_event: None,
+            },
+            |tx| {
+                let _ = tx.send(WorkerEvent::ResourceStatsReady(Vec::new()));
+            },
+        );
+        assert!(matches!(reaction, EventReaction::Nothing));
+
+        let first = try_recv_worker_event(&engine).expect("job must produce a single event");
+        assert!(
+            matches!(first, WorkerEvent::ResourceStatsReady(ref rows) if rows.is_empty()),
+            "expected ResourceStatsReady(empty), the silent-spawn path must not synthesise a CommandWorkerStarted event",
+        );
+        // No further events should be queued.
+        assert!(engine.worker_rx.try_recv().is_err());
     }
 }

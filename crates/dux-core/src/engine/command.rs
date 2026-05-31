@@ -9,9 +9,10 @@ use crate::engine::events::{
     BeginDeleteSessionView, DeleteTerminalView, DispatchAgentLaunchView, DoDeleteSessionView,
     EventReaction, FinishDeleteSessionView, StatusUpdate,
 };
-use crate::engine::{Engine, InFlightKey};
+use crate::engine::{CommandWorkerSpec, Engine, InFlightKey};
 use crate::worker::{
-    AgentLaunchRequest, CreateAgentRequest, ProjectPersistenceAction, PullTarget, WorkerEvent,
+    AgentLaunchFailedData, AgentLaunchRequest, CreateAgentRequest, ProjectPersistenceAction,
+    PullTarget, WorkerEvent,
 };
 
 /// What the Engine should do. Variants are payload-carrying — the caller
@@ -226,26 +227,37 @@ impl Engine {
                 busy_message,
                 term_size,
             } => {
-                if !self.mark_in_flight(InFlightKey::CreateAgent) {
-                    return Ok(EventReaction::Status(StatusUpdate::error(
-                        "An agent is already being created or forked.",
-                    )));
-                }
                 let paths = self.paths.clone();
                 let config = self.config.clone();
-                let worker_tx = self.worker_tx.clone();
-                std::thread::spawn(move || {
-                    crate::agent_job::run_create_agent_job(
-                        *request, paths, config, worker_tx, term_size,
-                    );
-                });
-                Ok(EventReaction::Status(StatusUpdate::busy(busy_message)))
+                Ok(self.spawn_command_worker(
+                    CommandWorkerSpec {
+                        label: "create-agent".into(),
+                        in_flight_key: Some(InFlightKey::CreateAgent),
+                        busy_status: Some(StatusUpdate::busy(busy_message)),
+                        already_running_status: Some(StatusUpdate::error(
+                            "An agent is already being created or forked.",
+                        )),
+                        panic_event: Some(Box::new(|reason| {
+                            WorkerEvent::CreateAgentFailed(format!(
+                                "Agent-creation worker panicked: {reason}"
+                            ))
+                        })),
+                    },
+                    move |tx| {
+                        crate::agent_job::run_create_agent_job(
+                            *request, paths, config, tx, term_size,
+                        );
+                    },
+                ))
             }
 
             Command::DispatchAgentLaunch { request } => {
                 let branch_name = request.session.branch_name.clone();
                 let session_id = request.session.id.clone();
-                if !self.mark_in_flight(InFlightKey::AgentLaunch(session_id.clone())) {
+                // Pre-check in-flight so the View carries the exact "already
+                // launching" message regardless of the primitive's generic
+                // already-running fallback.
+                if self.is_in_flight(&InFlightKey::AgentLaunch(session_id.clone())) {
                     return Ok(EventReaction::DispatchAgentLaunchView(Box::new(
                         DispatchAgentLaunchView {
                             session_id,
@@ -257,17 +269,47 @@ impl Engine {
                         },
                     )));
                 }
-                let tx = self.worker_tx.clone();
-                std::thread::spawn(move || {
-                    crate::agent_job::run_agent_launch_job(*request, tx);
-                });
-                Ok(EventReaction::DispatchAgentLaunchView(Box::new(
-                    DispatchAgentLaunchView {
-                        session_id,
-                        launched: true,
-                        status: None,
+                // Clone for the panic event closure before `request` is
+                // consumed by the job closure. `AgentLaunchRequest` is
+                // `Clone`, which keeps the panic recovery path symmetric
+                // with `process_agent_launch_failed`.
+                let panic_request = (*request).clone();
+                let reaction = self.spawn_command_worker(
+                    CommandWorkerSpec {
+                        label: format!("agent-launch:{session_id}"),
+                        in_flight_key: Some(InFlightKey::AgentLaunch(session_id.clone())),
+                        busy_status: None, // View variant carries the user-facing status
+                        already_running_status: None, // handled by the pre-check above
+                        panic_event: Some(Box::new(move |reason| {
+                            WorkerEvent::AgentLaunchFailed(Box::new(AgentLaunchFailedData {
+                                request: panic_request,
+                                message: format!("Agent-launch worker panicked: {reason}"),
+                            }))
+                        })),
                     },
-                )))
+                    move |tx| {
+                        crate::agent_job::run_agent_launch_job(*request, tx);
+                    },
+                );
+                // Wrap the primitive's return into the View variant so App
+                // callers keep a single pattern-match shape.
+                match reaction {
+                    EventReaction::Nothing => Ok(EventReaction::DispatchAgentLaunchView(Box::new(
+                        DispatchAgentLaunchView {
+                            session_id,
+                            launched: true,
+                            status: None,
+                        },
+                    ))),
+                    EventReaction::Status(status) => Ok(EventReaction::DispatchAgentLaunchView(
+                        Box::new(DispatchAgentLaunchView {
+                            session_id,
+                            launched: false,
+                            status: Some(status),
+                        }),
+                    )),
+                    other => Ok(other),
+                }
             }
 
             Command::StageFile {
@@ -297,18 +339,23 @@ impl Engine {
                 )))),
             },
 
-            Command::Push { worktree_path } => {
-                let tx = self.worker_tx.clone();
-                std::thread::spawn(move || {
+            Command::Push { worktree_path } => Ok(self.spawn_command_worker(
+                CommandWorkerSpec {
+                    label: "push".into(),
+                    in_flight_key: None,
+                    busy_status: Some(StatusUpdate::busy("Pushing to remote\u{2026}")),
+                    already_running_status: None,
+                    panic_event: Some(Box::new(|reason| {
+                        WorkerEvent::PushCompleted(Err(format!("Push worker panicked: {reason}")))
+                    })),
+                },
+                move |tx| {
                     let result = crate::git::push(&worktree_path)
                         .map(|_| ())
                         .map_err(|e| e.to_string());
                     let _ = tx.send(WorkerEvent::PushCompleted(result));
-                });
-                Ok(EventReaction::Status(StatusUpdate::busy(
-                    "Pushing to remote\u{2026}",
-                )))
-            }
+                },
+            )),
 
             Command::Pull {
                 repo_path,
@@ -317,63 +364,86 @@ impl Engine {
                 already_running_message,
             } => {
                 let repo_key = repo_path.to_string_lossy().into_owned();
-                if !self.mark_in_flight(InFlightKey::Pull(repo_key.clone())) {
-                    return Ok(EventReaction::Status(StatusUpdate::warning(
-                        already_running_message,
-                    )));
-                }
-                let tx = self.worker_tx.clone();
-                std::thread::spawn(move || {
-                    let result = match &target {
-                        PullTarget::Project { leading_branch, .. } => {
-                            let leading_branch = match leading_branch.clone() {
-                                Some(branch) => Ok(branch),
-                                None => crate::git::current_branch(&repo_path).map(|branch| {
-                                    crate::project_browser::leading_branch_for_project(
-                                        &repo_path, &branch,
-                                    )
-                                }),
-                            };
-                            leading_branch
-                                .and_then(|branch| {
-                                    crate::git::switch_branch_if_needed(&repo_path, &branch)?;
-                                    if crate::git::has_tracked_changes(&repo_path)? {
-                                        return Err(anyhow::anyhow!(
-                                            "Refresh blocked because the source checkout has uncommitted changes."
-                                        ));
-                                    }
-                                    crate::git::pull_branch(&repo_path, &branch)
-                                })
-                                .map(|_| crate::git::current_branch(&repo_path).ok())
-                                .map_err(|e| e.to_string())
-                        }
-                        PullTarget::Session => crate::git::pull_current_branch(&repo_path)
-                            .map(|_| None)
-                            .map_err(|e| e.to_string()),
-                    };
-                    let _ = tx.send(WorkerEvent::PullCompleted {
-                        repo_path: repo_key,
-                        target,
-                        result,
-                    });
-                });
-                Ok(EventReaction::Status(StatusUpdate::busy(busy_message)))
+                // Clones for the panic event closure; the job closure
+                // consumes the originals.
+                let repo_key_for_panic = repo_key.clone();
+                let target_for_panic = target.clone();
+                Ok(self.spawn_command_worker(
+                    CommandWorkerSpec {
+                        label: format!("pull:{repo_key}"),
+                        in_flight_key: Some(InFlightKey::Pull(repo_key.clone())),
+                        busy_status: Some(StatusUpdate::busy(busy_message)),
+                        already_running_status: Some(StatusUpdate::warning(
+                            already_running_message,
+                        )),
+                        panic_event: Some(Box::new(move |reason| WorkerEvent::PullCompleted {
+                            repo_path: repo_key_for_panic,
+                            target: target_for_panic,
+                            result: Err(format!("Pull worker panicked: {reason}")),
+                        })),
+                    },
+                    move |tx| {
+                        let result = match &target {
+                            PullTarget::Project { leading_branch, .. } => {
+                                let leading_branch = match leading_branch.clone() {
+                                    Some(branch) => Ok(branch),
+                                    None => crate::git::current_branch(&repo_path).map(|branch| {
+                                        crate::project_browser::leading_branch_for_project(
+                                            &repo_path, &branch,
+                                        )
+                                    }),
+                                };
+                                leading_branch
+                                    .and_then(|branch| {
+                                        crate::git::switch_branch_if_needed(&repo_path, &branch)?;
+                                        if crate::git::has_tracked_changes(&repo_path)? {
+                                            return Err(anyhow::anyhow!(
+                                                "Refresh blocked because the source checkout has uncommitted changes."
+                                            ));
+                                        }
+                                        crate::git::pull_branch(&repo_path, &branch)
+                                    })
+                                    .map(|_| crate::git::current_branch(&repo_path).ok())
+                                    .map_err(|e| e.to_string())
+                            }
+                            PullTarget::Session => crate::git::pull_current_branch(&repo_path)
+                                .map(|_| None)
+                                .map_err(|e| e.to_string()),
+                        };
+                        let _ = tx.send(WorkerEvent::PullCompleted {
+                            repo_path: repo_key,
+                            target,
+                            result,
+                        });
+                    },
+                ))
             }
 
             Command::OpenPath { path, target } => {
                 let display = path.display().to_string();
-                let tx = self.worker_tx.clone();
-                let target_for_event = target.clone();
-                std::thread::spawn(move || {
-                    let result = crate::startup::open_path(&path).map_err(|err| format!("{err:#}"));
-                    let _ = tx.send(crate::worker::WorkerEvent::OpenPathCompleted {
-                        target: target_for_event,
-                        result,
-                    });
-                });
-                Ok(EventReaction::Status(StatusUpdate::busy(format!(
-                    "Opening {target}: {display}"
-                ))))
+                let busy_message = format!("Opening {target}: {display}");
+                let target_for_job = target.clone();
+                let target_for_panic = target.clone();
+                Ok(self.spawn_command_worker(
+                    CommandWorkerSpec {
+                        label: format!("open-path:{target}"),
+                        in_flight_key: None,
+                        busy_status: Some(StatusUpdate::busy(busy_message)),
+                        already_running_status: None,
+                        panic_event: Some(Box::new(move |reason| WorkerEvent::OpenPathCompleted {
+                            target: target_for_panic,
+                            result: Err(format!("OpenPath worker panicked: {reason}")),
+                        })),
+                    },
+                    move |tx| {
+                        let result =
+                            crate::startup::open_path(&path).map_err(|err| format!("{err:#}"));
+                        let _ = tx.send(WorkerEvent::OpenPathCompleted {
+                            target: target_for_job,
+                            result,
+                        });
+                    },
+                ))
             }
 
             Command::ToggleAgentAutoReopen {

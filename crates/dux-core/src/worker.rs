@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::config::{Config, ProviderCommandConfig};
+use crate::engine::StatusUpdate;
 use crate::model::{AgentSession, ChangedFile, Project, ProjectBranchStatus, ProviderKind};
 use crate::pty::PtyClient;
 use crate::storage::StoredPr;
@@ -189,6 +190,12 @@ pub enum CreateAgentRequest {
 }
 
 pub enum WorkerEvent {
+    /// Status update delivered via the worker channel so it stays FIFO with
+    /// the completion event of the operation it announces. Posted by
+    /// `Engine::spawn_command_worker` before the worker thread starts so the
+    /// busy status is guaranteed to reach `process_worker_event` ahead of
+    /// any event the worker can produce.
+    CommandWorkerStarted(StatusUpdate),
     CreateAgentProgress(String),
     CreateAgentFailed(String),
     AgentLaunchReady(Box<AgentLaunchReadyData>),
