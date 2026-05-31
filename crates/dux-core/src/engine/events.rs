@@ -179,12 +179,12 @@ pub struct DetachedSession {
 }
 
 /// View-only follow-up for `WorkerEvent::AgentLaunchReady`. The Engine has
-/// already performed all domain-state mutations (in_flight maps, sessions,
-/// providers, session_store, mark_session_* helpers, resume_fallback_*,
-/// update_branch_sync_sessions, and the pure-engine portion of
-/// detach_conflicting_worktree_session). The App applies `last_pty_size`,
-/// clears `last_pty_activity` for any `detached_session_id`, runs view
-/// rebuilds, sets surfaces/overlays/status.
+/// already performed all domain-state mutations (the `in_flight` set,
+/// sessions, providers, session_store, mark_session_* helpers,
+/// resume_fallback_*, update_branch_sync_sessions, and the pure-engine
+/// portion of detach_conflicting_worktree_session). The App applies
+/// `last_pty_size`, clears `last_pty_activity` for any
+/// `detached_session_id`, runs view rebuilds, sets surfaces/overlays/status.
 pub struct AgentLaunchReadyOutcome {
     pub session: AgentSession,
     pub pty_size: (u16, u16),

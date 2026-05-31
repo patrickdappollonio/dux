@@ -545,10 +545,9 @@ impl Engine {
     }
 
     pub fn spawn_resource_stats_worker(&mut self) {
-        if self.is_in_flight(&InFlightKey::ResourceStats) {
+        if !self.mark_in_flight(InFlightKey::ResourceStats) {
             return;
         }
-        self.mark_in_flight(InFlightKey::ResourceStats);
         let targets = self.resource_monitor_targets();
         let tx = self.worker_tx.clone();
         thread::spawn(move || {

@@ -226,12 +226,11 @@ impl Engine {
                 busy_message,
                 term_size,
             } => {
-                if self.is_in_flight(&InFlightKey::CreateAgent) {
+                if !self.mark_in_flight(InFlightKey::CreateAgent) {
                     return Ok(EventReaction::Status(StatusUpdate::error(
                         "An agent is already being created or forked.",
                     )));
                 }
-                self.mark_in_flight(InFlightKey::CreateAgent);
                 let paths = self.paths.clone();
                 let config = self.config.clone();
                 let worker_tx = self.worker_tx.clone();

@@ -6325,9 +6325,9 @@ mod tests {
     use crate::storage::SessionStore;
     use crate::theme::Theme;
     use chrono::Utc;
-    use dux_core::engine::InFlightKey;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use dux_core::engine::InFlightKey;
     use ratatui::layout::Rect;
     use ratatui::text::Line;
     use std::process::Command;
