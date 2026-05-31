@@ -1237,10 +1237,7 @@ impl App {
             deletion_busy_messages: HashMap::new(),
             watched_worktree: Arc::clone(&watched_worktree),
             has_active_processes,
-            create_agent_in_flight: false,
-            agent_launches_in_flight: HashSet::new(),
-            pulls_in_flight: HashSet::new(),
-            resource_stats_in_flight: false,
+            in_flight: HashSet::new(),
             pr_last_checked: HashMap::new(),
         };
         let mut app = Self {

@@ -2620,10 +2620,7 @@ mod tests {
             deletion_busy_messages: std::collections::HashMap::new(),
             watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
             has_active_processes: Arc::new(AtomicBool::new(false)),
-            create_agent_in_flight: false,
-            agent_launches_in_flight: std::collections::HashSet::new(),
-            pulls_in_flight: std::collections::HashSet::new(),
-            resource_stats_in_flight: false,
+            in_flight: std::collections::HashSet::new(),
             pr_last_checked: std::collections::HashMap::new(),
         };
         let mut app = App {

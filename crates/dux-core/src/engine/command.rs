@@ -5,11 +5,11 @@
 
 use std::path::PathBuf;
 
-use crate::engine::Engine;
 use crate::engine::events::{
     BeginDeleteSessionView, DeleteTerminalView, DispatchAgentLaunchView, DoDeleteSessionView,
     EventReaction, FinishDeleteSessionView, StatusUpdate,
 };
+use crate::engine::{Engine, InFlightKey};
 use crate::worker::{
     AgentLaunchRequest, CreateAgentRequest, ProjectPersistenceAction, PullTarget, WorkerEvent,
 };
@@ -50,7 +50,7 @@ pub enum Command {
     PersistProject(Box<ProjectPersistenceAction>),
 
     /// Spawn the create-agent worker. Returns `EventReaction::Status(Error)` if
-    /// another create is already in flight; otherwise sets `create_agent_in_flight`,
+    /// another create is already in flight; otherwise marks `InFlightKey::CreateAgent`,
     /// spawns the worker, and returns `EventReaction::Status(Busy(busy_message))`.
     /// `term_size` is supplied by the caller because `crossterm::terminal::size()`
     /// is binary-only.
@@ -226,12 +226,12 @@ impl Engine {
                 busy_message,
                 term_size,
             } => {
-                if self.create_agent_in_flight {
+                if self.is_in_flight(&InFlightKey::CreateAgent) {
                     return Ok(EventReaction::Status(StatusUpdate::error(
                         "An agent is already being created or forked.",
                     )));
                 }
-                self.create_agent_in_flight = true;
+                self.mark_in_flight(InFlightKey::CreateAgent);
                 let paths = self.paths.clone();
                 let config = self.config.clone();
                 let worker_tx = self.worker_tx.clone();
@@ -246,7 +246,7 @@ impl Engine {
             Command::DispatchAgentLaunch { request } => {
                 let branch_name = request.session.branch_name.clone();
                 let session_id = request.session.id.clone();
-                if !self.agent_launches_in_flight.insert(session_id.clone()) {
+                if !self.mark_in_flight(InFlightKey::AgentLaunch(session_id.clone())) {
                     return Ok(EventReaction::DispatchAgentLaunchView(Box::new(
                         DispatchAgentLaunchView {
                             session_id,
@@ -318,7 +318,7 @@ impl Engine {
                 already_running_message,
             } => {
                 let repo_key = repo_path.to_string_lossy().into_owned();
-                if !self.pulls_in_flight.insert(repo_key.clone()) {
+                if !self.mark_in_flight(InFlightKey::Pull(repo_key.clone())) {
                     return Ok(EventReaction::Status(StatusUpdate::warning(
                         already_running_message,
                     )));

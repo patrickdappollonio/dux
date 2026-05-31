@@ -13,7 +13,7 @@ use std::time::Instant;
 use chrono::Utc;
 
 use crate::config::Config;
-use crate::engine::Engine;
+use crate::engine::{Engine, InFlightKey};
 use crate::logger;
 use crate::model::{
     AgentSession, GhStatus, PrState, Project, ProjectBranchStatus, ProviderKind, SessionStatus,
@@ -219,8 +219,8 @@ pub enum AgentLaunchReadyView {
 }
 
 /// View-only follow-up for `WorkerEvent::AgentLaunchFailed`. Engine has
-/// already cleared `agent_launches_in_flight`, flipped
-/// `create_agent_in_flight` for Create-kind failures, logged the
+/// already cleared `InFlightKey::AgentLaunch(session_id)`, cleared
+/// `InFlightKey::CreateAgent` for Create-kind failures, logged the
 /// ResumeFallback / StartupAutoReopen cases, and marked ResumeFallback
 /// sessions Detached. The App only formats the status message.
 pub enum AgentLaunchFailedOutcome {
@@ -446,10 +446,10 @@ impl Engine {
         let AgentLaunchReadyData { request, client } = data;
         let session = request.session.clone();
         let pty_size = request.pty_size;
-        self.agent_launches_in_flight.remove(&session.id);
+        self.clear_in_flight(&InFlightKey::AgentLaunch(session.id.clone()));
 
         if matches!(request.kind, AgentLaunchKind::Create { .. }) {
-            self.create_agent_in_flight = false;
+            self.clear_in_flight(&InFlightKey::CreateAgent);
             if let Err(err) = self.session_store.upsert_session(&session) {
                 logger::error(&format!(
                     "session store upsert failed for {}: {err}",
@@ -865,11 +865,11 @@ impl Engine {
     ) -> AgentLaunchFailedOutcome {
         let AgentLaunchFailedData { request, message } = data;
         let session = request.session;
-        self.agent_launches_in_flight.remove(&session.id);
+        self.clear_in_flight(&InFlightKey::AgentLaunch(session.id.clone()));
 
         match request.kind {
             AgentLaunchKind::Create { .. } => {
-                self.create_agent_in_flight = false;
+                self.clear_in_flight(&InFlightKey::CreateAgent);
                 AgentLaunchFailedOutcome::Create { message }
             }
             AgentLaunchKind::Reconnect { .. } => AgentLaunchFailedOutcome::Reconnect {
@@ -912,7 +912,7 @@ impl Engine {
                 EventReaction::Status(StatusUpdate::busy(message))
             }
             WorkerEvent::CreateAgentFailed(message) => {
-                self.create_agent_in_flight = false;
+                self.clear_in_flight(&InFlightKey::CreateAgent);
                 EventReaction::Status(StatusUpdate::error(message))
             }
             WorkerEvent::AgentLaunchReady(boxed) => {
@@ -943,7 +943,7 @@ impl Engine {
                 target,
                 result,
             } => {
-                self.pulls_in_flight.remove(&repo_path);
+                self.clear_in_flight(&InFlightKey::Pull(repo_path));
                 match target {
                     PullTarget::Project {
                         project_id,
@@ -1183,7 +1183,7 @@ impl Engine {
                 }
             }
             WorkerEvent::ResourceStatsReady(stats) => {
-                self.resource_stats_in_flight = false;
+                self.clear_in_flight(&InFlightKey::ResourceStats);
                 EventReaction::ResourceStatsArrived(stats)
             }
             WorkerEvent::NonDefaultBranchCheckoutCompleted {
@@ -1429,10 +1429,7 @@ mod tests {
             deletion_busy_messages: HashMap::new(),
             watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
             has_active_processes: Arc::new(AtomicBool::new(false)),
-            create_agent_in_flight: false,
-            agent_launches_in_flight: HashSet::new(),
-            pulls_in_flight: HashSet::new(),
-            resource_stats_in_flight: false,
+            in_flight: HashSet::new(),
             pr_last_checked: HashMap::new(),
         };
         (engine, tmp)
@@ -1577,7 +1574,7 @@ mod tests {
         let project = sample_project("p1", "/tmp/p1");
         engine.projects.push(project);
         let repo_path = "/tmp/p1".to_string();
-        engine.pulls_in_flight.insert(repo_path.clone());
+        engine.mark_in_flight(InFlightKey::Pull(repo_path.clone()));
 
         let reaction = engine.process_worker_event(WorkerEvent::PullCompleted {
             repo_path: repo_path.clone(),
@@ -1590,7 +1587,7 @@ mod tests {
         });
 
         // In-flight entry is cleared regardless of result.
-        assert!(!engine.pulls_in_flight.contains(&repo_path));
+        assert!(!engine.is_in_flight(&InFlightKey::Pull(repo_path.clone())));
 
         // Project's current branch is updated; status is NotLeading because
         // leading_branch is Some("main") and current_branch is "feature-x".
@@ -1610,7 +1607,7 @@ mod tests {
     fn pull_completed_project_err_still_clears_inflight() {
         let (mut engine, _tmp) = test_engine();
         let repo_path = "/tmp/p1".to_string();
-        engine.pulls_in_flight.insert(repo_path.clone());
+        engine.mark_in_flight(InFlightKey::Pull(repo_path.clone()));
 
         let reaction = engine.process_worker_event(WorkerEvent::PullCompleted {
             repo_path: repo_path.clone(),
@@ -1622,7 +1619,7 @@ mod tests {
             result: Err("network down".to_string()),
         });
 
-        assert!(!engine.pulls_in_flight.contains(&repo_path));
+        assert!(!engine.is_in_flight(&InFlightKey::Pull(repo_path.clone())));
         let status = unwrap_status(reaction);
         assert_eq!(status.tone, StatusTone::Error);
         assert_eq!(
@@ -1841,12 +1838,12 @@ mod tests {
     #[test]
     fn create_agent_failed_flips_inflight_and_returns_error_status() {
         let (mut engine, _tmp) = test_engine();
-        engine.create_agent_in_flight = true;
+        engine.mark_in_flight(InFlightKey::CreateAgent);
 
         let reaction =
             engine.process_worker_event(WorkerEvent::CreateAgentFailed("nope".to_string()));
 
-        assert!(!engine.create_agent_in_flight);
+        assert!(!engine.is_in_flight(&InFlightKey::CreateAgent));
         let status = unwrap_status(reaction);
         assert_eq!(status.tone, StatusTone::Error);
         assert_eq!(status.message, "nope");
@@ -1931,8 +1928,8 @@ mod tests {
     #[test]
     fn process_agent_launch_failed_create_clears_in_flight_and_returns_message() {
         let (mut engine, _tmp) = test_engine();
-        engine.agent_launches_in_flight.insert("s1".to_string());
-        engine.create_agent_in_flight = true;
+        engine.mark_in_flight(InFlightKey::AgentLaunch("s1".to_string()));
+        engine.mark_in_flight(InFlightKey::CreateAgent);
         let data = make_failed_data(
             "s1",
             "feat/x",
@@ -1945,8 +1942,8 @@ mod tests {
             "boom",
         );
         let outcome = engine.process_agent_launch_failed(data);
-        assert!(!engine.agent_launches_in_flight.contains("s1"));
-        assert!(!engine.create_agent_in_flight);
+        assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch("s1".to_string())));
+        assert!(!engine.is_in_flight(&InFlightKey::CreateAgent));
         assert!(
             matches!(outcome, AgentLaunchFailedOutcome::Create { message } if message == "boom")
         );
@@ -1958,7 +1955,7 @@ mod tests {
         let session = sample_session("s1", "project-1", "feat/x");
         let _ = engine.session_store.upsert_session(&session);
         engine.sessions.push(session);
-        engine.agent_launches_in_flight.insert("s1".to_string());
+        engine.mark_in_flight(InFlightKey::AgentLaunch("s1".to_string()));
 
         let data = make_failed_data(
             "s1",
@@ -1970,7 +1967,7 @@ mod tests {
         );
         let outcome = engine.process_agent_launch_failed(data);
         assert!(matches!(outcome, AgentLaunchFailedOutcome::ResumeFallback));
-        assert!(!engine.agent_launches_in_flight.contains("s1"));
+        assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch("s1".to_string())));
         assert_eq!(engine.sessions[0].status, SessionStatus::Detached);
     }
 
@@ -2262,7 +2259,7 @@ mod tests {
     #[test]
     fn apply_dispatch_create_agent_request_returns_error_when_in_flight() {
         let (mut engine, _tmp) = test_engine();
-        engine.create_agent_in_flight = true;
+        engine.mark_in_flight(InFlightKey::CreateAgent);
         let project = sample_project("p1", "/tmp/p1");
         let request = CreateAgentRequest::NewProject {
             project,
@@ -2285,14 +2282,14 @@ mod tests {
             })
         ));
         // Engine state should be unchanged on the already-in-flight path.
-        assert!(engine.create_agent_in_flight);
+        assert!(engine.is_in_flight(&InFlightKey::CreateAgent));
     }
 
     #[test]
     fn apply_dispatch_agent_launch_returns_already_launching_when_pending() {
         let (mut engine, _tmp) = test_engine();
         let session = sample_session("s1", "p1", "feat/x");
-        engine.agent_launches_in_flight.insert("s1".to_string());
+        engine.mark_in_flight(InFlightKey::AgentLaunch("s1".to_string()));
         let request = AgentLaunchRequest {
             session,
             provider_config: ProviderCommandConfig::default(),
@@ -2334,9 +2331,7 @@ mod tests {
     fn apply_pull_rejects_concurrent_pulls_for_same_repo() {
         let (mut engine, _tmp) = test_engine();
         let repo_path = PathBuf::from("/tmp/dummy-repo");
-        engine
-            .pulls_in_flight
-            .insert(repo_path.to_string_lossy().into_owned());
+        engine.mark_in_flight(InFlightKey::Pull(repo_path.to_string_lossy().into_owned()));
         let reaction = engine
             .apply(crate::engine::Command::Pull {
                 repo_path: repo_path.clone(),

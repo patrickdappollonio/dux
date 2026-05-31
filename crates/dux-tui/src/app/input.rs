@@ -6325,6 +6325,7 @@ mod tests {
     use crate::storage::SessionStore;
     use crate::theme::Theme;
     use chrono::Utc;
+    use dux_core::engine::InFlightKey;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
@@ -6511,10 +6512,7 @@ mod tests {
             deletion_busy_messages: std::collections::HashMap::new(),
             watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
             has_active_processes: Arc::new(AtomicBool::new(false)),
-            create_agent_in_flight: false,
-            agent_launches_in_flight: std::collections::HashSet::new(),
-            pulls_in_flight: std::collections::HashSet::new(),
-            resource_stats_in_flight: false,
+            in_flight: std::collections::HashSet::new(),
             pr_last_checked: std::collections::HashMap::new(),
         };
         let mut app = App {
@@ -6983,7 +6981,7 @@ not_a_real_action = ["x"]
             .expect("repeat refresh should not error");
 
         let repo_path = app.engine.projects[0].path.clone();
-        assert!(app.engine.pulls_in_flight.contains(&repo_path));
+        assert!(app.engine.is_in_flight(&InFlightKey::Pull(repo_path)));
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
         assert!(app.status.text().contains("already in progress"));
     }
@@ -6992,12 +6990,13 @@ not_a_real_action = ["x"]
     fn project_pull_completion_clears_in_flight_guard() {
         let mut app = test_app(default_bindings());
         let repo_path = app.engine.projects[0].path.clone();
-        app.engine.pulls_in_flight.insert(repo_path.clone());
+        app.engine
+            .mark_in_flight(InFlightKey::Pull(repo_path.clone()));
 
         app.engine
             .worker_tx
             .send(WorkerEvent::PullCompleted {
-                repo_path,
+                repo_path: repo_path.clone(),
                 target: PullTarget::Project {
                     project_id: app.engine.projects[0].id.clone(),
                     project_name: app.engine.projects[0].name.clone(),
@@ -7009,7 +7008,7 @@ not_a_real_action = ["x"]
 
         app.drain_events();
 
-        assert!(app.engine.pulls_in_flight.is_empty());
+        assert!(!app.engine.is_in_flight(&InFlightKey::Pull(repo_path)));
         assert_eq!(app.engine.projects[0].current_branch, "feature/demo");
         assert_eq!(
             app.engine.projects[0].branch_status,
@@ -7028,7 +7027,7 @@ not_a_real_action = ["x"]
             .expect("repeat pull should not error");
 
         let repo_path = app.engine.sessions[0].worktree_path.clone();
-        assert!(app.engine.pulls_in_flight.contains(&repo_path));
+        assert!(app.engine.is_in_flight(&InFlightKey::Pull(repo_path)));
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
         assert!(app.status.text().contains("already in progress"));
     }
@@ -7723,7 +7722,7 @@ not_a_real_action = ["x"]
             }
             other => panic!("expected name-new-agent prompt, got {other:?}"),
         }
-        assert!(!app.engine.create_agent_in_flight);
+        assert!(!app.engine.is_in_flight(&InFlightKey::CreateAgent));
     }
 
     #[test]
@@ -7843,7 +7842,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         let repo_path = PathBuf::from(&app.engine.projects[0].path);
         run_git(&repo_path, &["branch", "feature/pr-42"]);
-        app.engine.create_agent_in_flight = true;
+        app.engine.mark_in_flight(InFlightKey::CreateAgent);
 
         app.prompt = PromptState::NameNewAgent {
             request: CreateAgentRequest::PullRequest {
@@ -7995,7 +7994,7 @@ not_a_real_action = ["x"]
             }
             other => panic!("expected name-new-agent prompt, got {other:?}"),
         }
-        assert!(!app.engine.create_agent_in_flight);
+        assert!(!app.engine.is_in_flight(&InFlightKey::CreateAgent));
     }
 
     #[test]
@@ -11955,7 +11954,9 @@ cyan = "#00ffff"
         std::thread::sleep(std::time::Duration::from_millis(200));
         drain_until(&mut app, |app| {
             app.engine.providers.contains_key(&session_id)
-                && !app.engine.agent_launches_in_flight.contains(&session_id)
+                && !app
+                    .engine
+                    .is_in_flight(&InFlightKey::AgentLaunch(session_id.clone()))
                 && app.status.text().contains("No prior session to resume")
         });
 
@@ -12053,7 +12054,9 @@ cyan = "#00ffff"
         std::thread::sleep(std::time::Duration::from_millis(200));
         drain_until(&mut app, |app| {
             app.engine.providers.contains_key(&session_id)
-                && !app.engine.agent_launches_in_flight.contains(&session_id)
+                && !app
+                    .engine
+                    .is_in_flight(&InFlightKey::AgentLaunch(session_id.clone()))
                 && app.status.text().contains("No prior session to resume")
         });
 
@@ -12204,7 +12207,9 @@ cyan = "#00ffff"
         app.restore_sessions();
         drain_until(&mut app, |app| {
             app.engine.providers.contains_key(&session_id)
-                && !app.engine.agent_launches_in_flight.contains(&session_id)
+                && !app
+                    .engine
+                    .is_in_flight(&InFlightKey::AgentLaunch(session_id.clone()))
                 && app.engine.sessions[0].status == SessionStatus::Active
         });
 
@@ -12271,7 +12276,9 @@ cyan = "#00ffff"
 
         drain_until(&mut app, |app| {
             app.engine.providers.contains_key(&session_id)
-                && !app.engine.agent_launches_in_flight.contains(&session_id)
+                && !app
+                    .engine
+                    .is_in_flight(&InFlightKey::AgentLaunch(session_id.clone()))
                 && app.status.text().contains("Resume timed out")
         });
 

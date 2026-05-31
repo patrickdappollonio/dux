@@ -5,6 +5,7 @@
 pub mod command;
 pub mod config_saver;
 mod events;
+mod in_flight;
 
 pub use command::Command;
 pub use config_saver::{ConfigSaver, NoopConfigSaver};
@@ -15,6 +16,7 @@ pub use events::{
     FinishDeleteSessionOutcome, FinishDeleteSessionView, ProjectPersistenceOutcome,
     ProjectPersistenceView, StatusUpdate,
 };
+pub use in_flight::{InFlightKey, InFlightSet};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -92,10 +94,11 @@ pub struct Engine {
     pub deletion_busy_messages: HashMap<String, String>,
     pub watched_worktree: Arc<Mutex<Option<PathBuf>>>,
     pub has_active_processes: Arc<AtomicBool>,
-    pub create_agent_in_flight: bool,
-    pub agent_launches_in_flight: HashSet<String>,
-    pub pulls_in_flight: HashSet<String>,
-    pub resource_stats_in_flight: bool,
+    /// Set of currently-running operations. See `InFlightKey` for the
+    /// allowed variants. Inserted by `mark_in_flight` before spawning a
+    /// worker; cleared by `clear_in_flight` when the worker's completion
+    /// event arrives.
+    pub in_flight: InFlightSet,
     /// Last-checked timestamps for the one-shot PR-check rate-limiter.
     /// Keyed by `session_id`; written by `process_worker_event`'s
     /// `PrStatusReady` arm and read by `spawn_pr_check_for_session` to
@@ -104,6 +107,22 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Mark an operation as in-flight. Returns `true` if it was newly
+    /// inserted, `false` if it was already present.
+    pub fn mark_in_flight(&mut self, key: InFlightKey) -> bool {
+        self.in_flight.insert(key)
+    }
+
+    /// Clear an in-flight key after a worker's completion event arrives.
+    pub fn clear_in_flight(&mut self, key: &InFlightKey) {
+        self.in_flight.remove(key);
+    }
+
+    /// True if the given key is currently marked in-flight.
+    pub fn is_in_flight(&self, key: &InFlightKey) -> bool {
+        self.in_flight.contains(key)
+    }
+
     pub fn spawn_project_persistence(&self, action: ProjectPersistenceAction) {
         let db_path = self.paths.sessions_db_path.clone();
         let tx = self.worker_tx.clone();
@@ -526,10 +545,10 @@ impl Engine {
     }
 
     pub fn spawn_resource_stats_worker(&mut self) {
-        if self.resource_stats_in_flight {
+        if self.is_in_flight(&InFlightKey::ResourceStats) {
             return;
         }
-        self.resource_stats_in_flight = true;
+        self.mark_in_flight(InFlightKey::ResourceStats);
         let targets = self.resource_monitor_targets();
         let tx = self.worker_tx.clone();
         thread::spawn(move || {
