@@ -154,6 +154,14 @@ pub enum EventReaction {
         scope_label: String,
         log: StartupCommandLatestLog,
     },
+
+    // -- Agent-creation dispatch (E4c). --
+    /// View follow-up for `Command::DispatchAgentLaunch`. The Engine performs
+    /// the in-flight check + spawn; the App caller uses `launched` to decide
+    /// site-specific follow-up (busy messages, status updates, fallback
+    /// branches). `status` is `Some(StatusUpdate::info(…))` only on the
+    /// already-in-flight path.
+    DispatchAgentLaunchView(Box<DispatchAgentLaunchView>),
 }
 
 /// Result of `Engine::detach_conflicting_worktree_session` — the App caller
@@ -348,6 +356,16 @@ pub struct BeginDeleteSessionView {
     pub session_id: String,
     pub outcome: BeginDeleteSessionOutcome,
     pub delete_worktree: bool,
+}
+
+/// View follow-up for `Command::DispatchAgentLaunch`. The Engine performs
+/// the in-flight check + spawn; the App caller uses `launched` to decide
+/// site-specific follow-up (busy messages, status updates, fallback
+/// branches). `status` is `Some(StatusUpdate::info(…))` only on the
+/// already-in-flight path.
+pub struct DispatchAgentLaunchView {
+    pub launched: bool,
+    pub status: Option<StatusUpdate>,
 }
 
 /// Display name for a session — title if present, branch name otherwise.
@@ -1296,7 +1314,8 @@ mod tests {
     };
     use crate::storage::SessionStore;
     use crate::worker::{
-        AgentLaunchFailedData, AgentLaunchKind, AgentLaunchRequest, PullTarget, WorkerEvent,
+        AgentLaunchFailedData, AgentLaunchKind, AgentLaunchRequest, CreateAgentRequest, PullTarget,
+        WorkerEvent,
     };
     use chrono::Utc;
     use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1487,6 +1506,7 @@ mod tests {
             EventReaction::FinishDeleteSessionView(_) => "FinishDeleteSessionView",
             EventReaction::DoDeleteSessionView(_) => "DoDeleteSessionView",
             EventReaction::BeginDeleteSessionView(_) => "BeginDeleteSessionView",
+            EventReaction::DispatchAgentLaunchView(_) => "DispatchAgentLaunchView",
         }
     }
 
@@ -2148,5 +2168,68 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // ── Engine::apply on the agent-creation dispatch family (E4c) ───────────
+
+    #[test]
+    fn apply_dispatch_create_agent_request_returns_error_when_in_flight() {
+        let (mut engine, _tmp) = test_engine();
+        engine.create_agent_in_flight = true;
+        let project = sample_project("p1", "/tmp/p1");
+        let request = CreateAgentRequest::NewProject {
+            project,
+            custom_name: None,
+            use_existing_branch: false,
+            pull_before_create: false,
+        };
+        let reaction = engine
+            .apply(crate::engine::Command::DispatchCreateAgentRequest {
+                request: Box::new(request),
+                busy_message: "busy".to_string(),
+                term_size: (24, 80),
+            })
+            .expect("apply succeeds");
+        assert!(matches!(
+            reaction,
+            EventReaction::Status(StatusUpdate {
+                tone: StatusTone::Error,
+                ..
+            })
+        ));
+        // Engine state should be unchanged on the already-in-flight path.
+        assert!(engine.create_agent_in_flight);
+    }
+
+    #[test]
+    fn apply_dispatch_agent_launch_returns_already_launching_when_pending() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat/x");
+        engine.agent_launches_in_flight.insert("s1".to_string());
+        let request = AgentLaunchRequest {
+            session,
+            provider_config: ProviderCommandConfig::default(),
+            env: Vec::new(),
+            resume: false,
+            pty_size: (24, 80),
+            scrollback_lines: 1000,
+            kind: AgentLaunchKind::Reconnect {
+                status_message: String::new(),
+            },
+        };
+        let reaction = engine
+            .apply(crate::engine::Command::DispatchAgentLaunch {
+                request: Box::new(request),
+            })
+            .expect("apply succeeds");
+        let view = match reaction {
+            EventReaction::DispatchAgentLaunchView(v) => *v,
+            other => panic!(
+                "expected DispatchAgentLaunchView, got {}",
+                reaction_kind(&other)
+            ),
+        };
+        assert!(!view.launched);
+        assert!(view.status.is_some());
     }
 }

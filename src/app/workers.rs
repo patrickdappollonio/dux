@@ -2,8 +2,9 @@ use std::sync::mpsc::Sender;
 
 use dux_core::engine::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
-    BeginDeleteSessionOutcome, BeginDeleteSessionView, DoDeleteSessionView, EventReaction,
-    FinishDeleteSessionView, ProjectPersistenceOutcome, ProjectPersistenceView, StatusUpdate,
+    BeginDeleteSessionOutcome, BeginDeleteSessionView, DispatchAgentLaunchView,
+    DoDeleteSessionView, EventReaction, FinishDeleteSessionView, ProjectPersistenceOutcome,
+    ProjectPersistenceView, StatusUpdate,
 };
 
 use super::*;
@@ -550,6 +551,18 @@ impl App {
                         }
                     }
                 }
+            }
+
+            EventReaction::DispatchAgentLaunchView(view) => {
+                let DispatchAgentLaunchView {
+                    launched: _,
+                    status,
+                } = *view;
+                if let Some(status) = status {
+                    self.apply_reaction(EventReaction::Status(status));
+                }
+                // The `launched` bool is consumed by the App wrapper before
+                // `apply_reaction` is called; nothing more to do here.
             }
         }
     }

@@ -5,9 +5,10 @@
 
 use crate::engine::Engine;
 use crate::engine::events::{
-    BeginDeleteSessionView, DoDeleteSessionView, EventReaction, FinishDeleteSessionView,
+    BeginDeleteSessionView, DispatchAgentLaunchView, DoDeleteSessionView, EventReaction,
+    FinishDeleteSessionView, StatusUpdate,
 };
-use crate::worker::ProjectPersistenceAction;
+use crate::worker::{AgentLaunchRequest, CreateAgentRequest, ProjectPersistenceAction};
 
 /// What the Engine should do. Variants are payload-carrying — the caller
 /// computes the context (selected session id, prompt state, etc.) and
@@ -43,6 +44,30 @@ pub enum Command {
     /// Boxed to keep the enum size within the clippy `large_enum_variant`
     /// threshold (`ProjectPersistenceAction` is 248 bytes unboxed).
     PersistProject(Box<ProjectPersistenceAction>),
+
+    /// Spawn the create-agent worker. Returns `EventReaction::Status(Error)` if
+    /// another create is already in flight; otherwise sets `create_agent_in_flight`,
+    /// spawns the worker, and returns `EventReaction::Status(Busy(busy_message))`.
+    /// `term_size` is supplied by the caller because `crossterm::terminal::size()`
+    /// is binary-only.
+    ///
+    /// Boxed to keep the enum size within the clippy `large_enum_variant`
+    /// threshold (`CreateAgentRequest` contains a full `Project` + fields).
+    DispatchCreateAgentRequest {
+        request: Box<CreateAgentRequest>,
+        busy_message: String,
+        term_size: (u16, u16),
+    },
+
+    /// Spawn the agent-launch worker (Reconnect / ForceReconnect / ResumeFallback
+    /// / StartupAutoReopen / Create-finalize). Returns a typed view carrying
+    /// `launched: bool` so App callers can do their per-site post-action.
+    /// When already-in-flight, the view carries `launched: false` + a
+    /// Status::info ("Agent X is already launching.").
+    ///
+    /// Boxed to keep the enum size within the clippy `large_enum_variant`
+    /// threshold (`AgentLaunchRequest` carries `AgentSession` + env vector).
+    DispatchAgentLaunch { request: Box<AgentLaunchRequest> },
 }
 
 impl Engine {
@@ -103,6 +128,54 @@ impl Engine {
             Command::PersistProject(action) => {
                 self.spawn_project_persistence(*action);
                 Ok(EventReaction::Nothing)
+            }
+
+            Command::DispatchCreateAgentRequest {
+                request,
+                busy_message,
+                term_size,
+            } => {
+                if self.create_agent_in_flight {
+                    return Ok(EventReaction::Status(StatusUpdate::error(
+                        "An agent is already being created or forked.",
+                    )));
+                }
+                self.create_agent_in_flight = true;
+                let paths = self.paths.clone();
+                let config = self.config.clone();
+                let worker_tx = self.worker_tx.clone();
+                std::thread::spawn(move || {
+                    crate::agent_job::run_create_agent_job(
+                        *request, paths, config, worker_tx, term_size,
+                    );
+                });
+                Ok(EventReaction::Status(StatusUpdate::busy(busy_message)))
+            }
+
+            Command::DispatchAgentLaunch { request } => {
+                let branch_name = request.session.branch_name.clone();
+                let session_id = request.session.id.clone();
+                if !self.agent_launches_in_flight.insert(session_id) {
+                    return Ok(EventReaction::DispatchAgentLaunchView(Box::new(
+                        DispatchAgentLaunchView {
+                            launched: false,
+                            status: Some(StatusUpdate::info(format!(
+                                "Agent \"{}\" is already launching.",
+                                branch_name,
+                            ))),
+                        },
+                    )));
+                }
+                let tx = self.worker_tx.clone();
+                std::thread::spawn(move || {
+                    crate::agent_job::run_agent_launch_job(*request, tx);
+                });
+                Ok(EventReaction::DispatchAgentLaunchView(Box::new(
+                    DispatchAgentLaunchView {
+                        launched: true,
+                        status: None,
+                    },
+                )))
             }
         }
     }

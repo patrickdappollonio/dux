@@ -1,7 +1,7 @@
 use super::*;
 use crate::browser;
 use crate::editor;
-use dux_core::engine::{Command, FinishDeleteSessionOutcome};
+use dux_core::engine::{Command, EventReaction, FinishDeleteSessionOutcome};
 
 impl App {
     pub(crate) fn open_project_browser(&mut self) -> Result<()> {
@@ -395,19 +395,13 @@ impl App {
         request: CreateAgentRequest,
         busy_message: String,
     ) -> Result<()> {
-        if self.engine.create_agent_in_flight {
-            self.set_error("An agent is already being created or forked.");
-            return Ok(());
-        }
-        self.engine.create_agent_in_flight = true;
-        self.set_busy(busy_message);
-        let paths = self.engine.paths.clone();
-        let config = self.engine.config.clone();
-        let worker_tx = self.engine.worker_tx.clone();
         let term_size = crossterm::terminal::size().unwrap_or((80, 24));
-        thread::spawn(move || {
-            dux_core::agent_job::run_create_agent_job(request, paths, config, worker_tx, term_size);
-        });
+        let reaction = self.engine.apply(Command::DispatchCreateAgentRequest {
+            request: Box::new(request),
+            busy_message,
+            term_size,
+        })?;
+        self.apply_reaction(reaction);
         Ok(())
     }
 
@@ -447,23 +441,21 @@ impl App {
     }
 
     pub(crate) fn dispatch_agent_launch(&mut self, request: AgentLaunchRequest) -> bool {
-        let session_id = request.session.id.clone();
-        if !self
-            .engine
-            .agent_launches_in_flight
-            .insert(session_id.clone())
-        {
-            self.set_info(format!(
-                "Agent \"{}\" is already launching.",
-                request.session.branch_name
-            ));
-            return false;
-        }
-        let tx = self.engine.worker_tx.clone();
-        thread::spawn(move || {
-            dux_core::agent_job::run_agent_launch_job(request, tx);
-        });
-        true
+        let reaction = match self.engine.apply(Command::DispatchAgentLaunch {
+            request: Box::new(request),
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                self.set_error(format!("{e:#}"));
+                return false;
+            }
+        };
+        let launched = matches!(
+            &reaction,
+            EventReaction::DispatchAgentLaunchView(view) if view.launched
+        );
+        self.apply_reaction(reaction);
+        launched
     }
 
     pub(crate) fn spawn_companion_terminal_for_session(
