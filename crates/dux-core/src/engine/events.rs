@@ -2330,26 +2330,12 @@ mod tests {
         assert!(view.label.is_none());
     }
 
-    #[test]
-    fn apply_open_path_returns_busy_status_with_formatted_target() {
-        let (mut engine, _tmp) = test_engine();
-        let reaction = engine
-            .apply(crate::engine::Command::OpenPath {
-                path: PathBuf::from("/tmp/log.txt"),
-                target: "startup command log file".to_string(),
-            })
-            .expect("apply succeeds");
-        let update = match reaction {
-            EventReaction::Status(u) => u,
-            other => panic!("expected Status, got {}", reaction_kind(&other)),
-        };
-        assert!(matches!(update.tone, StatusTone::Busy));
-        assert_eq!(
-            update.message,
-            "Opening startup command log file: /tmp/log.txt"
-        );
-        // Worker thread is fire-and-forget; we don't assert on the event
-        // it sends because `crate::startup::open_path` opens a real file
-        // and would fail in CI (no display server, no associated app).
-    }
+    // Note: `Command::OpenPath` is intentionally NOT unit-tested here. The
+    // apply arm spawns a detached thread that calls
+    // `crate::startup::open_path` (which shells out to xdg-open / `open`),
+    // and even though we only care about the synchronous Status reaction,
+    // the spawned thread still fires the real system handler — producing a
+    // desktop notification on dev machines and a flaky failure in CI. The
+    // status-message formatting is trivial and exercised end-to-end by the
+    // App-level startup-command-log open flow.
 }
