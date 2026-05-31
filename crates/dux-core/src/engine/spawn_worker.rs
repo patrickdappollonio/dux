@@ -113,6 +113,12 @@ impl Engine {
         let spawn_result = thread::Builder::new()
             .name(format!("dux-cmd-{label_for_thread}"))
             .spawn(move || {
+                // AssertUnwindSafe: the job's captured state is owned by
+                // this thread and is not shared with the main engine. A
+                // panic strands at most that owned state; the in-flight
+                // key it left set is restored by the synthesised
+                // completion event posted below, which `drain_events`
+                // routes through the existing failure handler.
                 let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
                     job(tx_for_job);
                 }));

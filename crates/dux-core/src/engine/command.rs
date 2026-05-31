@@ -422,11 +422,11 @@ impl Engine {
             Command::OpenPath { path, target } => {
                 let display = path.display().to_string();
                 let busy_message = format!("Opening {target}: {display}");
-                let target_for_job = target.clone();
+                let label = format!("open-path:{target}");
                 let target_for_panic = target.clone();
                 Ok(self.spawn_command_worker(
                     CommandWorkerSpec {
-                        label: format!("open-path:{target}"),
+                        label,
                         in_flight_key: None,
                         busy_status: Some(StatusUpdate::busy(busy_message)),
                         already_running_status: None,
@@ -438,10 +438,7 @@ impl Engine {
                     move |tx| {
                         let result =
                             crate::startup::open_path(&path).map_err(|err| format!("{err:#}"));
-                        let _ = tx.send(WorkerEvent::OpenPathCompleted {
-                            target: target_for_job,
-                            result,
-                        });
+                        let _ = tx.send(WorkerEvent::OpenPathCompleted { target, result });
                     },
                 ))
             }
