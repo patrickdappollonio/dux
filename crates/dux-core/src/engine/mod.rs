@@ -8,9 +8,10 @@ mod events;
 pub use command::Command;
 pub use events::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
-    BeginDeleteSessionOutcome, BeginDeleteSessionView, DetachedSession, DispatchAgentLaunchView,
-    DoDeleteSessionOutcome, DoDeleteSessionView, EventReaction, FinishDeleteSessionOutcome,
-    FinishDeleteSessionView, ProjectPersistenceOutcome, ProjectPersistenceView, StatusUpdate,
+    BeginDeleteSessionOutcome, BeginDeleteSessionView, DeleteTerminalView, DetachedSession,
+    DispatchAgentLaunchView, DoDeleteSessionOutcome, DoDeleteSessionView, EventReaction,
+    FinishDeleteSessionOutcome, FinishDeleteSessionView, ProjectPersistenceOutcome,
+    ProjectPersistenceView, StatusUpdate,
 };
 
 use std::collections::{HashMap, HashSet};

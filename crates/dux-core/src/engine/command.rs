@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 use crate::engine::Engine;
 use crate::engine::events::{
-    BeginDeleteSessionView, DispatchAgentLaunchView, DoDeleteSessionView, EventReaction,
-    FinishDeleteSessionView, StatusUpdate,
+    BeginDeleteSessionView, DeleteTerminalView, DispatchAgentLaunchView, DoDeleteSessionView,
+    EventReaction, FinishDeleteSessionView, StatusUpdate,
 };
 use crate::worker::{
     AgentLaunchRequest, CreateAgentRequest, ProjectPersistenceAction, PullTarget, WorkerEvent,
@@ -117,6 +117,28 @@ pub enum Command {
         busy_message: String,
         already_running_message: String,
     },
+
+    /// Open a filesystem path via the user's OS handler. Fire-and-forget
+    /// spawn; result posts back as `WorkerEvent::OpenPathCompleted` which the
+    /// existing reaction handler surfaces as a status message.
+    OpenPath { path: PathBuf, target: String },
+
+    /// Toggle a session's `auto_reopen_enabled` flag. The App caller passes
+    /// the new value + branch name (computed from the cloned selected session
+    /// upfront — preserves the App-side capture-before-mutate behaviour). The
+    /// engine performs the upsert in-place; if the session was removed
+    /// in-flight, falls back to `session_store.set_auto_reopen_enabled`
+    /// (matches the original method's race-handling).
+    ToggleAgentAutoReopen {
+        session_id: String,
+        branch_name: String,
+        new_enabled: bool,
+    },
+
+    /// Remove a companion terminal from the engine (drops `PtyClient`, killing
+    /// the child). Returns a typed view carrying the terminal's label so the
+    /// App can format status + reconcile `active_terminal_id` (view field).
+    DeleteTerminal { terminal_id: String },
 }
 
 impl Engine {
@@ -315,6 +337,54 @@ impl Engine {
                     });
                 });
                 Ok(EventReaction::Status(StatusUpdate::busy(busy_message)))
+            }
+
+            Command::OpenPath { path, target } => {
+                let display = path.display().to_string();
+                let tx = self.worker_tx.clone();
+                let target_for_event = target.clone();
+                std::thread::spawn(move || {
+                    let result = crate::startup::open_path(&path).map_err(|err| format!("{err:#}"));
+                    let _ = tx.send(crate::worker::WorkerEvent::OpenPathCompleted {
+                        target: target_for_event,
+                        result,
+                    });
+                });
+                Ok(EventReaction::Status(StatusUpdate::busy(format!(
+                    "Opening {target}: {display}"
+                ))))
+            }
+
+            Command::ToggleAgentAutoReopen {
+                session_id,
+                branch_name,
+                new_enabled,
+            } => {
+                if let Some(current) = self.sessions.iter_mut().find(|c| c.id == session_id) {
+                    current.auto_reopen_enabled = new_enabled;
+                    current.updated_at = chrono::Utc::now();
+                    self.session_store.upsert_session(current)?;
+                } else {
+                    self.session_store
+                        .set_auto_reopen_enabled(&session_id, new_enabled)?;
+                }
+                Ok(EventReaction::Status(StatusUpdate::info(format!(
+                    "Startup auto-reopen {} for agent \"{}\".",
+                    if new_enabled { "enabled" } else { "disabled" },
+                    branch_name,
+                ))))
+            }
+
+            Command::DeleteTerminal { terminal_id } => {
+                let label = self
+                    .companion_terminals
+                    .get(&terminal_id)
+                    .map(|t| t.label.clone());
+                // Removing from the map drops PtyClient, which kills the child.
+                self.companion_terminals.remove(&terminal_id);
+                Ok(EventReaction::DeleteTerminalView(Box::new(
+                    DeleteTerminalView { terminal_id, label },
+                )))
             }
         }
     }

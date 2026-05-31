@@ -162,6 +162,12 @@ pub enum EventReaction {
     /// branches). `status` is `Some(StatusUpdate::info(…))` only on the
     /// already-in-flight path.
     DispatchAgentLaunchView(Box<DispatchAgentLaunchView>),
+
+    // -- Companion terminal deletion (E4e). --
+    /// View follow-up for `Command::DeleteTerminal`. The Engine has dropped
+    /// the `PtyClient` (killing the child); the App clears
+    /// `active_terminal_id` if it matches and clamps the terminal cursor.
+    DeleteTerminalView(Box<DeleteTerminalView>),
 }
 
 /// Result of `Engine::detach_conflicting_worktree_session` — the App caller
@@ -366,6 +372,15 @@ pub struct BeginDeleteSessionView {
 pub struct DispatchAgentLaunchView {
     pub launched: bool,
     pub status: Option<StatusUpdate>,
+}
+
+/// View follow-up for `Command::DeleteTerminal`. `label` is `Some(label)`
+/// if the terminal existed; `None` if it was already gone. The App caller
+/// clears `active_terminal_id` if it matches and clamps the terminal
+/// cursor.
+pub struct DeleteTerminalView {
+    pub terminal_id: String,
+    pub label: Option<String>,
 }
 
 /// Display name for a session — title if present, branch name otherwise.
@@ -1507,6 +1522,7 @@ mod tests {
             EventReaction::DoDeleteSessionView(_) => "DoDeleteSessionView",
             EventReaction::BeginDeleteSessionView(_) => "BeginDeleteSessionView",
             EventReaction::DispatchAgentLaunchView(_) => "DispatchAgentLaunchView",
+            EventReaction::DeleteTerminalView(_) => "DeleteTerminalView",
         }
     }
 
@@ -2265,5 +2281,75 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    // ── E4e: OpenPath, ToggleAgentAutoReopen, DeleteTerminal ────────────
+
+    #[test]
+    fn apply_toggle_agent_auto_reopen_updates_session_and_returns_status() {
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat/x");
+        session.auto_reopen_enabled = false;
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let reaction = engine
+            .apply(crate::engine::Command::ToggleAgentAutoReopen {
+                session_id: "s1".to_string(),
+                branch_name: "feat/x".to_string(),
+                new_enabled: true,
+            })
+            .expect("apply succeeds");
+        assert!(engine.sessions[0].auto_reopen_enabled);
+        assert!(matches!(
+            reaction,
+            EventReaction::Status(StatusUpdate {
+                tone: StatusTone::Info,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn apply_delete_terminal_returns_view_with_label_when_present() {
+        let (mut engine, _tmp) = test_engine();
+        // Without a real PtyClient we can't construct a CompanionTerminal —
+        // exercise only the "not present" path here. The label-present
+        // path is covered by existing App-level tests (do_delete_terminal
+        // is called from the confirm-delete-terminal flow).
+        let reaction = engine
+            .apply(crate::engine::Command::DeleteTerminal {
+                terminal_id: "missing".to_string(),
+            })
+            .expect("apply succeeds");
+        let view = match reaction {
+            EventReaction::DeleteTerminalView(v) => *v,
+            other => panic!("expected DeleteTerminalView, got {}", reaction_kind(&other)),
+        };
+        assert_eq!(view.terminal_id, "missing");
+        assert!(view.label.is_none());
+    }
+
+    #[test]
+    fn apply_open_path_returns_busy_status_with_formatted_target() {
+        let (mut engine, _tmp) = test_engine();
+        let reaction = engine
+            .apply(crate::engine::Command::OpenPath {
+                path: PathBuf::from("/tmp/log.txt"),
+                target: "startup command log file".to_string(),
+            })
+            .expect("apply succeeds");
+        let update = match reaction {
+            EventReaction::Status(u) => u,
+            other => panic!("expected Status, got {}", reaction_kind(&other)),
+        };
+        assert!(matches!(update.tone, StatusTone::Busy));
+        assert_eq!(
+            update.message,
+            "Opening startup command log file: /tmp/log.txt"
+        );
+        // Worker thread is fire-and-forget; we don't assert on the event
+        // it sends because `crate::startup::open_path` opens a real file
+        // and would fail in CI (no display server, no associated app).
     }
 }

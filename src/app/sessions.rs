@@ -902,20 +902,16 @@ impl App {
     }
 
     pub(crate) fn do_delete_terminal(&mut self, terminal_id: &str) {
-        let label = self
-            .engine
-            .companion_terminals
-            .get(terminal_id)
-            .map(|t| t.label.clone());
-        // Removing from the map drops PtyClient, which kills the child process.
-        self.engine.companion_terminals.remove(terminal_id);
-        if self.active_terminal_id.as_deref() == Some(terminal_id) {
-            self.active_terminal_id = None;
-        }
-        self.clamp_terminal_cursor();
-        if let Some(label) = label {
-            self.set_info(format!("Deleted terminal \"{}\"", label));
-        }
+        let reaction = match self.engine.apply(Command::DeleteTerminal {
+            terminal_id: terminal_id.to_string(),
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                self.set_error(format!("{e:#}"));
+                return;
+            }
+        };
+        self.apply_reaction(reaction);
     }
 
     fn change_agent_provider_options(
@@ -1280,26 +1276,13 @@ impl App {
             self.set_error("Select an agent first.");
             return Ok(());
         };
-        let enabled = !session.auto_reopen_enabled;
-        if let Some(current) = self
-            .engine
-            .sessions
-            .iter_mut()
-            .find(|candidate| candidate.id == session.id)
-        {
-            current.auto_reopen_enabled = enabled;
-            current.updated_at = Utc::now();
-            self.engine.session_store.upsert_session(current)?;
-        } else {
-            self.engine
-                .session_store
-                .set_auto_reopen_enabled(&session.id, enabled)?;
-        }
-        self.set_info(format!(
-            "Startup auto-reopen {} for agent \"{}\".",
-            if enabled { "enabled" } else { "disabled" },
-            session.branch_name
-        ));
+        let new_enabled = !session.auto_reopen_enabled;
+        let reaction = self.engine.apply(Command::ToggleAgentAutoReopen {
+            session_id: session.id,
+            branch_name: session.branch_name,
+            new_enabled,
+        })?;
+        self.apply_reaction(reaction);
         Ok(())
     }
 
@@ -1626,16 +1609,13 @@ impl App {
     }
 
     fn spawn_open_path(&mut self, path: PathBuf, target: &'static str) {
-        let display = path.display().to_string();
-        let tx = self.engine.worker_tx.clone();
-        std::thread::spawn(move || {
-            let result = crate::startup::open_path(&path).map_err(|err| format!("{err:#}"));
-            let _ = tx.send(WorkerEvent::OpenPathCompleted {
-                target: target.to_string(),
-                result,
-            });
-        });
-        self.set_busy(format!("Opening {target}: {display}"));
+        match self.engine.apply(Command::OpenPath {
+            path,
+            target: target.to_string(),
+        }) {
+            Ok(reaction) => self.apply_reaction(reaction),
+            Err(e) => self.set_error(format!("{e:#}")),
+        }
     }
 
     fn spawn_startup_command_log_load(

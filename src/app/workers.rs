@@ -2,7 +2,7 @@ use std::sync::mpsc::Sender;
 
 use dux_core::engine::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
-    BeginDeleteSessionOutcome, BeginDeleteSessionView, DispatchAgentLaunchView,
+    BeginDeleteSessionOutcome, BeginDeleteSessionView, DeleteTerminalView, DispatchAgentLaunchView,
     DoDeleteSessionView, EventReaction, FinishDeleteSessionView, ProjectPersistenceOutcome,
     ProjectPersistenceView, StatusUpdate,
 };
@@ -563,6 +563,17 @@ impl App {
                 }
                 // The `launched` bool is consumed by the App wrapper before
                 // `apply_reaction` is called; nothing more to do here.
+            }
+
+            EventReaction::DeleteTerminalView(view) => {
+                let DeleteTerminalView { terminal_id, label } = *view;
+                if self.active_terminal_id.as_deref() == Some(terminal_id.as_str()) {
+                    self.active_terminal_id = None;
+                }
+                self.clamp_terminal_cursor();
+                if let Some(label) = label {
+                    self.set_info(format!("Deleted terminal \"{label}\""));
+                }
             }
         }
     }
