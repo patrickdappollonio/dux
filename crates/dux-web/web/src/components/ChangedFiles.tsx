@@ -1,5 +1,18 @@
 import { useState } from "react"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
 import {
@@ -11,24 +24,19 @@ import {
 } from "@/components/ui/sheet"
 import { openCommit, socket, useDux } from "@/lib/store"
 import type { ChangedFileView } from "@/lib/types"
-import { cn } from "@/lib/utils"
 
 // Map raw git status codes to a short display glyph.
 function statusGlyph(status: string): string {
-  switch (status.toUpperCase()) {
-    case "M": return "M"
-    case "A": return "A"
-    case "D": return "D"
-    case "?": return "?"
+  const upper = status.toUpperCase()
+  switch (upper) {
+    case "M":  return "M"
+    case "A":  return "A"
+    case "D":  return "D"
+    case "?":
     case "??": return "?"
-    default: return status.slice(0, 1).toUpperCase() || "?"
+    case "R":  return "R"
+    default:   return status.slice(0, 1).toUpperCase() || "?"
   }
-}
-
-// Truncate a path on the left if it is too long, preserving the filename.
-function truncatePath(path: string, maxLen = 36): string {
-  if (path.length <= maxLen) return path
-  return "…" + path.slice(path.length - (maxLen - 1))
 }
 
 interface FileRowProps {
@@ -50,43 +58,33 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
   return (
     <div
       role="row"
-      className="group flex cursor-pointer items-center gap-1.5 rounded px-1.5 py-1 text-xs hover:bg-muted"
+      className="group flex cursor-pointer items-center gap-2 rounded px-1 py-1 hover:bg-muted"
       onClick={() => onOpenDiff(file.path)}
     >
-      <span
-        className={cn(
-          "w-3 shrink-0 font-mono font-semibold",
-          glyph === "A" && "text-emerald-500",
-          glyph === "D" && "text-red-500",
-          glyph === "M" && "text-amber-500",
-          glyph === "?" && "text-muted-foreground"
-        )}
-      >
+      {/* Status glyph */}
+      <Badge variant="outline" className="shrink-0 font-mono">
         {glyph}
+      </Badge>
+
+      {/* File path */}
+      <span className="min-w-0 flex-1 truncate text-xs text-foreground">
+        {file.path}
       </span>
 
-      <span className="min-w-0 flex-1 truncate font-mono text-foreground">
-        {truncatePath(file.path)}
-      </span>
-
+      {/* Additions / deletions (text-only, skip for binary) */}
       {!file.binary && (file.additions > 0 || file.deletions > 0) && (
-        <span className="shrink-0 font-mono text-muted-foreground">
-          {file.additions > 0 && (
-            <span className="text-emerald-500">+{file.additions}</span>
-          )}
-          {file.additions > 0 && file.deletions > 0 && (
-            <span className="text-muted-foreground">/</span>
-          )}
-          {file.deletions > 0 && (
-            <span className="text-red-500">−{file.deletions}</span>
-          )}
+        <span className="shrink-0 text-xs text-muted-foreground">
+          {file.additions > 0 && `+${file.additions}`}
+          {file.additions > 0 && file.deletions > 0 && " "}
+          {file.deletions > 0 && `−${file.deletions}`}
         </span>
       )}
 
+      {/* Stage / Unstage action */}
       <Button
         variant="ghost"
         size="sm"
-        className="h-5 shrink-0 cursor-pointer px-1.5 py-0 text-xs opacity-0 group-hover:opacity-100"
+        className="shrink-0 opacity-0 group-hover:opacity-100"
         onClick={handleAction}
       >
         {action === "stage" ? "Stage" : "Unstage"}
@@ -104,22 +102,30 @@ interface FileGroupProps {
 }
 
 function FileGroup({ heading, files, action, sessionId, onOpenDiff }: FileGroupProps) {
+  const [open, setOpen] = useState(true)
+
   if (files.length === 0) return null
+
   return (
-    <div className="flex flex-col gap-0.5">
-      <h3 className="px-1.5 py-1 text-[0.65rem] font-semibold uppercase tracking-wide text-muted-foreground">
-        {heading} ({files.length})
-      </h3>
-      {files.map((f) => (
-        <FileRow
-          key={f.path}
-          file={f}
-          action={action}
-          sessionId={sessionId}
-          onOpenDiff={onOpenDiff}
-        />
-      ))}
-    </div>
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger className="flex w-full items-center gap-2 rounded px-1 py-1 text-sm font-medium hover:bg-muted">
+        <span className="flex-1 text-left">{heading}</span>
+        <Badge variant="secondary">{files.length}</Badge>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <div className="mt-1 flex flex-col gap-0.5">
+          {files.map((f) => (
+            <FileRow
+              key={f.path}
+              file={f}
+              action={action}
+              sessionId={sessionId}
+              onOpenDiff={onOpenDiff}
+            />
+          ))}
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
   )
 }
 
@@ -127,9 +133,10 @@ export function ChangedFiles() {
   const { viewModel, selectedSessionId } = useDux()
   const [diffPath, setDiffPath] = useState<string | null>(null)
 
+  // No session selected — muted empty state.
   if (!selectedSessionId) {
     return (
-      <div className="flex h-full items-center justify-center p-4 text-xs text-muted-foreground">
+      <div className="flex h-full items-center justify-center p-4 text-sm text-muted-foreground">
         Select a session to see changes
       </div>
     )
@@ -137,74 +144,67 @@ export function ChangedFiles() {
 
   const changed = viewModel?.changed_files ?? { staged: [], unstaged: [] }
   const hasChanges = changed.staged.length > 0 || changed.unstaged.length > 0
-
-  function handleCommit() {
-    if (selectedSessionId) openCommit(selectedSessionId)
-  }
-
-  function handlePush() {
-    if (selectedSessionId) socket.sendCommand("push", { session_id: selectedSessionId })
-  }
+  const showSeparator = changed.staged.length > 0 && changed.unstaged.length > 0
 
   return (
     <>
-      <div className="flex h-full min-h-0 flex-col bg-background">
-        {/* Header */}
-        <div className="flex shrink-0 items-center gap-1.5 border-b border-border px-2 py-1.5">
-          <h2 className="flex-1 text-[0.7rem] font-semibold uppercase tracking-wide text-muted-foreground">
-            Changes
-          </h2>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 cursor-pointer px-2 py-0 text-xs"
-            onClick={handleCommit}
-            disabled={changed.staged.length === 0}
-          >
-            Commit…
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 cursor-pointer px-2 py-0 text-xs"
-            onClick={handlePush}
-          >
-            Push
-          </Button>
-        </div>
+      {/* Main card filling the pane */}
+      <Card className="h-full rounded-none border-0 ring-0">
+        <CardHeader className="border-b">
+          <CardTitle>Changes</CardTitle>
+          <CardAction className="flex items-center gap-1">
+            <Button
+              size="sm"
+              onClick={() => openCommit(selectedSessionId)}
+              disabled={changed.staged.length === 0}
+            >
+              Commit…
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => socket.sendCommand("push", { session_id: selectedSessionId })}
+            >
+              Push
+            </Button>
+          </CardAction>
+        </CardHeader>
 
-        {/* File list */}
-        <ScrollArea className="flex-1">
-          <div className="flex flex-col gap-2 p-1.5">
-            {!hasChanges && (
-              <p className="px-1.5 py-2 text-xs text-muted-foreground">
-                No changes.
-              </p>
-            )}
-            <FileGroup
-              heading="Staged"
-              files={changed.staged}
-              action="unstage"
-              sessionId={selectedSessionId}
-              onOpenDiff={setDiffPath}
-            />
-            {changed.staged.length > 0 && changed.unstaged.length > 0 && (
-              <Separator />
-            )}
-            <FileGroup
-              heading="Unstaged"
-              files={changed.unstaged}
-              action="stage"
-              sessionId={selectedSessionId}
-              onOpenDiff={setDiffPath}
-            />
-          </div>
-        </ScrollArea>
-      </div>
+        <CardContent className="flex min-h-0 flex-1 flex-col p-0">
+          <ScrollArea className="flex-1">
+            <div className="flex flex-col gap-1 p-3">
+              {!hasChanges && (
+                <p className="py-2 text-sm text-muted-foreground">No changes.</p>
+              )}
 
-      {/* Diff sheet */}
-      <Sheet open={diffPath !== null} onOpenChange={(open) => { if (!open) setDiffPath(null) }}>
-        <SheetContent side="right" className="w-[min(600px,90vw)] sm:max-w-none">
+              <FileGroup
+                heading="Staged"
+                files={changed.staged}
+                action="unstage"
+                sessionId={selectedSessionId}
+                onOpenDiff={setDiffPath}
+              />
+
+              {showSeparator && <Separator className="my-1" />}
+
+              <FileGroup
+                heading="Unstaged"
+                files={changed.unstaged}
+                action="stage"
+                sessionId={selectedSessionId}
+                onOpenDiff={setDiffPath}
+              />
+            </div>
+          </ScrollArea>
+        </CardContent>
+      </Card>
+
+      {/* Diff sheet — placeholder, structured diff lands in a follow-up */}
+      <Sheet
+        open={diffPath !== null}
+        onOpenChange={(open) => { if (!open) setDiffPath(null) }}
+      >
+        <SheetContent side="right">
           <SheetHeader>
             <SheetTitle className="font-mono text-sm">{diffPath ?? ""}</SheetTitle>
             <SheetDescription>
