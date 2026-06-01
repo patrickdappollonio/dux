@@ -102,7 +102,17 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
             while let Ok(event) = engine.worker_rx.try_recv() {
                 let _ = engine.process_worker_event(event);
             }
-            let _ = vm_tx.send(view_model_json(&engine));
+            // Only notify ViewModel subscribers when the projection actually changed,
+            // so idle ticks don't wake every WS client ~20x/second.
+            let json = view_model_json(&engine);
+            vm_tx.send_if_modified(|current| {
+                if *current != json {
+                    *current = json;
+                    true
+                } else {
+                    false
+                }
+            });
 
             let mut disconnected = false;
             loop {
