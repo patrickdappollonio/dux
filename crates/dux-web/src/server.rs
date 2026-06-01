@@ -5,27 +5,25 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::{Html, IntoResponse};
+use axum::response::IntoResponse;
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 
 use crate::engine_actor::EngineHandle;
 use crate::protocol::{ClientMessage, ServerMessage};
 
-const INDEX_HTML: &str = include_str!("assets/index.html");
-
 #[derive(Clone)]
 pub struct AppState {
     pub engine: EngineHandle,
 }
 
-/// Build the axum router serving the static page, a health check, and the `/ws` endpoint.
+/// Build the axum router serving the embedded web UI, a health check, and the `/ws` endpoint.
 pub fn router(engine: EngineHandle) -> Router {
     let state = AppState { engine };
     Router::new()
-        .route("/", get(|| async { Html(INDEX_HTML) }))
         .route("/healthz", get(|| async { "ok" }))
         .route("/ws", get(ws_upgrade))
+        .fallback(crate::web_assets::static_handler)
         .with_state(state)
 }
 

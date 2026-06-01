@@ -9,6 +9,7 @@ pub mod bootstrap;
 pub mod engine_actor;
 pub mod protocol;
 pub mod server;
+pub mod web_assets;
 
 use std::net::SocketAddr;
 

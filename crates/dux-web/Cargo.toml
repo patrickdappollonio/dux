@@ -11,8 +11,10 @@ serde_json.workspace = true
 tokio.workspace = true
 axum.workspace = true
 futures-util.workspace = true
+rust-embed = { version = "8", features = ["mime-guess", "debug-embed"] }
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio-tungstenite.workspace = true
 chrono.workspace = true
+tower = { version = "0.5", features = ["util"] }
