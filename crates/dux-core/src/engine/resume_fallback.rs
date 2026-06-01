@@ -170,7 +170,10 @@ mod tests {
         let outcome = engine.retry_resume_fallback("s1", (24, 80), "fresh".to_string());
 
         assert!(matches!(outcome, ResumeFallbackOutcome::Retried { .. }));
-        // Candidate, provider, and pin were torn down.
+        // Candidate and pin were torn down. The providers check is
+        // documentation-only: PtyClient can't be seeded without spawning a
+        // real process, so the map is always empty here and this assert can't
+        // fail — the load-bearing assertions are the candidate and pin removals.
         assert!(!engine.resume_fallback_candidates.contains_key("s1"));
         assert!(!engine.providers.contains_key("s1"));
         assert!(!engine.running_provider_pins.contains_key("s1"));
