@@ -4,7 +4,7 @@ use dux_core::engine::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
     BeginDeleteSessionOutcome, BeginDeleteSessionView, DeleteTerminalView, DispatchAgentLaunchView,
     DoDeleteSessionView, EventReaction, FinishDeleteSessionView, ProjectPersistenceOutcome,
-    ProjectPersistenceView, StatusUpdate,
+    ProjectPersistenceView, ResumeFallbackOutcome, StatusUpdate,
 };
 
 use super::*;
@@ -861,7 +861,6 @@ impl App {
         }
 
         for session_id in hung {
-            self.engine.resume_fallback_candidates.remove(&session_id);
             let Some(session) = self
                 .engine
                 .sessions
@@ -869,15 +868,11 @@ impl App {
                 .find(|s| s.id == session_id)
                 .cloned()
             else {
+                // Session vanished between detection and retry; drop any stale
+                // candidate so it can't leak.
+                self.engine.resume_fallback_candidates.remove(&session_id);
                 continue;
             };
-            self.engine.providers.remove(&session_id);
-            self.engine.running_provider_pins.remove(&session_id);
-            self.last_pty_activity.remove(&session_id);
-            logger::info(&format!(
-                "resume args produced no visible output for agent \"{}\" within timeout, retrying with regular args",
-                session.branch_name
-            ));
             let proj_name = self.engine.project_name_for_session(&session);
             let status_message = format!(
                 "Resume timed out for agent \"{}\" with no visible output. Started a fresh {} session in project \"{}\".",
@@ -885,14 +880,23 @@ impl App {
                 session.provider.as_str(),
                 proj_name,
             );
-            let request = self.agent_launch_request(
-                session,
-                false,
-                AgentLaunchKind::ResumeFallback { status_message },
-            );
-            if !self.dispatch_agent_launch(request) {
-                self.engine
-                    .mark_session_status(&session_id, SessionStatus::Detached);
+            logger::info(&format!(
+                "resume args produced no visible output for agent \"{}\" within timeout, retrying with regular args",
+                session.branch_name
+            ));
+            let pty_size = self.pty_size_for_launch();
+            match self
+                .engine
+                .retry_resume_fallback(&session_id, pty_size, status_message)
+            {
+                ResumeFallbackOutcome::Retried { reaction } => {
+                    self.last_pty_activity.remove(&session_id);
+                    self.apply_reaction(*reaction);
+                }
+                // InFlight: a launch is already in progress — leave it alone.
+                // NotCandidate: nothing to retry (engine cleared any stale
+                // candidate). Either way, no further action here.
+                ResumeFallbackOutcome::InFlight | ResumeFallbackOutcome::NotCandidate => {}
             }
         }
     }

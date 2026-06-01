@@ -405,7 +405,7 @@ impl App {
         Ok(())
     }
 
-    fn pty_size_for_launch(&self) -> (u16, u16) {
+    pub(crate) fn pty_size_for_launch(&self) -> (u16, u16) {
         if self.last_pty_size != (0, 0) {
             self.last_pty_size
         } else {
