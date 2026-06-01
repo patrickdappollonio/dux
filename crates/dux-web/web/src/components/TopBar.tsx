@@ -1,21 +1,16 @@
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { setPaletteOpen, useDux } from "@/lib/store"
-import { cn } from "@/lib/utils"
 
 function ConnIndicator() {
   const { conn } = useDux()
   const map = {
-    open: { glyph: "●", label: "Connected", color: "text-emerald-500" },
-    connecting: { glyph: "○", label: "Connecting", color: "text-amber-500" },
-    closed: { glyph: "○", label: "Disconnected", color: "text-zinc-500" },
+    open: { label: "Connected", variant: "default" },
+    connecting: { label: "Connecting", variant: "secondary" },
+    closed: { label: "Disconnected", variant: "outline" },
   } as const
-  const { glyph, label, color } = map[conn]
-  return (
-    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-      <span className={cn("leading-none", color)}>{glyph}</span>
-      <span>{label}</span>
-    </div>
-  )
+  const { label, variant } = map[conn]
+  return <Badge variant={variant}>{label}</Badge>
 }
 
 export function TopBar() {
