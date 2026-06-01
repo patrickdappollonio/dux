@@ -1,5 +1,6 @@
 import { Sidebar } from "@/components/Sidebar"
 import { StatusBar } from "@/components/StatusBar"
+import { TerminalPane } from "@/components/TerminalPane"
 import { TopBar } from "@/components/TopBar"
 import {
   ResizableHandle,
@@ -9,18 +10,17 @@ import {
 import { useDux } from "@/lib/store"
 
 function TerminalArea() {
-  const { viewModel, selectedSessionId } = useDux()
-  const session = viewModel?.sessions.find((s) => s.id === selectedSessionId)
+  const { selectedSessionId } = useDux()
 
   return (
-    <div className="flex h-full flex-col bg-background">
-      <div className="m-2 flex flex-1 items-center justify-center rounded-md border border-border bg-card text-sm text-muted-foreground">
-        {session ? (
-          <span className="font-mono">{session.branch_name}</span>
-        ) : (
-          <span>select a session</span>
-        )}
-      </div>
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      {selectedSessionId ? (
+        <TerminalPane key={selectedSessionId} sessionId={selectedSessionId} />
+      ) : (
+        <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+          <span>Select a session to attach its terminal</span>
+        </div>
+      )}
     </div>
   )
 }
