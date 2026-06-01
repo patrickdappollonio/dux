@@ -14,6 +14,8 @@ export interface DuxState {
   conn: ConnState
   selectedSessionId: string | null
   lastMessage: string
+  commitTarget: string | null
+  paletteOpen: boolean
 }
 
 let state: DuxState = {
@@ -21,6 +23,8 @@ let state: DuxState = {
   conn: "connecting",
   selectedSessionId: null,
   lastMessage: "",
+  commitTarget: null,
+  paletteOpen: false,
 }
 
 const listeners = new Set<() => void>()
@@ -77,4 +81,16 @@ export function useDux(): DuxState {
 
 export function selectSession(id: string | null): void {
   setState({ selectedSessionId: id })
+}
+
+export function openCommit(sessionId: string): void {
+  setState({ commitTarget: sessionId })
+}
+
+export function closeCommit(): void {
+  setState({ commitTarget: null })
+}
+
+export function setPaletteOpen(open: boolean): void {
+  setState({ paletteOpen: open })
 }

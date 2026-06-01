@@ -1,3 +1,5 @@
+import { CommandPalette } from "@/components/CommandPalette"
+import { CommitDialog } from "@/components/CommitDialog"
 import { Sidebar } from "@/components/Sidebar"
 import { StatusBar } from "@/components/StatusBar"
 import { TerminalPane } from "@/components/TerminalPane"
@@ -38,6 +40,8 @@ function ChangedFilesArea() {
 function App() {
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
+      <CommandPalette />
+      <CommitDialog />
       <TopBar />
       <ResizablePanelGroup orientation="horizontal" className="flex-1">
         <ResizablePanel defaultSize={22} minSize={12} collapsible>

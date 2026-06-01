@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button"
-import { useDux } from "@/lib/store"
+import { setPaletteOpen, useDux } from "@/lib/store"
 import { cn } from "@/lib/utils"
 
 function ConnIndicator() {
@@ -37,7 +37,7 @@ export function TopBar() {
         <Button
           variant="outline"
           size="sm"
-          onClick={() => {}}
+          onClick={() => setPaletteOpen(true)}
           className="gap-2 text-muted-foreground"
         >
           <span className="font-mono text-xs">⌘K</span>

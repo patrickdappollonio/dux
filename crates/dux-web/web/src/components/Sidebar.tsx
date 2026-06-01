@@ -1,5 +1,12 @@
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { selectSession, useDux } from "@/lib/store"
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu"
+import { openCommit, selectSession, socket, useDux } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import type { SessionStatus, SessionView } from "@/lib/types"
 
@@ -16,27 +23,69 @@ function SessionRow({
   session: SessionView
   selected: boolean
 }) {
+  function handleToggleAutoReopen() {
+    socket.sendCommand("toggle_agent_auto_reopen", {
+      session_id: session.id,
+      enabled: !session.auto_reopen_enabled,
+    })
+  }
+
+  function handlePush() {
+    socket.sendCommand("push", { session_id: session.id })
+  }
+
   return (
-    <button
-      type="button"
-      onClick={() => selectSession(session.id)}
-      className={cn(
-        "flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
-        selected
-          ? "bg-accent text-accent-foreground"
-          : "text-muted-foreground hover:bg-muted hover:text-foreground"
-      )}
-    >
-      <span
-        className={cn(
-          "size-1.5 shrink-0 rounded-full",
-          STATUS_DOT[session.status]
-        )}
-      />
-      <span className="truncate">
-        {session.provider} · {session.branch_name}
-      </span>
-    </button>
+    <ContextMenu>
+      <ContextMenuTrigger className="w-full">
+        <button
+          type="button"
+          onClick={() => selectSession(session.id)}
+          className={cn(
+            "flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
+            selected
+              ? "bg-accent text-accent-foreground"
+              : "text-muted-foreground hover:bg-muted hover:text-foreground"
+          )}
+        >
+          <span
+            className={cn(
+              "size-1.5 shrink-0 rounded-full",
+              STATUS_DOT[session.status]
+            )}
+          />
+          <span className="truncate">
+            {session.provider} · {session.branch_name}
+          </span>
+        </button>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem
+          className="cursor-pointer"
+          onClick={() => selectSession(session.id)}
+        >
+          Stream
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          className="cursor-pointer"
+          onClick={handleToggleAutoReopen}
+        >
+          Toggle auto-reopen
+        </ContextMenuItem>
+        <ContextMenuItem
+          className="cursor-pointer"
+          onClick={handlePush}
+        >
+          Push
+        </ContextMenuItem>
+        <ContextMenuItem
+          className="cursor-pointer"
+          onClick={() => openCommit(session.id)}
+        >
+          Commit…
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   )
 }
 
