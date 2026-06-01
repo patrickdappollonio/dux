@@ -1759,7 +1759,9 @@ impl App {
         );
         let (theme, theme_warning) = crate::theme::load_or_fallback(&config.ui.theme, &paths);
         let mut status = StatusLine::new(initial_status);
-        if let Some(message) = theme_warning {
+        if !config.ui.disable_startup_warnings
+            && let Some(message) = theme_warning
+        {
             status.warning(message);
         }
         let gh_integration_val = config.ui.github_integration;

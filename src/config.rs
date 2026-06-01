@@ -227,6 +227,7 @@ pub struct UiConfig {
     pub diff_comment_editor_max_lines: u16,
     pub github_integration: bool,
     pub auto_reopen_agents: bool,
+    pub disable_startup_warnings: bool,
     pub pr_banner_position: String,
     pub theme: String,
 }
@@ -258,6 +259,7 @@ impl Default for Config {
                 diff_comment_editor_max_lines: 10,
                 github_integration: true,
                 auto_reopen_agents: false,
+                disable_startup_warnings: false,
                 pr_banner_position: "bottom".to_string(),
                 theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
             },
@@ -399,6 +401,7 @@ impl Default for UiConfig {
             diff_comment_editor_max_lines: 10,
             github_integration: true,
             auto_reopen_agents: false,
+            disable_startup_warnings: false,
             pr_banner_position: "bottom".to_string(),
             theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
         }
@@ -843,6 +846,13 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.ui.auto_reopen_agents),
         },
         ConfigEntry::Field {
+            key: "disable_startup_warnings",
+            comment: Some(CommentSource::Static(
+                "# Disable non-critical startup warnings. Runtime warnings and errors still appear.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.ui.disable_startup_warnings),
+        },
+        ConfigEntry::Field {
             key: "pr_banner_position",
             comment: Some(CommentSource::Static(
                 "# Position of the PR banner in the agent pane: \"top\" or \"bottom\".\n# Toggle at runtime from the command palette.",
@@ -1094,6 +1104,12 @@ pub fn save_config(
         "ui",
         "auto_reopen_agents",
         config.ui.auto_reopen_agents,
+    );
+    patch_table_bool(
+        &mut doc,
+        "ui",
+        "disable_startup_warnings",
+        config.ui.disable_startup_warnings,
     );
     patch_table_str(
         &mut doc,
@@ -2418,6 +2434,29 @@ name = "test"
         let rendered = render_config_default(&config);
         let parsed: Config = toml::from_str(&rendered).expect("config should parse");
         assert_eq!(parsed.ui.staged_pane_height_pct, 65);
+    }
+
+    #[test]
+    fn default_config_round_trips_disable_startup_warnings() {
+        let mut config = Config::default();
+        config.ui.disable_startup_warnings = true;
+        let rendered = render_config_default(&config);
+        assert!(rendered.contains("disable_startup_warnings = true"));
+        let parsed: Config = toml::from_str(&rendered).expect("config should parse");
+        assert!(parsed.ui.disable_startup_warnings);
+    }
+
+    #[test]
+    fn old_config_missing_disable_startup_warnings_defaults_to_false() {
+        let parsed: Config = toml::from_str(
+            r#"
+[ui]
+left_width_pct = 20
+"#,
+        )
+        .expect("config should parse");
+
+        assert!(!parsed.ui.disable_startup_warnings);
     }
 
     #[test]

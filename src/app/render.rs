@@ -994,7 +994,7 @@ impl App {
 
         let w = content_area.width.max(1) as usize;
 
-        let decorated = self.decorated_diff_lines(&lines, &rows, selected_row);
+        let decorated = self.decorated_diff_lines(&lines, &rows, selected_row, w);
         let decorated_lines: Vec<Line<'static>> =
             decorated.iter().map(|row| row.line.clone()).collect();
         let effective_gutter_width = gutter_width + 2;
@@ -1113,13 +1113,16 @@ impl App {
         lines: &[Line<'static>],
         rows: &[crate::diff::DiffRow],
         selected_row: Option<usize>,
+        width: usize,
     ) -> Vec<DecoratedDiffLine> {
         let mut decorated: Vec<DecoratedDiffLine> = Vec::with_capacity(lines.len());
         for (idx, line) in lines.iter().enumerate() {
             let anchor = rows.get(idx).and_then(|row| row.anchor.as_ref());
-            let has_comment = anchor
-                .and_then(|anchor| self.diff_comment_for_anchor(anchor))
+            let comment = anchor.and_then(|anchor| self.diff_comment_for_anchor(anchor));
+            let editor_open = anchor
+                .and_then(|anchor| self.diff_comment_editor_for_anchor(anchor))
                 .is_some();
+            let has_comment = comment.is_some();
             let selected = selected_row == Some(idx);
             let marker = if has_comment { "⚑ " } else { "  " };
             let marker_style = if has_comment {
@@ -1145,10 +1148,18 @@ impl App {
                 inline_editor: false,
             });
 
-            if anchor
-                .and_then(|anchor| self.diff_comment_editor_for_anchor(anchor))
-                .is_some()
+            if let Some(comment) = comment
+                && !editor_open
             {
+                decorated.extend(Self::visible_diff_comment_lines(
+                    comment,
+                    &self.theme,
+                    idx,
+                    width,
+                ));
+            }
+
+            if editor_open {
                 for _ in 0..3 {
                     decorated.push(DecoratedDiffLine {
                         line: Line::from(""),
@@ -1288,6 +1299,65 @@ impl App {
         if let Some(editor) = &self.diff_comment_editor {
             self.render_multiline_input(&editor.input, inner, frame);
         }
+    }
+
+    fn visible_diff_comment_lines(
+        comment: &crate::app::DiffComment,
+        theme: &Theme,
+        source_row: usize,
+        available_width: usize,
+    ) -> Vec<DecoratedDiffLine> {
+        let box_width = available_width.saturating_sub(2).max(10);
+        let content_width = box_width.saturating_sub(4).max(1);
+        let title = " ⚑ Comment ";
+        let title_width = title.chars().count();
+        let top_border = if title_width < box_width.saturating_sub(2) {
+            format!(
+                "  ╭{title}{}╮",
+                "─".repeat(box_width.saturating_sub(2 + title_width))
+            )
+        } else {
+            format!("  ╭{}╮", "─".repeat(box_width.saturating_sub(2)))
+        };
+        let mut input = TextInput::with_text(comment.text.clone()).with_multiline(1);
+        input.set_display_width(Some(content_width));
+        input.set_visible_lines(input.total_lines().max(1));
+        let mut lines = vec![DecoratedDiffLine {
+            line: Line::from(Span::styled(
+                top_border,
+                Style::default().fg(theme.overlay_border),
+            )),
+            source_row,
+            inline_editor: false,
+        }];
+
+        for text in input.visible_lines() {
+            let text_width = text.chars().count().min(content_width);
+            let padding = " ".repeat(content_width.saturating_sub(text_width));
+            lines.push(DecoratedDiffLine {
+                line: Line::from(vec![
+                    Span::styled("  │ ", Style::default().fg(theme.overlay_border)),
+                    Span::styled(text, Style::default().fg(theme.text_fg)),
+                    Span::styled(
+                        format!("{padding} │"),
+                        Style::default().fg(theme.overlay_border),
+                    ),
+                ]),
+                source_row,
+                inline_editor: false,
+            });
+        }
+
+        lines.push(DecoratedDiffLine {
+            line: Line::from(Span::styled(
+                format!("  ╰{}╯", "─".repeat(box_width.saturating_sub(2))),
+                Style::default().fg(theme.overlay_border),
+            )),
+            source_row,
+            inline_editor: false,
+        });
+
+        lines
     }
 
     /// Render the ASCII "dux" logo centered in the given area, with an

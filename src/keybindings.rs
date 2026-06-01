@@ -1122,7 +1122,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     },
     BindingDef {
         action: Action::SendDiffComments,
-        default_keys: &[key!(ctrl - y)],
+        default_keys: &[key!(ctrl - ';'), key!(ctrl - ':')],
         scopes: &[BindingScope::Center, BindingScope::Interactive],
         help: Some(HelpEntry {
             section: "Agent pane",
@@ -1800,6 +1800,10 @@ fn normalize_ctrl_punct(kc: KeyCombination) -> KeyCombination {
     KeyCombination::new(KeyCode::Char(replacement), kc.modifiers)
 }
 
+fn normalize_for_lookup(kc: KeyCombination) -> KeyCombination {
+    normalize_ctrl_punct(normalize_backtab(kc.normalized()))
+}
+
 /// Returns the shared display format: lowercase modifiers, dash separator.
 /// e.g. `ctrl-p`, `shift-tab`, `space`, `enter`.
 /// Format for UI display: title-case modifiers, natural key names.
@@ -1812,6 +1816,11 @@ pub fn display_format() -> KeyCombinationFormat {
 #[cfg(test)]
 pub fn format_key(kc: KeyCombination) -> String {
     display_format().to_string(kc)
+}
+
+/// Format a raw terminal key event the same way bindings resolve it.
+pub fn format_key_event_for_display(key: KeyEvent) -> String {
+    display_format().to_string(normalize_for_lookup(KeyCombination::from(key)))
 }
 
 /// Format for config file serialization: all lowercase.
@@ -1918,14 +1927,13 @@ impl RuntimeBindings {
     /// Plain bindings (no modifiers) reject Ctrl/Alt combos so that e.g.
     /// Ctrl+D does not accidentally match a plain `d` binding.
     pub fn lookup(&self, key: &KeyEvent, scope: BindingScope) -> Option<Action> {
-        let incoming =
-            normalize_ctrl_punct(normalize_backtab(KeyCombination::from(*key).normalized()));
+        let incoming = normalize_for_lookup(KeyCombination::from(*key));
         self.bindings
             .iter()
             .filter(|b| b.scopes.contains(&scope))
             .find(|b| {
                 b.keys.iter().any(|k| {
-                    let norm = normalize_ctrl_punct(normalize_backtab(k.normalized()));
+                    let norm = normalize_for_lookup(*k);
                     if norm.codes != incoming.codes {
                         return false;
                     }
@@ -2107,8 +2115,8 @@ pub struct KeyConflict {
 /// - Plain bindings (no modifiers) only conflict with other plain bindings.
 /// - Modifier bindings conflict only when modifiers are identical.
 fn keys_conflict(a: &KeyCombination, b: &KeyCombination) -> bool {
-    let na = normalize_ctrl_punct(normalize_backtab(a.normalized()));
-    let nb = normalize_ctrl_punct(normalize_backtab(b.normalized()));
+    let na = normalize_for_lookup(*a);
+    let nb = normalize_for_lookup(*b);
     if na.codes != nb.codes {
         return false;
     }
@@ -2270,6 +2278,7 @@ fn key_combination_to_bytes(kc: &KeyCombination) -> Option<Vec<u8>> {
             //   Ctrl+]  → 0x1d  (GS)
             //   Ctrl+^  → 0x1e  (RS)
             //   Ctrl+_  → 0x1f  (US)
+            //   Ctrl+; / Ctrl+: → CSI-u sequences in terminals that support them
             let lower = c.to_ascii_lowercase();
             if lower.is_ascii_lowercase() {
                 Some(vec![lower as u8 - b'a' + 1])
@@ -2279,6 +2288,8 @@ fn key_combination_to_bytes(kc: &KeyCombination) -> Option<Vec<u8>> {
                     ']' => Some(vec![0x1d]),
                     '^' => Some(vec![0x1e]),
                     '_' => Some(vec![0x1f]),
+                    ';' => Some(b"\x1b[59;5u".to_vec()),
+                    ':' => Some(b"\x1b[58;5u".to_vec()),
                     _ => None,
                 }
             }
@@ -2398,6 +2409,35 @@ mod tests {
         assert_eq!(
             bindings.lookup(&key, BindingScope::Global),
             Some(Action::RemoveGitPane),
+        );
+    }
+
+    #[test]
+    fn lookup_send_diff_comments_matches_ctrl_semicolon_and_colon() {
+        let bindings = default_bindings();
+        assert_eq!(
+            bindings.lookup(
+                &KeyEvent::new(KeyCode::Char(';'), KeyModifiers::CONTROL),
+                BindingScope::Interactive
+            ),
+            Some(Action::SendDiffComments)
+        );
+        assert_eq!(
+            bindings.lookup(
+                &KeyEvent::new(KeyCode::Char(':'), KeyModifiers::CONTROL),
+                BindingScope::Interactive
+            ),
+            Some(Action::SendDiffComments)
+        );
+        assert_eq!(
+            bindings.lookup(
+                &KeyEvent::new(
+                    KeyCode::Char(':'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                ),
+                BindingScope::Interactive
+            ),
+            Some(Action::SendDiffComments)
         );
     }
 
@@ -2718,6 +2758,12 @@ mod tests {
 
         let kc3 = key!(space);
         assert_eq!(format_key(kc3), "Space");
+    }
+
+    #[test]
+    fn format_key_event_display_normalizes_ctrl_punctuation() {
+        let key = KeyEvent::new(KeyCode::Char('6'), KeyModifiers::CONTROL);
+        assert_eq!(format_key_event_for_display(key), "Ctrl-^");
     }
 
     #[test]
@@ -3085,6 +3131,30 @@ mod tests {
         assert_eq!(key_combination_to_bytes(&kc), Some(vec![0x07]));
         let kc_a = key!(ctrl - a);
         assert_eq!(key_combination_to_bytes(&kc_a), Some(vec![0x01]));
+    }
+
+    #[test]
+    fn bytes_ctrl_semicolon_and_colon() {
+        assert_eq!(
+            key_combination_to_bytes(&key!(ctrl - ';')),
+            Some(b"\x1b[59;5u".to_vec())
+        );
+        assert_eq!(
+            key_combination_to_bytes(&key!(ctrl - ':')),
+            Some(b"\x1b[58;5u".to_vec())
+        );
+    }
+
+    #[test]
+    fn interactive_byte_patterns_match_send_diff_comments_default() {
+        let bindings = default_bindings();
+        let patterns = bindings.interactive_byte_patterns();
+        let semicolon = patterns.match_sequence(b"\x1b[59;5u");
+        assert!(semicolon.is_some());
+        assert_eq!(semicolon.unwrap().0, Action::SendDiffComments);
+        let colon = patterns.match_sequence(b"\x1b[58;5u");
+        assert!(colon.is_some());
+        assert_eq!(colon.unwrap().0, Action::SendDiffComments);
     }
 
     #[test]

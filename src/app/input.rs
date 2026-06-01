@@ -2035,8 +2035,7 @@ impl App {
                 return Ok(false);
             }
 
-            let kc = crokey::KeyCombination::from(key).normalized();
-            let label = crate::keybindings::display_format().to_string(kc);
+            let label = crate::keybindings::format_key_event_for_display(key);
 
             // Look up what action this key resolves to in every scope.
             let resolved: Vec<String> = BindingScope::ALL
@@ -9506,6 +9505,44 @@ not_a_real_action = ["x"]
         assert_eq!(comment.key.session_id, "session-1");
         assert_eq!(comment.key.rel_path, "README.md");
         assert_eq!(comment.text, "Use h4 here");
+    }
+
+    #[test]
+    fn diff_renders_saved_comments_inline_under_code_lines() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        open_commentable_diff(&mut app);
+        app.fullscreen_overlay = FullscreenOverlay::Diff;
+        let key = crate::app::DiffCommentKey::new("session-1", &diff_anchor(45, "## title"));
+        app.save_diff_comment(key, "Use an h4 instead\nKeep this visible".to_string());
+
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(
+            rendered.contains("Comment"),
+            "expected inline comment label in diff, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("Use an h4 instead"),
+            "expected first comment line in diff, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("Keep this visible"),
+            "expected multiline comment text in diff, got: {rendered}"
+        );
     }
 
     #[test]
