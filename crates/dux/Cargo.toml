@@ -5,4 +5,6 @@ edition = "2024"
 
 [dependencies]
 dux-tui = { path = "../dux-tui" }
+dux-web = { path = "../dux-web" }
+dux-core.workspace = true
 anyhow.workspace = true

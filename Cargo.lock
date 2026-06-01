@@ -612,7 +612,9 @@ name = "dux"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dux-core",
  "dux-tui",
+ "dux-web",
 ]
 
 [[package]]
