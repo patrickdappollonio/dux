@@ -419,25 +419,8 @@ impl App {
         resume: bool,
         kind: AgentLaunchKind,
     ) -> AgentLaunchRequest {
-        let cfg = provider_config(&self.engine.config, &session.provider);
-        let env = self
-            .engine
-            .projects
-            .iter()
-            .find(|project| project.id == session.project_id)
-            .and_then(|project| {
-                crate::config::resolve_agent_env(&self.engine.config.env, &project.env).ok()
-            })
-            .unwrap_or_default();
-        AgentLaunchRequest {
-            session,
-            provider_config: cfg,
-            env,
-            resume,
-            pty_size: self.pty_size_for_launch(),
-            scrollback_lines: self.engine.config.ui.agent_scrollback_lines,
-            kind,
-        }
+        self.engine
+            .build_agent_launch_request(session, resume, self.pty_size_for_launch(), kind)
     }
 
     pub(crate) fn dispatch_agent_launch(&mut self, request: AgentLaunchRequest) -> bool {
