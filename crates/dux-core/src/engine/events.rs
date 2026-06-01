@@ -2082,6 +2082,69 @@ mod tests {
     }
 
     #[test]
+    fn begin_delete_inline_preserved_orphan_when_no_delete_no_siblings() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat/x");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let outcome = engine.begin_delete_session("s1", false);
+        match outcome {
+            BeginDeleteSessionOutcome::Inline { removal } => {
+                assert_eq!(removal, WorktreeRemoval::PreservedOrphan);
+            }
+            other => panic!("expected Inline, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn begin_delete_inline_preserved_shared_when_no_delete_with_sibling() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let mut a = sample_session("s1", "p1", "feat/x");
+        let mut b = sample_session("s2", "p1", "feat/y");
+        a.worktree_path = "/tmp/shared".to_string();
+        b.worktree_path = "/tmp/shared".to_string();
+        engine.session_store.upsert_session(&a).unwrap();
+        engine.session_store.upsert_session(&b).unwrap();
+        engine.sessions.push(a);
+        engine.sessions.push(b);
+
+        let outcome = engine.begin_delete_session("s1", false);
+        match outcome {
+            BeginDeleteSessionOutcome::Inline { removal } => {
+                assert_eq!(removal, WorktreeRemoval::PreservedShared);
+            }
+            other => panic!("expected Inline, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn begin_delete_inline_skipped_for_siblings_when_delete_with_sibling() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let mut a = sample_session("s1", "p1", "feat/x");
+        let mut b = sample_session("s2", "p1", "feat/y");
+        a.worktree_path = "/tmp/shared".to_string();
+        b.worktree_path = "/tmp/shared".to_string();
+        engine.session_store.upsert_session(&a).unwrap();
+        engine.session_store.upsert_session(&b).unwrap();
+        engine.sessions.push(a);
+        engine.sessions.push(b);
+
+        // delete_worktree=true but a sibling shares the worktree → skipped,
+        // so this stays on the inline path (no git removal needed).
+        let outcome = engine.begin_delete_session("s1", true);
+        match outcome {
+            BeginDeleteSessionOutcome::Inline { removal } => {
+                assert_eq!(removal, WorktreeRemoval::SkippedForSiblings);
+            }
+            other => panic!("expected Inline, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn do_delete_session_unknown_id_returns_none() {
         let (mut engine, _tmp) = test_engine();
         assert!(
