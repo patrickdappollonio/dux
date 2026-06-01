@@ -6,6 +6,7 @@
 //! runs `cargo tree -p dux-web` and fails if any TUI-only crate appears.
 
 pub mod bootstrap;
+pub mod engine_actor;
 
 #[cfg(test)]
 mod tests {
