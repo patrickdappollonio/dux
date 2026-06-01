@@ -377,8 +377,7 @@ pub enum BeginDeleteSessionOutcome {
 }
 
 /// View follow-up data for a `Command::FinishDeleteSession`. Wraps the
-/// engine outcome with the App-context fields needed for status
-/// formatting and the contract-violation check.
+/// engine outcome with the App-context fields needed for status formatting.
 pub struct FinishDeleteSessionView {
     pub session_id: String,
     pub outcome: FinishDeleteSessionOutcome,
