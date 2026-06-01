@@ -104,6 +104,116 @@ impl TerminalSnapshot {
     }
 }
 
+/// Build an ANSI byte sequence that repaints `snapshot` onto a freshly-connected
+/// client's terminal. If `alt_screen` is set, switch the client into the
+/// alternate-screen buffer first so full-screen apps (vim, claude) render
+/// correctly. Reflects the visible screen only (no scrollback replay).
+pub fn synthesize_repaint(snapshot: &TerminalSnapshot, alt_screen: bool) -> Vec<u8> {
+    let mut out = String::new();
+    if alt_screen {
+        out.push_str("\x1b[?1049h");
+    }
+    out.push_str("\x1b[2J\x1b[H");
+
+    let mut cells: Vec<&SnapshotCell> = snapshot.cells.iter().collect();
+    cells.sort_by_key(|c| (c.row, c.col));
+
+    let mut expected_next: Option<(u16, u16)> = None;
+    let mut last_style: Option<(CellColor, CellColor, CellModifier)> = None;
+    for cell in cells {
+        if expected_next != Some((cell.row, cell.col)) {
+            out.push_str(&format!("\x1b[{};{}H", cell.row + 1, cell.col + 1));
+        }
+        let style = (cell.fg, cell.bg, cell.modifier);
+        if last_style != Some(style) {
+            out.push_str("\x1b[0m");
+            out.push_str(&sgr_sequence(cell.fg, cell.bg, cell.modifier));
+            last_style = Some(style);
+        }
+        out.push_str(cell.symbol.as_str());
+        expected_next = Some((cell.row, cell.col + 1));
+    }
+
+    out.push_str("\x1b[0m");
+    if let Some(cursor) = &snapshot.cursor {
+        out.push_str(&format!("\x1b[{};{}H", cursor.row + 1, cursor.col + 1));
+    }
+    out.into_bytes()
+}
+
+fn sgr_sequence(fg: CellColor, bg: CellColor, modifier: CellModifier) -> String {
+    let mut params: Vec<String> = Vec::new();
+    if modifier.bold {
+        params.push("1".to_string());
+    }
+    if modifier.dim {
+        params.push("2".to_string());
+    }
+    if modifier.italic {
+        params.push("3".to_string());
+    }
+    if modifier.underlined {
+        params.push("4".to_string());
+    }
+    if modifier.reversed {
+        params.push("7".to_string());
+    }
+    if modifier.crossed_out {
+        params.push("9".to_string());
+    }
+    params.push(fg_sgr(fg));
+    params.push(bg_sgr(bg));
+    format!("\x1b[{}m", params.join(";"))
+}
+
+fn fg_sgr(color: CellColor) -> String {
+    match color {
+        CellColor::Reset => "39".to_string(),
+        CellColor::Black => "30".to_string(),
+        CellColor::Red => "31".to_string(),
+        CellColor::Green => "32".to_string(),
+        CellColor::Yellow => "33".to_string(),
+        CellColor::Blue => "34".to_string(),
+        CellColor::Magenta => "35".to_string(),
+        CellColor::Cyan => "36".to_string(),
+        CellColor::Gray => "37".to_string(),
+        CellColor::DarkGray => "90".to_string(),
+        CellColor::LightRed => "91".to_string(),
+        CellColor::LightGreen => "92".to_string(),
+        CellColor::LightYellow => "93".to_string(),
+        CellColor::LightBlue => "94".to_string(),
+        CellColor::LightMagenta => "95".to_string(),
+        CellColor::LightCyan => "96".to_string(),
+        CellColor::White => "97".to_string(),
+        CellColor::Rgb(r, g, b) => format!("38;2;{r};{g};{b}"),
+        CellColor::Indexed(n) => format!("38;5;{n}"),
+    }
+}
+
+fn bg_sgr(color: CellColor) -> String {
+    match color {
+        CellColor::Reset => "49".to_string(),
+        CellColor::Black => "40".to_string(),
+        CellColor::Red => "41".to_string(),
+        CellColor::Green => "42".to_string(),
+        CellColor::Yellow => "43".to_string(),
+        CellColor::Blue => "44".to_string(),
+        CellColor::Magenta => "45".to_string(),
+        CellColor::Cyan => "46".to_string(),
+        CellColor::Gray => "47".to_string(),
+        CellColor::DarkGray => "100".to_string(),
+        CellColor::LightRed => "101".to_string(),
+        CellColor::LightGreen => "102".to_string(),
+        CellColor::LightYellow => "103".to_string(),
+        CellColor::LightBlue => "104".to_string(),
+        CellColor::LightMagenta => "105".to_string(),
+        CellColor::LightCyan => "106".to_string(),
+        CellColor::White => "107".to_string(),
+        CellColor::Rgb(r, g, b) => format!("48;2;{r};{g};{b}"),
+        CellColor::Indexed(n) => format!("48;5;{n}"),
+    }
+}
+
 /// Maximum number of bytes buffered while PTY ingestion is paused (4 MiB).
 /// The oldest data is dropped on overflow — on resume the child will typically
 /// redraw anyway because pause is only active during scrollback sessions with
@@ -1125,6 +1235,7 @@ fn append_with_cap(pending: &mut PendingIngest, data: &[u8], cap: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use compact_str::CompactString;
     use portable_pty::CommandBuilder;
 
     fn viewport_lines(snapshot: &TerminalSnapshot) -> Vec<String> {
@@ -1784,5 +1895,72 @@ mod tests {
         // single log line on resume can summarize the session.
         append_with_cap(&mut pending, b"", cap);
         assert!(pending.dropped);
+    }
+
+    fn repaint_cell(row: u16, col: u16, symbol: &str, fg: CellColor) -> SnapshotCell {
+        SnapshotCell {
+            row,
+            col,
+            symbol: CompactString::from(symbol),
+            fg,
+            bg: CellColor::Reset,
+            modifier: CellModifier {
+                bold: false,
+                dim: false,
+                italic: false,
+                underlined: false,
+                reversed: false,
+                crossed_out: false,
+            },
+        }
+    }
+
+    #[test]
+    fn repaint_emits_alt_screen_clear_position_color_and_text() {
+        let snapshot = TerminalSnapshot {
+            rows: 1,
+            cols: 3,
+            scrollback_offset: 0,
+            scrollback_total: 0,
+            cursor: Some(SnapshotCursor { row: 0, col: 2 }),
+            cells: vec![
+                repaint_cell(0, 0, "H", CellColor::Red),
+                repaint_cell(0, 1, "i", CellColor::Red),
+            ],
+        };
+        let bytes = synthesize_repaint(&snapshot, true);
+        let text = String::from_utf8(bytes).expect("utf8");
+
+        assert!(
+            text.starts_with("\x1b[?1049h"),
+            "no alt-screen enter: {text:?}"
+        );
+        assert!(text.contains("\x1b[2J"), "no clear: {text:?}");
+        assert!(text.contains("\x1b[1;1H"), "no home position: {text:?}");
+        assert!(text.contains("31"), "no red fg sgr: {text:?}");
+        assert!(text.contains("Hi"), "text not contiguous: {text:?}");
+        assert!(
+            text.trim_end().ends_with("\x1b[1;3H"),
+            "cursor not restored: {text:?}"
+        );
+    }
+
+    #[test]
+    fn repaint_without_alt_screen_has_no_alt_enter() {
+        let snapshot = TerminalSnapshot {
+            rows: 1,
+            cols: 1,
+            scrollback_offset: 0,
+            scrollback_total: 0,
+            cursor: None,
+            cells: vec![repaint_cell(0, 0, "x", CellColor::Reset)],
+        };
+        let bytes = synthesize_repaint(&snapshot, false);
+        let text = String::from_utf8(bytes).expect("utf8");
+        assert!(
+            !text.contains("\x1b[?1049h"),
+            "unexpected alt-screen enter: {text:?}"
+        );
+        assert!(text.contains('x'));
     }
 }
