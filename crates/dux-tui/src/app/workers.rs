@@ -34,21 +34,24 @@ impl App {
         // For sessions that were spawned with resume_args and exited before
         // producing any output, retry with regular args (fresh session).
         // This handles `claude --continue || claude` style fallback.
-        let mut retried = HashSet::new();
+        // Sessions whose exit was fully handled by a resume-fallback retry (or
+        // is protected because a launch is already in flight). These must be
+        // skipped by the destructive second loop AND by the post-exit UI/PR
+        // follow-ups below.
+        let mut handled = HashSet::new();
         for (session_id, _, is_minimal, _) in &exited {
-            if self
+            if !self
                 .engine
                 .resume_fallback_candidates
-                .remove(session_id)
-                .is_none()
+                .contains_key(session_id)
             {
                 continue;
             }
-            // Check whether the exited process produced only minimal output
-            // (no scrollback and ≤5 visible lines). A failed `--continue`
-            // typically prints 1-2 lines of error; a real session produces
-            // far more output and scrollback history.
             if !is_minimal {
+                // Non-minimal exit of a resume candidate: preserve today's
+                // behavior — drop the candidate unconditionally and let the
+                // second loop mark it Detached.
+                self.engine.resume_fallback_candidates.remove(session_id);
                 continue;
             }
             let Some(session) = self
@@ -58,15 +61,10 @@ impl App {
                 .find(|s| s.id == *session_id)
                 .cloned()
             else {
+                // Session gone: drop the stale candidate, fall through.
+                self.engine.resume_fallback_candidates.remove(session_id);
                 continue;
             };
-            self.engine.providers.remove(session_id);
-            self.engine.running_provider_pins.remove(session_id);
-            self.last_pty_activity.remove(session_id);
-            logger::info(&format!(
-                "resume args exited without output for agent \"{}\", retrying with regular args",
-                session.branch_name
-            ));
             let proj_name = self.engine.project_name_for_session(&session);
             let status_message = format!(
                 "No prior session to resume for agent \"{}\". Started a fresh {} session in project \"{}\".",
@@ -74,21 +72,34 @@ impl App {
                 session.provider.as_str(),
                 proj_name,
             );
-            let request = self.agent_launch_request(
-                session,
-                false,
-                AgentLaunchKind::ResumeFallback { status_message },
-            );
-            if self.dispatch_agent_launch(request) {
-                retried.insert(session_id.clone());
-            } else {
-                self.engine
-                    .mark_session_status(session_id, SessionStatus::Detached);
+            logger::info(&format!(
+                "resume args exited without output for agent \"{}\", retrying with regular args",
+                session.branch_name
+            ));
+            let pty_size = self.pty_size_for_launch();
+            match self
+                .engine
+                .retry_resume_fallback(session_id, pty_size, status_message)
+            {
+                ResumeFallbackOutcome::Retried { reaction } => {
+                    self.last_pty_activity.remove(session_id);
+                    self.apply_reaction(*reaction);
+                    handled.insert(session_id.clone());
+                }
+                ResumeFallbackOutcome::InFlight => {
+                    // Protect: a launch is already in flight; do not let the
+                    // second loop tear this session down.
+                    handled.insert(session_id.clone());
+                }
+                ResumeFallbackOutcome::NotCandidate => {
+                    // Candidate was removed by another path this tick; fall
+                    // through to normal exit handling.
+                }
             }
         }
 
         for (session_id, exit_success, _, _) in &exited {
-            if retried.contains(session_id) {
+            if handled.contains(session_id) {
                 continue;
             }
             self.engine.providers.remove(session_id);
@@ -101,12 +112,12 @@ impl App {
                 .mark_session_status(session_id, SessionStatus::Detached);
         }
         if !exited.is_empty() {
-            // If the currently-viewed session just exited (and was not retried),
-            // leave interactive mode.
+            // If the currently-viewed session just exited (and was not handled
+            // by a resume-fallback retry), leave interactive mode.
             if let Some(current) = self.selected_session()
                 && let Some((_, exit_success, is_minimal, excerpt)) =
                     exited.iter().find(|(id, _, _, _)| id == &current.id)
-                && !retried.contains(&current.id)
+                && !handled.contains(&current.id)
             {
                 let key = self.bindings.label_for(Action::ReconnectAgent);
                 if self.session_surface == SessionSurface::Agent {
@@ -140,7 +151,7 @@ impl App {
             // Trigger PR status check for exited agents.
             for sid in &exited {
                 let session_id = &sid.0;
-                if !retried.contains(session_id) {
+                if !handled.contains(session_id) {
                     self.engine.spawn_pr_check_for_session(session_id);
                 }
             }
