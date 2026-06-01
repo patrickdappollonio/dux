@@ -5,6 +5,8 @@
 //! Dependency isolation is enforced by the `dep-isolation` CI job, which
 //! runs `cargo tree -p dux-web` and fails if any TUI-only crate appears.
 
+pub mod bootstrap;
+
 #[cfg(test)]
 mod tests {
     use dux_core::engine::Command;
