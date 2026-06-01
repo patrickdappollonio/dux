@@ -154,4 +154,54 @@ mod tests {
         assert!(engine.resume_fallback_candidates.contains_key("s1"));
         assert!(engine.is_in_flight(&InFlightKey::AgentLaunch("s1".to_string())));
     }
+
+    #[test]
+    fn retry_dispatches_and_clears_state_on_happy_path() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat/x");
+        engine.sessions.push(session);
+        engine
+            .resume_fallback_candidates
+            .insert("s1".to_string(), Instant::now());
+        engine
+            .running_provider_pins
+            .insert("s1".to_string(), crate::model::ProviderKind::new("claude"));
+
+        let outcome = engine.retry_resume_fallback("s1", (24, 80), "fresh".to_string());
+
+        assert!(matches!(outcome, ResumeFallbackOutcome::Retried { .. }));
+        // Candidate, provider, and pin were torn down.
+        assert!(!engine.resume_fallback_candidates.contains_key("s1"));
+        assert!(!engine.providers.contains_key("s1"));
+        assert!(!engine.running_provider_pins.contains_key("s1"));
+        // A launch is now in flight (dispatch marked the key).
+        assert!(engine.is_in_flight(&InFlightKey::AgentLaunch("s1".to_string())));
+    }
+
+    #[test]
+    fn retry_returns_not_candidate_when_not_a_candidate() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat/x");
+        engine.sessions.push(session);
+        // No resume_fallback_candidates entry seeded.
+
+        let outcome = engine.retry_resume_fallback("s1", (24, 80), "msg".to_string());
+
+        assert!(matches!(outcome, ResumeFallbackOutcome::NotCandidate));
+        assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch("s1".to_string())));
+    }
+
+    #[test]
+    fn retry_drops_stale_candidate_when_session_is_gone() {
+        let (mut engine, _tmp) = test_engine();
+        // Candidate present but no matching session.
+        engine
+            .resume_fallback_candidates
+            .insert("ghost".to_string(), Instant::now());
+
+        let outcome = engine.retry_resume_fallback("ghost", (24, 80), "msg".to_string());
+
+        assert!(matches!(outcome, ResumeFallbackOutcome::NotCandidate));
+        assert!(!engine.resume_fallback_candidates.contains_key("ghost"));
+    }
 }
