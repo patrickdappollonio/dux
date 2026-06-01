@@ -3434,4 +3434,53 @@ mod tests {
         .expect_err("mismatched repo");
         assert!(err.contains("selected project uses github.com/octocat/Hello-World"));
     }
+
+    #[test]
+    fn finish_delete_messages_match_each_removal_variant() {
+        use dux_core::engine::{FinishDeleteSessionOutcome, WorktreeRemoval};
+
+        let cases = [
+            (
+                WorktreeRemoval::SkippedForSiblings,
+                "Deleted claude agent \"branch-s1\". Worktree preserved because other sessions still use it.",
+            ),
+            (
+                WorktreeRemoval::PreservedShared,
+                "Deleted claude session for agent \"branch-s1\". Worktree preserved for remaining sessions.",
+            ),
+            (
+                WorktreeRemoval::PreservedOrphan,
+                "Deleted claude agent \"branch-s1\". Worktree preserved at /tmp/wt.",
+            ),
+            (
+                WorktreeRemoval::Performed {
+                    branch_already_deleted: true,
+                },
+                "Deleted agent (branch \"branch-s1\" was already removed).",
+            ),
+            (
+                WorktreeRemoval::Performed {
+                    branch_already_deleted: false,
+                },
+                "Deleted claude agent from project \"demo\" with branch \"branch-s1\".",
+            ),
+        ];
+
+        for (removal, expected) in cases {
+            let session = make_session("s1", "claude", "/tmp/wt");
+            let project = make_project("project-1", "claude");
+            let mut app = test_app_with_sessions(vec![session.clone()], vec![project.clone()]);
+            let outcome = FinishDeleteSessionOutcome {
+                session,
+                project: Some(project),
+                other_sessions_on_worktree: matches!(
+                    removal,
+                    WorktreeRemoval::SkippedForSiblings | WorktreeRemoval::PreservedShared
+                ),
+                project_still_has_sessions: false,
+            };
+            app.apply_finish_delete_session_outcome("s1", outcome, removal, true);
+            assert_eq!(app.status.message(), expected, "variant {removal:?}");
+        }
+    }
 }
