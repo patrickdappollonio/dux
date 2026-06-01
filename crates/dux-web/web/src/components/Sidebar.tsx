@@ -1,4 +1,3 @@
-import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -6,6 +5,20 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu"
+import {
+  Sidebar as SidebarRoot,
+  SidebarContent,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
+  SidebarHeader,
+  SidebarMenu,
+  SidebarMenuBadge,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
+  SidebarRail,
+} from "@/components/ui/sidebar"
 import { openCommit, selectSession, socket, useDux } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import type { SessionStatus, SessionView } from "@/lib/types"
@@ -13,7 +26,7 @@ import type { SessionStatus, SessionView } from "@/lib/types"
 const STATUS_DOT: Record<SessionStatus, string> = {
   active: "bg-emerald-500",
   detached: "bg-amber-500",
-  exited: "bg-zinc-500",
+  exited: "bg-muted-foreground",
 }
 
 function SessionRow({
@@ -35,57 +48,49 @@ function SessionRow({
   }
 
   return (
-    <ContextMenu>
-      <ContextMenuTrigger className="w-full">
-        <button
-          type="button"
-          onClick={() => selectSession(session.id)}
-          className={cn(
-            "flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors",
-            selected
-              ? "bg-accent text-accent-foreground"
-              : "text-muted-foreground hover:bg-muted hover:text-foreground"
-          )}
-        >
-          <span
-            className={cn(
-              "size-1.5 shrink-0 rounded-full",
-              STATUS_DOT[session.status]
-            )}
-          />
-          <span className="truncate">
-            {session.provider} · {session.branch_name}
-          </span>
-        </button>
-      </ContextMenuTrigger>
-      <ContextMenuContent>
-        <ContextMenuItem
-          className="cursor-pointer"
-          onClick={() => selectSession(session.id)}
-        >
-          Stream
-        </ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem
-          className="cursor-pointer"
-          onClick={handleToggleAutoReopen}
-        >
-          Toggle auto-reopen
-        </ContextMenuItem>
-        <ContextMenuItem
-          className="cursor-pointer"
-          onClick={handlePush}
-        >
-          Push
-        </ContextMenuItem>
-        <ContextMenuItem
-          className="cursor-pointer"
-          onClick={() => openCommit(session.id)}
-        >
-          Commit…
-        </ContextMenuItem>
-      </ContextMenuContent>
-    </ContextMenu>
+    <SidebarMenuItem>
+      <ContextMenu>
+        <ContextMenuTrigger>
+          <SidebarMenuButton
+            isActive={selected}
+            onClick={() => selectSession(session.id)}
+          >
+            <span>
+              {session.provider} · {session.branch_name}
+            </span>
+          </SidebarMenuButton>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem
+            className="cursor-pointer"
+            onClick={() => selectSession(session.id)}
+          >
+            Stream
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem
+            className="cursor-pointer"
+            onClick={handleToggleAutoReopen}
+          >
+            Toggle auto-reopen
+          </ContextMenuItem>
+          <ContextMenuItem className="cursor-pointer" onClick={handlePush}>
+            Push
+          </ContextMenuItem>
+          <ContextMenuItem
+            className="cursor-pointer"
+            onClick={() => openCommit(session.id)}
+          >
+            Commit…
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
+      <SidebarMenuBadge>
+        <span
+          className={cn("size-1.5 rounded-full", STATUS_DOT[session.status])}
+        />
+      </SidebarMenuBadge>
+    </SidebarMenuItem>
   )
 }
 
@@ -111,28 +116,38 @@ export function Sidebar() {
     projects.find((p) => p.id === id)?.name ?? id.slice(0, 8)
 
   return (
-    <ScrollArea className="h-full bg-sidebar">
-      <div className="flex flex-col gap-3 p-2">
-        {order.length === 0 && (
-          <p className="px-2 py-1 text-xs text-muted-foreground">
-            No sessions yet.
-          </p>
-        )}
-        {order.map((projectId) => (
-          <div key={projectId} className="flex flex-col gap-0.5">
-            <h2 className="truncate px-2 py-1 text-[0.7rem] font-semibold tracking-wide text-muted-foreground uppercase">
-              {projectName(projectId)}
-            </h2>
-            {grouped.get(projectId)!.map((session) => (
-              <SessionRow
-                key={session.id}
-                session={session}
-                selected={session.id === selectedSessionId}
-              />
-            ))}
-          </div>
-        ))}
-      </div>
-    </ScrollArea>
+    <SidebarProvider className="h-full min-h-0">
+      <SidebarRoot collapsible="none" className="h-full w-full">
+        <SidebarHeader>
+          <SidebarGroupLabel>Sessions</SidebarGroupLabel>
+        </SidebarHeader>
+        <SidebarContent>
+          {order.length === 0 && (
+            <SidebarGroup>
+              <SidebarGroupContent className="px-2 py-1 text-muted-foreground">
+                No sessions yet.
+              </SidebarGroupContent>
+            </SidebarGroup>
+          )}
+          {order.map((projectId) => (
+            <SidebarGroup key={projectId}>
+              <SidebarGroupLabel>{projectName(projectId)}</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {grouped.get(projectId)!.map((session) => (
+                    <SessionRow
+                      key={session.id}
+                      session={session}
+                      selected={session.id === selectedSessionId}
+                    />
+                  ))}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          ))}
+        </SidebarContent>
+        <SidebarRail />
+      </SidebarRoot>
+    </SidebarProvider>
   )
 }
