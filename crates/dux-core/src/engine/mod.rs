@@ -19,7 +19,7 @@ pub use events::{
     BeginDeleteSessionOutcome, BeginDeleteSessionView, DeleteTerminalView, DetachedSession,
     DispatchAgentLaunchView, DoDeleteSessionOutcome, DoDeleteSessionView, EventReaction,
     FinishDeleteSessionOutcome, FinishDeleteSessionView, ProjectPersistenceOutcome,
-    ProjectPersistenceView, StatusUpdate,
+    ProjectPersistenceView, StatusUpdate, WorktreeRemoval,
 };
 pub use in_flight::{InFlightKey, InFlightSet};
 pub use resume_fallback::ResumeFallbackOutcome;

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use crate::engine::events::{
     BeginDeleteSessionView, DeleteTerminalView, DispatchAgentLaunchView, DoDeleteSessionView,
-    EventReaction, FinishDeleteSessionView, StatusUpdate,
+    EventReaction, FinishDeleteSessionView, StatusUpdate, WorktreeRemoval,
 };
 use crate::engine::{CommandWorkerSpec, Engine, InFlightKey};
 use crate::worker::{
@@ -25,8 +25,7 @@ pub enum Command {
     /// and the async `WorktreeRemoveCompleted` callback.
     FinishDeleteSession {
         session_id: String,
-        delete_worktree: bool,
-        remove_outcome: Option<bool>,
+        removal: WorktreeRemoval,
         update_status: bool,
     },
     /// Synchronous deletion: lookup → optional `git::remove_worktree` → full
@@ -172,8 +171,7 @@ impl Engine {
         match command {
             Command::FinishDeleteSession {
                 session_id,
-                delete_worktree,
-                remove_outcome,
+                removal,
                 update_status,
             } => {
                 let Some(outcome) = self.finish_delete_session(&session_id)? else {
@@ -183,8 +181,7 @@ impl Engine {
                     FinishDeleteSessionView {
                         session_id,
                         outcome,
-                        delete_worktree,
-                        remove_outcome,
+                        removal,
                         update_status,
                     },
                 )))
@@ -200,7 +197,6 @@ impl Engine {
                     DoDeleteSessionView {
                         session_id,
                         outcome,
-                        delete_worktree,
                     },
                 )))
             }
@@ -213,7 +209,6 @@ impl Engine {
                     BeginDeleteSessionView {
                         session_id,
                         outcome,
-                        delete_worktree,
                     },
                 )))
             }

@@ -1,7 +1,7 @@
 use super::*;
 use crate::browser;
 use crate::editor;
-use dux_core::engine::{Command, EventReaction, FinishDeleteSessionOutcome};
+use dux_core::engine::{Command, EventReaction, FinishDeleteSessionOutcome, WorktreeRemoval};
 
 impl App {
     pub(crate) fn open_project_browser(&mut self) -> Result<()> {
@@ -756,9 +756,8 @@ impl App {
     /// is no longer present this is a no-op, which matters for the async path
     /// where the user may have deleted the project before the worker replies.
     ///
-    /// `remove_outcome` is `Some(branch_already_deleted)` only on the branch
-    /// where we actually removed the worktree; it drives the success message
-    /// variant.
+    /// `removal` records what happened to the worktree; it drives the success
+    /// message variant.
     /// `update_status` controls whether the method writes a success message
     /// to the status line. The async worker handler passes `false` when the
     /// status line has already been overwritten by an unrelated operation
@@ -767,14 +766,12 @@ impl App {
     pub(crate) fn finish_delete_session(
         &mut self,
         session_id: &str,
-        delete_worktree: bool,
-        remove_outcome: Option<bool>,
+        removal: WorktreeRemoval,
         update_status: bool,
     ) -> Result<()> {
         let reaction = self.engine.apply(Command::FinishDeleteSession {
             session_id: session_id.to_string(),
-            delete_worktree,
-            remove_outcome,
+            removal,
             update_status,
         })?;
         self.apply_reaction(reaction);
@@ -785,14 +782,13 @@ impl App {
         &mut self,
         session_id: &str,
         outcome: FinishDeleteSessionOutcome,
-        delete_worktree: bool,
-        remove_outcome: Option<bool>,
+        removal: WorktreeRemoval,
         update_status: bool,
-    ) -> Result<()> {
+    ) {
         let FinishDeleteSessionOutcome {
             session,
             project,
-            other_sessions_on_worktree,
+            other_sessions_on_worktree: _,
             project_still_has_sessions,
         } = outcome;
 
@@ -812,31 +808,23 @@ impl App {
         }
         self.reload_changed_files();
 
-        // Contract-violation check (unchanged from original — kept here because
-        // it's a violation of the caller's contract, not an engine error).
-        if !other_sessions_on_worktree && delete_worktree && remove_outcome.is_none() {
-            return Err(anyhow::anyhow!(
-                "Internal error: worktree deletion flagged but no removal result provided."
-            ));
-        }
-
         if update_status {
-            match (other_sessions_on_worktree, delete_worktree, remove_outcome) {
-                (true, true, _) => {
+            match removal {
+                WorktreeRemoval::SkippedForSiblings => {
                     self.set_info(format!(
                         "Deleted {} agent \"{}\". Worktree preserved because other sessions still use it.",
                         session.provider.as_str(),
                         session.branch_name,
                     ));
                 }
-                (true, false, _) => {
+                WorktreeRemoval::PreservedShared => {
                     self.set_info(format!(
                         "Deleted {} session for agent \"{}\". Worktree preserved for remaining sessions.",
                         session.provider.as_str(),
                         session.branch_name,
                     ));
                 }
-                (false, false, _) => {
+                WorktreeRemoval::PreservedOrphan => {
                     self.set_info(format!(
                         "Deleted {} agent \"{}\". Worktree preserved at {}.",
                         session.provider.as_str(),
@@ -844,7 +832,9 @@ impl App {
                         session.worktree_path,
                     ));
                 }
-                (false, true, Some(branch_already_deleted)) => {
+                WorktreeRemoval::Performed {
+                    branch_already_deleted,
+                } => {
                     if branch_already_deleted {
                         self.set_info(format!(
                             "Deleted agent (branch \"{}\" was already removed).",
@@ -863,11 +853,8 @@ impl App {
                         ));
                     }
                 }
-                // Guarded by the early return above; kept for exhaustiveness.
-                (false, true, None) => {}
             }
         }
-        Ok(())
     }
 
     pub(crate) fn confirm_delete_selected_terminal(&mut self) -> Result<()> {
@@ -3066,7 +3053,7 @@ mod tests {
             )
             .expect("deleted session row");
 
-        app.finish_delete_session("s1", false, None, true)
+        app.finish_delete_session("s1", WorktreeRemoval::PreservedOrphan, true)
             .expect("finish delete");
 
         let separator_index = app
@@ -3101,10 +3088,10 @@ mod tests {
         let project = make_project("project-1", "claude");
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        app.finish_delete_session("s1", false, None, true)
+        app.finish_delete_session("s1", WorktreeRemoval::PreservedOrphan, true)
             .expect("first finish succeeds");
         // Second call must not panic or return Err even though session is gone.
-        app.finish_delete_session("s1", false, None, true)
+        app.finish_delete_session("s1", WorktreeRemoval::PreservedOrphan, true)
             .expect("second finish is a no-op");
     }
 

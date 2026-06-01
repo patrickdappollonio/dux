@@ -289,6 +289,48 @@ pub enum ProjectPersistenceView {
     },
 }
 
+/// What happened to the session's worktree during deletion. Each variant maps
+/// 1:1 to a user-facing status message; the illegal "delete requested, no
+/// siblings, but no result" state has no representation. Replaces the former
+/// `(delete_worktree: bool, remove_outcome: Option<bool>)` pair.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorktreeRemoval {
+    /// Deletion NOT requested; worktree shared with sibling sessions.
+    PreservedShared,
+    /// Deletion NOT requested; no siblings — worktree left at its path.
+    PreservedOrphan,
+    /// Deletion requested but skipped because siblings still use the worktree.
+    SkippedForSiblings,
+    /// Worktree removed. `branch_already_deleted` mirrors git's report.
+    Performed { branch_already_deleted: bool },
+}
+
+impl WorktreeRemoval {
+    /// Derive the removal outcome for a synchronous (inline / `do_delete`)
+    /// decision, given user intent and whether siblings share the worktree.
+    /// `performed` is `Some(branch_already_deleted)` when git actually removed
+    /// the worktree, `None` when it was not run. The caller guarantees
+    /// `performed.is_some()` exactly when `delete_worktree && !other_sessions`.
+    fn from_decision(
+        delete_worktree: bool,
+        other_sessions_on_worktree: bool,
+        performed: Option<bool>,
+    ) -> Self {
+        match (delete_worktree, other_sessions_on_worktree, performed) {
+            (_, _, Some(branch_already_deleted)) => WorktreeRemoval::Performed {
+                branch_already_deleted,
+            },
+            (true, true, None) => WorktreeRemoval::SkippedForSiblings,
+            (false, true, None) => WorktreeRemoval::PreservedShared,
+            (false, false, None) => WorktreeRemoval::PreservedOrphan,
+            // delete requested, no siblings, but git did not run: impossible by
+            // the caller's contract. Default to the most truthful preserved
+            // state rather than panicking.
+            (true, false, None) => WorktreeRemoval::PreservedOrphan,
+        }
+    }
+}
+
 /// Result of `Engine::finish_delete_session`. Carries the deleted session
 /// and project context the App needs to apply view follow-up
 /// (`last_pty_activity` clear, `clear_companion_terminals_for_session`,
@@ -308,15 +350,14 @@ pub struct FinishDeleteSessionOutcome {
 pub struct DoDeleteSessionOutcome {
     /// Finish-cascade outcome (same shape T3f-1 introduced).
     pub finish: FinishDeleteSessionOutcome,
-    /// `Some(branch_already_deleted)` if Engine ran `git::remove_worktree`;
-    /// `None` if the worktree was preserved because a sibling session shares
-    /// it or `delete_worktree` was false. Drives the 4-case status formatting
-    /// in `apply_finish_delete_session_outcome`.
-    pub remove_outcome: Option<bool>,
+    /// What happened to the worktree. Drives status formatting in
+    /// `apply_finish_delete_session_outcome`.
+    pub removal: WorktreeRemoval,
 }
 
 /// Result of `Engine::begin_delete_session`. The four branches mirror the
 /// original App method's control flow.
+#[derive(Debug)]
 pub enum BeginDeleteSessionOutcome {
     /// `pending_deletions` already contains this session — App emits the
     /// "already in progress" error.
@@ -331,9 +372,8 @@ pub enum BeginDeleteSessionOutcome {
     AsyncStarted { busy_message: String },
     /// Inline path: no worktree removal needed (no `delete_worktree` request
     /// or shared with siblings). App should call the existing
-    /// `finish_delete_session(session_id, delete_worktree, None, true)`
-    /// wrapper to complete cleanup + emit status.
-    Inline,
+    /// `finish_delete_session` wrapper to complete cleanup + emit status.
+    Inline { removal: WorktreeRemoval },
 }
 
 /// View follow-up data for a `Command::FinishDeleteSession`. Wraps the
@@ -342,8 +382,7 @@ pub enum BeginDeleteSessionOutcome {
 pub struct FinishDeleteSessionView {
     pub session_id: String,
     pub outcome: FinishDeleteSessionOutcome,
-    pub delete_worktree: bool,
-    pub remove_outcome: Option<bool>,
+    pub removal: WorktreeRemoval,
     pub update_status: bool,
 }
 
@@ -352,7 +391,6 @@ pub struct FinishDeleteSessionView {
 pub struct DoDeleteSessionView {
     pub session_id: String,
     pub outcome: DoDeleteSessionOutcome,
-    pub delete_worktree: bool,
 }
 
 /// View follow-up data for a `Command::BeginDeleteSession`. Wraps the
@@ -361,7 +399,6 @@ pub struct DoDeleteSessionView {
 pub struct BeginDeleteSessionView {
     pub session_id: String,
     pub outcome: BeginDeleteSessionOutcome,
-    pub delete_worktree: bool,
 }
 
 /// View follow-up for `Command::DispatchAgentLaunch`. The Engine performs
@@ -780,8 +817,12 @@ impl Engine {
             return Ok(None);
         };
         Ok(Some(DoDeleteSessionOutcome {
+            removal: WorktreeRemoval::from_decision(
+                delete_worktree,
+                finish.other_sessions_on_worktree,
+                remove_outcome,
+            ),
             finish,
-            remove_outcome,
         }))
     }
 
@@ -855,7 +896,13 @@ impl Engine {
                 "deleting session {} at {} (delete_worktree={}, inline)",
                 session.id, session.worktree_path, delete_worktree
             ));
-            BeginDeleteSessionOutcome::Inline
+            BeginDeleteSessionOutcome::Inline {
+                removal: WorktreeRemoval::from_decision(
+                    delete_worktree,
+                    other_sessions_on_worktree,
+                    None,
+                ),
+            }
         }
     }
 
@@ -2026,7 +2073,12 @@ mod tests {
         engine.sessions.push(session);
         // delete_worktree=false → no git work needed → inline path
         let outcome = engine.begin_delete_session("s1", false);
-        assert!(matches!(outcome, BeginDeleteSessionOutcome::Inline));
+        assert!(matches!(
+            outcome,
+            BeginDeleteSessionOutcome::Inline {
+                removal: WorktreeRemoval::PreservedOrphan
+            }
+        ));
         assert!(!engine.pending_deletions.contains("s1"));
     }
 
@@ -2122,8 +2174,7 @@ mod tests {
         let reaction = engine
             .apply(crate::engine::Command::FinishDeleteSession {
                 session_id: "missing".to_string(),
-                delete_worktree: false,
-                remove_outcome: None,
+                removal: crate::engine::WorktreeRemoval::PreservedOrphan,
                 update_status: true,
             })
             .unwrap();

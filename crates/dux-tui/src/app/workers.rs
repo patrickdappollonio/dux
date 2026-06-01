@@ -4,7 +4,7 @@ use dux_core::engine::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
     BeginDeleteSessionOutcome, BeginDeleteSessionView, DeleteTerminalView, DispatchAgentLaunchView,
     DoDeleteSessionView, EventReaction, FinishDeleteSessionView, ProjectPersistenceOutcome,
-    ProjectPersistenceView, ResumeFallbackOutcome, StatusUpdate,
+    ProjectPersistenceView, ResumeFallbackOutcome, StatusUpdate, WorktreeRemoval,
 };
 
 use super::*;
@@ -345,8 +345,9 @@ impl App {
                 if self.engine.sessions.iter().any(|s| s.id == session_id) {
                     if let Err(e) = self.finish_delete_session(
                         &session_id,
-                        true,
-                        Some(branch_already_deleted),
+                        WorktreeRemoval::Performed {
+                            branch_already_deleted,
+                        },
                         our_busy_still_showing,
                     ) {
                         self.set_error(format!(
@@ -506,43 +507,34 @@ impl App {
                 let FinishDeleteSessionView {
                     session_id,
                     outcome,
-                    delete_worktree,
-                    remove_outcome,
+                    removal,
                     update_status,
                 } = *view;
-                if let Err(e) = self.apply_finish_delete_session_outcome(
+                self.apply_finish_delete_session_outcome(
                     &session_id,
                     outcome,
-                    delete_worktree,
-                    remove_outcome,
+                    removal,
                     update_status,
-                ) {
-                    self.set_error(format!("{e:#}"));
-                }
+                );
             }
 
             EventReaction::DoDeleteSessionView(view) => {
                 let DoDeleteSessionView {
                     session_id,
                     outcome,
-                    delete_worktree,
                 } = *view;
-                if let Err(e) = self.apply_finish_delete_session_outcome(
+                self.apply_finish_delete_session_outcome(
                     &session_id,
                     outcome.finish,
-                    delete_worktree,
-                    outcome.remove_outcome,
+                    outcome.removal,
                     true,
-                ) {
-                    self.set_error(format!("{e:#}"));
-                }
+                );
             }
 
             EventReaction::BeginDeleteSessionView(view) => {
                 let BeginDeleteSessionView {
                     session_id,
                     outcome,
-                    delete_worktree,
                 } = *view;
                 match outcome {
                     BeginDeleteSessionOutcome::AlreadyInFlight => {
@@ -554,10 +546,8 @@ impl App {
                     BeginDeleteSessionOutcome::AsyncStarted { busy_message } => {
                         self.set_busy(busy_message);
                     }
-                    BeginDeleteSessionOutcome::Inline => {
-                        if let Err(e) =
-                            self.finish_delete_session(&session_id, delete_worktree, None, true)
-                        {
+                    BeginDeleteSessionOutcome::Inline { removal } => {
+                        if let Err(e) = self.finish_delete_session(&session_id, removal, true) {
                             self.set_error(format!("{e:#}"));
                         }
                     }
