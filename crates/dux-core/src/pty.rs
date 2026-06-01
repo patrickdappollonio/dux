@@ -249,6 +249,10 @@ pub struct PtyClient {
     /// the terminal parser on resume. Bounded by `PAUSE_BUFFER_CAP`; oldest
     /// bytes are dropped on overflow.
     pending_bytes: Arc<Mutex<PendingIngest>>,
+    /// Live raw-byte subscribers (web clients). Each receives a clone of every
+    /// chunk read from the PTY, independent of TUI scrollback pause. Senders
+    /// that have hung up are pruned by the reader loop.
+    subscribers: Arc<Mutex<Vec<std::sync::mpsc::Sender<Vec<u8>>>>>,
 }
 
 #[derive(Default)]
@@ -325,6 +329,8 @@ impl PtyClient {
         let received_data = Arc::new(AtomicBool::new(false));
         let scroll_paused = Arc::new(AtomicBool::new(false));
         let pending_bytes = Arc::new(Mutex::new(PendingIngest::default()));
+        let subscribers: Arc<Mutex<Vec<std::sync::mpsc::Sender<Vec<u8>>>>> =
+            Arc::new(Mutex::new(Vec::new()));
 
         let terminal_ref = Arc::clone(&terminal);
         let writer_ref = Arc::clone(&writer);
@@ -334,6 +340,7 @@ impl PtyClient {
         let received_data_ref = Arc::clone(&received_data);
         let scroll_paused_ref = Arc::clone(&scroll_paused);
         let pending_bytes_ref = Arc::clone(&pending_bytes);
+        let subscribers_ref = Arc::clone(&subscribers);
         thread::spawn(move || {
             Self::reader_loop(
                 reader,
@@ -345,6 +352,7 @@ impl PtyClient {
                 received_data_ref,
                 scroll_paused_ref,
                 pending_bytes_ref,
+                subscribers_ref,
             );
         });
 
@@ -360,6 +368,7 @@ impl PtyClient {
             last_resize_at: Mutex::new(None),
             scroll_paused,
             pending_bytes,
+            subscribers,
         })
     }
 
@@ -374,6 +383,7 @@ impl PtyClient {
         received_data: Arc<AtomicBool>,
         scroll_paused: Arc<AtomicBool>,
         pending_bytes: Arc<Mutex<PendingIngest>>,
+        subscribers: Arc<Mutex<Vec<std::sync::mpsc::Sender<Vec<u8>>>>>,
     ) {
         let mut buf = [0u8; 4096];
         loop {
@@ -384,6 +394,15 @@ impl PtyClient {
                 }
                 Ok(n) => {
                     let data = &buf[..n];
+
+                    // Fan raw bytes out to web subscribers before the TUI-only
+                    // scroll-pause branch, so web clients stream independently.
+                    // Prune hung-up receivers. Cheap no-op when there are none.
+                    if let Ok(mut subs) = subscribers.lock()
+                        && !subs.is_empty()
+                    {
+                        subs.retain(|tx| tx.send(data.to_vec()).is_ok());
+                    }
 
                     // Fast-path check: if paused, buffer instead of parsing.
                     // The definitive check happens inside the pending_bytes
@@ -445,6 +464,32 @@ impl PtyClient {
     pub fn snapshot(&self) -> TerminalSnapshot {
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
         terminal.snapshot()
+    }
+
+    /// Subscribe to the live raw-byte stream. The returned receiver gets a clone
+    /// of every chunk read from the PTY from now on. Drop it to unsubscribe.
+    pub fn subscribe(&self) -> std::sync::mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.subscribers
+            .lock()
+            .expect("subscribers mutex poisoned")
+            .push(tx);
+        rx
+    }
+
+    /// Subscribe and also return a synthesized ANSI repaint of the current
+    /// screen, so a freshly-connected client can prime its terminal before the
+    /// live stream arrives. The subscriber is registered *before* the snapshot
+    /// is taken, so no bytes are lost; a newly-connecting client may briefly see
+    /// a few bytes both in the repaint and the first streamed chunk — harmless
+    /// and self-correcting for redraw-heavy TUIs.
+    pub fn subscribe_with_repaint(&self) -> (Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let rx = self.subscribe();
+        let terminal = self.terminal.lock().expect("terminal mutex poisoned");
+        let snapshot = terminal.snapshot();
+        let alt_screen = terminal.is_alt_screen();
+        drop(terminal);
+        (synthesize_repaint(&snapshot, alt_screen), rx)
     }
 
     /// Fill `target` with the current terminal viewport, reusing its `cells`
