@@ -18,7 +18,7 @@ export function CommitDialog() {
 
   function handleCommit() {
     if (!commitTarget || !message.trim()) return
-    socket.sendCommand("commit", { session_id: commitTarget, message: message.trim() })
+    socket.sendCommand("commit_changes", { session_id: commitTarget, message: message.trim() })
     setMessage("")
     closeCommit()
   }
