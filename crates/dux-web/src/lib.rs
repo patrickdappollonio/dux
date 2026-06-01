@@ -7,6 +7,7 @@
 
 pub mod bootstrap;
 pub mod engine_actor;
+pub mod protocol;
 
 #[cfg(test)]
 mod tests {
