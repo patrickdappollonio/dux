@@ -1,8 +1,7 @@
 //! Headless `Engine` bootstrap for the web server. Mirrors the TUI's field-by-field
 //! assembly (crates/dux-tui/src/app/mod.rs) but with no UI, a default config, and a
 //! `WebConfigSaver`. Config-file loading is intentionally skipped (Plan 2 skeleton);
-//! sessions come from the SQLite store. Project loading (the `ProjectConfig` -> `Project`
-//! converter currently in `dux-tui`) is a documented follow-up; we start with none.
+//! sessions and projects come from the SQLite store.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -61,6 +60,8 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     let session_store = SessionStore::open(&paths.sessions_db_path)?;
     let single_instance_lock = SingleInstanceLock::acquire(&paths.lock_path)?;
     let sessions = session_store.load_sessions()?;
+    let projects =
+        dux_core::project_browser::load_projects(&session_store.load_projects()?, &config);
     let (worker_tx, worker_rx): (mpsc::Sender<WorkerEvent>, mpsc::Receiver<WorkerEvent>) =
         mpsc::channel();
 
@@ -68,7 +69,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         config,
         paths: paths.clone(),
         session_store,
-        projects: Vec::new(),
+        projects,
         sessions,
         staged_files: Vec::new(),
         unstaged_files: Vec::new(),
@@ -101,6 +102,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dux_core::config::ProjectConfig;
 
     fn temp_paths() -> (tempfile::TempDir, DuxPaths) {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -123,5 +125,39 @@ mod tests {
         let vm = engine.view_model();
         assert!(vm.projects.is_empty());
         assert!(vm.sessions.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_engine_includes_projects_from_store() {
+        let (_tmp, paths) = temp_paths();
+        let seeded_id = "web-bootstrap-test-project".to_string();
+
+        // Seed one project into the store before bootstrapping.
+        let store = SessionStore::open(&paths.sessions_db_path).expect("open store");
+        store
+            .upsert_project(&ProjectConfig {
+                id: seeded_id.clone(),
+                path: "/nonexistent/path/for/test".to_string(),
+                name: Some("test-project".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: Default::default(),
+            })
+            .expect("upsert project");
+        drop(store);
+
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let vm = engine.view_model();
+
+        assert!(
+            !vm.projects.is_empty(),
+            "ViewModel should include projects from the store"
+        );
+        assert!(
+            vm.projects.iter().any(|p| p.id == seeded_id),
+            "seeded project id should appear in the ViewModel"
+        );
     }
 }

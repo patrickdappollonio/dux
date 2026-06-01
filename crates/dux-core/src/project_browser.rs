@@ -9,9 +9,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
-use crate::config::DuxPaths;
+use crate::config::{Config, DuxPaths, ProjectConfig, expand_path};
 use crate::git::{self, GitWorktree};
-use crate::model::{AgentSession, Project, ProjectBranchStatus};
+use crate::model::{AgentSession, Project, ProjectBranchStatus, ProviderKind};
 use crate::worker::{BranchWarningKind, BrowserEntry, ProjectWorktreeEntry, WorkerEvent};
 
 pub fn browser_entries(dir: &Path) -> Vec<BrowserEntry> {
@@ -71,6 +71,64 @@ pub fn leading_branch_for_project(path: &Path, current_branch: &str) -> String {
         Some(default) => default,
         None => current_branch.to_string(),
     }
+}
+
+/// Convert a slice of `ProjectConfig` entries (from SQLite) into runtime `Project` values.
+/// Each project gets its path expanded, its provider resolved (falling back to the global
+/// default), and its current branch read from git. Missing or non-git paths are flagged
+/// with `path_missing = true` and receive an empty `current_branch`.
+pub fn load_projects(project_configs: &[ProjectConfig], config: &Config) -> Vec<Project> {
+    let mut projects = Vec::new();
+    for project in project_configs {
+        let (path, missing) = match expand_path(&project.path) {
+            Some(expanded) => {
+                let p = PathBuf::from(&expanded);
+                let missing = !p.exists() || !git::is_git_repo(&p);
+                (p, missing)
+            }
+            None => {
+                // Unsafe or invalid path – treat as missing.
+                (PathBuf::from(&project.path), true)
+            }
+        };
+        let provider = project
+            .default_provider
+            .as_deref()
+            .map(ProviderKind::from_str)
+            .unwrap_or_else(|| config.default_provider());
+        let current_branch = if missing {
+            String::new()
+        } else {
+            git::current_branch(&path).unwrap_or_else(|_| "main".to_string())
+        };
+        let leading_branch = project
+            .leading_branch
+            .clone()
+            .or_else(|| (!missing).then(|| leading_branch_for_project(&path, &current_branch)));
+        projects.push(Project {
+            id: project.id.clone(),
+            name: project.name.clone().unwrap_or_else(|| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("project")
+                    .to_string()
+            }),
+            path: path.to_string_lossy().to_string(),
+            explicit_default_provider: project
+                .default_provider
+                .as_deref()
+                .map(ProviderKind::from_str),
+            default_provider: provider,
+            leading_branch,
+            auto_reopen_agents: project.auto_reopen_agents,
+            startup_command: project.startup_command.clone(),
+            env: project.env.clone(),
+            current_branch,
+            branch_status: ProjectBranchStatus::Unknown,
+            path_missing: missing,
+        });
+    }
+    projects
 }
 
 pub fn classify_project_worktrees(
@@ -353,5 +411,39 @@ mod tests {
         assert!(!project_checkout_entry.is_selectable);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_projects_converts_project_config_to_project() {
+        use crate::config::{Config, ProjectConfig};
+
+        let cfg = ProjectConfig {
+            id: "test-project-id".to_string(),
+            path: "/nonexistent/path/that/does/not/exist".to_string(),
+            name: Some("my-project".to_string()),
+            default_provider: None,
+            leading_branch: None,
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: Default::default(),
+        };
+        let config = Config::default();
+        let projects = load_projects(&[cfg], &config);
+
+        assert_eq!(projects.len(), 1);
+        let project = &projects[0];
+        assert_eq!(project.id, "test-project-id");
+        // No explicit provider → falls back to the global default ("claude").
+        assert_eq!(
+            project.default_provider.as_str(),
+            config.defaults.provider.as_str()
+        );
+        // Missing path → branch_status is Unknown.
+        assert!(matches!(
+            project.branch_status,
+            ProjectBranchStatus::Unknown
+        ));
+        // Missing path → path_missing is true.
+        assert!(project.path_missing);
     }
 }

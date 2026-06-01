@@ -2561,62 +2561,7 @@ impl App {
     }
 }
 
-pub(crate) fn load_projects(
-    project_configs: &[crate::config::ProjectConfig],
-    config: &Config,
-) -> Vec<Project> {
-    let mut projects = Vec::new();
-    for project in project_configs {
-        let (path, missing) = match crate::config::expand_path(&project.path) {
-            Some(expanded) => {
-                let p = PathBuf::from(&expanded);
-                let missing = !p.exists() || !git::is_git_repo(&p);
-                (p, missing)
-            }
-            None => {
-                // Unsafe or invalid path – treat as missing.
-                (PathBuf::from(&project.path), true)
-            }
-        };
-        let provider = project
-            .default_provider
-            .as_deref()
-            .map(ProviderKind::from_str)
-            .unwrap_or_else(|| config.default_provider());
-        let current_branch = if missing {
-            String::new()
-        } else {
-            git::current_branch(&path).unwrap_or_else(|_| "main".to_string())
-        };
-        let leading_branch = project
-            .leading_branch
-            .clone()
-            .or_else(|| (!missing).then(|| leading_branch_for_project(&path, &current_branch)));
-        projects.push(Project {
-            id: project.id.clone(),
-            name: project.name.clone().unwrap_or_else(|| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("project")
-                    .to_string()
-            }),
-            path: path.to_string_lossy().to_string(),
-            explicit_default_provider: project
-                .default_provider
-                .as_deref()
-                .map(ProviderKind::from_str),
-            default_provider: provider,
-            leading_branch,
-            auto_reopen_agents: project.auto_reopen_agents,
-            startup_command: project.startup_command.clone(),
-            env: project.env.clone(),
-            current_branch,
-            branch_status: ProjectBranchStatus::Unknown,
-            path_missing: missing,
-        });
-    }
-    projects
-}
+pub(crate) use dux_core::project_browser::load_projects;
 
 pub(crate) fn persist_runtime_projects_to_config_and_store(
     projects: &[Project],
