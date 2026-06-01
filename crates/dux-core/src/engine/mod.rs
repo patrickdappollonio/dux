@@ -6,7 +6,11 @@ pub mod command;
 pub mod config_saver;
 mod events;
 mod in_flight;
+mod resume_fallback;
 mod spawn_worker;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use command::Command;
 pub use config_saver::{ConfigSaver, NoopConfigSaver};
@@ -18,6 +22,7 @@ pub use events::{
     ProjectPersistenceView, StatusUpdate,
 };
 pub use in_flight::{InFlightKey, InFlightSet};
+pub use resume_fallback::ResumeFallbackOutcome;
 pub use spawn_worker::{BackgroundWorkerSpec, CommandWorkerSpec, LoopControl, LoopWorkerSpec};
 
 use std::collections::{HashMap, HashSet};

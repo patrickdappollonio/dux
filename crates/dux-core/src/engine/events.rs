@@ -1364,114 +1364,18 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DuxPaths, ProviderCommandConfig};
-    use crate::lockfile::SingleInstanceLock;
+    use crate::config::ProviderCommandConfig;
+    use crate::engine::test_support::{sample_project, sample_session, test_engine};
     use crate::model::{
-        AgentSession, GhStatus, PrInfo, PrState, Project, ProjectBranchStatus, ProviderKind,
-        SessionStatus,
+        GhStatus, PrInfo, PrState, ProjectBranchStatus, ProviderKind, SessionStatus,
     };
-    use crate::storage::SessionStore;
     use crate::worker::{
         AgentLaunchFailedData, AgentLaunchKind, AgentLaunchRequest, CreateAgentRequest, PullTarget,
         WorkerEvent,
     };
-    use chrono::Utc;
-    use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
-    use tempfile::TempDir;
-
-    /// Construct a minimally-wired `Engine` for tests, alongside the `TempDir`
-    /// that backs its on-disk state (sqlite, lockfile). Keep the `TempDir`
-    /// alive for the lifetime of the test so it is cleaned up afterwards.
-    fn test_engine() -> (Engine, TempDir) {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().to_path_buf();
-        let paths = DuxPaths {
-            config_path: root.join("config.toml"),
-            sessions_db_path: root.join("sessions.sqlite3"),
-            worktrees_root: root.join("worktrees"),
-            lock_path: root.join("dux.lock"),
-            root: root.clone(),
-        };
-        std::fs::create_dir_all(&paths.worktrees_root).expect("worktrees dir");
-        let session_store = SessionStore::open(&paths.sessions_db_path).expect("session store");
-        let single_instance_lock =
-            SingleInstanceLock::acquire(&paths.lock_path).expect("single-instance lock");
-        let (worker_tx, worker_rx) = mpsc::channel();
-        let engine = Engine {
-            config: Config::default(),
-            paths,
-            session_store,
-            projects: Vec::new(),
-            sessions: Vec::new(),
-            staged_files: Vec::new(),
-            unstaged_files: Vec::new(),
-            terminal_counter: 0,
-            github_integration_enabled: false,
-            single_instance_lock,
-            worker_tx,
-            worker_rx,
-            config_saver: Box::new(crate::engine::NoopConfigSaver),
-            providers: HashMap::new(),
-            running_provider_pins: HashMap::new(),
-            companion_terminals: HashMap::new(),
-            gh_status: GhStatus::Unknown,
-            pr_statuses: HashMap::new(),
-            branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-            pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-            pr_sync_enabled: Arc::new(AtomicBool::new(false)),
-            refs_watcher: None,
-            refs_watch_paths: HashMap::new(),
-            resume_fallback_candidates: HashMap::new(),
-            pending_deletions: HashSet::new(),
-            deletion_busy_messages: HashMap::new(),
-            watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
-            has_active_processes: Arc::new(AtomicBool::new(false)),
-            in_flight: HashSet::new(),
-            pr_last_checked: HashMap::new(),
-        };
-        (engine, tmp)
-    }
-
-    fn sample_project(id: &str, path: &str) -> Project {
-        Project {
-            id: id.to_string(),
-            name: format!("{id}-name"),
-            path: path.to_string(),
-            explicit_default_provider: None,
-            default_provider: ProviderKind::new("claude"),
-            leading_branch: Some("main".to_string()),
-            auto_reopen_agents: None,
-            startup_command: None,
-            env: BTreeMap::new(),
-            current_branch: "main".to_string(),
-            branch_status: ProjectBranchStatus::Leading,
-            path_missing: false,
-        }
-    }
-
-    fn sample_session(id: &str, project_id: &str, branch: &str) -> AgentSession {
-        let now = Utc::now();
-        AgentSession {
-            id: id.to_string(),
-            project_id: project_id.to_string(),
-            project_path: None,
-            provider: ProviderKind::new("claude"),
-            source_branch: "main".to_string(),
-            branch_name: branch.to_string(),
-            worktree_path: format!("/tmp/{id}-worktree"),
-            title: Some(format!("{id}-title")),
-            started_providers: Vec::new(),
-            desired_running: true,
-            auto_reopen_enabled: false,
-            status: SessionStatus::Detached,
-            created_at: now,
-            updated_at: now,
-        }
-    }
 
     #[test]
     fn finish_delete_session_unknown_id_returns_none() {
