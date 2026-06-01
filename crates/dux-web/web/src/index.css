@@ -3,6 +3,11 @@
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
 
+html, body, #root { height: 100%; }
+body { overflow: hidden; user-select: none; }
+button, a, [role="button"], [role="menuitem"], [role="option"], [role="tab"], .cursor-pointer { cursor: pointer; }
+input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
