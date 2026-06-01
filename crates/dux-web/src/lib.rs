@@ -8,6 +8,28 @@
 pub mod bootstrap;
 pub mod engine_actor;
 pub mod protocol;
+pub mod server;
+
+use std::net::SocketAddr;
+
+use anyhow::Result;
+use dux_core::config::DuxPaths;
+
+/// Boot the engine on its own thread and serve the web UI on `addr` (loopback for now).
+/// Blocking entry — builds its own tokio runtime.
+pub fn run_server(paths: DuxPaths, addr: SocketAddr) -> Result<()> {
+    let engine = bootstrap::bootstrap_engine(&paths)?;
+    let (handle, _join) = engine_actor::spawn_engine_thread(engine);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async move {
+        let app = server::router(handle);
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        axum::serve(listener, app).await?;
+        Ok::<(), anyhow::Error>(())
+    })
+}
 
 #[cfg(test)]
 mod tests {
