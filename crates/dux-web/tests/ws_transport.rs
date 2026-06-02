@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use dux_core::config::DuxPaths;
+use dux_core::config::{DuxPaths, ProviderCommandConfig};
 use dux_core::storage::SessionStore;
 use dux_web::bootstrap::bootstrap_engine;
 use dux_web::engine_actor::spawn_engine_thread;
@@ -58,7 +58,19 @@ async fn boot() -> (SocketAddr, tempfile::TempDir) {
             ))
             .unwrap();
     }
-    let engine = bootstrap_engine(&paths).unwrap();
+    let mut engine = bootstrap_engine(&paths).unwrap();
+    // The sample session's provider is "claude", which isn't on PATH in CI. Override
+    // it with `cat`, a runnable program that echoes stdin so the real launch flow
+    // spawns a streaming PTY (the marker the streaming tests send is echoed back).
+    engine.config.providers.commands.insert(
+        "claude".to_string(),
+        ProviderCommandConfig {
+            command: "cat".to_string(),
+            args: vec![],
+            resume_args: None,
+            ..Default::default()
+        },
+    );
     let (handle, _join) = spawn_engine_thread(engine);
     let app = router(handle);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -194,6 +206,43 @@ async fn double_subscribe_does_not_break_streaming() {
     assert!(
         String::from_utf8_lossy(&acc).contains("dux-no-dup-marker"),
         "streaming broke after re-subscribe; got {} bytes",
+        acc.len()
+    );
+}
+
+/// Subscribing now launches/resumes the REAL agent provider (no demo shell). With the
+/// test provider overridden to `cat`, the launch flow spawns a streaming PTY; we prove a
+/// provider was actually launched and is streaming by echoing a marker through it.
+#[tokio::test]
+async fn subscribe_launches_a_provider() {
+    let (addr, _tmp) = boot().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let _ = ws.next().await; // initial view_model
+    ws.send(Message::Text(
+        r#"{"type":"subscribe","session_id":"s1"}"#.into(),
+    ))
+    .await
+    .unwrap();
+    ws.send(Message::Binary(b"dux-launched-provider-marker\n".to_vec()))
+        .await
+        .unwrap();
+    let mut acc = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
+            if let Message::Binary(b) = m {
+                acc.extend_from_slice(&b);
+            }
+            if String::from_utf8_lossy(&acc).contains("dux-launched-provider-marker") {
+                break;
+            }
+        }
+    }
+    assert!(
+        String::from_utf8_lossy(&acc).contains("dux-launched-provider-marker"),
+        "real provider launch did not stream; got {} bytes",
         acc.len()
     );
 }

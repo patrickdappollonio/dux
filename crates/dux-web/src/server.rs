@@ -99,10 +99,6 @@ async fn handle_socket(socket: WebSocket, engine: EngineHandle) {
                         }
                     }
                     ClientMessage::Subscribe { session_id } => {
-                        if let Err(e) = engine.ensure_demo_pty(session_id.clone()).await {
-                            let _ = send_json(&sink, &ServerMessage::Error { message: e }).await;
-                            continue;
-                        }
                         match engine.subscribe_pty(session_id.clone()).await {
                             Ok((repaint, rx)) => {
                                 // Stop the previous forwarder before streaming the new subscription.

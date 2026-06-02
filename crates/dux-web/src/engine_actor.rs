@@ -5,10 +5,11 @@
 //! over tokio oneshots; the latest ViewModel JSON over a tokio watch channel.
 
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use dux_core::engine::Engine;
+use dux_core::engine::{Command, Engine, InFlightKey};
 use dux_core::wire::{WireCommand, WireCommandOutcome};
+use dux_core::worker::AgentLaunchKind;
 use tokio::sync::{mpsc, oneshot, watch};
 
 /// A PTY subscription: an initial repaint snapshot plus the live byte stream the caller
@@ -22,12 +23,25 @@ pub enum EngineRequest {
         oneshot::Sender<Result<WireCommandOutcome, String>>,
     ),
     SubscribePty(String, oneshot::Sender<Result<PtySubscription, String>>),
-    EnsureDemoPty(String, oneshot::Sender<Result<(), String>>),
     WritePty(String, Vec<u8>),
     ResizePty(String, u16, u16),
 }
 
 const TICK: Duration = Duration::from_millis(50);
+
+/// How long to wait for an agent provider to come up before failing a subscribe.
+/// The launch runs in a background worker and the provider appears via the
+/// worker-event drain, so the subscribe reply is deferred until then.
+const LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// A subscribe that is waiting for its provider to be launched/resumed. The reply
+/// is held until `engine.providers` contains the session (success) or the
+/// deadline passes (timeout).
+struct PendingSubscribe {
+    session_id: String,
+    reply: Option<oneshot::Sender<Result<PtySubscription, String>>>,
+    deadline: Instant,
+}
 
 #[derive(Clone)]
 pub struct EngineHandle {
@@ -56,14 +70,6 @@ impl EngineHandle {
         let (tx, rx) = oneshot::channel();
         self.req_tx
             .send(EngineRequest::ApplyWire(command, tx))
-            .map_err(|_| "engine thread gone".to_string())?;
-        rx.await.map_err(|_| "engine reply dropped".to_string())?
-    }
-
-    pub async fn ensure_demo_pty(&self, session_id: String) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        self.req_tx
-            .send(EngineRequest::EnsureDemoPty(session_id, tx))
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
     }
@@ -98,10 +104,33 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
     engine.spawn_gh_status_check();
 
     let handle = thread::spawn(move || {
+        // Subscribes waiting for their provider to come up via the worker-event drain.
+        let mut pending: Vec<PendingSubscribe> = Vec::new();
         loop {
+            // Draining worker events may insert a launched provider (AgentLaunchReady)
+            // into `engine.providers`, which resolves pending subscribes below.
             while let Ok(event) = engine.worker_rx.try_recv() {
                 let _ = engine.process_worker_event(event);
             }
+
+            // Resolve or expire pending subscribes now that providers may have appeared.
+            let now = Instant::now();
+            pending.retain_mut(|p| {
+                if let Some(client) = engine.providers.get(&p.session_id) {
+                    if let Some(reply) = p.reply.take() {
+                        let _ = reply.send(Ok(client.subscribe_with_repaint()));
+                    }
+                    false
+                } else if now > p.deadline {
+                    if let Some(reply) = p.reply.take() {
+                        let _ = reply.send(Err("timed out launching agent".to_string()));
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+
             // Only notify ViewModel subscribers when the projection actually changed,
             // so idle ticks don't wake every WS client ~20x/second.
             let json = view_model_json(&engine);
@@ -117,6 +146,9 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
             let mut disconnected = false;
             loop {
                 match req_rx.try_recv() {
+                    Ok(EngineRequest::SubscribePty(session_id, reply)) => {
+                        handle_subscribe(&mut engine, &mut pending, session_id, reply);
+                    }
                     Ok(req) => handle_request(&mut engine, req),
                     Err(mpsc::error::TryRecvError::Empty) => break,
                     Err(mpsc::error::TryRecvError::Disconnected) => {
@@ -151,16 +183,8 @@ fn handle_request(engine: &mut Engine, req: EngineRequest) {
             let res = engine.apply_wire(cmd).map_err(|e| e.to_string());
             let _ = reply.send(res);
         }
-        EngineRequest::EnsureDemoPty(session_id, reply) => {
-            let _ = reply.send(ensure_demo_pty(engine, &session_id));
-        }
-        EngineRequest::SubscribePty(session_id, reply) => {
-            let res = match engine.providers.get(&session_id) {
-                Some(client) => Ok(client.subscribe_with_repaint()),
-                None => Err(format!("no running provider for session {session_id}")),
-            };
-            let _ = reply.send(res);
-        }
+        // SubscribePty is handled inline in the loop (it needs `&mut pending`).
+        EngineRequest::SubscribePty(_, _) => unreachable!("SubscribePty handled in the loop"),
         EngineRequest::WritePty(session_id, bytes) => {
             if let Some(client) = engine.providers.get(&session_id) {
                 let _ = client.write_bytes(&bytes);
@@ -174,30 +198,61 @@ fn handle_request(engine: &mut Engine, req: EngineRequest) {
     }
 }
 
-/// Spawn a plain PTY (the configured shell) for `session_id` if none is running, so PTY
-/// streaming can be demonstrated without the full agent-launch flow. Real agent launch
-/// over the web is a later plan.
-fn ensure_demo_pty(engine: &mut Engine, session_id: &str) -> Result<(), String> {
-    if engine.providers.contains_key(session_id) {
-        return Ok(());
+/// Handle a `SubscribePty` request. If the provider already exists, reply
+/// immediately. Otherwise launch/resume the real agent provider and defer the
+/// reply via a `PendingSubscribe` until the provider comes up (or times out).
+fn handle_subscribe(
+    engine: &mut Engine,
+    pending: &mut Vec<PendingSubscribe>,
+    session_id: String,
+    reply: oneshot::Sender<Result<PtySubscription, String>>,
+) {
+    if let Some(client) = engine.providers.get(&session_id) {
+        let _ = reply.send(Ok(client.subscribe_with_repaint()));
+        return;
     }
+    match launch_agent(engine, &session_id) {
+        Ok(()) => pending.push(PendingSubscribe {
+            session_id,
+            reply: Some(reply),
+            deadline: Instant::now() + LAUNCH_TIMEOUT,
+        }),
+        Err(e) => {
+            let _ = reply.send(Err(e));
+        }
+    }
+}
+
+/// Launch (or resume) the real agent provider for `session_id` through the
+/// engine's standard launch flow. The provider is NOT inserted here: the
+/// dispatched launch runs in a background worker and the provider appears later
+/// via the worker-event drain (`process_agent_launch_ready`), the same path the
+/// TUI uses. The caller's `PendingSubscribe` waits for it.
+fn launch_agent(engine: &mut Engine, session_id: &str) -> Result<(), String> {
     let session = engine
         .sessions
         .iter()
         .find(|s| s.id == session_id)
+        .cloned()
         .ok_or_else(|| format!("unknown session {session_id}"))?;
-    let worktree = std::path::PathBuf::from(&session.worktree_path);
-    let cwd = if worktree.is_dir() {
-        worktree
-    } else {
-        std::env::current_dir().map_err(|e| e.to_string())?
-    };
-    let command = engine.config.terminal.command.clone();
-    let args = engine.config.terminal.args.clone();
-    let scrollback = engine.config.ui.agent_scrollback_lines;
-    let client = dux_core::pty::PtyClient::spawn(&command, &args, &cwd, 24, 80, scrollback)
+    // A launch is already running for this session: just wait for it.
+    if engine.is_in_flight(&InFlightKey::AgentLaunch(session_id.to_string())) {
+        return Ok(());
+    }
+    let resume = engine.should_resume_session(&session);
+    let request = engine.build_agent_launch_request(
+        session,
+        resume,
+        (24, 80),
+        AgentLaunchKind::Reconnect {
+            status_message: "Attaching to agent".to_string(),
+        },
+    );
+    engine
+        .apply(Command::DispatchAgentLaunch {
+            request: Box::new(request),
+        })
         .map_err(|e| e.to_string())?;
-    engine.providers.insert(session_id.to_string(), client);
     Ok(())
 }
 

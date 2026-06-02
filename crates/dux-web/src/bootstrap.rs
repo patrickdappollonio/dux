@@ -56,7 +56,11 @@ impl ConfigSaver for WebConfigSaver {
 /// Assemble a headless `Engine` from `paths`, loading sessions from the store and
 /// acquiring the single-instance lock at `paths.lock_path`.
 pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
-    let config = Config::default();
+    let mut config = Config::default();
+    // Ensure the standard provider commands (and their resume args) are present so
+    // real agent launches/resumes work over the web. Full config.toml loading
+    // (user env, custom commands) is a separate later refinement.
+    config.providers.ensure_defaults();
     let session_store = SessionStore::open(&paths.sessions_db_path)?;
     let single_instance_lock = SingleInstanceLock::acquire(&paths.lock_path)?;
     let sessions = session_store.load_sessions()?;
