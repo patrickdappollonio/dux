@@ -1,7 +1,8 @@
 //! Headless `Engine` bootstrap for the web server. Mirrors the TUI's field-by-field
-//! assembly (crates/dux-tui/src/app/mod.rs) but with no UI, a default config, and a
-//! `WebConfigSaver`. Config-file loading is intentionally skipped (Plan 2 skeleton);
-//! sessions and projects come from the SQLite store.
+//! assembly (crates/dux-tui/src/app/mod.rs) but with a read-only config load and a
+//! `WebConfigSaver`. Config is loaded via `dux_core::config::load_config`, which reads
+//! `config.toml` read-only and falls back to defaults on missing/malformed files.
+//! Sessions and projects come from the SQLite store.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -54,13 +55,11 @@ impl ConfigSaver for WebConfigSaver {
 }
 
 /// Assemble a headless `Engine` from `paths`, loading sessions from the store and
-/// acquiring the single-instance lock at `paths.lock_path`.
+/// acquiring the single-instance lock at `paths.lock_path`. Config is loaded
+/// read-only from `config.toml` via `load_config` — no file creation, migration,
+/// or write-back occurs here.
 pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
-    let mut config = Config::default();
-    // Ensure the standard provider commands (and their resume args) are present so
-    // real agent launches/resumes work over the web. Full config.toml loading
-    // (user env, custom commands) is a separate later refinement.
-    config.providers.ensure_defaults();
+    let config = dux_core::config::load_config(paths);
     let session_store = SessionStore::open(&paths.sessions_db_path)?;
     let single_instance_lock = SingleInstanceLock::acquire(&paths.lock_path)?;
     let sessions = session_store.load_sessions()?;

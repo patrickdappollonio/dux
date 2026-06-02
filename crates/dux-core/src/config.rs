@@ -843,6 +843,29 @@ pub fn provider_config(
         })
 }
 
+/// Load config for a read-only consumer (the web server). Reads `config.toml` if
+/// present and parses it; on a missing file or parse error, falls back to defaults
+/// (logging the error). Always applies provider defaults. Unlike the TUI's
+/// `ensure_config`, this never creates, migrates, or writes the config file — the
+/// server must not mutate config (that's the TUI's canonical renderer).
+pub fn load_config(paths: &DuxPaths) -> Config {
+    let mut config = match std::fs::read_to_string(&paths.config_path) {
+        Ok(raw) => match toml::from_str::<Config>(&raw) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                crate::logger::error(&format!(
+                    "failed to parse {}: {e}; using defaults",
+                    paths.config_path.display()
+                ));
+                Config::default()
+            }
+        },
+        Err(_) => Config::default(),
+    };
+    config.providers.ensure_defaults();
+    config
+}
+
 /// Check whether a provider command is available on PATH.
 /// Returns `Ok(())` if found, or `Err(message)` with a user-friendly install hint.
 pub fn check_provider_available(config: &ProviderCommandConfig) -> std::result::Result<(), String> {
@@ -1165,5 +1188,85 @@ mod tests {
         let err = check_provider_available(&cfg).expect_err("command should be missing");
         assert!(err.contains("definitely-missing-provider-command"));
         assert!(err.contains("Install with: install custom-tool"));
+    }
+
+    // ── load_config tests ────────────────────────────────────────────────
+
+    fn make_test_paths(root: &std::path::Path) -> DuxPaths {
+        DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root: root.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn load_config_reads_custom_provider_command() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        std::fs::write(
+            &paths.config_path,
+            r#"
+[providers.claude]
+command = "/custom/claude"
+
+[ui]
+github_integration = false
+"#,
+        )
+        .expect("write config");
+
+        let config = load_config(&paths);
+
+        assert_eq!(
+            config.providers.commands["claude"].command, "/custom/claude",
+            "custom provider command should be loaded from config.toml"
+        );
+        assert!(
+            !config.ui.github_integration,
+            "ui.github_integration should be false per config.toml"
+        );
+        // Provider defaults must still be populated (e.g. codex should exist).
+        assert!(
+            config.providers.commands.contains_key("codex"),
+            "ensure_defaults should add missing default providers"
+        );
+    }
+
+    #[test]
+    fn load_config_falls_back_to_defaults_when_file_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        // No config.toml written — file does not exist.
+
+        let config = load_config(&paths);
+
+        // Provider defaults must be present.
+        assert!(
+            config.providers.commands.contains_key("claude"),
+            "claude provider should be present via defaults"
+        );
+        assert!(
+            config.providers.commands.contains_key("codex"),
+            "codex provider should be present via defaults"
+        );
+    }
+
+    #[test]
+    fn load_config_falls_back_to_defaults_on_malformed_toml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        std::fs::write(&paths.config_path, "this is not valid toml ][[[")
+            .expect("write bad config");
+
+        // Must not panic; must return usable defaults.
+        let config = load_config(&paths);
+
+        assert!(
+            config.providers.commands.contains_key("claude"),
+            "claude provider should be present via defaults after parse failure"
+        );
     }
 }

@@ -17,6 +17,7 @@ portable-pty = "0.9"
 rusqlite = { version = "0.39.0", features = ["bundled", "chrono"] }
 rustix.workspace = true
 serde.workspace = true
+toml = "1.1.2"
 serde_json.workspace = true
 sysinfo.workspace = true
 uuid.workspace = true
