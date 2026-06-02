@@ -1,7 +1,7 @@
 import {
   Bot,
-  Boxes,
   ChevronRight,
+  Cpu,
   Ellipsis,
   Folder,
   FolderOpen,
@@ -9,7 +9,6 @@ import {
   RefreshCw,
   Send,
   Sparkles,
-  SquareTerminal,
   Terminal,
   Wifi,
   WifiOff,
@@ -79,11 +78,11 @@ function providerIcon(provider: string): ComponentType {
     case "claude":
       return Bot
     case "codex":
-      return SquareTerminal
+      return Cpu
     case "gemini":
       return Sparkles
     default:
-      return Terminal
+      return Bot
   }
 }
 
@@ -214,7 +213,9 @@ function ProjectItem({
           <span className="flex-1 truncate">{name}</span>
           <ChevronRight className="ml-auto transition-transform group-data-[state=open]/collapsible:rotate-90" />
         </CollapsibleTrigger>
-        <SidebarMenuBadge>{sessions.length}</SidebarMenuBadge>
+        <SidebarMenuBadge>
+          <Badge variant="secondary">{sessions.length}</Badge>
+        </SidebarMenuBadge>
         <CollapsibleContent>
           <SidebarMenuSub>
             {sessions.map((session) => (
@@ -238,6 +239,7 @@ const CONN_BADGE: Record<
   open: { variant: "default", label: "Connected" },
   connecting: { variant: "secondary", label: "Connecting" },
   closed: { variant: "outline", label: "Offline" },
+  failed: { variant: "outline", label: "Failed" },
 }
 
 function ConnFooter() {
@@ -327,9 +329,7 @@ export function AppSidebar() {
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton size="lg">
-              <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-                <Boxes className="size-4" />
-              </div>
+              <img src="/dux-logo.png" alt="dux" className="size-8 rounded-lg" />
               <div className="flex flex-1 flex-col gap-0.5 leading-none">
                 <span className="font-semibold">dux</span>
                 <span className="text-xs text-sidebar-foreground/70">

@@ -8,6 +8,7 @@ import type {
 
 const RECONNECT_MIN_MS = 500
 const RECONNECT_MAX_MS = 5000
+const MAX_RECONNECT_ATTEMPTS = 4
 
 // DuxSocket wraps a single WebSocket connection to the dux web server. It
 // dispatches parsed server frames to consumer-settable callbacks and exposes
@@ -19,6 +20,7 @@ export class DuxSocket {
   private reconnectDelay = RECONNECT_MIN_MS
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private closedByUser = false
+  private attempts = 0
 
   // Consumer callbacks. Defaults are no-ops so consumers only wire what they need.
   onViewModel: (vm: ViewModel) => void = () => {}
@@ -45,6 +47,7 @@ export class DuxSocket {
 
     ws.onopen = () => {
       this.reconnectDelay = RECONNECT_MIN_MS
+      this.attempts = 0
       this.onConn("open")
     }
 
@@ -92,6 +95,11 @@ export class DuxSocket {
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer !== null) return
+    this.attempts++
+    if (this.attempts > MAX_RECONNECT_ATTEMPTS) {
+      this.onConn("failed")
+      return
+    }
     const delay = this.reconnectDelay
     this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_MAX_MS)
     this.reconnectTimer = setTimeout(() => {
@@ -100,6 +108,16 @@ export class DuxSocket {
         this.open()
       }
     }, delay)
+  }
+
+  reconnect(): void {
+    this.attempts = 0
+    this.closedByUser = false
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    this.open()
   }
 
   private sendJson(message: ClientMessage): void {

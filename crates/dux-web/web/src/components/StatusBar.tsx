@@ -1,5 +1,6 @@
 import { Badge } from "@/components/ui/badge"
-import { useDux } from "@/lib/store"
+import { Button } from "@/components/ui/button"
+import { reconnect, useDux } from "@/lib/store"
 import type { SessionStatus } from "@/lib/types"
 
 // Map a session status onto a Badge variant + label for the statusline.
@@ -12,10 +13,11 @@ const STATUS_BADGE: Record<
   exited: { variant: "outline", label: "exited" },
 }
 
-const CONN_LABEL = {
+const CONN_LABEL: Record<string, string> = {
   open: "Connected",
   connecting: "Connecting",
   closed: "Offline",
+  failed: "Connection failed",
 }
 
 export function StatusBar() {
@@ -40,7 +42,13 @@ export function StatusBar() {
         )}
       </div>
       <div className="flex min-w-0 items-center gap-2">
-        <span>{CONN_LABEL[conn]}</span>
+        {conn === "failed" ? (
+          <Button variant="outline" size="sm" onClick={reconnect}>
+            Reconnect
+          </Button>
+        ) : (
+          <span>{CONN_LABEL[conn]}</span>
+        )}
         <span className="truncate">{lastMessage}</span>
       </div>
     </footer>

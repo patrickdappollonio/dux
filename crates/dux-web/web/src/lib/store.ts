@@ -109,6 +109,10 @@ export function setPaletteOpen(open: boolean): void {
   setState({ paletteOpen: open })
 }
 
+export function reconnect(): void {
+  socket.reconnect()
+}
+
 // Update the expanded sidebar width during a drag. Pass `persist` on release to
 // write the final value to localStorage.
 export function setSidebarWidth(width: string, persist = false): void {

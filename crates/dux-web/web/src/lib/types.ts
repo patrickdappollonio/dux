@@ -65,4 +65,4 @@ export type ClientMessage =
   | { type: "subscribe"; session_id: string }
   | { type: "resize"; session_id: string; rows: number; cols: number }
 
-export type ConnState = "connecting" | "open" | "closed"
+export type ConnState = "connecting" | "open" | "closed" | "failed"

@@ -45,6 +45,7 @@ const CONN_BADGE: Record<
   open: { variant: "default", label: "Connected" },
   connecting: { variant: "secondary", label: "Connecting" },
   closed: { variant: "outline", label: "Offline" },
+  failed: { variant: "outline", label: "Disconnected" },
 }
 
 function InsetHeader() {
@@ -116,7 +117,7 @@ function TerminalArea() {
   }
 
   return (
-    <div className="h-full min-h-0">
+    <div className="h-full min-h-0 bg-background p-3">
       <TerminalPane key={selectedSessionId} sessionId={selectedSessionId} />
     </div>
   )
