@@ -1,0 +1,577 @@
+---
+// Docs search modal. Mounted once globally in Layout.astro and opened from the
+// header button (which dispatches the `open-search` event) or via the
+// Cmd/Ctrl-K and "/" shortcuts. The Pagefind engine is dynamically imported
+// only on first open, so pages that never search ship none of it.
+//
+// All visuals derive from the tokens in global.css — no hardcoded colors.
+---
+
+<div id="docs-search" class="search-overlay" hidden>
+  <div class="search-backdrop" data-search-close aria-hidden="true"></div>
+
+  <div
+    class="search-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="docs-search-label"
+  >
+    <h2 id="docs-search-label" class="sr-only">Search the documentation</h2>
+
+    <div class="search-input-row">
+      <svg
+        class="search-icon"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <circle cx="11" cy="11" r="8"></circle>
+        <path d="m21 21-4.3-4.3"></path>
+      </svg>
+
+      <input
+        id="docs-search-input"
+        type="search"
+        class="search-input"
+        placeholder="Search the docs…"
+        autocomplete="off"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+        role="combobox"
+        aria-expanded="false"
+        aria-controls="docs-search-results"
+        aria-autocomplete="list"
+        aria-activedescendant=""
+      />
+
+      <kbd class="search-esc">Esc</kbd>
+    </div>
+
+    <div
+      id="docs-search-status"
+      class="search-status"
+      role="status"
+      aria-live="polite"
+    >
+      Type to search the docs.
+    </div>
+
+    <ul
+      id="docs-search-results"
+      class="search-results"
+      role="listbox"
+      aria-label="Search results"
+    >
+    </ul>
+  </div>
+</div>
+
+<script>
+  import { mapResult, nextIndex } from "../lib/search-ui";
+  import type { SearchResult } from "../lib/search-ui";
+
+  // Minimal shape of the Pagefind module we load at runtime.
+  interface PagefindModule {
+    init?: () => Promise<void>;
+    options?: (opts: Record<string, unknown>) => Promise<void>;
+    debouncedSearch: (
+      query: string,
+    ) => Promise<{ results: Array<{ data: () => Promise<unknown> }> } | null>;
+  }
+
+  const overlay = document.getElementById("docs-search");
+  const input = document.getElementById(
+    "docs-search-input",
+  ) as HTMLInputElement | null;
+  const status = document.getElementById("docs-search-status");
+  const list = document.getElementById("docs-search-results");
+
+  // Bail quietly if the markup isn't present (defensive; it always is).
+  if (overlay && input && status && list) {
+    let pagefind: PagefindModule | null = null;
+    let pagefindFailed = false;
+    let loading: Promise<PagefindModule | null> | null = null;
+    let selected = -1; // index into the flat list of selectable anchors
+    let lastFocused: HTMLElement | null = null;
+    let searchToken = 0; // guards against out-of-order async responses
+
+    const isOpen = () => !overlay.hasAttribute("hidden");
+
+    // Lazy-load the Pagefind runtime on first open. The specifier is built from
+    // BASE_URL so the import is non-static — Vite leaves it alone and the file
+    // (generated into /pagefind/ at build time) resolves at runtime.
+    function loadPagefind(): Promise<PagefindModule | null> {
+      if (pagefind) return Promise.resolve(pagefind);
+      if (pagefindFailed) return Promise.resolve(null);
+      if (loading) return loading;
+      const url = `${import.meta.env.BASE_URL}pagefind/pagefind.js`.replace(
+        /\/{2,}/g,
+        "/",
+      );
+      loading = import(/* @vite-ignore */ url)
+        .then(async (mod: PagefindModule) => {
+          await mod.init?.();
+          pagefind = mod;
+          return mod;
+        })
+        .catch(() => {
+          pagefindFailed = true;
+          return null;
+        });
+      return loading;
+    }
+
+    function setStatus(message: string) {
+      status!.textContent = message;
+    }
+
+    function clearResults() {
+      list!.innerHTML = "";
+      selected = -1;
+      input!.setAttribute("aria-expanded", "false");
+      input!.setAttribute("aria-activedescendant", "");
+    }
+
+    // Every selectable anchor in render order, for keyboard navigation.
+    function anchors(): HTMLAnchorElement[] {
+      return Array.from(
+        list!.querySelectorAll<HTMLAnchorElement>("a[data-result]"),
+      );
+    }
+
+    function applySelection() {
+      const items = anchors();
+      items.forEach((a, i) => {
+        const active = i === selected;
+        a.classList.toggle("is-active", active);
+        a.setAttribute("aria-selected", active ? "true" : "false");
+        if (active) {
+          input!.setAttribute("aria-activedescendant", a.id);
+          a.scrollIntoView({ block: "nearest" });
+        }
+      });
+      if (selected < 0) input!.setAttribute("aria-activedescendant", "");
+    }
+
+    function renderResults(results: SearchResult[], query: string) {
+      if (results.length === 0) {
+        clearResults();
+        setStatus(`No results for "${query}".`);
+        return;
+      }
+
+      const frag = document.createDocumentFragment();
+      let counter = 0;
+      for (const r of results) {
+        const li = document.createElement("li");
+        li.className = "search-result-group";
+
+        const main = document.createElement("a");
+        main.id = `docs-search-opt-${counter++}`;
+        main.href = r.url;
+        main.dataset.result = "";
+        main.setAttribute("role", "option");
+        main.className = "search-result";
+        main.innerHTML = `<span class="search-result-title">${escapeHtml(
+          r.title,
+        )}</span>${
+          r.excerpt
+            ? `<span class="search-result-excerpt">${r.excerpt}</span>`
+            : ""
+        }`;
+        li.appendChild(main);
+
+        for (const sub of r.subResults) {
+          const subAnchor = document.createElement("a");
+          subAnchor.id = `docs-search-opt-${counter++}`;
+          subAnchor.href = sub.url;
+          subAnchor.dataset.result = "";
+          subAnchor.setAttribute("role", "option");
+          subAnchor.className = "search-subresult";
+          subAnchor.innerHTML = `<span class="search-subresult-title">${escapeHtml(
+            sub.title,
+          )}</span>${
+            sub.excerpt
+              ? `<span class="search-result-excerpt">${sub.excerpt}</span>`
+              : ""
+          }`;
+          li.appendChild(subAnchor);
+        }
+
+        frag.appendChild(li);
+      }
+
+      list!.innerHTML = "";
+      list!.appendChild(frag);
+      selected = -1;
+      input!.setAttribute("aria-expanded", "true");
+      setStatus(
+        `${results.length} result${results.length === 1 ? "" : "s"}.`,
+      );
+    }
+
+    function escapeHtml(value: string): string {
+      const div = document.createElement("div");
+      div.textContent = value;
+      return div.innerHTML;
+    }
+
+    async function runSearch(query: string) {
+      const trimmed = query.trim();
+      if (trimmed === "") {
+        clearResults();
+        setStatus("Type to search the docs.");
+        return;
+      }
+
+      const token = ++searchToken;
+      const pf = await loadPagefind();
+      if (token !== searchToken) return; // a newer keystroke superseded us
+
+      if (!pf) {
+        clearResults();
+        setStatus("Search index isn't built yet — run `npm run build`.");
+        return;
+      }
+
+      setStatus("Searching…");
+      const search = await pf.debouncedSearch(trimmed);
+      if (token !== searchToken) return;
+      // debouncedSearch resolves to null when a later call debounced this one.
+      if (!search) return;
+
+      const data = await Promise.all(search.results.map((r) => r.data()));
+      if (token !== searchToken) return;
+
+      renderResults(
+        data.map((d) => mapResult(d as Parameters<typeof mapResult>[0])),
+        trimmed,
+      );
+    }
+
+    function openSearch() {
+      if (isOpen()) return;
+      lastFocused = document.activeElement as HTMLElement | null;
+      overlay!.removeAttribute("hidden");
+      document.body.style.overflow = "hidden";
+      // Warm the engine up so the first keystroke feels instant.
+      void loadPagefind();
+      requestAnimationFrame(() => {
+        input!.focus();
+        input!.select();
+      });
+    }
+
+    function closeSearch() {
+      if (!isOpen()) return;
+      overlay!.setAttribute("hidden", "");
+      document.body.style.overflow = "";
+      input!.value = "";
+      clearResults();
+      setStatus("Type to search the docs.");
+      lastFocused?.focus?.();
+    }
+
+    function moveSelection(delta: number) {
+      const items = anchors();
+      selected = nextIndex(selected, delta, items.length);
+      applySelection();
+    }
+
+    // ---- Wiring -----------------------------------------------------------
+
+    document.addEventListener("open-search", openSearch);
+
+    // Any element marked `data-open-search` (the header button) opens the modal.
+    document.addEventListener("click", (event) => {
+      if ((event.target as HTMLElement).closest("[data-open-search]")) {
+        event.preventDefault();
+        openSearch();
+      }
+    });
+
+    overlay.addEventListener("click", (event) => {
+      const target = event.target as HTMLElement;
+      if (target.closest("[data-search-close]")) closeSearch();
+    });
+
+    let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+    input.addEventListener("input", () => {
+      clearTimeout(debounceTimer);
+      const value = input!.value;
+      debounceTimer = setTimeout(() => void runSearch(value), 120);
+    });
+
+    input.addEventListener("keydown", (event) => {
+      switch (event.key) {
+        case "ArrowDown":
+          event.preventDefault();
+          moveSelection(1);
+          break;
+        case "ArrowUp":
+          event.preventDefault();
+          moveSelection(-1);
+          break;
+        case "Enter": {
+          const items = anchors();
+          if (selected >= 0 && items[selected]) {
+            event.preventDefault();
+            window.location.href = items[selected].href;
+          }
+          break;
+        }
+        case "Escape":
+          event.preventDefault();
+          closeSearch();
+          break;
+      }
+    });
+
+    // Pointer hover updates the active row so mouse and keyboard agree.
+    list.addEventListener("mousemove", (event) => {
+      const anchor = (event.target as HTMLElement).closest<HTMLAnchorElement>(
+        "a[data-result]",
+      );
+      if (!anchor) return;
+      const items = anchors();
+      const index = items.indexOf(anchor);
+      if (index !== -1 && index !== selected) {
+        selected = index;
+        applySelection();
+      }
+    });
+
+    // Global shortcuts: Cmd/Ctrl-K toggles; "/" opens when not already typing
+    // in a field; both work from anywhere on the page.
+    document.addEventListener("keydown", (event) => {
+      const target = event.target as HTMLElement | null;
+      const typing =
+        !!target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        isOpen() ? closeSearch() : openSearch();
+        return;
+      }
+      if (event.key === "/" && !typing && !isOpen()) {
+        event.preventDefault();
+        openSearch();
+      }
+    });
+
+    // Keep focus inside the dialog while it's open (simple Tab trap).
+    overlay.addEventListener("keydown", (event) => {
+      if (event.key !== "Tab" || !isOpen()) return;
+      const focusable = overlay!.querySelectorAll<HTMLElement>(
+        'input, a[href], button, [tabindex]:not([tabindex="-1"])',
+      );
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
+  }
+</script>
+
+<style>
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .search-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 12vh 1rem 1rem;
+  }
+
+  .search-overlay[hidden] {
+    display: none;
+  }
+
+  .search-backdrop {
+    position: absolute;
+    inset: 0;
+    background: color-mix(in oklab, var(--color-ink) 78%, transparent);
+    backdrop-filter: blur(4px);
+  }
+
+  .search-dialog {
+    position: relative;
+    width: 100%;
+    max-width: 40rem;
+    max-height: 70vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-radius: 0.85rem;
+    border: 1px solid var(--color-border);
+    background: color-mix(in oklab, var(--color-panel) 96%, transparent);
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, var(--color-accent) 8%, transparent),
+      0 24px 70px -20px color-mix(in oklab, var(--color-ink) 90%, transparent);
+    animation: search-pop 0.14s ease-out;
+  }
+
+  @keyframes search-pop {
+    from {
+      opacity: 0;
+      transform: translateY(-0.5rem) scale(0.99);
+    }
+  }
+
+  .search-input-row {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    padding: 0.85rem 1rem;
+    border-bottom: 1px solid var(--color-border-soft);
+  }
+
+  .search-icon {
+    width: 1.1rem;
+    height: 1.1rem;
+    flex-shrink: 0;
+    color: var(--color-dim);
+  }
+
+  .search-input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: 0;
+    outline: none;
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    font-size: 1rem;
+  }
+
+  .search-input::placeholder {
+    color: var(--color-dim);
+  }
+
+  /* Hide the native search "clear" affordance; Esc / backdrop close instead. */
+  .search-input::-webkit-search-cancel-button {
+    display: none;
+  }
+
+  .search-esc {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: var(--color-dim);
+    padding: 0.15rem 0.45rem;
+    border: 1px solid var(--color-border);
+    border-radius: 0.4rem;
+    background: var(--color-panel-2);
+  }
+
+  .search-status {
+    padding: 0.5rem 1rem;
+    font-size: 0.75rem;
+    color: var(--color-dim);
+    border-bottom: 1px solid var(--color-border-soft);
+  }
+
+  .search-results {
+    list-style: none;
+    margin: 0;
+    padding: 0.4rem;
+    overflow-y: auto;
+  }
+
+  /* The result rows below are built in JavaScript (document.createElement), so
+     they never receive Astro's scoping attribute. Their rules must therefore be
+     `:global()` — but every one is nested under the templated `.search-results`
+     container, so the styles reach the dynamic children without leaking to the
+     rest of the site. */
+  .search-results :global(.search-result-group + .search-result-group) {
+    margin-top: 0.15rem;
+  }
+
+  .search-results :global(.search-result),
+  .search-results :global(.search-subresult) {
+    display: block;
+    padding: 0.55rem 0.7rem;
+    border-radius: 0.55rem;
+    text-decoration: none;
+    color: var(--color-text);
+    border: 1px solid transparent;
+  }
+
+  .search-results :global(.search-subresult) {
+    margin-left: 1rem;
+    padding-top: 0.4rem;
+    padding-bottom: 0.4rem;
+    border-left: 1px solid var(--color-border-soft);
+    border-radius: 0 0.55rem 0.55rem 0;
+  }
+
+  .search-results :global(.search-result.is-active),
+  .search-results :global(.search-subresult.is-active) {
+    background: color-mix(in oklab, var(--color-accent) 12%, transparent);
+    border-color: color-mix(in oklab, var(--color-accent) 45%, transparent);
+  }
+
+  .search-results :global(.search-result-title) {
+    display: block;
+    font-family: var(--font-display);
+    font-size: 0.92rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  .search-results :global(.search-subresult-title) {
+    display: block;
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: var(--color-muted);
+  }
+
+  .search-results :global(.search-result-excerpt) {
+    display: block;
+    margin-top: 0.15rem;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: var(--color-dim);
+  }
+
+  /* Pagefind wraps matched terms in <mark>; tint them with the accent. */
+  .search-results :global(mark) {
+    background: color-mix(in oklab, var(--color-accent) 22%, transparent);
+    color: var(--color-text);
+    border-radius: 0.2rem;
+    padding: 0 0.1em;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .search-dialog {
+      animation: none;
+    }
+  }
+</style>
