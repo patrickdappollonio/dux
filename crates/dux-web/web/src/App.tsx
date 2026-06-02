@@ -1,54 +1,133 @@
+import { AppSidebar } from "@/components/Sidebar"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { CommandPalette } from "@/components/CommandPalette"
 import { CommitDialog } from "@/components/CommitDialog"
-import { Sidebar } from "@/components/Sidebar"
 import { StatusBar } from "@/components/StatusBar"
 import { TerminalPane } from "@/components/TerminalPane"
-import { TopBar } from "@/components/TopBar"
+import { Badge } from "@/components/ui/badge"
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb"
+import { Button } from "@/components/ui/button"
 import {
   ResizableHandle,
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable"
-import { useDux } from "@/lib/store"
+import { Separator } from "@/components/ui/separator"
+import {
+  SidebarInset,
+  SidebarProvider,
+  SidebarTrigger,
+} from "@/components/ui/sidebar"
+import { Toaster } from "@/components/ui/sonner"
+import { setPaletteOpen, useDux } from "@/lib/store"
+import type { ConnState } from "@/lib/types"
+
+const CONN_BADGE: Record<
+  ConnState,
+  { variant: "default" | "secondary" | "outline"; label: string }
+> = {
+  open: { variant: "default", label: "Connected" },
+  connecting: { variant: "secondary", label: "Connecting" },
+  closed: { variant: "outline", label: "Offline" },
+}
+
+function InsetHeader() {
+  const { viewModel, selectedSessionId, conn } = useDux()
+  const session = viewModel?.sessions.find((s) => s.id === selectedSessionId)
+  const project = session
+    ? viewModel?.projects.find((p) => p.id === session.project_id)
+    : undefined
+  const badge = CONN_BADGE[conn]
+
+  return (
+    <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
+      <SidebarTrigger className="-ml-1" />
+      <Separator orientation="vertical" className="h-4" />
+      <Breadcrumb>
+        <BreadcrumbList>
+          {session ? (
+            <>
+              <BreadcrumbItem>
+                <BreadcrumbPage>{project?.name ?? "dux"}</BreadcrumbPage>
+              </BreadcrumbItem>
+              <BreadcrumbSeparator />
+              <BreadcrumbItem>
+                <BreadcrumbPage className="font-mono">
+                  {session.branch_name}
+                </BreadcrumbPage>
+              </BreadcrumbItem>
+            </>
+          ) : (
+            <BreadcrumbItem>
+              <BreadcrumbPage>dux</BreadcrumbPage>
+            </BreadcrumbItem>
+          )}
+        </BreadcrumbList>
+      </Breadcrumb>
+
+      <div className="ml-auto flex items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setPaletteOpen(true)}
+        >
+          <span className="font-mono text-xs">⌘K</span>
+          Search…
+        </Button>
+        <Badge variant={badge.variant}>{badge.label}</Badge>
+      </div>
+    </header>
+  )
+}
 
 function TerminalArea() {
   const { selectedSessionId } = useDux()
 
+  if (!selectedSessionId) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+        Select a session to attach its terminal
+      </div>
+    )
+  }
+
   return (
-    <div className="flex h-full min-h-0 flex-col bg-background">
-      {selectedSessionId ? (
-        <TerminalPane key={selectedSessionId} sessionId={selectedSessionId} />
-      ) : (
-        <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-          <span>Select a session to attach its terminal</span>
-        </div>
-      )}
+    <div className="h-full min-h-0">
+      <TerminalPane key={selectedSessionId} sessionId={selectedSessionId} />
     </div>
   )
 }
 
 function App() {
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
+    <SidebarProvider>
+      <AppSidebar />
+      <SidebarInset className="h-svh min-h-0 overflow-hidden">
+        <InsetHeader />
+        <div className="flex min-h-0 flex-1 flex-col">
+          <ResizablePanelGroup orientation="horizontal" className="flex-1">
+            <ResizablePanel defaultSize={74} minSize={30}>
+              <TerminalArea />
+            </ResizablePanel>
+            <ResizableHandle />
+            <ResizablePanel defaultSize={26} minSize={14} collapsible>
+              <ChangedFiles />
+            </ResizablePanel>
+          </ResizablePanelGroup>
+          <StatusBar />
+        </div>
+      </SidebarInset>
+
       <CommandPalette />
       <CommitDialog />
-      <TopBar />
-      <ResizablePanelGroup orientation="horizontal" className="flex-1">
-        <ResizablePanel defaultSize={22} minSize={12} collapsible>
-          <Sidebar />
-        </ResizablePanel>
-        <ResizableHandle />
-        <ResizablePanel defaultSize={54} minSize={30}>
-          <TerminalArea />
-        </ResizablePanel>
-        <ResizableHandle />
-        <ResizablePanel defaultSize={24} minSize={14} collapsible>
-          <ChangedFiles />
-        </ResizablePanel>
-      </ResizablePanelGroup>
-      <StatusBar />
-    </div>
+      <Toaster />
+    </SidebarProvider>
   )
 }
 
