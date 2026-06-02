@@ -4,6 +4,7 @@ import {
   ChevronRight,
   Ellipsis,
   Folder,
+  FolderOpen,
   GitCommitHorizontal,
   RefreshCw,
   Send,
@@ -16,6 +17,13 @@ import {
 import type { ComponentType } from "react"
 
 import { Badge } from "@/components/ui/badge"
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -287,8 +295,18 @@ export function AppSidebar() {
         <SidebarGroup>
           <SidebarGroupLabel>Projects</SidebarGroupLabel>
           {order.length === 0 ? (
-            <SidebarGroupContent className="px-2 py-1 text-muted-foreground">
-              No sessions yet.
+            <SidebarGroupContent>
+              <Empty className="border-0 p-4">
+                <EmptyHeader>
+                  <EmptyMedia variant="icon">
+                    <FolderOpen />
+                  </EmptyMedia>
+                  <EmptyTitle>No sessions</EmptyTitle>
+                  <EmptyDescription>
+                    Create an agent in the dux TUI to see it here.
+                  </EmptyDescription>
+                </EmptyHeader>
+              </Empty>
             </SidebarGroupContent>
           ) : (
             <SidebarMenu>

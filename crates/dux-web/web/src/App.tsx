@@ -14,6 +14,13 @@ import {
 } from "@/components/ui/breadcrumb"
 import { Button } from "@/components/ui/button"
 import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty"
+import {
   ResizableHandle,
   ResizablePanel,
   ResizablePanelGroup,
@@ -27,6 +34,7 @@ import {
 import { Toaster } from "@/components/ui/sonner"
 import { setPaletteOpen, useDux } from "@/lib/store"
 import type { ConnState } from "@/lib/types"
+import { SquareTerminal } from "lucide-react"
 
 const CONN_BADGE: Record<
   ConnState,
@@ -91,9 +99,17 @@ function TerminalArea() {
 
   if (!selectedSessionId) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-        Select a session to attach its terminal
-      </div>
+      <Empty className="h-full border-0">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <SquareTerminal />
+          </EmptyMedia>
+          <EmptyTitle>No session selected</EmptyTitle>
+          <EmptyDescription>
+            Pick an agent session from the sidebar to attach its terminal.
+          </EmptyDescription>
+        </EmptyHeader>
+      </Empty>
     )
   }
 

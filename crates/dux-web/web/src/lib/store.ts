@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react"
+import { toast } from "sonner"
 
 import { DuxSocket } from "./ws"
 import type { ConnState, ViewModel } from "./types"
@@ -64,13 +65,16 @@ socket.onConn = (conn) => {
 socket.onCommandResult = (status, error) => {
   if (error) {
     setState({ lastMessage: error })
+    toast.error(error)
   } else if (status) {
     setState({ lastMessage: status.message })
+    toast.success(status.message)
   }
 }
 
 socket.onError = (message) => {
   setState({ lastMessage: message })
+  toast.error(message)
 }
 
 socket.connect()

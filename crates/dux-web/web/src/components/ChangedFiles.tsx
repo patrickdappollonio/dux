@@ -1,4 +1,5 @@
 import { useState } from "react"
+import { Check, MousePointerClick } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -13,6 +14,13 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible"
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
 import {
@@ -136,9 +144,15 @@ export function ChangedFiles() {
   // No session selected — muted empty state.
   if (!selectedSessionId) {
     return (
-      <div className="flex h-full items-center justify-center p-4 text-sm text-muted-foreground">
-        Select a session to see changes
-      </div>
+      <Empty className="h-full border-0">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <MousePointerClick />
+          </EmptyMedia>
+          <EmptyTitle>No session selected</EmptyTitle>
+          <EmptyDescription>Select a session to see its changes.</EmptyDescription>
+        </EmptyHeader>
+      </Empty>
     )
   }
 
@@ -174,7 +188,15 @@ export function ChangedFiles() {
           <ScrollArea className="flex-1">
             <div className="flex flex-col gap-1 p-3">
               {!hasChanges && (
-                <p className="py-2 text-sm text-muted-foreground">No changes.</p>
+                <Empty className="border-0 py-6">
+                  <EmptyHeader>
+                    <EmptyMedia variant="icon">
+                      <Check />
+                    </EmptyMedia>
+                    <EmptyTitle>No changes</EmptyTitle>
+                    <EmptyDescription>This worktree is clean.</EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
               )}
 
               <FileGroup
