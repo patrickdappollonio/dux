@@ -2959,6 +2959,97 @@ mod tests {
         assert_eq!(persisted[0].started_providers, vec!["claude".to_string()]);
     }
 
+    fn dummy_changed_file(path: &str) -> crate::model::ChangedFile {
+        crate::model::ChangedFile {
+            status: "M".to_string(),
+            path: path.to_string(),
+            additions: 1,
+            deletions: 0,
+            binary: false,
+        }
+    }
+
+    /// Adding a new project selects it in the left pane. Because a freshly
+    /// added project has no agents, the right-pane changed-files lists must be
+    /// cleared — otherwise the previously selected project's modified files
+    /// linger and appear to belong to the brand-new project.
+    #[test]
+    fn adding_project_clears_stale_changed_files() {
+        let session = make_session("s1", "claude", "/tmp/wt/a");
+        let existing = make_project("project-1", "claude");
+        let mut app = test_app_with_sessions(vec![session], vec![existing]);
+
+        // Simulate the previously selected project showing modified files.
+        app.staged_files = vec![dummy_changed_file("staged.rs")];
+        app.unstaged_files = vec![
+            dummy_changed_file("a.rs"),
+            dummy_changed_file("b.rs"),
+            dummy_changed_file("c.rs"),
+        ];
+
+        // A new project gets persisted and applied. It has no agents.
+        let new_project = make_project("project-2", "claude");
+        app.apply_project_persistence_result(
+            ProjectPersistenceAction::Add {
+                project: new_project,
+                status_message: "Added project".to_string(),
+            },
+            Ok(()),
+        );
+
+        // The new (agent-less) project is now selected, so the right pane must
+        // be empty rather than echoing the previous project's changes.
+        assert!(
+            app.selected_session().is_none(),
+            "new project has no agents"
+        );
+        assert!(
+            app.staged_files.is_empty(),
+            "staged files should be cleared when switching to an agent-less project"
+        );
+        assert!(
+            app.unstaged_files.is_empty(),
+            "unstaged files should be cleared when switching to an agent-less project"
+        );
+    }
+
+    /// Removing a project from the app (without deleting worktrees) moves the
+    /// selection elsewhere; the changed-files panel must reflect the new
+    /// selection rather than the removed project's stale files.
+    #[test]
+    fn removing_project_clears_stale_changed_files() {
+        let session = make_session("s1", "claude", "/tmp/wt/a");
+        let p1 = make_project("project-1", "claude");
+        let mut p2 = make_project("project-2", "claude");
+        p2.name = "second".to_string();
+        // Two projects; project-1 owns the session.
+        let mut app = test_app_with_sessions(vec![session], vec![p1, p2]);
+        app.rebuild_left_items();
+
+        // Pretend the user is sitting on project-2 (no agents) with stale files
+        // left over from somewhere.
+        app.staged_files = vec![dummy_changed_file("staged.rs")];
+        app.unstaged_files = vec![dummy_changed_file("a.rs")];
+        app.selected_left = app.left_items().len().saturating_sub(1);
+
+        app.apply_project_persistence_result(
+            ProjectPersistenceAction::Remove {
+                project_id: "project-2".to_string(),
+                project_name: "second".to_string(),
+            },
+            Ok(()),
+        );
+
+        assert!(
+            app.staged_files.is_empty(),
+            "staged files should be cleared after removing a project"
+        );
+        assert!(
+            app.unstaged_files.is_empty() || app.selected_session().is_some(),
+            "unstaged files should reflect the new selection after removing a project"
+        );
+    }
+
     /// Build a `Project` whose `path` points at a caller-controlled directory,
     /// so tests can decide whether git operations succeed or fail.
     fn make_project_at(id: &str, provider: &str, path: &str) -> Project {
