@@ -149,3 +149,51 @@ async fn client_streams_pty_bytes() {
         acc.len()
     );
 }
+
+/// Regression: subscribing twice in a row (React StrictMode double-mount / session switching)
+/// must not break streaming and must not duplicate PTY output. We can't reliably count exact
+/// occurrences because the shell echoes the typed input line itself, so we assert that streaming
+/// still works after the re-subscribe (the marker appears) and that the connection didn't hang.
+#[tokio::test]
+async fn double_subscribe_does_not_break_streaming() {
+    let (addr, _tmp) = boot().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let _ = ws.next().await; // initial view_model
+
+    // Subscribe twice in a row, simulating the double-subscribe that caused doubled output.
+    ws.send(Message::Text(
+        r#"{"type":"subscribe","session_id":"s1"}"#.into(),
+    ))
+    .await
+    .unwrap();
+    ws.send(Message::Text(
+        r#"{"type":"subscribe","session_id":"s1"}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    // Drive the shell to produce a unique marker via stdout (not just terminal echo).
+    ws.send(Message::Binary(b"printf dux-no-dup-marker\\n\n".to_vec()))
+        .await
+        .unwrap();
+
+    let mut acc = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
+            if let Message::Binary(b) = m {
+                acc.extend_from_slice(&b);
+            }
+            if String::from_utf8_lossy(&acc).contains("dux-no-dup-marker") {
+                break;
+            }
+        }
+    }
+    assert!(
+        String::from_utf8_lossy(&acc).contains("dux-no-dup-marker"),
+        "streaming broke after re-subscribe; got {} bytes",
+        acc.len()
+    );
+}

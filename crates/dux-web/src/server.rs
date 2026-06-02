@@ -55,6 +55,10 @@ async fn handle_socket(socket: WebSocket, engine: EngineHandle) {
     }
 
     let mut subscribed: Option<String> = None;
+    // Exactly one live PTY forwarder per connection. Re-subscribing aborts the previous one so a
+    // single PtyClient's output is never streamed to the same socket twice (which doubled echoed
+    // input). React StrictMode double-mounts and session switching both trigger re-subscribes.
+    let mut pty_forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
     while let Some(Ok(msg)) = stream.next().await {
         match msg {
@@ -101,11 +105,15 @@ async fn handle_socket(socket: WebSocket, engine: EngineHandle) {
                         }
                         match engine.subscribe_pty(session_id.clone()).await {
                             Ok((repaint, rx)) => {
+                                // Stop the previous forwarder before streaming the new subscription.
+                                if let Some(prev) = pty_forwarder.take() {
+                                    prev.abort();
+                                }
                                 subscribed = Some(session_id.clone());
                                 send_binary(&sink, repaint).await;
                                 let _ = send_json(&sink, &ServerMessage::Subscribed { session_id })
                                     .await;
-                                spawn_pty_forwarder(Arc::clone(&sink), rx);
+                                pty_forwarder = Some(spawn_pty_forwarder(Arc::clone(&sink), rx));
                             }
                             Err(e) => {
                                 let _ =
@@ -126,10 +134,22 @@ async fn handle_socket(socket: WebSocket, engine: EngineHandle) {
             _ => {}
         }
     }
+
+    // Connection closed: stop the forwarder so it doesn't linger.
+    if let Some(h) = pty_forwarder.take() {
+        h.abort();
+    }
 }
 
 /// Forward std-mpsc PTY bytes into the socket as binary frames, off the async runtime.
-fn spawn_pty_forwarder(sink: SharedSink, rx: std::sync::mpsc::Receiver<Vec<u8>>) {
+///
+/// Returns the async pump task's [`JoinHandle`]. Aborting it drops `async_rx`, which makes the
+/// blocking reader's `blocking_send` fail so the blocking task ends and drops its std `Receiver`;
+/// the owning `PtyClient` then prunes that stale subscriber on its next read.
+fn spawn_pty_forwarder(
+    sink: SharedSink,
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+) -> tokio::task::JoinHandle<()> {
     let (tx, mut async_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
     tokio::task::spawn_blocking(move || {
         while let Ok(chunk) = rx.recv() {
@@ -145,7 +165,7 @@ fn spawn_pty_forwarder(sink: SharedSink, rx: std::sync::mpsc::Receiver<Vec<u8>>)
                 break;
             }
         }
-    });
+    })
 }
 
 async fn send_view_model(sink: &SharedSink, json: &str) -> Result<(), ()> {
