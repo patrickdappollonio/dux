@@ -69,6 +69,8 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     let (worker_tx, worker_rx): (mpsc::Sender<WorkerEvent>, mpsc::Receiver<WorkerEvent>) =
         mpsc::channel();
 
+    let github_integration_enabled = config.ui.github_integration;
+
     Ok(Engine {
         config,
         paths: paths.clone(),
@@ -78,7 +80,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         staged_files: Vec::new(),
         unstaged_files: Vec::new(),
         terminal_counter: 0,
-        github_integration_enabled: false,
+        github_integration_enabled,
         single_instance_lock,
         worker_tx,
         worker_rx,

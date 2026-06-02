@@ -6,6 +6,7 @@ import {
   Folder,
   FolderOpen,
   GitCommitHorizontal,
+  GitPullRequest,
   RefreshCw,
   Send,
   Sparkles,
@@ -70,7 +71,7 @@ import {
   socket,
   useDux,
 } from "@/lib/store"
-import type { ConnState, SessionStatus, SessionView } from "@/lib/types"
+import type { ConnState, PrView, SessionStatus, SessionView } from "@/lib/types"
 
 // Pick a lucide glyph that hints at the provider behind a session.
 function providerIcon(provider: string): ComponentType {
@@ -95,6 +96,17 @@ const STATUS_BADGE: Record<
   active: { variant: "default", label: "active" },
   detached: { variant: "secondary", label: "detached" },
   exited: { variant: "outline", label: "exited" },
+}
+
+// Map a PR state onto a Badge variant. PR state is communicated as a Badge
+// variant, never as a concrete color.
+const PR_BADGE_VARIANT: Record<
+  PrView["state"],
+  "default" | "secondary" | "outline"
+> = {
+  open: "default",
+  merged: "secondary",
+  closed: "outline",
 }
 
 function SessionSubItem({
@@ -132,6 +144,30 @@ function SessionSubItem({
         >
           <Icon />
           <span className="flex-1 truncate">{label}</span>
+          {session.pr ? (
+            <Badge
+              variant={PR_BADGE_VARIANT[session.pr.state]}
+              title={session.pr.title}
+              render={
+                <a
+                  href={session.pr.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    window.open(
+                      session.pr!.url,
+                      "_blank",
+                      "noopener",
+                    )
+                  }}
+                >
+                  <GitPullRequest data-icon="inline-start" />#
+                  {session.pr.number}
+                </a>
+              }
+            />
+          ) : null}
           <Badge variant={status.variant}>{status.label}</Badge>
         </ContextMenuTrigger>
         <ContextMenuContent>

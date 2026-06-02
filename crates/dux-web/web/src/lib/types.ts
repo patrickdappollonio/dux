@@ -17,6 +17,13 @@ export interface ProjectView {
   path_missing: boolean
 }
 
+export interface PrView {
+  number: number
+  state: "open" | "merged" | "closed"
+  title: string
+  url: string
+}
+
 export interface SessionView {
   id: string
   project_id: string
@@ -26,6 +33,7 @@ export interface SessionView {
   worktree_path: string
   status: SessionStatus
   auto_reopen_enabled: boolean
+  pr?: PrView
 }
 
 export interface ChangedFileView {

@@ -36,6 +36,16 @@ export function StatusBar() {
             {status ? (
               <Badge variant={status.variant}>{status.label}</Badge>
             ) : null}
+            {session.pr ? (
+              <a
+                href={session.pr.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="truncate text-foreground hover:underline"
+              >
+                PR #{session.pr.number} · {session.pr.title}
+              </a>
+            ) : null}
           </>
         ) : (
           <span>No session</span>

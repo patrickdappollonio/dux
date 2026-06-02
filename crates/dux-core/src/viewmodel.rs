@@ -6,7 +6,7 @@
 use serde::Serialize;
 
 use crate::engine::Engine;
-use crate::model::{AgentSession, ChangedFile, Project, ProjectBranchStatus};
+use crate::model::{AgentSession, ChangedFile, PrInfo, PrState, Project, ProjectBranchStatus};
 
 /// The full chrome snapshot a web client needs to draw projects, sessions, and
 /// the changed-files lists.
@@ -40,6 +40,17 @@ pub struct SessionView {
     /// "active" | "detached" | "exited"
     pub status: String,
     pub auto_reopen_enabled: bool,
+    /// Associated GitHub pull request, if one is tracked for this session.
+    pub pr: Option<PrView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PrView {
+    pub number: u64,
+    /// "open" | "merged" | "closed"
+    pub state: String,
+    pub title: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
@@ -77,7 +88,7 @@ impl ProjectView {
 }
 
 impl SessionView {
-    fn from_session(s: &AgentSession) -> Self {
+    fn from_session(s: &AgentSession, pr: Option<&PrInfo>) -> Self {
         Self {
             id: s.id.clone(),
             project_id: s.project_id.clone(),
@@ -87,6 +98,23 @@ impl SessionView {
             worktree_path: s.worktree_path.clone(),
             status: s.status.as_str().to_string(),
             auto_reopen_enabled: s.auto_reopen_enabled,
+            pr: pr.map(PrView::from_pr),
+        }
+    }
+}
+
+impl PrView {
+    fn from_pr(pr: &PrInfo) -> Self {
+        Self {
+            number: pr.number,
+            state: match pr.state {
+                PrState::Open => "open",
+                PrState::Merged => "merged",
+                PrState::Closed => "closed",
+            }
+            .to_string(),
+            title: pr.title.clone(),
+            url: pr.url.clone(),
         }
     }
 }
@@ -115,7 +143,7 @@ impl Engine {
             sessions: self
                 .sessions
                 .iter()
-                .map(SessionView::from_session)
+                .map(|s| SessionView::from_session(s, self.pr_statuses.get(&s.id)))
                 .collect(),
             changed_files: ChangedFilesView {
                 staged: self
@@ -165,6 +193,46 @@ mod tests {
         assert_eq!(vm.changed_files.staged[0].path, "src/lib.rs");
         assert_eq!(vm.changed_files.staged[0].additions, 3);
         assert_eq!(vm.changed_files.unstaged.len(), 0);
+    }
+
+    #[test]
+    fn session_pr_status_is_projected() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        engine.sessions.push(sample_session("s1", "p1", "feature"));
+        engine.pr_statuses.insert(
+            "s1".to_string(),
+            PrInfo {
+                number: 42,
+                state: PrState::Merged,
+                title: "Add the thing".to_string(),
+                host: "github.com".to_string(),
+                owner_repo: "owner/repo".to_string(),
+                url: "https://github.com/owner/repo/pull/42".to_string(),
+            },
+        );
+
+        let vm = engine.view_model();
+
+        let pr = vm.sessions[0]
+            .pr
+            .as_ref()
+            .expect("session should carry projected PR");
+        assert_eq!(pr.number, 42);
+        assert_eq!(pr.state, "merged");
+        assert_eq!(pr.title, "Add the thing");
+        assert_eq!(pr.url, "https://github.com/owner/repo/pull/42");
+    }
+
+    #[test]
+    fn session_without_pr_has_none() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        engine.sessions.push(sample_session("s1", "p1", "feature"));
+
+        let vm = engine.view_model();
+
+        assert!(vm.sessions[0].pr.is_none());
     }
 
     #[test]
