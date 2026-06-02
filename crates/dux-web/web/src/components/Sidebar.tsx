@@ -7,9 +7,11 @@ import {
   FolderOpen,
   GitCommitHorizontal,
   GitPullRequest,
+  Plus,
   RefreshCw,
   Send,
   Sparkles,
+  SquareTerminal,
   Terminal,
   Wifi,
   WifiOff,
@@ -65,13 +67,22 @@ import {
 } from "@/components/ui/sidebar"
 import { useSidebar } from "@/components/ui/sidebar"
 import {
+  createTerminal,
   openCommit,
   selectSession,
+  selectTerminal,
   setSidebarWidth,
   socket,
   useDux,
 } from "@/lib/store"
-import type { ConnState, PrView, SessionStatus, SessionView } from "@/lib/types"
+import type { SelectedTarget } from "@/lib/store"
+import type {
+  ConnState,
+  PrView,
+  SessionStatus,
+  SessionView,
+  TerminalView,
+} from "@/lib/types"
 
 // Pick a lucide glyph that hints at the provider behind a session.
 function providerIcon(provider: string): ComponentType {
@@ -109,16 +120,42 @@ const PR_BADGE_VARIANT: Record<
   closed: "outline",
 }
 
+// A single companion terminal nested beneath its owning agent session. The
+// terminal glyph is reserved for terminals — agents use a provider icon.
+function TerminalSubItem({
+  terminal,
+  sessionId,
+  active,
+}: {
+  terminal: TerminalView
+  sessionId: string
+  active: boolean
+}) {
+  return (
+    <SidebarMenuSubItem>
+      <SidebarMenuSubButton
+        isActive={active}
+        onClick={() => selectTerminal(terminal.id, sessionId)}
+      >
+        <SquareTerminal />
+        <span className="flex-1 truncate">{terminal.label}</span>
+      </SidebarMenuSubButton>
+    </SidebarMenuSubItem>
+  )
+}
+
 function SessionSubItem({
   session,
-  selected,
+  selectedTarget,
 }: {
   session: SessionView
-  selected: boolean
+  selectedTarget: SelectedTarget | null
 }) {
   const Icon = providerIcon(session.provider)
   const status = STATUS_BADGE[session.status]
   const label = session.title || session.branch_name
+  const agentSelected =
+    selectedTarget?.kind === "agent" && selectedTarget.sessionId === session.id
 
   function handleToggleAutoReopen() {
     socket.sendCommand("toggle_agent_auto_reopen", {
@@ -137,7 +174,7 @@ function SessionSubItem({
         <ContextMenuTrigger
           render={
             <SidebarMenuSubButton
-              isActive={selected}
+              isActive={agentSelected}
               onClick={() => selectSession(session.id)}
             />
           }
@@ -193,8 +230,25 @@ function SessionSubItem({
           >
             Commit…
           </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem
+            className="cursor-pointer"
+            onClick={() => createTerminal(session.id)}
+          >
+            New terminal
+          </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
+
+      <SidebarMenuAction
+        showOnHover
+        className="right-7"
+        title="New terminal"
+        aria-label="New terminal"
+        onClick={() => createTerminal(session.id)}
+      >
+        <Plus />
+      </SidebarMenuAction>
 
       <DropdownMenu>
         <SidebarMenuAction
@@ -225,9 +279,30 @@ function SessionSubItem({
               <GitCommitHorizontal />
               Commit…
             </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => createTerminal(session.id)}>
+              <SquareTerminal />
+              New terminal
+            </DropdownMenuItem>
           </DropdownMenuGroup>
         </DropdownMenuContent>
       </DropdownMenu>
+
+      {session.terminals.length > 0 ? (
+        <SidebarMenuSub>
+          {session.terminals.map((terminal) => (
+            <TerminalSubItem
+              key={terminal.id}
+              terminal={terminal}
+              sessionId={session.id}
+              active={
+                selectedTarget?.kind === "terminal" &&
+                selectedTarget.terminalId === terminal.id
+              }
+            />
+          ))}
+        </SidebarMenuSub>
+      ) : null}
     </SidebarMenuSubItem>
   )
 }
@@ -235,11 +310,11 @@ function SessionSubItem({
 function ProjectItem({
   name,
   sessions,
-  selectedSessionId,
+  selectedTarget,
 }: {
   name: string
   sessions: SessionView[]
-  selectedSessionId: string | null
+  selectedTarget: SelectedTarget | null
 }) {
   return (
     <Collapsible defaultOpen className="group/collapsible">
@@ -258,7 +333,7 @@ function ProjectItem({
               <SessionSubItem
                 key={session.id}
                 session={session}
-                selected={session.id === selectedSessionId}
+                selectedTarget={selectedTarget}
               />
             ))}
           </SidebarMenuSub>
@@ -339,7 +414,7 @@ function SidebarResizeHandle() {
 }
 
 export function AppSidebar() {
-  const { viewModel, selectedSessionId } = useDux()
+  const { viewModel, selectedTarget } = useDux()
   const sessions = viewModel?.sessions ?? []
   const projects = viewModel?.projects ?? []
 
@@ -401,7 +476,7 @@ export function AppSidebar() {
                   key={projectId}
                   name={projectName(projectId)}
                   sessions={grouped.get(projectId)!}
-                  selectedSessionId={selectedSessionId}
+                  selectedTarget={selectedTarget}
                 />
               ))}
             </SidebarMenu>

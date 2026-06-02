@@ -24,6 +24,11 @@ export interface PrView {
   url: string
 }
 
+export interface TerminalView {
+  id: string
+  label: string
+}
+
 export interface SessionView {
   id: string
   project_id: string
@@ -34,6 +39,7 @@ export interface SessionView {
   status: SessionStatus
   auto_reopen_enabled: boolean
   pr?: PrView
+  terminals: TerminalView[]
 }
 
 export interface ChangedFileView {
@@ -65,12 +71,15 @@ export type ServerMessage =
   | { type: "view_model"; data: ViewModel }
   | { type: "command_result"; status: CommandStatus | null; error: string | null }
   | { type: "subscribed"; session_id: string }
+  | { type: "terminal_created"; session_id: string; terminal_id: string }
   | { type: "error"; message: string }
 
 // Client -> server JSON text frames, tagged by `type`.
 export type ClientMessage =
   | { type: "command"; command: string; args: Record<string, unknown> }
   | { type: "subscribe"; session_id: string }
+  | { type: "subscribe_terminal"; terminal_id: string }
+  | { type: "create_terminal"; session_id: string }
   | { type: "resize"; session_id: string; rows: number; cols: number }
 
 export type ConnState = "connecting" | "open" | "closed" | "failed"

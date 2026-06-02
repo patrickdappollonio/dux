@@ -4,6 +4,13 @@ import { toast } from "sonner"
 import { DuxSocket } from "./ws"
 import type { ConnState, ViewModel } from "./types"
 
+// The currently-streamed target: either an agent session or one of its
+// companion terminals. Both carry a `sessionId` so session-scoped UI (the
+// breadcrumb, changed files) keeps working regardless of which is focused.
+export type SelectedTarget =
+  | { kind: "agent"; sessionId: string }
+  | { kind: "terminal"; terminalId: string; sessionId: string }
+
 // A tiny external store backed by `useSyncExternalStore`. A single module-level
 // `DuxSocket` instance feeds it: ViewModel updates, connection state, and
 // command/error results (surfaced as `lastMessage`). The PTY byte stream is
@@ -13,6 +20,11 @@ import type { ConnState, ViewModel } from "./types"
 export interface DuxState {
   viewModel: ViewModel | null
   conn: ConnState
+  selectedTarget: SelectedTarget | null
+  // Derived from `selectedTarget`: the owning session id. Session-scoped UI
+  // (breadcrumb, changed files, statusbar) reads this so it keeps working
+  // whether an agent or one of its terminals is focused. Kept in `state` (not
+  // recomputed per snapshot) so `getSnapshot` stays referentially stable.
   selectedSessionId: string | null
   lastMessage: string
   commitTarget: string | null
@@ -31,6 +43,7 @@ function loadSidebarWidth(): string {
 let state: DuxState = {
   viewModel: null,
   conn: "connecting",
+  selectedTarget: null,
   selectedSessionId: null,
   lastMessage: "",
   commitTarget: null,
@@ -87,14 +100,43 @@ socket.onError = (message) => {
   toast.error(message)
 }
 
+// A freshly created terminal auto-focuses so the user lands on it immediately.
+socket.onTerminalCreated = (sessionId, terminalId) => {
+  selectTerminal(terminalId, sessionId)
+}
+
 socket.connect()
 
 export function useDux(): DuxState {
   return useSyncExternalStore(subscribe, getSnapshot)
 }
 
+// Select an agent session as the streamed target. Signature kept stable so
+// existing callers continue to work unchanged.
 export function selectSession(id: string | null): void {
-  setState({ selectedSessionId: id })
+  if (id === null) {
+    setState({ selectedTarget: null, selectedSessionId: null })
+    return
+  }
+  setState({
+    selectedTarget: { kind: "agent", sessionId: id },
+    selectedSessionId: id,
+  })
+}
+
+// Select one of a session's companion terminals as the streamed target. The
+// owning session id is retained so session-scoped UI keeps resolving.
+export function selectTerminal(terminalId: string, sessionId: string): void {
+  setState({
+    selectedTarget: { kind: "terminal", terminalId, sessionId },
+    selectedSessionId: sessionId,
+  })
+}
+
+// Ask the server to spawn a new companion terminal for a session. The server
+// replies with `terminal_created`, which auto-focuses it via `onTerminalCreated`.
+export function createTerminal(sessionId: string): void {
+  socket.createTerminal(sessionId)
 }
 
 export function openCommit(sessionId: string): void {

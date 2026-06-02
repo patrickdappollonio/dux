@@ -5,10 +5,13 @@ import "@xterm/xterm/css/xterm.css"
 import { socket } from "@/lib/store"
 
 interface TerminalPaneProps {
-  sessionId: string
+  // The streamed target: an agent session or one of its companion terminals.
+  // `id` is the session id for an agent and the terminal id for a terminal.
+  kind: "agent" | "terminal"
+  id: string
 }
 
-export function TerminalPane({ sessionId }: TerminalPaneProps) {
+export function TerminalPane({ kind, id }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -57,14 +60,20 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
     const encoder = new TextEncoder()
     const dataSub = term.onData((s) => socket.sendInput(encoder.encode(s)))
 
-    // Subscribe to this session's PTY, then send the initial size.
-    socket.subscribe(sessionId)
-    socket.resize(sessionId, term.rows, term.cols)
+    // Subscribe to the selected target's PTY. The server tracks the currently
+    // subscribed id (agent session OR terminal) and routes input/resize to it,
+    // so the rest of the wiring is identical for both kinds.
+    if (kind === "terminal") {
+      socket.subscribeTerminal(id)
+    } else {
+      socket.subscribe(id)
+    }
+    socket.resize(id, term.rows, term.cols)
 
     // Refit + report size on container resize.
     const ro = new ResizeObserver(() => {
       fit.fit()
-      socket.resize(sessionId, term.rows, term.cols)
+      socket.resize(id, term.rows, term.cols)
     })
     ro.observe(container)
 
@@ -74,7 +83,7 @@ export function TerminalPane({ sessionId }: TerminalPaneProps) {
       socket.onPtyBytes = () => {}
       term.dispose()
     }
-  }, [sessionId])
+  }, [kind, id])
 
   return <div ref={containerRef} className="h-full w-full" />
 }

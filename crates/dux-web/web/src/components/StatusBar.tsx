@@ -21,15 +21,19 @@ const CONN_LABEL: Record<string, string> = {
 }
 
 export function StatusBar() {
-  const { viewModel, selectedSessionId, lastMessage, conn } = useDux()
+  const { viewModel, selectedSessionId, selectedTarget, lastMessage, conn } =
+    useDux()
   const session = viewModel?.sessions.find((s) => s.id === selectedSessionId)
   const status = session ? STATUS_BADGE[session.status] : null
+  const focusLabel =
+    selectedTarget?.kind === "terminal" ? "terminal" : "agent"
 
   return (
     <footer className="flex h-7 shrink-0 items-center justify-between border-t px-3 text-xs text-muted-foreground">
       <div className="flex min-w-0 items-center gap-2">
         {session ? (
           <>
+            <Badge variant="outline">{focusLabel}</Badge>
             <span className="truncate font-mono">
               {session.provider} · {session.branch_name}
             </span>

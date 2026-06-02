@@ -49,11 +49,17 @@ const CONN_BADGE: Record<
 }
 
 function InsetHeader() {
-  const { viewModel, selectedSessionId, conn } = useDux()
+  const { viewModel, selectedSessionId, selectedTarget, conn } = useDux()
   const session = viewModel?.sessions.find((s) => s.id === selectedSessionId)
   const project = session
     ? viewModel?.projects.find((p) => p.id === session.project_id)
     : undefined
+  // When a companion terminal is focused, surface its label as a third crumb.
+  const terminalLabel =
+    selectedTarget?.kind === "terminal"
+      ? session?.terminals.find((t) => t.id === selectedTarget.terminalId)
+          ?.label
+      : undefined
   const badge = CONN_BADGE[conn]
 
   return (
@@ -73,6 +79,14 @@ function InsetHeader() {
                   {session.branch_name}
                 </BreadcrumbPage>
               </BreadcrumbItem>
+              {terminalLabel ? (
+                <>
+                  <BreadcrumbSeparator />
+                  <BreadcrumbItem>
+                    <BreadcrumbPage>{terminalLabel}</BreadcrumbPage>
+                  </BreadcrumbItem>
+                </>
+              ) : null}
             </>
           ) : (
             <BreadcrumbItem>
@@ -98,27 +112,39 @@ function InsetHeader() {
 }
 
 function TerminalArea() {
-  const { selectedSessionId } = useDux()
+  const { selectedTarget } = useDux()
 
-  if (!selectedSessionId) {
+  if (!selectedTarget) {
     return (
       <Empty className="h-full border-0">
         <EmptyHeader>
           <EmptyMedia variant="icon">
             <SquareTerminal />
           </EmptyMedia>
-          <EmptyTitle>No session selected</EmptyTitle>
+          <EmptyTitle>Nothing selected</EmptyTitle>
           <EmptyDescription>
-            Pick an agent session from the sidebar to attach its terminal.
+            Pick an agent session or a companion terminal from the sidebar to
+            attach it.
           </EmptyDescription>
         </EmptyHeader>
       </Empty>
     )
   }
 
+  // For an agent the streamed id is the session id; for a terminal it is the
+  // terminal id. Key by that id so switching remounts the terminal cleanly.
+  const targetId =
+    selectedTarget.kind === "terminal"
+      ? selectedTarget.terminalId
+      : selectedTarget.sessionId
+
   return (
     <div className="h-full min-h-0 bg-background p-3">
-      <TerminalPane key={selectedSessionId} sessionId={selectedSessionId} />
+      <TerminalPane
+        key={targetId}
+        kind={selectedTarget.kind}
+        id={targetId}
+      />
     </div>
   )
 }

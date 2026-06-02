@@ -29,6 +29,7 @@ export class DuxSocket {
   onError: (message: string) => void = () => {}
   onConn: (state: ConnState) => void = () => {}
   onPtyBytes: (bytes: Uint8Array) => void = () => {}
+  onTerminalCreated: (sessionId: string, terminalId: string) => void = () => {}
 
   constructor(url: string) {
     this.url = url
@@ -87,6 +88,9 @@ export class DuxSocket {
         break
       case "subscribed":
         break
+      case "terminal_created":
+        this.onTerminalCreated(message.session_id, message.terminal_id)
+        break
       case "error":
         this.onError(message.message)
         break
@@ -132,6 +136,14 @@ export class DuxSocket {
 
   subscribe(sessionId: string): void {
     this.sendJson({ type: "subscribe", session_id: sessionId })
+  }
+
+  subscribeTerminal(terminalId: string): void {
+    this.sendJson({ type: "subscribe_terminal", terminal_id: terminalId })
+  }
+
+  createTerminal(sessionId: string): void {
+    this.sendJson({ type: "create_terminal", session_id: sessionId })
   }
 
   resize(sessionId: string, rows: number, cols: number): void {
