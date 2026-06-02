@@ -124,6 +124,48 @@ async fn handle_socket(socket: WebSocket, engine: EngineHandle) {
                     } => {
                         engine.resize_pty(session_id, rows, cols);
                     }
+                    ClientMessage::SubscribeTerminal { terminal_id } => {
+                        match engine.subscribe_terminal(terminal_id.clone()).await {
+                            Ok((repaint, rx)) => {
+                                // Stop the previous forwarder before streaming the new subscription.
+                                if let Some(prev) = pty_forwarder.take() {
+                                    prev.abort();
+                                }
+                                subscribed = Some(terminal_id.clone());
+                                send_binary(&sink, repaint).await;
+                                let _ = send_json(
+                                    &sink,
+                                    &ServerMessage::Subscribed {
+                                        session_id: terminal_id,
+                                    },
+                                )
+                                .await;
+                                pty_forwarder = Some(spawn_pty_forwarder(Arc::clone(&sink), rx));
+                            }
+                            Err(e) => {
+                                let _ =
+                                    send_json(&sink, &ServerMessage::Error { message: e }).await;
+                            }
+                        }
+                    }
+                    ClientMessage::CreateTerminal { session_id } => {
+                        match engine.create_terminal(session_id.clone()).await {
+                            Ok((terminal_id, _label)) => {
+                                let _ = send_json(
+                                    &sink,
+                                    &ServerMessage::TerminalCreated {
+                                        session_id,
+                                        terminal_id,
+                                    },
+                                )
+                                .await;
+                            }
+                            Err(e) => {
+                                let _ =
+                                    send_json(&sink, &ServerMessage::Error { message: e }).await;
+                            }
+                        }
+                    }
                 }
             }
             Message::Close(_) => break,

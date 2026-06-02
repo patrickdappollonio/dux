@@ -71,6 +71,10 @@ async fn boot() -> (SocketAddr, tempfile::TempDir) {
             ..Default::default()
         },
     );
+    // Companion terminals run `config.terminal.command`; override it with `cat` so a
+    // created terminal echoes input back the same way the provider override does.
+    engine.config.terminal.command = "cat".to_string();
+    engine.config.terminal.args = vec![];
     let (handle, _join) = spawn_engine_thread(engine);
     let app = router(handle);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -243,6 +247,65 @@ async fn subscribe_launches_a_provider() {
     assert!(
         String::from_utf8_lossy(&acc).contains("dux-launched-provider-marker"),
         "real provider launch did not stream; got {} bytes",
+        acc.len()
+    );
+}
+
+/// Companion terminals are created on demand (distinct from the agent provider) and stream
+/// over the same binary input path. Create one, subscribe to it, echo a marker through it
+/// (the `cat` terminal override), and assert the marker streams back.
+#[tokio::test]
+async fn create_and_stream_a_terminal() {
+    let (addr, _tmp) = boot().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let _ = ws.next().await; // initial view_model
+
+    ws.send(Message::Text(
+        r#"{"type":"create_terminal","session_id":"s1"}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    // Read until the terminal_created message arrives, extracting the terminal_id.
+    let mut terminal_id = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline && terminal_id.is_empty() {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"type\":\"terminal_created\"")
+        {
+            let v: serde_json::Value = serde_json::from_str(&t).expect("parse terminal_created");
+            terminal_id = v["terminal_id"].as_str().expect("terminal_id").to_string();
+        }
+    }
+    assert!(!terminal_id.is_empty(), "never received terminal_created");
+
+    ws.send(Message::Text(format!(
+        r#"{{"type":"subscribe_terminal","terminal_id":"{terminal_id}"}}"#
+    )))
+    .await
+    .unwrap();
+    ws.send(Message::Binary(b"dux-terminal-marker\n".to_vec()))
+        .await
+        .unwrap();
+
+    let mut acc = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
+            if let Message::Binary(b) = m {
+                acc.extend_from_slice(&b);
+            }
+            if String::from_utf8_lossy(&acc).contains("dux-terminal-marker") {
+                break;
+            }
+        }
+    }
+    assert!(
+        String::from_utf8_lossy(&acc).contains("dux-terminal-marker"),
+        "companion terminal did not stream; got {} bytes",
         acc.len()
     );
 }

@@ -3,6 +3,7 @@
 //! state container; domain operations and workers move into `Engine` methods in E3.
 
 pub mod command;
+mod companion;
 pub mod config_saver;
 mod events;
 mod in_flight;

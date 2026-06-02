@@ -42,6 +42,14 @@ pub struct SessionView {
     pub auto_reopen_enabled: bool,
     /// Associated GitHub pull request, if one is tracked for this session.
     pub pr: Option<PrView>,
+    /// Companion terminals open for this session, sorted by `id` for stability.
+    pub terminals: Vec<TerminalView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TerminalView {
+    pub id: String,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -88,7 +96,7 @@ impl ProjectView {
 }
 
 impl SessionView {
-    fn from_session(s: &AgentSession, pr: Option<&PrInfo>) -> Self {
+    fn from_session(s: &AgentSession, pr: Option<&PrInfo>, terminals: Vec<TerminalView>) -> Self {
         Self {
             id: s.id.clone(),
             project_id: s.project_id.clone(),
@@ -99,6 +107,7 @@ impl SessionView {
             status: s.status.as_str().to_string(),
             auto_reopen_enabled: s.auto_reopen_enabled,
             pr: pr.map(PrView::from_pr),
+            terminals,
         }
     }
 }
@@ -143,7 +152,19 @@ impl Engine {
             sessions: self
                 .sessions
                 .iter()
-                .map(|s| SessionView::from_session(s, self.pr_statuses.get(&s.id)))
+                .map(|s| {
+                    let mut terminals: Vec<TerminalView> = self
+                        .companion_terminals
+                        .iter()
+                        .filter(|(_, t)| t.session_id == s.id)
+                        .map(|(id, t)| TerminalView {
+                            id: id.clone(),
+                            label: t.label.clone(),
+                        })
+                        .collect();
+                    terminals.sort_by(|a, b| a.id.cmp(&b.id));
+                    SessionView::from_session(s, self.pr_statuses.get(&s.id), terminals)
+                })
                 .collect(),
             changed_files: ChangedFilesView {
                 staged: self
@@ -233,6 +254,32 @@ mod tests {
         let vm = engine.view_model();
 
         assert!(vm.sessions[0].pr.is_none());
+    }
+
+    #[test]
+    fn companion_terminals_are_projected_onto_their_session() {
+        let (mut engine, _tmp) = test_engine();
+
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feature");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+
+        let (terminal_id, label) = engine
+            .create_companion_terminal("s1")
+            .expect("create companion terminal");
+
+        let vm = engine.view_model();
+        let terminals = &vm.sessions[0].terminals;
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(terminals[0].id, terminal_id);
+        assert_eq!(terminals[0].label, label);
     }
 
     #[test]

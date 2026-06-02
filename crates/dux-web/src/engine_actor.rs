@@ -8,6 +8,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use dux_core::engine::{Command, Engine, InFlightKey};
+use dux_core::pty::PtyClient;
 use dux_core::wire::{WireCommand, WireCommandOutcome};
 use dux_core::worker::AgentLaunchKind;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -25,6 +26,21 @@ pub enum EngineRequest {
     SubscribePty(String, oneshot::Sender<Result<PtySubscription, String>>),
     WritePty(String, Vec<u8>),
     ResizePty(String, u16, u16),
+    /// Subscribe to an existing companion terminal (no launch; replies immediately).
+    SubscribeTerminal(String, oneshot::Sender<Result<PtySubscription, String>>),
+    /// Create a companion terminal for a session, replying `(terminal_id, label)`.
+    CreateTerminal(String, oneshot::Sender<Result<(String, String), String>>),
+}
+
+/// Resolve the live PTY for an id, which may name either an agent provider
+/// (keyed by `session_id`) or a companion terminal (keyed by `terminal_id`).
+/// This unifies the write/resize path so the same input/resize routing serves
+/// both agents and terminals via whichever id the connection is subscribed to.
+fn pty_for<'a>(engine: &'a Engine, id: &str) -> Option<&'a PtyClient> {
+    engine
+        .providers
+        .get(id)
+        .or_else(|| engine.companion_terminals.get(id).map(|t| &t.client))
 }
 
 const TICK: Duration = Duration::from_millis(50);
@@ -90,6 +106,22 @@ impl EngineHandle {
         let _ = self
             .req_tx
             .send(EngineRequest::ResizePty(session_id, rows, cols));
+    }
+
+    pub async fn subscribe_terminal(&self, terminal_id: String) -> Result<PtySubscription, String> {
+        let (tx, rx) = oneshot::channel();
+        self.req_tx
+            .send(EngineRequest::SubscribeTerminal(terminal_id, tx))
+            .map_err(|_| "engine thread gone".to_string())?;
+        rx.await.map_err(|_| "engine reply dropped".to_string())?
+    }
+
+    pub async fn create_terminal(&self, session_id: String) -> Result<(String, String), String> {
+        let (tx, rx) = oneshot::channel();
+        self.req_tx
+            .send(EngineRequest::CreateTerminal(session_id, tx))
+            .map_err(|_| "engine thread gone".to_string())?;
+        rx.await.map_err(|_| "engine reply dropped".to_string())?
     }
 }
 
@@ -185,15 +217,28 @@ fn handle_request(engine: &mut Engine, req: EngineRequest) {
         }
         // SubscribePty is handled inline in the loop (it needs `&mut pending`).
         EngineRequest::SubscribePty(_, _) => unreachable!("SubscribePty handled in the loop"),
-        EngineRequest::WritePty(session_id, bytes) => {
-            if let Some(client) = engine.providers.get(&session_id) {
+        EngineRequest::WritePty(id, bytes) => {
+            if let Some(client) = pty_for(engine, &id) {
                 let _ = client.write_bytes(&bytes);
             }
         }
-        EngineRequest::ResizePty(session_id, rows, cols) => {
-            if let Some(client) = engine.providers.get(&session_id) {
+        EngineRequest::ResizePty(id, rows, cols) => {
+            if let Some(client) = pty_for(engine, &id) {
                 let _ = client.resize(rows, cols);
             }
+        }
+        EngineRequest::SubscribeTerminal(terminal_id, reply) => {
+            let res = match engine.companion_terminals.get(&terminal_id) {
+                Some(terminal) => Ok(terminal.client.subscribe_with_repaint()),
+                None => Err("unknown terminal".to_string()),
+            };
+            let _ = reply.send(res);
+        }
+        EngineRequest::CreateTerminal(session_id, reply) => {
+            let res = engine
+                .create_companion_terminal(&session_id)
+                .map_err(|e| e.to_string());
+            let _ = reply.send(res);
         }
     }
 }

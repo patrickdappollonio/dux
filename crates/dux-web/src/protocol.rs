@@ -25,6 +25,10 @@ pub enum ClientMessage {
         rows: u16,
         cols: u16,
     },
+    /// Start streaming an existing companion terminal's PTY to this connection.
+    SubscribeTerminal { terminal_id: String },
+    /// Create a new companion terminal for a session (distinct from its agent).
+    CreateTerminal { session_id: String },
 }
 
 /// Server -> browser (JSON text frames). PTY bytes are sent as separate binary frames.
@@ -40,6 +44,11 @@ pub enum ServerMessage {
     },
     /// A subscription was accepted (the repaint follows as the first binary frame).
     Subscribed { session_id: String },
+    /// A companion terminal was created for the given session.
+    TerminalCreated {
+        session_id: String,
+        terminal_id: String,
+    },
     /// An error not tied to a specific command.
     Error { message: String },
 }
