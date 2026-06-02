@@ -14,6 +14,7 @@ import {
   Wifi,
   WifiOff,
 } from "lucide-react"
+import type * as React from "react"
 import type { ComponentType } from "react"
 
 import { Badge } from "@/components/ui/badge"
@@ -62,7 +63,14 @@ import {
   SidebarMenuSubItem,
   SidebarRail,
 } from "@/components/ui/sidebar"
-import { openCommit, selectSession, socket, useDux } from "@/lib/store"
+import { useSidebar } from "@/components/ui/sidebar"
+import {
+  openCommit,
+  selectSession,
+  setSidebarWidth,
+  socket,
+  useDux,
+} from "@/lib/store"
 import type { ConnState, SessionStatus, SessionView } from "@/lib/types"
 
 // Pick a lucide glyph that hints at the provider behind a session.
@@ -250,6 +258,48 @@ function ConnFooter() {
   )
 }
 
+// Drag handle pinned to the sidebar's right edge. shadcn's `collapsible="icon"`
+// only collapses; this lets the user resize the expanded width by dragging,
+// clamped to [14rem, 28rem] and persisted on release. Hidden while collapsed.
+const MIN_SIDEBAR_PX = 14 * 16
+const MAX_SIDEBAR_PX = 28 * 16
+
+function SidebarResizeHandle() {
+  const { state } = useSidebar()
+
+  if (state === "collapsed") {
+    return null
+  }
+
+  function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
+    event.preventDefault()
+    const target = event.currentTarget
+    target.setPointerCapture(event.pointerId)
+
+    const onMove = (move: PointerEvent) => {
+      const px = Math.min(Math.max(move.clientX, MIN_SIDEBAR_PX), MAX_SIDEBAR_PX)
+      setSidebarWidth(`${px / 16}rem`)
+    }
+
+    const onUp = (up: PointerEvent) => {
+      const px = Math.min(Math.max(up.clientX, MIN_SIDEBAR_PX), MAX_SIDEBAR_PX)
+      setSidebarWidth(`${px / 16}rem`, true)
+      window.removeEventListener("pointermove", onMove)
+      window.removeEventListener("pointerup", onUp)
+    }
+
+    window.addEventListener("pointermove", onMove)
+    window.addEventListener("pointerup", onUp)
+  }
+
+  return (
+    <div
+      onPointerDown={handlePointerDown}
+      className="absolute inset-y-0 -right-1 z-30 w-1 cursor-col-resize hover:bg-sidebar-border"
+    />
+  )
+}
+
 export function AppSidebar() {
   const { viewModel, selectedSessionId } = useDux()
   const sessions = viewModel?.sessions ?? []
@@ -328,6 +378,7 @@ export function AppSidebar() {
       </SidebarFooter>
 
       <SidebarRail />
+      <SidebarResizeHandle />
     </Sidebar>
   )
 }

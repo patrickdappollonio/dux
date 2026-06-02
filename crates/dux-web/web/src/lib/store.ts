@@ -17,6 +17,15 @@ export interface DuxState {
   lastMessage: string
   commitTarget: string | null
   paletteOpen: boolean
+  sidebarWidth: string
+}
+
+// The expanded sidebar width is drag-resizable and persisted across reloads.
+const SIDEBAR_WIDTH_KEY = "dux:sidebar-width"
+const DEFAULT_SIDEBAR_WIDTH = "16rem"
+
+function loadSidebarWidth(): string {
+  return localStorage.getItem(SIDEBAR_WIDTH_KEY) || DEFAULT_SIDEBAR_WIDTH
 }
 
 let state: DuxState = {
@@ -26,6 +35,7 @@ let state: DuxState = {
   lastMessage: "",
   commitTarget: null,
   paletteOpen: false,
+  sidebarWidth: loadSidebarWidth(),
 }
 
 const listeners = new Set<() => void>()
@@ -97,4 +107,13 @@ export function closeCommit(): void {
 
 export function setPaletteOpen(open: boolean): void {
   setState({ paletteOpen: open })
+}
+
+// Update the expanded sidebar width during a drag. Pass `persist` on release to
+// write the final value to localStorage.
+export function setSidebarWidth(width: string, persist = false): void {
+  setState({ sidebarWidth: width })
+  if (persist) {
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, width)
+  }
 }

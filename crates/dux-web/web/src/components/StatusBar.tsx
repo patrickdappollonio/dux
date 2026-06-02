@@ -1,13 +1,48 @@
+import { Badge } from "@/components/ui/badge"
 import { useDux } from "@/lib/store"
+import type { SessionStatus } from "@/lib/types"
+
+// Map a session status onto a Badge variant + label for the statusline.
+const STATUS_BADGE: Record<
+  SessionStatus,
+  { variant: "default" | "secondary" | "outline"; label: string }
+> = {
+  active: { variant: "default", label: "active" },
+  detached: { variant: "secondary", label: "detached" },
+  exited: { variant: "outline", label: "exited" },
+}
+
+const CONN_LABEL = {
+  open: "Connected",
+  connecting: "Connecting",
+  closed: "Offline",
+}
 
 export function StatusBar() {
-  const { viewModel, selectedSessionId, lastMessage } = useDux()
+  const { viewModel, selectedSessionId, lastMessage, conn } = useDux()
   const session = viewModel?.sessions.find((s) => s.id === selectedSessionId)
+  const status = session ? STATUS_BADGE[session.status] : null
 
   return (
-    <footer className="flex h-6 shrink-0 items-center justify-between gap-3 border-t border-border bg-background px-3 text-xs text-muted-foreground">
-      <span className="truncate font-mono">{session?.branch_name ?? ""}</span>
-      <span className="truncate">{lastMessage}</span>
+    <footer className="flex h-7 shrink-0 items-center justify-between border-t px-3 text-xs text-muted-foreground">
+      <div className="flex min-w-0 items-center gap-2">
+        {session ? (
+          <>
+            <span className="truncate font-mono">
+              {session.provider} · {session.branch_name}
+            </span>
+            {status ? (
+              <Badge variant={status.variant}>{status.label}</Badge>
+            ) : null}
+          </>
+        ) : (
+          <span>No session</span>
+        )}
+      </div>
+      <div className="flex min-w-0 items-center gap-2">
+        <span>{CONN_LABEL[conn]}</span>
+        <span className="truncate">{lastMessage}</span>
+      </div>
     </footer>
   )
 }

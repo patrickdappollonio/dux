@@ -1,3 +1,5 @@
+import type * as React from "react"
+
 import { AppSidebar } from "@/components/Sidebar"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { CommandPalette } from "@/components/CommandPalette"
@@ -121,13 +123,17 @@ function TerminalArea() {
 }
 
 function App() {
+  const { sidebarWidth } = useDux()
+
   return (
-    <SidebarProvider>
+    <SidebarProvider
+      style={{ "--sidebar-width": sidebarWidth } as React.CSSProperties}
+    >
       <AppSidebar />
-      <SidebarInset className="h-svh min-h-0 overflow-hidden">
+      <SidebarInset className="flex h-svh min-h-0 flex-col overflow-hidden">
         <InsetHeader />
-        <div className="flex min-h-0 flex-1 flex-col">
-          <ResizablePanelGroup orientation="horizontal" className="flex-1">
+        <div className="min-h-0 flex-1">
+          <ResizablePanelGroup orientation="horizontal" className="size-full">
             <ResizablePanel defaultSize={74} minSize={30}>
               <TerminalArea />
             </ResizablePanel>
@@ -136,8 +142,8 @@ function App() {
               <ChangedFiles />
             </ResizablePanel>
           </ResizablePanelGroup>
-          <StatusBar />
         </div>
+        <StatusBar />
       </SidebarInset>
 
       <CommandPalette />
