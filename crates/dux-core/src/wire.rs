@@ -519,4 +519,38 @@ mod tests {
         let names = String::from_utf8_lossy(&staged.stdout);
         assert!(names.contains("a.txt"), "staged names: {names}");
     }
+
+    #[test]
+    fn drive_delete_followup_finishes_on_worktree_removed() {
+        // The async deletion path: BeginDeleteSession spawned a git-removal
+        // worker and did NOT remove the session yet. When the worker reports
+        // success, drive_delete_followup must run FinishDeleteSession to
+        // completion and report the "removed its worktree" status. This covers
+        // the async glue without needing a real git worktree.
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let reaction = EventReaction::WorktreeRemoveSucceeded {
+            session_id: "s1".to_string(),
+            branch_already_deleted: false,
+            our_busy_message: None,
+        };
+        let statuses = engine.drive_delete_followup(&reaction);
+
+        assert!(
+            !engine.sessions.iter().any(|s| s.id == "s1"),
+            "session should be removed after worktree removal"
+        );
+        assert_eq!(statuses.len(), 1, "expected one status: {statuses:?}");
+        assert_eq!(statuses[0].tone, "info");
+        assert!(
+            statuses[0].message.contains("Deleted agent")
+                && statuses[0].message.contains("removed its worktree"),
+            "unexpected status: {}",
+            statuses[0].message
+        );
+    }
 }
