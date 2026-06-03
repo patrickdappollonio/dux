@@ -220,6 +220,135 @@ async fn boot_with_repo() -> (SocketAddr, tempfile::TempDir) {
     (addr, tmp)
 }
 
+/// Like `boot()`, but the session's worktree is a REAL git repo with a STAGED
+/// change, and the provider is overridden to a deterministic one-shot command
+/// (`bash -c 'echo …'`) that ignores the prompt and prints a known string to
+/// stdout. This lets the commit-message test assert the exact generated message
+/// streams back over the WebSocket without depending on a real AI provider.
+async fn boot_for_commit_message() -> (SocketAddr, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+
+    let run = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .status()
+            .expect("spawn git")
+            .success();
+        assert!(ok, "git {args:?} failed");
+    };
+    run(&["init", "-q"]);
+    run(&["config", "user.email", "t@example.com"]);
+    run(&["config", "user.name", "t"]);
+    std::fs::write(root.join("f.txt"), "line1\nline2\nline3\n").expect("write file");
+    // Stage the file so `git diff --cached` has content.
+    run(&["add", "f.txt"]);
+
+    let paths = DuxPaths {
+        root: root.clone(),
+        config_path: root.join("config.toml"),
+        sessions_db_path: root.join("sessions.sqlite3"),
+        worktrees_root: root.join("worktrees"),
+        lock_path: root.join("dux.lock"),
+    };
+    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    {
+        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        store
+            .upsert_project(&ProjectConfig {
+                id: "p1".to_string(),
+                path: root.to_string_lossy().into_owned(),
+                name: Some("p1-name".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: Default::default(),
+            })
+            .unwrap();
+        store
+            .upsert_session(&sample_session(
+                "s1",
+                "p1",
+                "feat",
+                root.to_string_lossy().as_ref(),
+            ))
+            .unwrap();
+    }
+    let mut engine = bootstrap_engine(&paths).unwrap();
+    // Deterministic one-shot provider: ignores the prompt and prints a fixed
+    // marker to stdout, so `run_oneshot` returns exactly "DETERMINISTIC-COMMIT-MSG".
+    engine.config.providers.commands.insert(
+        "claude".to_string(),
+        ProviderCommandConfig {
+            command: "bash".to_string(),
+            args: vec![],
+            resume_args: None,
+            oneshot_args: vec![
+                "-c".to_string(),
+                "echo DETERMINISTIC-COMMIT-MSG".to_string(),
+            ],
+            ..Default::default()
+        },
+    );
+    let (handle, _join) = spawn_engine_thread(engine);
+    let app = router(handle);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, tmp)
+}
+
+/// Generating a commit message over the wire: the synchronous `command_result`
+/// (or a broadcast `status`) carries the Busy "Generating an AI commit message"
+/// notice, and the one-shot provider's deterministic output streams back later as
+/// a `commit_message` frame. This exercises the full path: WireCommand ->
+/// Command::GenerateCommitMessage -> spawned run_oneshot ->
+/// WorkerEvent::CommitMessageGenerated -> EventReaction -> broadcast channel ->
+/// commit-message-forwarder -> ServerMessage::CommitMessage.
+#[tokio::test]
+async fn generate_commit_message_streams_result() {
+    let (addr, _tmp) = boot_for_commit_message().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let _ = ws.next().await; // initial view_model
+
+    ws.send(Message::Text(
+        r#"{"type":"command","command":"generate_commit_message","args":{"session_id":"s1"}}"#
+            .into(),
+    ))
+    .await
+    .unwrap();
+
+    let mut saw_busy = false;
+    let mut saw_message = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while tokio::time::Instant::now() < deadline && !(saw_busy && saw_message) {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+        {
+            if (t.contains("\"type\":\"command_result\"") || t.contains("\"type\":\"status\""))
+                && t.contains("Generating an AI commit message")
+            {
+                saw_busy = true;
+            }
+            if t.contains("\"type\":\"commit_message\"") && t.contains("DETERMINISTIC-COMMIT-MSG") {
+                saw_message = true;
+            }
+        }
+    }
+
+    assert!(saw_busy, "never received the Busy generating status");
+    assert!(
+        saw_message,
+        "never received the generated commit_message frame"
+    );
+}
+
 /// Fetching the diff for a changed file returns hunks carrying the insert/delete
 /// content; a path-traversal request returns an error frame with a null diff.
 #[tokio::test]

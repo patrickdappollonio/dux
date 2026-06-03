@@ -42,6 +42,9 @@ pub enum WireCommand {
     Pull {
         session_id: String,
     },
+    GenerateCommitMessage {
+        session_id: String,
+    },
     ToggleAgentAutoReopen {
         session_id: String,
         enabled: bool,
@@ -317,6 +320,9 @@ impl Engine {
                     "Pull already in progress for this worktree. Wait for the current pull to finish."
                         .to_string(),
             },
+            WireCommand::GenerateCommitMessage { session_id } => {
+                Command::GenerateCommitMessage { session_id }
+            }
             WireCommand::ToggleAgentAutoReopen {
                 session_id,
                 enabled,
@@ -792,6 +798,116 @@ mod tests {
             .expect("git diff");
         let names = String::from_utf8_lossy(&staged.stdout);
         assert!(names.contains("a.txt"), "staged names: {names}");
+    }
+
+    #[test]
+    fn wire_generate_commit_message_deserializes() {
+        let json = r#"{"command":"generate_commit_message","args":{"session_id":"s1"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::GenerateCommitMessage {
+                session_id: "s1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn wire_to_command_generate_commit_message_maps_to_command() {
+        let (engine, _tmp) = test_engine();
+        let cmd = engine
+            .wire_to_command(WireCommand::GenerateCommitMessage {
+                session_id: "s1".to_string(),
+            })
+            .expect("reconstruct");
+        match cmd {
+            Command::GenerateCommitMessage { session_id } => {
+                assert_eq!(session_id, "s1");
+            }
+            _ => panic!("expected Command::GenerateCommitMessage variant"),
+        }
+    }
+
+    /// Stage a file in `repo` so `git diff --cached` has content.
+    fn stage_file(repo: &std::path::Path) {
+        let ok = std::process::Command::new("git")
+            .args(["add", "a.txt"])
+            .current_dir(repo)
+            .status()
+            .expect("spawn git add")
+            .success();
+        assert!(ok, "git add failed");
+    }
+
+    #[test]
+    fn apply_generate_commit_message_returns_busy_with_staged_diff() {
+        let repo = init_repo();
+        stage_file(repo.path());
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = repo.path().to_string_lossy().into_owned();
+        engine.sessions.push(session);
+
+        let reaction = engine
+            .apply(Command::GenerateCommitMessage {
+                session_id: "s1".to_string(),
+            })
+            .expect("apply");
+        match reaction {
+            EventReaction::Status(update) => {
+                assert_eq!(update.tone, StatusTone::Busy);
+                assert!(
+                    update.message.contains("Generating an AI commit message"),
+                    "unexpected message: {}",
+                    update.message
+                );
+            }
+            _ => panic!("expected Busy Status reaction"),
+        }
+    }
+
+    #[test]
+    fn apply_generate_commit_message_errors_with_nothing_staged() {
+        // init_repo writes a.txt but does NOT stage it, so the cached diff is empty.
+        let repo = init_repo();
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = repo.path().to_string_lossy().into_owned();
+        engine.sessions.push(session);
+
+        let reaction = engine
+            .apply(Command::GenerateCommitMessage {
+                session_id: "s1".to_string(),
+            })
+            .expect("apply");
+        match reaction {
+            EventReaction::Status(update) => {
+                assert_eq!(update.tone, StatusTone::Error);
+                assert!(
+                    update.message.contains("No staged changes"),
+                    "unexpected message: {}",
+                    update.message
+                );
+            }
+            _ => panic!("expected Error Status reaction"),
+        }
+    }
+
+    #[test]
+    fn apply_generate_commit_message_unknown_session_errors() {
+        let (mut engine, _tmp) = test_engine();
+        let reaction = engine
+            .apply(Command::GenerateCommitMessage {
+                session_id: "ghost".to_string(),
+            })
+            .expect("apply");
+        match reaction {
+            EventReaction::Status(update) => {
+                assert_eq!(update.tone, StatusTone::Error);
+                assert!(update.message.contains("Unknown session"));
+            }
+            _ => panic!("expected Error Status reaction"),
+        }
     }
 
     #[test]

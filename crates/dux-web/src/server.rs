@@ -78,6 +78,29 @@ async fn handle_socket(socket: WebSocket, engine: EngineHandle) {
         });
     }
 
+    // Forward AI-generated commit messages (produced by one-shot provider runs
+    // after a `generate_commit_message` command) to this client.
+    {
+        let sink = Arc::clone(&sink);
+        let mut commit_rx = engine.subscribe_commit_messages();
+        tokio::spawn(async move {
+            loop {
+                match commit_rx.recv().await {
+                    Ok(message) => {
+                        if send_json(&sink, &ServerMessage::CommitMessage { message })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
     let mut subscribed: Option<String> = None;
     // Exactly one live PTY forwarder per connection. Re-subscribing aborts the previous one so a
     // single PtyClient's output is never streamed to the same socket twice (which doubled echoed

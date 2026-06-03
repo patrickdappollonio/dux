@@ -159,6 +159,15 @@ pub enum Command {
     /// known-good config. Fire-and-forget: completion arrives as
     /// `WorkerEvent::ConfigRecoverCompleted`.
     RecoverConfig,
+
+    /// Generate an AI commit message for a session by running the session's
+    /// provider in one-shot mode over the staged diff. Mirrors the TUI's
+    /// `trigger_ai_commit_message`: builds `default_commit_prompt() + diff`,
+    /// spawns a thread to call `run_oneshot`, and posts the result back via
+    /// `WorkerEvent::CommitMessageGenerated` / `CommitMessageFailed`. Returns
+    /// `EventReaction::Status(Busy(...))` immediately; an error status if the
+    /// session is unknown or there is nothing staged to summarize.
+    GenerateCommitMessage { session_id: String },
 }
 
 impl Engine {
@@ -501,6 +510,46 @@ impl Engine {
                     self.worker_tx.clone(),
                 );
                 Ok(EventReaction::Nothing)
+            }
+
+            Command::GenerateCommitMessage { session_id } => {
+                let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned()
+                else {
+                    return Ok(EventReaction::Status(StatusUpdate::error(
+                        "Unknown session.",
+                    )));
+                };
+                let worktree = PathBuf::from(&session.worktree_path);
+                let diff_text = match crate::git::staged_diff_text(&worktree) {
+                    Ok(d) if d.trim().is_empty() => {
+                        return Ok(EventReaction::Status(StatusUpdate::error(
+                            "No staged changes to summarize. Stage files first.",
+                        )));
+                    }
+                    Ok(d) => d,
+                    Err(e) => {
+                        return Ok(EventReaction::Status(StatusUpdate::error(format!(
+                            "Failed to read the staged diff: {e}"
+                        ))));
+                    }
+                };
+                let prompt = format!("{}\n\n{}", self.config.default_commit_prompt(), diff_text);
+                let cfg = crate::config::provider_config(&self.config, &session.provider);
+                let prov = crate::provider::create_provider(session.provider.as_str(), cfg);
+                let tx = self.worker_tx.clone();
+                std::thread::spawn(move || match prov.run_oneshot(&prompt, &worktree) {
+                    Ok(msg) => {
+                        let _ = tx.send(crate::worker::WorkerEvent::CommitMessageGenerated(msg));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(crate::worker::WorkerEvent::CommitMessageFailed(
+                            e.to_string(),
+                        ));
+                    }
+                });
+                Ok(EventReaction::Status(StatusUpdate::busy(
+                    "Generating an AI commit message from the staged diff\u{2026}",
+                )))
             }
         }
     }

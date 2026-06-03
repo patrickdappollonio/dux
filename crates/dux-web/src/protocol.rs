@@ -65,6 +65,9 @@ pub enum ServerMessage {
         diff: Option<FileDiff>,
         error: Option<String>,
     },
+    /// An AI-generated commit message produced by a one-shot provider run,
+    /// pushed asynchronously after a `generate_commit_message` command.
+    CommitMessage { message: String },
 }
 
 #[cfg(test)]
@@ -117,6 +120,18 @@ mod tests {
                 session_id: "s1".to_string(),
                 path: "a.txt".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn commit_message_serializes() {
+        let msg = ServerMessage::CommitMessage {
+            message: "Fix the thing".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"commit_message","message":"Fix the thing"}"#
         );
     }
 

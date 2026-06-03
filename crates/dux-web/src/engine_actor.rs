@@ -69,6 +69,7 @@ pub struct EngineHandle {
     req_tx: mpsc::UnboundedSender<EngineRequest>,
     view_model_rx: watch::Receiver<String>,
     status_tx: broadcast::Sender<WireStatus>,
+    commit_msg_tx: broadcast::Sender<String>,
 }
 
 // Axum state must be `Send + Sync`; prove the handle satisfies that here so a future
@@ -90,6 +91,10 @@ impl EngineHandle {
 
     pub fn subscribe_status(&self) -> broadcast::Receiver<WireStatus> {
         self.status_tx.subscribe()
+    }
+
+    pub fn subscribe_commit_messages(&self) -> broadcast::Receiver<String> {
+        self.commit_msg_tx.subscribe()
     }
 
     pub async fn apply_wire(&self, command: WireCommand) -> Result<WireCommandOutcome, String> {
@@ -153,6 +158,8 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
     let (vm_tx, vm_rx) = watch::channel(view_model_json(&engine));
     let (status_tx, _status_rx) = broadcast::channel::<WireStatus>(256);
     let thread_status_tx = status_tx.clone();
+    let (commit_msg_tx, _commit_msg_rx) = broadcast::channel::<String>(64);
+    let thread_commit_tx = commit_msg_tx.clone();
 
     engine.spawn_changed_files_poller();
     engine.spawn_branch_sync_worker();
@@ -189,6 +196,23 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
                             "Saved to the database, but config.toml could not be updated: {e:#}"
                         ),
                     ));
+                }
+
+                // A one-shot commit-message worker completed: push the generated
+                // message to subscribed web clients, or surface a failure on the
+                // status stream. Handled via `&reaction` so it coexists with the
+                // borrows above and stays before the by-value consume below.
+                match &reaction {
+                    EventReaction::CommitMessageGenerated(msg) => {
+                        let _ = thread_commit_tx.send(msg.clone());
+                    }
+                    EventReaction::CommitMessageFailed(err) => {
+                        let _ = thread_status_tx.send(WireStatus::new(
+                            "error",
+                            format!("Couldn't generate a commit message: {err}"),
+                        ));
+                    }
+                    _ => {}
                 }
 
                 // A reload worker re-read config.toml; apply the new config to the
@@ -296,6 +320,7 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
             req_tx,
             view_model_rx: vm_rx,
             status_tx,
+            commit_msg_tx,
         },
         handle,
     )
