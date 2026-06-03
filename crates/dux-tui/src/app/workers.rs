@@ -581,7 +581,7 @@ impl App {
         }
     }
 
-    fn apply_project_persistence_outcome(&mut self, outcome: ProjectPersistenceOutcome) {
+    pub(crate) fn apply_project_persistence_outcome(&mut self, outcome: ProjectPersistenceOutcome) {
         let ProjectPersistenceOutcome { action, view } = outcome;
 
         match view {
@@ -625,6 +625,11 @@ impl App {
                 }) {
                     self.selected_left = index;
                 }
+                // The freshly added project is now selected and has no agents,
+                // so refresh the right-pane file lists. Without this, the
+                // previously selected project's changed files linger and look
+                // like they belong to the brand-new project.
+                self.reload_changed_files();
                 if let Err(err) = self.persist_config_projects_from_runtime() {
                     self.set_error(format!(
                         "Project was saved to the database, but config.toml could not be updated: {err:#}"
@@ -637,6 +642,10 @@ impl App {
             ProjectPersistenceView::Removed { project_name } => {
                 self.rebuild_left_items();
                 self.selected_left = self.selected_left.saturating_sub(1);
+                // Selection moved to a different item; refresh the right-pane
+                // file lists so they match the new selection instead of the
+                // removed project's stale changes.
+                self.reload_changed_files();
                 if let Err(err) = self.persist_config_projects_from_runtime() {
                     self.set_error(format!(
                         "Project was removed from the database, but config.toml could not be updated: {err:#}"

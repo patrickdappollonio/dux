@@ -2526,6 +2526,7 @@ mod tests {
     use crate::storage::SessionStore;
     use crate::theme::Theme;
     use chrono::Utc;
+    use dux_core::engine::{ProjectPersistenceOutcome, ProjectPersistenceView};
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex, mpsc};
     use tempfile::tempdir;
@@ -2716,6 +2717,94 @@ mod tests {
             crate::pty::PtyClient::spawn("echo", &[], std::path::Path::new("/tmp"), 24, 80, 1000)
                 .expect("spawn echo for test");
         app.engine.providers.insert(session_id.to_string(), client);
+    }
+
+    fn dummy_changed_file(path: &str) -> dux_core::model::ChangedFile {
+        dux_core::model::ChangedFile {
+            status: "M".to_string(),
+            path: path.to_string(),
+            additions: 1,
+            deletions: 0,
+            binary: false,
+        }
+    }
+
+    /// Adding a new (agent-less) project selects it; the right-pane changed-files
+    /// lists must be cleared so the previously selected project's modified files
+    /// don't appear to belong to the brand-new project.
+    #[test]
+    fn adding_project_clears_stale_changed_files() {
+        let session = make_session("s1", "claude", "/tmp/wt/a");
+        let existing = make_project("project-1", "claude");
+        let mut app = test_app_with_sessions(vec![session], vec![existing]);
+
+        app.engine.staged_files = vec![dummy_changed_file("staged.rs")];
+        app.engine.unstaged_files = vec![dummy_changed_file("a.rs"), dummy_changed_file("b.rs")];
+
+        // The engine worker has already added the project to engine state;
+        // applying the outcome selects it and must refresh the file lists.
+        let new_project = make_project("project-2", "claude");
+        app.engine.projects.push(new_project);
+        app.apply_project_persistence_outcome(ProjectPersistenceOutcome {
+            action: ProjectPersistenceAction::Add {
+                project: make_project("project-2", "claude"),
+                status_message: "Added project".to_string(),
+            },
+            view: ProjectPersistenceView::Added {
+                project_id: "project-2".to_string(),
+                status_message: "Added project".to_string(),
+            },
+        });
+
+        assert!(
+            app.selected_session().is_none(),
+            "new agent-less project has no selected agent"
+        );
+        assert!(
+            app.engine.staged_files.is_empty(),
+            "staged files should be cleared when switching to an agent-less project"
+        );
+        assert!(
+            app.engine.unstaged_files.is_empty(),
+            "unstaged files should be cleared when switching to an agent-less project"
+        );
+    }
+
+    /// Removing a project refreshes the changed-files panel for the new
+    /// selection rather than echoing the removed project's stale files.
+    #[test]
+    fn removing_project_clears_stale_changed_files() {
+        let session = make_session("s1", "claude", "/tmp/wt/a");
+        let p1 = make_project("project-1", "claude");
+        let mut p2 = make_project("project-2", "claude");
+        p2.name = "second".to_string();
+        let mut app = test_app_with_sessions(vec![session], vec![p1, p2]);
+        app.rebuild_left_items();
+
+        app.engine.staged_files = vec![dummy_changed_file("staged.rs")];
+        app.engine.unstaged_files = vec![dummy_changed_file("a.rs")];
+        app.selected_left = app.left_items().len().saturating_sub(1);
+
+        // Simulate the worker having removed project-2 from engine state.
+        app.engine.projects.retain(|p| p.id != "project-2");
+        app.apply_project_persistence_outcome(ProjectPersistenceOutcome {
+            action: ProjectPersistenceAction::Remove {
+                project_id: "project-2".to_string(),
+                project_name: "second".to_string(),
+            },
+            view: ProjectPersistenceView::Removed {
+                project_name: "second".to_string(),
+            },
+        });
+
+        assert!(
+            app.engine.staged_files.is_empty(),
+            "staged files should be cleared after removing a project"
+        );
+        assert!(
+            app.engine.unstaged_files.is_empty() || app.selected_session().is_some(),
+            "unstaged files should reflect the new selection after removing a project"
+        );
     }
 
     #[test]
