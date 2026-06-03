@@ -57,6 +57,29 @@ export interface ChangedFiles {
   unstaged: ChangedFileView[]
 }
 
+export type DiffLineKind = "context" | "insert" | "delete"
+
+export interface DiffLine {
+  kind: DiffLineKind
+  old_line: number | null
+  new_line: number | null
+  content: string
+}
+
+export interface DiffHunk {
+  header: string
+  lines: DiffLine[]
+}
+
+export interface FileDiff {
+  path: string
+  binary: boolean
+  unchanged: boolean
+  old_size: number
+  new_size: number
+  hunks: DiffHunk[]
+}
+
 export interface ViewModel {
   projects: ProjectView[]
   sessions: SessionView[]
@@ -76,6 +99,13 @@ export type ServerMessage =
   | { type: "terminal_created"; session_id: string; terminal_id: string }
   | { type: "error"; message: string }
   | { type: "status"; tone: string; message: string }
+  | {
+      type: "diff"
+      session_id: string
+      path: string
+      diff: FileDiff | null
+      error: string | null
+    }
 
 // Client -> server JSON text frames, tagged by `type`.
 export type ClientMessage =
@@ -84,5 +114,6 @@ export type ClientMessage =
   | { type: "subscribe_terminal"; terminal_id: string }
   | { type: "create_terminal"; session_id: string }
   | { type: "resize"; session_id: string; rows: number; cols: number }
+  | { type: "get_diff"; session_id: string; path: string }
 
 export type ConnState = "connecting" | "open" | "closed" | "failed"

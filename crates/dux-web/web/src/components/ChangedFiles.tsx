@@ -1,5 +1,6 @@
 import { useState } from "react"
 import { Check, MousePointerClick } from "lucide-react"
+import { BrailleSpinner } from "@/components/BrailleSpinner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -26,12 +27,12 @@ import { Separator } from "@/components/ui/separator"
 import {
   Sheet,
   SheetContent,
-  SheetDescription,
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet"
-import { openCommit, socket, useDux } from "@/lib/store"
-import type { ChangedFileView } from "@/lib/types"
+import { closeDiff, openCommit, requestDiff, socket, useDux } from "@/lib/store"
+import type { DuxState } from "@/lib/store"
+import type { ChangedFileView, DiffLine } from "@/lib/types"
 
 // Map raw git status codes to a short display glyph.
 function statusGlyph(status: string): string {
@@ -138,8 +139,7 @@ function FileGroup({ heading, files, action, sessionId, onOpenDiff }: FileGroupP
 }
 
 export function ChangedFiles() {
-  const { viewModel, selectedSessionId } = useDux()
-  const [diffPath, setDiffPath] = useState<string | null>(null)
+  const { viewModel, selectedSessionId, currentDiff } = useDux()
 
   // No session selected — muted empty state.
   if (!selectedSessionId) {
@@ -204,7 +204,7 @@ export function ChangedFiles() {
                 files={changed.staged}
                 action="unstage"
                 sessionId={selectedSessionId}
-                onOpenDiff={setDiffPath}
+                onOpenDiff={(path) => requestDiff(selectedSessionId, path)}
               />
 
               {showSeparator && <Separator className="my-1" />}
@@ -214,27 +214,103 @@ export function ChangedFiles() {
                 files={changed.unstaged}
                 action="stage"
                 sessionId={selectedSessionId}
-                onOpenDiff={setDiffPath}
+                onOpenDiff={(path) => requestDiff(selectedSessionId, path)}
               />
             </div>
           </ScrollArea>
         </CardContent>
       </Card>
 
-      {/* Diff sheet — placeholder, structured diff lands in a follow-up */}
+      {/* Diff sheet — renders the structured per-file diff from the server */}
       <Sheet
-        open={diffPath !== null}
-        onOpenChange={(open) => { if (!open) setDiffPath(null) }}
+        open={currentDiff !== null}
+        onOpenChange={(open) => {
+          if (!open) closeDiff()
+        }}
       >
-        <SheetContent side="right">
+        <SheetContent side="right" className="w-[90vw] sm:max-w-3xl">
           <SheetHeader>
-            <SheetTitle className="font-mono text-sm">{diffPath ?? ""}</SheetTitle>
-            <SheetDescription>
-              Structured diff rendering lands in a follow-up. Staging and the file list work today.
-            </SheetDescription>
+            <SheetTitle className="font-mono text-sm">
+              {currentDiff?.path ?? ""}
+            </SheetTitle>
           </SheetHeader>
+          <div className="min-h-0 flex-1 overflow-auto px-4 pb-4">
+            <DiffBody state={currentDiff} />
+          </div>
         </SheetContent>
       </Sheet>
     </>
+  )
+}
+
+type DiffState = DuxState["currentDiff"]
+
+function DiffBody({ state }: { state: DiffState }) {
+  if (!state) return null
+  if (state.loading) {
+    return (
+      <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+        <BrailleSpinner className="text-primary" /> Loading diff…
+      </div>
+    )
+  }
+  if (state.error) {
+    return <div className="py-6 text-sm text-destructive">{state.error}</div>
+  }
+  const diff = state.diff
+  if (!diff) return null
+  if (diff.binary) {
+    return (
+      <div className="py-6 text-sm text-muted-foreground">
+        Binary file ({diff.old_size} → {diff.new_size} bytes). No text diff available.
+      </div>
+    )
+  }
+  if (diff.unchanged || diff.hunks.length === 0) {
+    return <div className="py-6 text-sm text-muted-foreground">No changes.</div>
+  }
+  return (
+    <div className="overflow-x-auto rounded border font-mono text-xs leading-relaxed">
+      {diff.hunks.map((hunk, hi) => (
+        <div key={hi}>
+          <div className="bg-muted px-2 py-0.5 text-muted-foreground">
+            {hunk.header}
+          </div>
+          {hunk.lines.map((line, li) => (
+            <DiffRow key={li} line={line} />
+          ))}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function DiffRow({ line }: { line: DiffLine }) {
+  const sign = line.kind === "insert" ? "+" : line.kind === "delete" ? "-" : " "
+  const rowClass =
+    line.kind === "insert"
+      ? "bg-green-600/15"
+      : line.kind === "delete"
+        ? "bg-red-600/15"
+        : ""
+  const signClass =
+    line.kind === "insert"
+      ? "text-green-500"
+      : line.kind === "delete"
+        ? "text-red-500"
+        : "text-muted-foreground"
+  return (
+    <div className={`flex ${rowClass}`}>
+      <span className="w-10 shrink-0 select-none px-1 text-right text-muted-foreground">
+        {line.old_line ?? ""}
+      </span>
+      <span className="w-10 shrink-0 select-none px-1 text-right text-muted-foreground">
+        {line.new_line ?? ""}
+      </span>
+      <span className={`w-4 shrink-0 select-none text-center ${signClass}`}>
+        {sign}
+      </span>
+      <span className="whitespace-pre">{line.content}</span>
+    </div>
   )
 }

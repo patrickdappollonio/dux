@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react"
 import { toast } from "sonner"
 
 import { DuxSocket } from "./ws"
-import type { ConnState, ViewModel } from "./types"
+import type { ConnState, FileDiff, ViewModel } from "./types"
 
 // The currently-streamed target: either an agent session or one of its
 // companion terminals. Both carry a `sessionId` so session-scoped UI (the
@@ -31,6 +31,13 @@ export interface DuxState {
   deleteTarget: string | null
   paletteOpen: boolean
   sidebarWidth: string
+  currentDiff: {
+    sessionId: string
+    path: string
+    diff: FileDiff | null
+    error: string | null
+    loading: boolean
+  } | null
 }
 
 // The expanded sidebar width is drag-resizable and persisted across reloads.
@@ -51,6 +58,7 @@ let state: DuxState = {
   deleteTarget: null,
   paletteOpen: false,
   sidebarWidth: loadSidebarWidth(),
+  currentDiff: null,
 }
 
 const listeners = new Set<() => void>()
@@ -159,6 +167,14 @@ socket.onTerminalCreated = (sessionId, terminalId) => {
   selectTerminal(terminalId, sessionId)
 }
 
+socket.onDiff = (sessionId, path, diff, error) => {
+  // Ignore stale responses for a file the user already navigated away from.
+  if (state.currentDiff?.path !== path || state.currentDiff?.sessionId !== sessionId) {
+    return
+  }
+  setState({ currentDiff: { sessionId, path, diff, error, loading: false } })
+}
+
 socket.connect()
 
 export function useDux(): DuxState {
@@ -206,6 +222,15 @@ export function openCommit(sessionId: string): void {
 
 export function closeCommit(): void {
   setState({ commitTarget: null })
+}
+
+export function requestDiff(sessionId: string, path: string): void {
+  setState({ currentDiff: { sessionId, path, diff: null, error: null, loading: true } })
+  socket.getDiff(sessionId, path)
+}
+
+export function closeDiff(): void {
+  setState({ currentDiff: null })
 }
 
 export function openDelete(sessionId: string): void {

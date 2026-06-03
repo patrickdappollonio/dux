@@ -2,6 +2,7 @@ import type {
   ClientMessage,
   CommandStatus,
   ConnState,
+  FileDiff,
   ServerMessage,
   ViewModel,
 } from "./types"
@@ -31,6 +32,12 @@ export class DuxSocket {
   onPtyBytes: (bytes: Uint8Array) => void = () => {}
   onTerminalCreated: (sessionId: string, terminalId: string) => void = () => {}
   onStatus: (tone: string, message: string) => void = () => {}
+  onDiff: (
+    sessionId: string,
+    path: string,
+    diff: FileDiff | null,
+    error: string | null,
+  ) => void = () => {}
 
   constructor(url: string) {
     this.url = url
@@ -98,6 +105,9 @@ export class DuxSocket {
       case "status":
         this.onStatus(message.tone, message.message)
         break
+      case "diff":
+        this.onDiff(message.session_id, message.path, message.diff, message.error)
+        break
     }
   }
 
@@ -152,6 +162,10 @@ export class DuxSocket {
 
   resize(sessionId: string, rows: number, cols: number): void {
     this.sendJson({ type: "resize", session_id: sessionId, rows, cols })
+  }
+
+  getDiff(sessionId: string, path: string): void {
+    this.sendJson({ type: "get_diff", session_id: sessionId, path })
   }
 
   sendInput(bytes: Uint8Array): void {
