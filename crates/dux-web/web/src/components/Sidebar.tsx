@@ -54,6 +54,7 @@ import {
   SidebarContent,
   SidebarFooter,
   SidebarGroup,
+  SidebarGroupAction,
   SidebarGroupContent,
   SidebarGroupLabel,
   SidebarHeader,
@@ -70,9 +71,11 @@ import { useSidebar } from "@/components/ui/sidebar"
 import {
   createTerminal,
   deleteTerminal,
+  openAddProject,
   openCommit,
   openDelete,
   openProjectSettings,
+  openRemoveProject,
   selectSession,
   selectTerminal,
   setSidebarWidth,
@@ -364,19 +367,31 @@ function ProjectItem({
           <Badge variant="secondary" className="shrink-0">{sessions.length}</Badge>
           <ChevronRight className="ml-auto shrink-0 transition-transform group-data-[state=open]/collapsible:rotate-90" />
         </CollapsibleTrigger>
-        {/* SidebarMenuAction is a sibling of the trigger so its click does not
-            toggle the collapsible. stopPropagation keeps it inert on the row. */}
-        <SidebarMenuAction
-          showOnHover
-          title="Project settings"
-          aria-label="Project settings"
-          onClick={(event) => {
-            event.stopPropagation()
-            openProjectSettings(id)
-          }}
-        >
-          <Settings />
-        </SidebarMenuAction>
+        {/* The dropdown trigger is a sibling of the CollapsibleTrigger so its
+            click does not toggle the collapsible. */}
+        <DropdownMenu>
+          <SidebarMenuAction
+            showOnHover
+            render={<DropdownMenuTrigger />}
+            aria-label="Project actions"
+          >
+            <Ellipsis />
+          </SidebarMenuAction>
+          <DropdownMenuContent side="right" align="start">
+            <DropdownMenuItem onClick={() => openProjectSettings(id)}>
+              <Settings />
+              Project settings…
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              className="text-destructive"
+              onClick={() => openRemoveProject(id)}
+            >
+              <Trash2 />
+              Remove project…
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <CollapsibleContent>
           <SidebarMenuSub>
             {sessions.map((session) => (
@@ -505,6 +520,13 @@ export function AppSidebar() {
       <SidebarContent>
         <SidebarGroup>
           <SidebarGroupLabel>Projects</SidebarGroupLabel>
+          <SidebarGroupAction
+            title="Add project"
+            aria-label="Add project"
+            onClick={openAddProject}
+          >
+            <Plus />
+          </SidebarGroupAction>
           {order.length === 0 ? (
             <SidebarGroupContent>
               <Empty className="border-0 p-4">

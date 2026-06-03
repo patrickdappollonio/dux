@@ -1,5 +1,6 @@
 import type * as React from "react"
 
+import { AddProjectDialog } from "@/components/AddProjectDialog"
 import { AppSidebar } from "@/components/Sidebar"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { CommandPalette } from "@/components/CommandPalette"
@@ -7,6 +8,7 @@ import { CommitDialog } from "@/components/CommitDialog"
 import { DeleteSessionDialog } from "@/components/DeleteSessionDialog"
 import { GlobalEnvDialog } from "@/components/GlobalEnvDialog"
 import { ProjectSettingsDialog } from "@/components/ProjectSettingsDialog"
+import { RemoveProjectDialog } from "@/components/RemoveProjectDialog"
 import { StatusBar } from "@/components/StatusBar"
 import { TerminalPane } from "@/components/TerminalPane"
 import { Badge } from "@/components/ui/badge"
@@ -183,6 +185,8 @@ function App() {
       <DeleteSessionDialog />
       <GlobalEnvDialog />
       <ProjectSettingsDialog />
+      <AddProjectDialog />
+      <RemoveProjectDialog />
       <Toaster />
     </SidebarProvider>
   )

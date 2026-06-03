@@ -9,6 +9,7 @@ import {
   CommandSeparator,
 } from "@/components/ui/command"
 import {
+  openAddProject,
   openCommit,
   openGlobalEnv,
   selectSession,
@@ -96,6 +97,15 @@ export function CommandPalette() {
         )}
 
         <CommandGroup heading="Workspace">
+          <CommandItem
+            className="cursor-pointer"
+            onSelect={() => {
+              openAddProject()
+              close()
+            }}
+          >
+            Add project…
+          </CommandItem>
           <CommandItem
             className="cursor-pointer"
             onSelect={() => {

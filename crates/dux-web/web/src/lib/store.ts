@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react"
 import { toast } from "sonner"
 
 import { DuxSocket } from "./ws"
-import type { ConnState, FileDiff, ViewModel } from "./types"
+import type { ConnState, DirEntryView, FileDiff, ViewModel } from "./types"
 
 // The currently-streamed target: either an agent session or one of its
 // companion terminals. Both carry a `sessionId` so session-scoped UI (the
@@ -32,6 +32,11 @@ export interface DuxState {
   deleteTarget: string | null
   globalEnvOpen: boolean
   projectSettingsTarget: string | null
+  addProjectOpen: boolean
+  browsePath: string
+  browseEntries: DirEntryView[]
+  browseLoading: boolean
+  removeProjectTarget: string | null
   paletteOpen: boolean
   sidebarWidth: string
   currentDiff: {
@@ -62,6 +67,11 @@ let state: DuxState = {
   deleteTarget: null,
   globalEnvOpen: false,
   projectSettingsTarget: null,
+  addProjectOpen: false,
+  browsePath: "",
+  browseEntries: [],
+  browseLoading: false,
+  removeProjectTarget: null,
   paletteOpen: false,
   sidebarWidth: loadSidebarWidth(),
   currentDiff: null,
@@ -188,6 +198,11 @@ socket.onDiff = (sessionId, path, diff, error) => {
   setState({ currentDiff: { sessionId, path, diff, error, loading: false } })
 }
 
+socket.onDirEntries = (path, entries, error) => {
+  setState({ browsePath: path, browseEntries: error ? [] : entries, browseLoading: false })
+  if (error) toast.error(error)
+}
+
 socket.connect()
 
 export function useDux(): DuxState {
@@ -289,6 +304,36 @@ export function openProjectSettings(projectId: string): void {
 
 export function closeProjectSettings(): void {
   setState({ projectSettingsTarget: null })
+}
+
+export function openAddProject(): void {
+  setState({ addProjectOpen: true, browseLoading: true, browseEntries: [] })
+  socket.browseDir(null) // start at $HOME
+}
+
+export function closeAddProject(): void {
+  setState({ addProjectOpen: false })
+}
+
+export function browseDir(path: string | null): void {
+  setState({ browseLoading: true })
+  socket.browseDir(path)
+}
+
+export function addProject(path: string, name: string): void {
+  socket.sendCommand("add_project", { path, name })
+}
+
+export function openRemoveProject(projectId: string): void {
+  setState({ removeProjectTarget: projectId })
+}
+
+export function closeRemoveProject(): void {
+  setState({ removeProjectTarget: null })
+}
+
+export function removeProject(projectId: string): void {
+  socket.sendCommand("remove_project", { project_id: projectId })
 }
 
 export function setPaletteOpen(open: boolean): void {

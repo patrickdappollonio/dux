@@ -48,6 +48,12 @@ export interface SessionView {
   has_output: boolean
 }
 
+export interface DirEntryView {
+  path: string
+  label: string
+  is_git_repo: boolean
+}
+
 export interface ChangedFileView {
   status: string
   path: string
@@ -113,6 +119,12 @@ export type ServerMessage =
       diff: FileDiff | null
       error: string | null
     }
+  | {
+      type: "dir_entries"
+      path: string
+      entries: DirEntryView[]
+      error: string | null
+    }
 
 // Client -> server JSON text frames, tagged by `type`.
 export type ClientMessage =
@@ -122,5 +134,6 @@ export type ClientMessage =
   | { type: "create_terminal"; session_id: string }
   | { type: "resize"; session_id: string; rows: number; cols: number }
   | { type: "get_diff"; session_id: string; path: string }
+  | { type: "browse_dir"; path: string | null }
 
 export type ConnState = "connecting" | "open" | "closed" | "failed"

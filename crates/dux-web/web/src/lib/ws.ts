@@ -2,6 +2,7 @@ import type {
   ClientMessage,
   CommandStatus,
   ConnState,
+  DirEntryView,
   FileDiff,
   ServerMessage,
   ViewModel,
@@ -37,6 +38,11 @@ export class DuxSocket {
     sessionId: string,
     path: string,
     diff: FileDiff | null,
+    error: string | null,
+  ) => void = () => {}
+  onDirEntries: (
+    path: string,
+    entries: DirEntryView[],
     error: string | null,
   ) => void = () => {}
 
@@ -112,6 +118,9 @@ export class DuxSocket {
       case "diff":
         this.onDiff(message.session_id, message.path, message.diff, message.error)
         break
+      case "dir_entries":
+        this.onDirEntries(message.path, message.entries, message.error)
+        break
     }
   }
 
@@ -170,6 +179,10 @@ export class DuxSocket {
 
   getDiff(sessionId: string, path: string): void {
     this.sendJson({ type: "get_diff", session_id: sessionId, path })
+  }
+
+  browseDir(path: string | null): void {
+    this.sendJson({ type: "browse_dir", path })
   }
 
   sendInput(bytes: Uint8Array): void {
