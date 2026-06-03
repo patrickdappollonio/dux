@@ -66,8 +66,18 @@ pub fn file_diff(worktree: &Path, rel_path: &str) -> anyhow::Result<FileDiff> {
         anyhow::bail!("invalid diff path: {rel_path}");
     }
 
+    // The component check above blocks `..`, but a symlink INSIDE the worktree
+    // could still point outside it. Since the web passes client-supplied paths,
+    // resolve the working-copy path and refuse to read anything whose realpath
+    // escapes the worktree. (The HEAD side comes from `git cat-file`, which
+    // never follows filesystem symlinks, so only the working read needs this.)
+    let working_path = worktree.join(rel_path);
+    if working_path.exists() && !crate::git::is_under(worktree, &working_path) {
+        anyhow::bail!("path escapes worktree: {rel_path}");
+    }
+
     let old_bytes = crate::git::file_bytes_at_head(worktree, rel_path)?.unwrap_or_default();
-    let new_bytes = std::fs::read(worktree.join(rel_path)).unwrap_or_default();
+    let new_bytes = std::fs::read(&working_path).unwrap_or_default();
     let old_size = old_bytes.len();
     let new_size = new_bytes.len();
 
@@ -82,19 +92,26 @@ pub fn file_diff(worktree: &Path, rel_path: &str) -> anyhow::Result<FileDiff> {
         });
     }
 
-    let (old_text, new_text) = match (String::from_utf8(old_bytes), String::from_utf8(new_bytes)) {
-        (Ok(o), Ok(n)) => (o, n),
-        _ => {
-            return Ok(FileDiff {
-                path: rel_path.to_string(),
-                binary: true,
-                unchanged: false,
-                old_size,
-                new_size,
-                hunks: Vec::new(),
-            });
-        }
+    // Treat anything that isn't renderable UTF-8 text as binary — matching the
+    // TUI's `is_renderable_text`. `content_inspector` catches UTF-8 byte streams
+    // that nonetheless contain NULs/control bytes, which `String::from_utf8`
+    // alone would accept and render garbled.
+    let is_text = |bytes: &[u8]| {
+        bytes.is_empty()
+            || content_inspector::inspect(bytes) == content_inspector::ContentType::UTF_8
     };
+    if !is_text(&old_bytes) || !is_text(&new_bytes) {
+        return Ok(FileDiff {
+            path: rel_path.to_string(),
+            binary: true,
+            unchanged: false,
+            old_size,
+            new_size,
+            hunks: Vec::new(),
+        });
+    }
+    let old_text = String::from_utf8(old_bytes).unwrap_or_default();
+    let new_text = String::from_utf8(new_bytes).unwrap_or_default();
 
     use similar::{ChangeTag, TextDiff};
     let text_diff = TextDiff::from_lines(&old_text, &new_text);
@@ -230,5 +247,41 @@ mod tests {
         let repo = init_repo();
         assert!(file_diff(repo.path(), "../escape.txt").is_err());
         assert!(file_diff(repo.path(), "/etc/passwd").is_err());
+        // Interior `..` is rejected too (components are not normalized away).
+        assert!(file_diff(repo.path(), "a/../../b").is_err());
+    }
+
+    /// A UTF-8 byte stream that nonetheless contains a NUL must be treated as
+    /// binary (matching the TUI's content_inspector check), not rendered as text.
+    #[test]
+    fn utf8_with_nul_is_binary() {
+        let repo = init_repo();
+        commit_file(repo.path(), "f.txt", "text\n");
+        // `valid\0utf8` is valid UTF-8 but content_inspector classifies it binary.
+        std::fs::write(repo.path().join("f.txt"), b"valid\0utf8\n").expect("overwrite");
+
+        let diff = file_diff(repo.path(), "f.txt").expect("diff");
+        assert!(diff.binary, "UTF-8-with-NUL should be flagged binary");
+        assert!(diff.hunks.is_empty());
+    }
+
+    /// A symlink inside the worktree that points OUTSIDE it must be refused —
+    /// the component check alone wouldn't catch this, and the web reads
+    /// client-supplied paths.
+    #[test]
+    fn symlink_escaping_worktree_is_rejected() {
+        let repo = init_repo();
+        let outside = tempfile::tempdir().expect("outside dir");
+        std::fs::write(outside.path().join("secret.txt"), "top secret\n").expect("write secret");
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            repo.path().join("link.txt"),
+        )
+        .expect("symlink");
+
+        assert!(
+            file_diff(repo.path(), "link.txt").is_err(),
+            "a symlink resolving outside the worktree must be rejected"
+        );
     }
 }
