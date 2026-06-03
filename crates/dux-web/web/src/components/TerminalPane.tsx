@@ -93,16 +93,34 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
     } else {
       socket.subscribe(id)
     }
-    socket.resize(id, term.rows, term.cols)
 
-    // Refit + report size on container resize.
-    const ro = new ResizeObserver(() => {
+    // Fit + report the PTY size through ONE deduplicated path. Every resize we
+    // send triggers a SIGWINCH redraw in the child, and ResizeObserver fires an
+    // initial callback on observe — so the old unconditional fit-and-send here
+    // plus the observer's first tick produced back-to-back redraws at attach,
+    // visible as jitter. Only genuinely new dimensions are sent, and observer
+    // bursts are coalesced to one measurement per frame.
+    let lastRows = 0
+    let lastCols = 0
+    let fitFrame = 0
+    const syncSize = () => {
       fit.fit()
-      socket.resize(id, term.rows, term.cols)
+      if (term.rows !== lastRows || term.cols !== lastCols) {
+        lastRows = term.rows
+        lastCols = term.cols
+        socket.resize(id, term.rows, term.cols)
+      }
+    }
+    syncSize()
+
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(fitFrame)
+      fitFrame = requestAnimationFrame(syncSize)
     })
     ro.observe(container)
 
     return () => {
+      cancelAnimationFrame(fitFrame)
       ro.disconnect()
       dataSub.dispose()
       socket.onPtyBytes = () => {}
