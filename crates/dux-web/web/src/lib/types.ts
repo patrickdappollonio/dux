@@ -12,6 +12,10 @@ export interface ProjectView {
   name: string
   path: string
   default_provider: string
+  explicit_default_provider: string | null
+  auto_reopen_agents: boolean | null
+  startup_command: string | null
+  env: Record<string, string>
   current_branch: string
   branch_status: string
   path_missing: boolean
@@ -85,6 +89,7 @@ export interface ViewModel {
   sessions: SessionView[]
   changed_files: ChangedFiles
   global_env: Record<string, string>
+  available_providers: string[]
 }
 
 export interface CommandStatus {

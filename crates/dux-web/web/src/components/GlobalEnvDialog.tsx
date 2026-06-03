@@ -9,32 +9,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Textarea } from "@/components/ui/textarea"
+import { envToText, parseEnv } from "@/lib/env"
 import { closeGlobalEnv, saveGlobalEnv, useDux } from "@/lib/store"
-
-// Render the current env as sorted `KEY=VALUE` lines for the textarea.
-function envToText(env: Record<string, string>): string {
-  return Object.entries(env)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([k, v]) => `${k}=${v}`)
-    .join("\n")
-}
-
-// Parse the textarea back to an object. Blank lines and `#` comments are
-// skipped; the first `=` splits key and value so values may themselves contain
-// `=`.
-function parseEnv(text: string): Record<string, string> {
-  const env: Record<string, string> = {}
-  for (const raw of text.split("\n")) {
-    const line = raw.trim()
-    if (line === "" || line.startsWith("#")) continue
-    const eq = line.indexOf("=")
-    if (eq <= 0) continue // skip lines with no key
-    const key = line.slice(0, eq).trim()
-    const value = line.slice(eq + 1) // keep value as-is (may contain '=')
-    if (key) env[key] = value
-  }
-  return env
-}
 
 // The form body is a separate component mounted only while the dialog is open.
 // It seeds its `useState` from the `env` prop via a lazy initializer, so there

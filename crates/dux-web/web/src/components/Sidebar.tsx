@@ -10,6 +10,7 @@ import {
   Plus,
   RefreshCw,
   Send,
+  Settings,
   SquareTerminal,
   Terminal,
   Trash2,
@@ -71,6 +72,7 @@ import {
   deleteTerminal,
   openCommit,
   openDelete,
+  openProjectSettings,
   selectSession,
   selectTerminal,
   setSidebarWidth,
@@ -341,10 +343,12 @@ function SessionSubItem({
 }
 
 function ProjectItem({
+  id,
   name,
   sessions,
   selectedTarget,
 }: {
+  id: string
   name: string
   sessions: SessionView[]
   selectedTarget: SelectedTarget | null
@@ -360,6 +364,19 @@ function ProjectItem({
           <Badge variant="secondary" className="shrink-0">{sessions.length}</Badge>
           <ChevronRight className="ml-auto shrink-0 transition-transform group-data-[state=open]/collapsible:rotate-90" />
         </CollapsibleTrigger>
+        {/* SidebarMenuAction is a sibling of the trigger so its click does not
+            toggle the collapsible. stopPropagation keeps it inert on the row. */}
+        <SidebarMenuAction
+          showOnHover
+          title="Project settings"
+          aria-label="Project settings"
+          onClick={(event) => {
+            event.stopPropagation()
+            openProjectSettings(id)
+          }}
+        >
+          <Settings />
+        </SidebarMenuAction>
         <CollapsibleContent>
           <SidebarMenuSub>
             {sessions.map((session) => (
@@ -507,6 +524,7 @@ export function AppSidebar() {
               {order.map((projectId) => (
                 <ProjectItem
                   key={projectId}
+                  id={projectId}
                   name={projectName(projectId)}
                   sessions={grouped.get(projectId)!}
                   selectedTarget={selectedTarget}

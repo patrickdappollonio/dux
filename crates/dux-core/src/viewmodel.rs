@@ -19,6 +19,9 @@ pub struct ViewModel {
     /// every spawned provider/terminal. Surfaced so a client can pre-fill an
     /// edit dialog.
     pub global_env: std::collections::BTreeMap<String, String>,
+    /// Configured provider command names, sorted. Surfaced so a client can
+    /// populate a per-project default-provider picker.
+    pub available_providers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -170,6 +173,9 @@ impl ChangedFileView {
 impl Engine {
     /// Project current engine state into a serializable snapshot for web clients.
     pub fn view_model(&self) -> ViewModel {
+        let mut available_providers: Vec<String> =
+            self.config.providers.commands.keys().cloned().collect();
+        available_providers.sort();
         ViewModel {
             projects: self
                 .projects
@@ -212,6 +218,7 @@ impl Engine {
                     .collect(),
             },
             global_env: self.config.env.clone(),
+            available_providers,
         }
     }
 }
@@ -425,6 +432,26 @@ mod tests {
         let vm = engine.view_model();
 
         assert_eq!(vm.global_env.get("FOO").map(String::as_str), Some("bar"));
+    }
+
+    #[test]
+    fn available_providers_lists_configured_defaults_sorted() {
+        let (engine, _tmp) = test_engine();
+
+        let vm = engine.view_model();
+
+        // A default Config configures these four providers.
+        for provider in ["claude", "codex", "gemini", "opencode"] {
+            assert!(
+                vm.available_providers.iter().any(|p| p == provider),
+                "available_providers should contain {provider}: {:?}",
+                vm.available_providers
+            );
+        }
+        // The list is sorted.
+        let mut sorted = vm.available_providers.clone();
+        sorted.sort();
+        assert_eq!(vm.available_providers, sorted);
     }
 
     #[test]
