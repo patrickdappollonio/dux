@@ -73,6 +73,7 @@ import {
   deleteTerminal,
   openAddProject,
   openCommit,
+  openCreateAgent,
   openDelete,
   openProjectSettings,
   openRemoveProject,
@@ -378,6 +379,11 @@ function ProjectItem({
             <Ellipsis />
           </SidebarMenuAction>
           <DropdownMenuContent side="right" align="start">
+            <DropdownMenuItem onClick={() => openCreateAgent(id)}>
+              <Bot />
+              New agent…
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => openProjectSettings(id)}>
               <Settings />
               Project settings…

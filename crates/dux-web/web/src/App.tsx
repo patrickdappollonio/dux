@@ -5,6 +5,7 @@ import { AppSidebar } from "@/components/Sidebar"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { CommandPalette } from "@/components/CommandPalette"
 import { CommitDialog } from "@/components/CommitDialog"
+import { CreateAgentDialog } from "@/components/CreateAgentDialog"
 import { DeleteSessionDialog } from "@/components/DeleteSessionDialog"
 import { GlobalEnvDialog } from "@/components/GlobalEnvDialog"
 import { ProjectSettingsDialog } from "@/components/ProjectSettingsDialog"
@@ -182,6 +183,7 @@ function App() {
 
       <CommandPalette />
       <CommitDialog />
+      <CreateAgentDialog />
       <DeleteSessionDialog />
       <GlobalEnvDialog />
       <ProjectSettingsDialog />

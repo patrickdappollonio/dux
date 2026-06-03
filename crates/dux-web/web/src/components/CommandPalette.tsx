@@ -11,6 +11,7 @@ import {
 import {
   openAddProject,
   openCommit,
+  openCreateAgent,
   openGlobalEnv,
   selectSession,
   setPaletteOpen,
@@ -90,6 +91,15 @@ export function CommandPalette() {
               </CommandItem>
               <CommandItem className="cursor-pointer" onSelect={handlePush}>
                 Push
+              </CommandItem>
+              <CommandItem
+                className="cursor-pointer"
+                onSelect={() => {
+                  openCreateAgent(selectedSession.project_id)
+                  close()
+                }}
+              >
+                New agent in this project…
               </CommandItem>
             </CommandGroup>
             <CommandSeparator />

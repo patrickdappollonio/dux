@@ -37,6 +37,7 @@ export interface DuxState {
   browseEntries: DirEntryView[]
   browseLoading: boolean
   removeProjectTarget: string | null
+  createAgentTarget: string | null
   paletteOpen: boolean
   sidebarWidth: string
   currentDiff: {
@@ -72,6 +73,7 @@ let state: DuxState = {
   browseEntries: [],
   browseLoading: false,
   removeProjectTarget: null,
+  createAgentTarget: null,
   paletteOpen: false,
   sidebarWidth: loadSidebarWidth(),
   currentDiff: null,
@@ -334,6 +336,20 @@ export function closeRemoveProject(): void {
 
 export function removeProject(projectId: string): void {
   socket.sendCommand("remove_project", { project_id: projectId })
+}
+
+export function openCreateAgent(projectId: string): void {
+  setState({ createAgentTarget: projectId })
+}
+
+export function closeCreateAgent(): void {
+  setState({ createAgentTarget: null })
+}
+
+// Ask the server to create a new agent in a project. An empty name lets the
+// server auto-generate a branch name.
+export function createAgent(projectId: string, name: string): void {
+  socket.sendCommand("create_agent", { project_id: projectId, name })
 }
 
 export function setPaletteOpen(open: boolean): void {
