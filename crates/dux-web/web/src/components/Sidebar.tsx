@@ -47,7 +47,6 @@ import {
   SidebarContent,
   SidebarFooter,
   SidebarGroup,
-  SidebarGroupAction,
   SidebarGroupContent,
   SidebarGroupLabel,
   SidebarHeader,
@@ -419,28 +418,47 @@ export function AppSidebar() {
   const sessions = viewModel?.sessions ?? []
   const projects = viewModel?.projects ?? []
 
-  // Show EVERY project — including freshly-added ones with no agents yet — in
-  // the ViewModel's project order, then group sessions under them. (A session
-  // whose project is somehow absent is appended under its own id so it's never
-  // dropped.)
-  const order: string[] = []
+  // Group sessions under EVERY project, then partition like the TUI: projects
+  // with agents first, agent-less ones under their own "Projects with no
+  // agents" heading. (A session whose project is somehow absent is kept under
+  // its own id so it's never dropped.)
   const grouped = new Map<string, SessionView[]>()
   for (const project of projects) {
     grouped.set(project.id, [])
-    order.push(project.id)
   }
+  const orphanIds: string[] = []
   for (const session of sessions) {
     let bucket = grouped.get(session.project_id)
     if (!bucket) {
       bucket = []
       grouped.set(session.project_id, bucket)
-      order.push(session.project_id)
+      orphanIds.push(session.project_id)
     }
     bucket.push(session)
   }
+  const withAgents: string[] = []
+  const withoutAgents: string[] = []
+  for (const project of projects) {
+    if ((grouped.get(project.id)?.length ?? 0) > 0) {
+      withAgents.push(project.id)
+    } else {
+      withoutAgents.push(project.id)
+    }
+  }
+  withAgents.push(...orphanIds)
 
   const projectName = (id: string) =>
     projects.find((p) => p.id === id)?.name ?? id.slice(0, 8)
+
+  const renderProject = (projectId: string) => (
+    <ProjectItem
+      key={projectId}
+      id={projectId}
+      name={projectName(projectId)}
+      sessions={grouped.get(projectId)!}
+      selectedTarget={selectedTarget}
+    />
+  )
 
   return (
     <Sidebar collapsible="icon">
@@ -463,14 +481,7 @@ export function AppSidebar() {
       <SidebarContent>
         <SidebarGroup>
           <SidebarGroupLabel>Projects</SidebarGroupLabel>
-          <SidebarGroupAction
-            title="Add project"
-            aria-label="Add project"
-            onClick={openAddProject}
-          >
-            <Plus />
-          </SidebarGroupAction>
-          {order.length === 0 ? (
+          {withAgents.length === 0 && withoutAgents.length === 0 ? (
             <SidebarGroupContent>
               <Empty className="border-0 p-4">
                 <EmptyHeader>
@@ -485,18 +496,31 @@ export function AppSidebar() {
               </Empty>
             </SidebarGroupContent>
           ) : (
-            <SidebarMenu>
-              {order.map((projectId) => (
-                <ProjectItem
-                  key={projectId}
-                  id={projectId}
-                  name={projectName(projectId)}
-                  sessions={grouped.get(projectId)!}
-                  selectedTarget={selectedTarget}
-                />
-              ))}
-            </SidebarMenu>
+            <SidebarMenu>{withAgents.map(renderProject)}</SidebarMenu>
           )}
+        </SidebarGroup>
+
+        {withoutAgents.length > 0 ? (
+          // Mirrors the TUI's "Projects with no agents" separator: agent-less
+          // projects sink below the active ones under their own heading.
+          <SidebarGroup>
+            <SidebarGroupLabel>Projects with no agents</SidebarGroupLabel>
+            <SidebarMenu>{withoutAgents.map(renderProject)}</SidebarMenu>
+          </SidebarGroup>
+        ) : null}
+
+        <SidebarGroup>
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                onClick={openAddProject}
+                className="text-sidebar-foreground/70"
+              >
+                <Plus />
+                Add project
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
         </SidebarGroup>
       </SidebarContent>
 
