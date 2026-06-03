@@ -108,13 +108,36 @@ socket.onConn = (conn) => {
   setState({ conn })
 }
 
+// Show a toast colored by the engine's StatusTone. dux uses Info for positive
+// confirmations ("X succeeded"), so Info maps to a success toast; Busy is a
+// neutral in-progress notice; Warning/Error map directly. Shared by the
+// synchronous command-result path and the async status stream so a "busy"
+// result is never shown as a green success.
+function toastForTone(tone: string, message: string): void {
+  switch (tone) {
+    case "error":
+      toast.error(message)
+      break
+    case "warning":
+      toast.warning(message)
+      break
+    case "busy":
+      toast.info(message)
+      break
+    default:
+      // "info" (and any unknown tone) is a positive confirmation.
+      toast.success(message)
+      break
+  }
+}
+
 socket.onCommandResult = (status, error) => {
   if (error) {
     setState({ lastMessage: error })
     toast.error(error)
   } else if (status) {
     setState({ lastMessage: status.message })
-    toast.success(status.message)
+    toastForTone(status.tone, status.message)
   }
 }
 
@@ -128,18 +151,7 @@ socket.onError = (message) => {
 // engine's StatusTone and keep the latest in the status bar.
 socket.onStatus = (tone, message) => {
   setState({ lastMessage: message })
-  switch (tone) {
-    case "error":
-      toast.error(message)
-      break
-    case "warning":
-      toast.warning(message)
-      break
-    default:
-      // "info" and "busy" are both non-alarming progress notices.
-      toast.info(message)
-      break
-  }
+  toastForTone(tone, message)
 }
 
 // A freshly created terminal auto-focuses so the user lands on it immediately.
