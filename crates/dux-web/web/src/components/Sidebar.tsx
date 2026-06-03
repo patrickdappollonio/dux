@@ -483,9 +483,16 @@ export function AppSidebar() {
   const sessions = viewModel?.sessions ?? []
   const projects = viewModel?.projects ?? []
 
-  // Group sessions by their owning project, preserving first-seen order.
+  // Show EVERY project — including freshly-added ones with no agents yet — in
+  // the ViewModel's project order, then group sessions under them. (A session
+  // whose project is somehow absent is appended under its own id so it's never
+  // dropped.)
   const order: string[] = []
   const grouped = new Map<string, SessionView[]>()
+  for (const project of projects) {
+    grouped.set(project.id, [])
+    order.push(project.id)
+  }
   for (const session of sessions) {
     let bucket = grouped.get(session.project_id)
     if (!bucket) {
@@ -534,9 +541,9 @@ export function AppSidebar() {
                   <EmptyMedia variant="icon">
                     <FolderOpen />
                   </EmptyMedia>
-                  <EmptyTitle>No sessions</EmptyTitle>
+                  <EmptyTitle>No projects</EmptyTitle>
                   <EmptyDescription>
-                    Create an agent in the dux TUI to see it here.
+                    Add a project to get started.
                   </EmptyDescription>
                 </EmptyHeader>
               </Empty>
