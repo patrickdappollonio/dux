@@ -23,6 +23,7 @@ pub enum WireCommand {
     CommitChanges { session_id: String, message: String },
     Push { session_id: String },
     ToggleAgentAutoReopen { session_id: String, enabled: bool },
+    DeleteTerminal { terminal_id: String },
 }
 
 /// A status-line update in wire-safe form.
@@ -67,6 +68,10 @@ fn wire_status_from_reaction(reaction: &EventReaction) -> Option<WireStatus> {
     match reaction {
         EventReaction::Status(update) => Some(WireStatus::from_update(update)),
         EventReaction::Multi(items) => items.iter().find_map(wire_status_from_reaction),
+        EventReaction::DeleteTerminalView(view) => view
+            .label
+            .as_ref()
+            .map(|l| WireStatus::new("info", format!("Closed terminal \"{l}\"."))),
         _ => None,
     }
 }
@@ -107,6 +112,12 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
             )],
             AgentLaunchFailedOutcome::ResumeFallback => vec![],
         },
+        EventReaction::DeleteTerminalView(view) => view
+            .label
+            .as_ref()
+            .map(|l| WireStatus::new("info", format!("Closed terminal \"{l}\".")))
+            .into_iter()
+            .collect(),
         _ => vec![],
     }
 }
@@ -159,6 +170,7 @@ impl Engine {
                     new_enabled: enabled,
                 }
             }
+            WireCommand::DeleteTerminal { terminal_id } => Command::DeleteTerminal { terminal_id },
         })
     }
 
@@ -175,6 +187,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::DeleteTerminalView;
     use crate::engine::test_support::{sample_session, test_engine};
     use std::path::Path;
 
@@ -189,6 +202,30 @@ mod tests {
                 path: "a.txt".to_string()
             }
         );
+    }
+
+    #[test]
+    fn wire_delete_terminal_deserializes() {
+        let json = r#"{"command":"delete_terminal","args":{"terminal_id":"term-1"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::DeleteTerminal {
+                terminal_id: "term-1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn wire_statuses_reports_closed_terminal() {
+        let r = EventReaction::DeleteTerminalView(Box::new(DeleteTerminalView {
+            terminal_id: "term-1".to_string(),
+            label: Some("Terminal 1".to_string()),
+        }));
+        let s = wire_statuses_from_reaction(&r);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].tone, "info");
+        assert!(s[0].message.contains("Closed terminal \"Terminal 1\""));
     }
 
     #[test]

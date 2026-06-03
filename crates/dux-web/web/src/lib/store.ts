@@ -179,6 +179,13 @@ export function createTerminal(sessionId: string): void {
   socket.createTerminal(sessionId)
 }
 
+// Ask the server to close (delete) a companion terminal. It is removed from the
+// ViewModel; if it was the focused target, the selection clears via the
+// ViewModel-prune in `onViewModel`.
+export function deleteTerminal(terminalId: string): void {
+  socket.sendCommand("delete_terminal", { terminal_id: terminalId })
+}
+
 export function openCommit(sessionId: string): void {
   setState({ commitTarget: sessionId })
 }

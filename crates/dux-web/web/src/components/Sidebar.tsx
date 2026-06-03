@@ -13,6 +13,7 @@ import {
   Terminal,
   Wifi,
   WifiOff,
+  X,
 } from "lucide-react"
 import type * as React from "react"
 
@@ -64,6 +65,7 @@ import {
 import { useSidebar } from "@/components/ui/sidebar"
 import {
   createTerminal,
+  deleteTerminal,
   openCommit,
   selectSession,
   selectTerminal,
@@ -113,13 +115,39 @@ function TerminalSubItem({
 }) {
   return (
     <SidebarMenuSubItem>
-      <SidebarMenuSubButton
-        isActive={active}
-        onClick={() => selectTerminal(terminal.id, sessionId)}
+      <ContextMenu>
+        <ContextMenuTrigger
+          render={
+            <SidebarMenuSubButton
+              isActive={active}
+              className="pr-8"
+              onClick={() => selectTerminal(terminal.id, sessionId)}
+            />
+          }
+        >
+          <SquareTerminal />
+          <span className="flex-1 truncate">{terminal.label}</span>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem
+            className="cursor-pointer text-destructive"
+            onClick={() => deleteTerminal(terminal.id)}
+          >
+            Close terminal
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
+      <SidebarMenuAction
+        showOnHover
+        title="Close terminal"
+        aria-label="Close terminal"
+        onClick={(event) => {
+          event.stopPropagation()
+          deleteTerminal(terminal.id)
+        }}
       >
-        <SquareTerminal />
-        <span className="flex-1 truncate">{terminal.label}</span>
-      </SidebarMenuSubButton>
+        <X />
+      </SidebarMenuAction>
     </SidebarMenuSubItem>
   )
 }
