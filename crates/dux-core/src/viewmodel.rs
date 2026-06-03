@@ -15,6 +15,10 @@ pub struct ViewModel {
     pub projects: Vec<ProjectView>,
     pub sessions: Vec<SessionView>,
     pub changed_files: ChangedFilesView,
+    /// Global environment variables from `[env]` in `config.toml`, applied to
+    /// every spawned provider/terminal. Surfaced so a client can pre-fill an
+    /// edit dialog.
+    pub global_env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -195,6 +199,7 @@ impl Engine {
                     .map(ChangedFileView::from_file)
                     .collect(),
             },
+            global_env: self.config.env.clone(),
         }
     }
 }
@@ -360,6 +365,19 @@ mod tests {
         }
 
         assert!(became_ready, "session should become ready after output");
+    }
+
+    #[test]
+    fn global_env_is_projected() {
+        let (mut engine, _tmp) = test_engine();
+        engine
+            .config
+            .env
+            .insert("FOO".to_string(), "bar".to_string());
+
+        let vm = engine.view_model();
+
+        assert_eq!(vm.global_env.get("FOO").map(String::as_str), Some("bar"));
     }
 
     #[test]

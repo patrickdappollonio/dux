@@ -5,6 +5,7 @@
 //! wire-safe `WireCommandOutcome` (the full `EventReaction` is engine-internal
 //! and view-coupled; web clients re-fetch `view_model()` for fresh state).
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -50,6 +51,9 @@ pub enum WireCommand {
     DeleteSession {
         session_id: String,
         delete_worktree: bool,
+    },
+    PersistGlobalEnv {
+        env: BTreeMap<String, String>,
     },
 }
 
@@ -310,6 +314,7 @@ impl Engine {
                 session_id,
                 delete_worktree,
             },
+            WireCommand::PersistGlobalEnv { env } => Command::PersistGlobalEnv { env },
         })
     }
 
@@ -471,6 +476,18 @@ mod tests {
                 delete_worktree: true,
             }
         );
+    }
+
+    #[test]
+    fn wire_persist_global_env_deserializes() {
+        let json = r#"{"command":"persist_global_env","args":{"env":{"FOO":"bar"}}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        match cmd {
+            WireCommand::PersistGlobalEnv { env } => {
+                assert_eq!(env.get("FOO").map(String::as_str), Some("bar"));
+            }
+            _ => panic!("expected WireCommand::PersistGlobalEnv variant"),
+        }
     }
 
     #[test]

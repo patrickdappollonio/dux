@@ -19,38 +19,53 @@ use dux_core::model::GhStatus;
 use dux_core::storage::SessionStore;
 use dux_core::worker::WorkerEvent;
 
-/// Config saver for the web surface. Plan 2 skeleton: no-op persistence, echoing
-/// completion events so the worker pipeline stays uniform. (Copied from the proven
-/// smoke-test stub.)
+/// Config saver for the web surface. Persists `config.toml` through the shared
+/// `dux_core::config_write` writer (which patches an existing file in place to
+/// preserve comments, or writes a plain serialization when none exists), and
+/// reloads by re-reading the real on-disk config. Each call runs on its own
+/// thread and reports completion through the worker pipeline, mirroring the
+/// TUI's `TuiConfigSaver`.
 pub struct WebConfigSaver;
 
 impl ConfigSaver for WebConfigSaver {
     fn persist_global_env(
         &self,
         env: BTreeMap<String, String>,
-        _config: Config,
-        _config_path: PathBuf,
+        config: Config,
+        config_path: PathBuf,
         worker_tx: mpsc::Sender<WorkerEvent>,
     ) {
-        let _ = worker_tx.send(WorkerEvent::GlobalEnvPersistenceCompleted {
-            env,
-            result: Ok(()),
+        std::thread::spawn(move || {
+            // `config` already carries the new env (the engine set it before calling).
+            let result = dux_core::config_write::save_config(&config_path, &config)
+                .map_err(|err| format!("{err:#}"));
+            let _ = worker_tx.send(WorkerEvent::GlobalEnvPersistenceCompleted { env, result });
         });
     }
 
-    fn reload_config(&self, _paths: DuxPaths, worker_tx: mpsc::Sender<WorkerEvent>) {
-        let _ = worker_tx.send(WorkerEvent::ConfigReloadReady(Box::new(Ok(
-            Config::default(),
-        ))));
+    fn reload_config(&self, paths: DuxPaths, worker_tx: mpsc::Sender<WorkerEvent>) {
+        std::thread::spawn(move || {
+            // Re-read config from disk (read-only load — same as bootstrap). Returns the
+            // REAL config, not Config::default(). (Applying it to the running engine is a
+            // later slice; this at least surfaces the true on-disk config.)
+            let config = dux_core::config::load_config(&paths);
+            let _ = worker_tx.send(WorkerEvent::ConfigReloadReady(Box::new(Ok(config))));
+        });
     }
 
     fn recover_config(
         &self,
-        _config_path: PathBuf,
-        _config: Config,
+        config_path: PathBuf,
+        config: Config,
         worker_tx: mpsc::Sender<WorkerEvent>,
     ) {
-        let _ = worker_tx.send(WorkerEvent::ConfigRecoverCompleted(Ok(())));
+        std::thread::spawn(move || {
+            // The web has no canonical commented renderer (that needs the TUI's
+            // RuntimeBindings); write a valid plain serialization via the shared writer.
+            let result = dux_core::config_write::save_config(&config_path, &config)
+                .map_err(|err| format!("failed to write {}: {err}", config_path.display()));
+            let _ = worker_tx.send(WorkerEvent::ConfigRecoverCompleted(result));
+        });
     }
 }
 
@@ -121,6 +136,41 @@ mod tests {
         };
         std::fs::create_dir_all(&paths.worktrees_root).expect("worktrees dir");
         (tmp, paths)
+    }
+
+    #[test]
+    fn web_config_saver_persists_global_env() {
+        use std::time::Duration;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.toml");
+        // Existing file with a user comment so the in-place patch path runs and
+        // comment preservation is meaningful.
+        std::fs::write(&config_path, "# user comment\n").expect("seed config");
+
+        let mut config = Config::default();
+        config.env.insert("FOO".to_string(), "bar".to_string());
+
+        let (tx, rx) = mpsc::channel();
+        WebConfigSaver.persist_global_env(config.env.clone(), config, config_path.clone(), tx);
+
+        let event = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("completion event");
+        match event {
+            WorkerEvent::GlobalEnvPersistenceCompleted { result, .. } => {
+                assert!(result.is_ok(), "persist failed: {result:?}");
+            }
+            _ => panic!("expected GlobalEnvPersistenceCompleted event"),
+        }
+
+        let written = std::fs::read_to_string(&config_path).expect("read back config");
+        assert!(written.contains("FOO"), "env key missing: {written}");
+        assert!(written.contains("bar"), "env value missing: {written}");
+        assert!(
+            written.contains("# user comment"),
+            "user comment should survive in-place patch: {written}"
+        );
     }
 
     #[test]
