@@ -50,8 +50,10 @@ export interface DuxState {
 }
 
 // The expanded sidebar width is drag-resizable and persisted across reloads.
+// 18rem gives agent names breathing room next to the PR/status badges; a
+// previously persisted width still wins.
 const SIDEBAR_WIDTH_KEY = "dux:sidebar-width"
-const DEFAULT_SIDEBAR_WIDTH = "16rem"
+const DEFAULT_SIDEBAR_WIDTH = "18rem"
 
 function loadSidebarWidth(): string {
   return localStorage.getItem(SIDEBAR_WIDTH_KEY) || DEFAULT_SIDEBAR_WIDTH

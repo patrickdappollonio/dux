@@ -1,6 +1,12 @@
 import { Circle, CirclePause } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 import type { SessionStatus } from "@/lib/types"
 
 // Meaningful status color + icon, mirroring the dux TUI (active=green/●,
@@ -30,8 +36,34 @@ const STATUS: Record<
   },
 }
 
-export function StatusBadge({ status }: { status: SessionStatus }) {
+export function StatusBadge({
+  status,
+  iconOnly = false,
+}: {
+  status: SessionStatus
+  // Compact mode for tight rows (the sidebar): show just the colored icon and
+  // reveal the label in a tooltip on hover, so long agent names keep their room.
+  iconOnly?: boolean
+}) {
   const s = STATUS[status]
+
+  if (iconOnly) {
+    return (
+      <TooltipProvider delay={300}>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Badge className={`${s.className} px-1.5`} aria-label={s.label} />
+            }
+          >
+            <s.Icon className={`size-2.5 ${s.fill ? "fill-current" : ""}`} />
+          </TooltipTrigger>
+          <TooltipContent side="right">{s.label}</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    )
+  }
+
   return (
     <Badge className={s.className}>
       <s.Icon

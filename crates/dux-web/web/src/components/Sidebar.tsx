@@ -221,7 +221,7 @@ function SessionSubItem({
                 }
               />
             ) : null}
-            <StatusBadge status={session.status} />
+            <StatusBadge status={session.status} iconOnly />
           </span>
         </ContextMenuTrigger>
         <ContextMenuContent>
