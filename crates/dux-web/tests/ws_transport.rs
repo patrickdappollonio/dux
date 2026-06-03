@@ -294,6 +294,41 @@ async fn client_can_apply_a_command() {
     assert!(saw_toggle, "toggle not reflected in view_model");
 }
 
+/// A web client can pull latest changes for a session's worktree with the
+/// `pull` command. The pull runs in a background worker, which posts a Busy
+/// "Pulling…" status that the engine actor broadcasts on the status stream
+/// (the synchronous `command_result` carries no status for worker-spawning
+/// commands). The background pull itself fails here (the boot worktree has no
+/// remote), but the busy status is what we assert reaches the client.
+#[tokio::test]
+async fn pull_returns_busy_status() {
+    let (addr, _tmp) = boot().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let _ = ws.next().await; // initial view_model
+
+    ws.send(Message::Text(
+        r#"{"type":"command","command":"pull","args":{"session_id":"s1"}}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    let mut found = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline && !found {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && (t.contains("\"type\":\"command_result\"") || t.contains("\"type\":\"status\""))
+            && t.contains("Pulling")
+        {
+            found = true;
+        }
+    }
+
+    assert!(found, "never received a Pulling busy status");
+}
+
 #[tokio::test]
 async fn client_streams_pty_bytes() {
     let (addr, _tmp) = boot().await;

@@ -14,6 +14,7 @@ use crate::engine::{
     FinishDeleteSessionOutcome, StatusUpdate, WorktreeRemoval,
 };
 use crate::statusline::StatusTone;
+use crate::worker::PullTarget;
 
 /// A command as received from a generic transport (e.g. the web WebSocket).
 /// `#[serde(tag = "command", content = "args")]` matches the `{ "command": "...",
@@ -34,6 +35,9 @@ pub enum WireCommand {
         message: String,
     },
     Push {
+        session_id: String,
+    },
+    Pull {
         session_id: String,
     },
     ToggleAgentAutoReopen {
@@ -273,6 +277,14 @@ impl Engine {
             WireCommand::Push { session_id } => Command::Push {
                 worktree_path: self.session_worktree(&session_id)?,
             },
+            WireCommand::Pull { session_id } => Command::Pull {
+                repo_path: self.session_worktree(&session_id)?,
+                target: PullTarget::Session,
+                busy_message: "Pulling latest changes from remote\u{2026}".to_string(),
+                already_running_message:
+                    "Pull already in progress for this worktree. Wait for the current pull to finish."
+                        .to_string(),
+            },
             WireCommand::ToggleAgentAutoReopen {
                 session_id,
                 enabled,
@@ -374,6 +386,39 @@ mod tests {
                 assert_eq!(path, "a.txt");
             }
             _ => panic!("expected Command::StageFile variant"),
+        }
+    }
+
+    #[test]
+    fn wire_pull_deserializes() {
+        let json = r#"{"command":"pull","args":{"session_id":"s1"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::Pull {
+                session_id: "s1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn wire_to_command_pull_resolves_worktree() {
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        let cmd = engine
+            .wire_to_command(WireCommand::Pull {
+                session_id: "s1".to_string(),
+            })
+            .expect("reconstruct");
+        match cmd {
+            Command::Pull {
+                repo_path,
+                target: PullTarget::Session,
+                ..
+            } => {
+                assert_eq!(repo_path, Path::new("/tmp/s1-worktree"));
+            }
+            _ => panic!("expected Command::Pull variant with Session target"),
         }
     }
 

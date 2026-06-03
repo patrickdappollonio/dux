@@ -182,6 +182,13 @@ export function ChangedFiles() {
             >
               Push
             </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => socket.sendCommand("pull", { session_id: selectedSessionId })}
+            >
+              Pull
+            </Button>
           </CardAction>
         </CardHeader>
 

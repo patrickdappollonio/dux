@@ -1,6 +1,7 @@
 import {
   Bot,
   ChevronRight,
+  Download,
   Ellipsis,
   Folder,
   FolderOpen,
@@ -166,6 +167,10 @@ function SessionSubItem({
     socket.sendCommand("push", { session_id: session.id })
   }
 
+  function handlePull() {
+    socket.sendCommand("pull", { session_id: session.id })
+  }
+
   return (
     <SidebarMenuSubItem>
       <ContextMenu>
@@ -230,6 +235,9 @@ function SessionSubItem({
           <ContextMenuItem className="cursor-pointer" onClick={handlePush}>
             Push
           </ContextMenuItem>
+          <ContextMenuItem className="cursor-pointer" onClick={handlePull}>
+            Pull
+          </ContextMenuItem>
           <ContextMenuItem
             className="cursor-pointer"
             onClick={() => openCommit(session.id)}
@@ -287,6 +295,10 @@ function SessionSubItem({
             <DropdownMenuItem onClick={handlePush}>
               <Send />
               Push
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={handlePull}>
+              <Download />
+              Pull
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => openCommit(session.id)}>
               <GitCommitHorizontal />
