@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react"
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
+import { Maximize2, Minimize2 } from "lucide-react"
+import { Button } from "@/components/ui/button"
 import { socket, useDux } from "@/lib/store"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 
@@ -12,8 +14,32 @@ interface TerminalPaneProps {
   id: string
 }
 
+// The Keyboard Lock API (Chromium-only): while the pane is fullscreen it lets
+// the page receive browser-reserved shortcuts like Ctrl+T / Ctrl+W so they
+// reach the agent instead of opening tabs. Elsewhere these helpers no-op and
+// fullscreen still works — just without the reserved keys.
+type KeyboardLockNavigator = Navigator & {
+  keyboard?: {
+    lock?: (keys?: string[]) => Promise<void>
+    unlock?: () => void
+  }
+}
+
+function lockKeyboard(): void {
+  const keyboard = (navigator as KeyboardLockNavigator).keyboard
+  void keyboard?.lock?.().catch(() => {})
+}
+
+function unlockKeyboard(): void {
+  const keyboard = (navigator as KeyboardLockNavigator).keyboard
+  keyboard?.unlock?.()
+}
+
 export function TerminalPane({ kind, id }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const wrapperRef = useRef<HTMLDivElement>(null)
+  const termRef = useRef<Terminal | null>(null)
+  const [isFullscreen, setIsFullscreen] = useState(false)
 
   const { viewModel } = useDux()
   const session =
@@ -77,6 +103,7 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
     term.loadAddon(fit)
     term.open(container)
     fit.fit()
+    termRef.current = term
 
     // Feed live PTY bytes into the terminal.
     socket.onPtyBytes = (bytes) => term.write(bytes)
@@ -124,17 +151,70 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
       ro.disconnect()
       dataSub.dispose()
       socket.onPtyBytes = () => {}
+      termRef.current = null
       term.dispose()
     }
   }, [kind, id])
+
+  // Track fullscreen state for this pane and release the keyboard lock the
+  // moment fullscreen ends, however it ends (button, held Esc, tab switch).
+  useEffect(() => {
+    function handleFullscreenChange() {
+      const active = document.fullscreenElement === wrapperRef.current
+      setIsFullscreen(active)
+      if (!active) {
+        unlockKeyboard()
+      }
+    }
+    document.addEventListener("fullscreenchange", handleFullscreenChange)
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange)
+      unlockKeyboard()
+    }
+  }, [])
+
+  async function toggleFullscreen() {
+    const wrapper = wrapperRef.current
+    if (!wrapper) return
+    if (document.fullscreenElement === wrapper) {
+      await document.exitFullscreen().catch(() => {})
+    } else {
+      try {
+        await wrapper.requestFullscreen()
+        // Only meaningful while fullscreen; held-Esc exits, single Esc presses
+        // flow to the agent.
+        lockKeyboard()
+      } catch {
+        // Fullscreen request denied — leave the pane embedded.
+      }
+    }
+    termRef.current?.focus()
+  }
 
   // The host div owns the padding so the resolved bg fills the padding area
   // seamlessly — no external "border" look. FitAddon measures the content box.
   // The wrapper is `relative` so the readiness spinner can overlay the host
   // until the PTY emits its first output (latched via `everReady`).
   return (
-    <div className="relative h-full w-full">
+    <div ref={wrapperRef} className="group relative h-full w-full bg-background">
       <div ref={containerRef} className="h-full w-full p-2" />
+      {/* Fullscreen toggle: embedded mode already forwards every key the
+          browser will give a page; fullscreen + keyboard lock additionally
+          captures reserved shortcuts (Ctrl+T, Ctrl+W, …) on Chromium. */}
+      <Button
+        variant="secondary"
+        size="icon"
+        onClick={() => void toggleFullscreen()}
+        title={
+          isFullscreen
+            ? "Exit fullscreen (hold Esc also works)"
+            : "Fullscreen — captures browser-reserved shortcuts like Ctrl+T"
+        }
+        aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+        className="absolute top-3 right-3 z-10 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
+      >
+        {isFullscreen ? <Minimize2 /> : <Maximize2 />}
+      </Button>
       {!everReady ? (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <div className="flex items-center gap-2 rounded-lg border bg-card px-4 py-3 text-card-foreground">
