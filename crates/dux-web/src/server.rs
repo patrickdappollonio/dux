@@ -54,6 +54,30 @@ async fn handle_socket(socket: WebSocket, engine: EngineHandle) {
         });
     }
 
+    // Forward engine status/lifecycle events (background completions, launch
+    // failures, PTY exits) to this client.
+    {
+        let sink = Arc::clone(&sink);
+        let mut status_rx = engine.subscribe_status();
+        tokio::spawn(async move {
+            loop {
+                match status_rx.recv().await {
+                    Ok(status) => {
+                        let msg = ServerMessage::Status {
+                            tone: status.tone,
+                            message: status.message,
+                        };
+                        if send_json(&sink, &msg).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
     let mut subscribed: Option<String> = None;
     // Exactly one live PTY forwarder per connection. Re-subscribing aborts the previous one so a
     // single PtyClient's output is never streamed to the same socket twice (which doubled echoed

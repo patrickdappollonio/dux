@@ -377,3 +377,59 @@ async fn exited_terminal_is_pruned_from_view_model() {
         "view_model still contained terminal id {terminal_id} after it exited"
     );
 }
+
+/// When a companion terminal's child exits, the engine prunes it on the next
+/// tick and broadcasts a status event. Confirm a `status` message reaches the
+/// client carrying the terminal-closed notice.
+#[tokio::test]
+async fn exited_terminal_emits_status() {
+    let (addr, _tmp) = boot().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let _ = ws.next().await; // initial view_model
+
+    ws.send(Message::Text(
+        r#"{"type":"create_terminal","session_id":"s1"}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    // Read until the terminal_created message arrives, extracting the terminal_id.
+    let mut terminal_id = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline && terminal_id.is_empty() {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"type\":\"terminal_created\"")
+        {
+            let v: serde_json::Value = serde_json::from_str(&t).expect("parse terminal_created");
+            terminal_id = v["terminal_id"].as_str().expect("terminal_id").to_string();
+        }
+    }
+    assert!(!terminal_id.is_empty(), "never received terminal_created");
+
+    ws.send(Message::Text(format!(
+        r#"{{"type":"subscribe_terminal","terminal_id":"{terminal_id}"}}"#
+    )))
+    .await
+    .unwrap();
+
+    // Ctrl-D (EOF) makes the `cat` companion terminal exit; the next tick prunes
+    // it and broadcasts a terminal-closed status event.
+    ws.send(Message::Binary(b"\x04".to_vec())).await.unwrap();
+
+    let mut found = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    while tokio::time::Instant::now() < deadline && !found {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"type\":\"status\"")
+            && t.contains("closed")
+        {
+            found = true;
+        }
+    }
+
+    assert!(found, "never received a terminal-closed status event");
+}

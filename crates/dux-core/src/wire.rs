@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::{Command, Engine, EventReaction, StatusUpdate};
+use crate::engine::{AgentLaunchFailedOutcome, Command, Engine, EventReaction, StatusUpdate};
 use crate::statusline::StatusTone;
 
 /// A command as received from a generic transport (e.g. the web WebSocket).
@@ -34,6 +34,14 @@ pub struct WireStatus {
 }
 
 impl WireStatus {
+    /// Construct a wire status directly (for non-reaction sources like PTY-exit notices).
+    pub fn new(tone: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            tone: tone.into(),
+            message: message.into(),
+        }
+    }
+
     fn from_update(update: &StatusUpdate) -> Self {
         let tone = match update.tone {
             StatusTone::Info => "info",
@@ -60,6 +68,46 @@ fn wire_status_from_reaction(reaction: &EventReaction) -> Option<WireStatus> {
         EventReaction::Status(update) => Some(WireStatus::from_update(update)),
         EventReaction::Multi(items) => items.iter().find_map(wire_status_from_reaction),
         _ => None,
+    }
+}
+
+/// Map an `EventReaction` to the user-facing status events it should emit on the
+/// async status stream. Unlike `wire_status_from_reaction` (single value, for a
+/// command's synchronous result), this flattens `Multi` and surfaces launch
+/// failures, so background completions and failures reach web clients. The
+/// messages mirror the TUI's `apply_agent_launch_failed_view` wording.
+pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> {
+    match reaction {
+        EventReaction::Status(update) => vec![WireStatus::from_update(update)],
+        EventReaction::Multi(items) => items.iter().flat_map(wire_statuses_from_reaction).collect(),
+        EventReaction::AgentLaunchFailedView(outcome) => match outcome.as_ref() {
+            AgentLaunchFailedOutcome::Create { message } => {
+                vec![WireStatus::new("error", message.clone())]
+            }
+            AgentLaunchFailedOutcome::Reconnect {
+                branch_name,
+                message,
+            } => vec![WireStatus::new(
+                "error",
+                format!("Reconnect failed for agent \"{branch_name}\": {message}"),
+            )],
+            AgentLaunchFailedOutcome::ForceReconnect {
+                branch_name,
+                message,
+            } => vec![WireStatus::new(
+                "error",
+                format!("Fresh restart failed for agent \"{branch_name}\": {message}"),
+            )],
+            AgentLaunchFailedOutcome::StartupAutoReopen {
+                branch_name,
+                message,
+            } => vec![WireStatus::new(
+                "warning",
+                format!("Couldn't auto-reopen agent \"{branch_name}\": {message}"),
+            )],
+            AgentLaunchFailedOutcome::ResumeFallback => vec![],
+        },
+        _ => vec![],
     }
 }
 
@@ -200,6 +248,49 @@ mod tests {
         run(&["config", "user.name", "t"]);
         std::fs::write(dir.path().join("a.txt"), "hello\n").expect("write file");
         dir
+    }
+
+    #[test]
+    fn wire_statuses_passes_through_status() {
+        let r = EventReaction::Status(StatusUpdate::error("boom"));
+        let s = wire_statuses_from_reaction(&r);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].tone, "error");
+        assert_eq!(s[0].message, "boom");
+    }
+
+    #[test]
+    fn wire_statuses_formats_launch_failure() {
+        let r =
+            EventReaction::AgentLaunchFailedView(Box::new(AgentLaunchFailedOutcome::Reconnect {
+                branch_name: "feat".to_string(),
+                message: "nope".to_string(),
+            }));
+        let s = wire_statuses_from_reaction(&r);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].tone, "error");
+        assert!(
+            s[0].message
+                .contains("Reconnect failed for agent \"feat\": nope")
+        );
+    }
+
+    #[test]
+    fn wire_statuses_resume_fallback_is_silent() {
+        let r = EventReaction::AgentLaunchFailedView(Box::new(
+            AgentLaunchFailedOutcome::ResumeFallback,
+        ));
+        assert!(wire_statuses_from_reaction(&r).is_empty());
+    }
+
+    #[test]
+    fn wire_statuses_flattens_multi() {
+        let r = EventReaction::Multi(vec![
+            EventReaction::Status(StatusUpdate::info("a")),
+            EventReaction::Nothing,
+            EventReaction::Status(StatusUpdate::busy("b")),
+        ]);
+        assert_eq!(wire_statuses_from_reaction(&r).len(), 2);
     }
 
     #[test]

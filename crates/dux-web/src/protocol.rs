@@ -51,6 +51,10 @@ pub enum ServerMessage {
     },
     /// An error not tied to a specific command.
     Error { message: String },
+    /// An asynchronous status/lifecycle event not tied to a specific command:
+    /// a background push/pull completing, an agent launch failing, or a PTY
+    /// exiting. Same tone+message shape as a command result's status.
+    Status { tone: String, message: String },
 }
 
 #[cfg(test)]

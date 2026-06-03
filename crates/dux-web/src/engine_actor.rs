@@ -7,11 +7,11 @@
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use dux_core::engine::{Command, Engine, InFlightKey};
+use dux_core::engine::{Command, Engine, InFlightKey, PrunedPtyKind};
 use dux_core::pty::PtyClient;
-use dux_core::wire::{WireCommand, WireCommandOutcome};
+use dux_core::wire::{WireCommand, WireCommandOutcome, WireStatus};
 use dux_core::worker::AgentLaunchKind;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 /// A PTY subscription: an initial repaint snapshot plus the live byte stream the caller
 /// forwards. (PTY bytes never travel through the request channel.)
@@ -63,6 +63,7 @@ struct PendingSubscribe {
 pub struct EngineHandle {
     req_tx: mpsc::UnboundedSender<EngineRequest>,
     view_model_rx: watch::Receiver<String>,
+    status_tx: broadcast::Sender<WireStatus>,
 }
 
 // Axum state must be `Send + Sync`; prove the handle satisfies that here so a future
@@ -80,6 +81,10 @@ impl EngineHandle {
 
     pub fn subscribe_view_model(&self) -> watch::Receiver<String> {
         self.view_model_rx.clone()
+    }
+
+    pub fn subscribe_status(&self) -> broadcast::Receiver<WireStatus> {
+        self.status_tx.subscribe()
     }
 
     pub async fn apply_wire(&self, command: WireCommand) -> Result<WireCommandOutcome, String> {
@@ -129,6 +134,8 @@ impl EngineHandle {
 pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>) {
     let (req_tx, mut req_rx) = mpsc::unbounded_channel::<EngineRequest>();
     let (vm_tx, vm_rx) = watch::channel(view_model_json(&engine));
+    let (status_tx, _status_rx) = broadcast::channel::<WireStatus>(256);
+    let thread_status_tx = status_tx.clone();
 
     engine.spawn_changed_files_poller();
     engine.spawn_branch_sync_worker();
@@ -142,13 +149,26 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
             // Draining worker events may insert a launched provider (AgentLaunchReady)
             // into `engine.providers`, which resolves pending subscribes below.
             while let Ok(event) = engine.worker_rx.try_recv() {
-                let _ = engine.process_worker_event(event);
+                let reaction = engine.process_worker_event(event);
+                for status in dux_core::wire::wire_statuses_from_reaction(&reaction) {
+                    let _ = thread_status_tx.send(status);
+                }
             }
 
             // Reap agent/terminal PTYs whose child process exited so they stop
             // lingering in `providers`/`companion_terminals` and disappear from
-            // the ViewModel. (Status broadcasting of these is added in a later slice.)
-            engine.prune_exited_ptys();
+            // the ViewModel, broadcasting a status for each so web clients learn.
+            for pruned in engine.prune_exited_ptys() {
+                let status = match pruned.kind {
+                    PrunedPtyKind::Agent => {
+                        WireStatus::new("warning", format!("Agent \"{}\" exited.", pruned.label))
+                    }
+                    PrunedPtyKind::Terminal => {
+                        WireStatus::new("info", format!("Terminal \"{}\" closed.", pruned.label))
+                    }
+                };
+                let _ = thread_status_tx.send(status);
+            }
 
             // Resolve or expire pending subscribes now that providers may have appeared.
             let now = Instant::now();
@@ -156,6 +176,17 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
                 if let Some(client) = engine.providers.get(&p.session_id) {
                     if let Some(reply) = p.reply.take() {
                         let _ = reply.send(Ok(client.subscribe_with_repaint()));
+                    }
+                    false
+                } else if !engine.is_in_flight(&InFlightKey::AgentLaunch(p.session_id.clone())) {
+                    // The launch worker finished but no provider came up: it failed.
+                    // Fail fast with a clear message instead of waiting for the timeout;
+                    // the specific error was already broadcast on the status stream.
+                    if let Some(reply) = p.reply.take() {
+                        let _ = reply.send(Err(format!(
+                            "Agent failed to launch for session {}. Check dux.log for details.",
+                            p.session_id
+                        )));
                     }
                     false
                 } else if now > p.deadline {
@@ -205,6 +236,7 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
         EngineHandle {
             req_tx,
             view_model_rx: vm_rx,
+            status_tx,
         },
         handle,
     )
