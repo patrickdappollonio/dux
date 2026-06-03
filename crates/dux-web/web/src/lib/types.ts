@@ -27,6 +27,7 @@ export interface PrView {
 export interface TerminalView {
   id: string
   label: string
+  has_output: boolean
 }
 
 export interface SessionView {
@@ -40,6 +41,7 @@ export interface SessionView {
   auto_reopen_enabled: boolean
   pr?: PrView
   terminals: TerminalView[]
+  has_output: boolean
 }
 
 export interface ChangedFileView {

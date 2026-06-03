@@ -1,8 +1,9 @@
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
-import { socket } from "@/lib/store"
+import { socket, useDux } from "@/lib/store"
+import { BrailleSpinner } from "@/components/BrailleSpinner"
 
 interface TerminalPaneProps {
   // The streamed target: an agent session or one of its companion terminals.
@@ -13,6 +14,25 @@ interface TerminalPaneProps {
 
 export function TerminalPane({ kind, id }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null)
+
+  const { viewModel } = useDux()
+  const session =
+    kind === "agent"
+      ? viewModel?.sessions.find((s) => s.id === id)
+      : viewModel?.sessions.find((s) => s.terminals.some((t) => t.id === id))
+  const hasOutput =
+    kind === "agent"
+      ? (session?.has_output ?? false)
+      : (session?.terminals.find((t) => t.id === id)?.has_output ?? false)
+  const providerName = session?.provider
+  // Latch readiness: once the PTY has emitted output we keep the spinner hidden,
+  // even if a later view model reports `has_output: false` (e.g. an exited
+  // agent). Adjusting state during render is the React-sanctioned latch pattern
+  // — the guard makes it run at most once, so it can't cascade.
+  const [everReady, setEverReady] = useState(false)
+  if (hasOutput && !everReady) {
+    setEverReady(true)
+  }
 
   useEffect(() => {
     const container = containerRef.current
@@ -92,5 +112,23 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
 
   // The host div owns the padding so the resolved bg fills the padding area
   // seamlessly — no external "border" look. FitAddon measures the content box.
-  return <div ref={containerRef} className="h-full w-full p-2" />
+  // The wrapper is `relative` so the readiness spinner can overlay the host
+  // until the PTY emits its first output (latched via `everReady`).
+  return (
+    <div className="relative h-full w-full">
+      <div ref={containerRef} className="h-full w-full p-2" />
+      {!everReady ? (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <div className="flex items-center gap-2 rounded-lg border bg-card px-4 py-3 text-card-foreground">
+            <BrailleSpinner className="text-primary" />
+            <span className="text-sm text-muted-foreground">
+              {kind === "agent"
+                ? `Starting ${providerName ?? "agent"}…`
+                : "Launching terminal…"}
+            </span>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
 }

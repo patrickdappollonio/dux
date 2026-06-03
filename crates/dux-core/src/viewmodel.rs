@@ -44,12 +44,17 @@ pub struct SessionView {
     pub pr: Option<PrView>,
     /// Companion terminals open for this session, sorted by `id` for stability.
     pub terminals: Vec<TerminalView>,
+    /// Whether the session's PTY has emitted any output yet. The web UI shows a
+    /// readiness spinner until this is true.
+    pub has_output: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TerminalView {
     pub id: String,
     pub label: String,
+    /// Whether the terminal's PTY has emitted any output yet.
+    pub has_output: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -96,7 +101,12 @@ impl ProjectView {
 }
 
 impl SessionView {
-    fn from_session(s: &AgentSession, pr: Option<&PrInfo>, terminals: Vec<TerminalView>) -> Self {
+    fn from_session(
+        s: &AgentSession,
+        pr: Option<&PrInfo>,
+        terminals: Vec<TerminalView>,
+        has_output: bool,
+    ) -> Self {
         Self {
             id: s.id.clone(),
             project_id: s.project_id.clone(),
@@ -108,6 +118,7 @@ impl SessionView {
             auto_reopen_enabled: s.auto_reopen_enabled,
             pr: pr.map(PrView::from_pr),
             terminals,
+            has_output,
         }
     }
 }
@@ -160,10 +171,16 @@ impl Engine {
                         .map(|(id, t)| TerminalView {
                             id: id.clone(),
                             label: t.label.clone(),
+                            has_output: t.client.has_output(),
                         })
                         .collect();
                     terminals.sort_by(|a, b| a.id.cmp(&b.id));
-                    SessionView::from_session(s, self.pr_statuses.get(&s.id), terminals)
+                    let has_output = self
+                        .providers
+                        .get(&s.id)
+                        .map(|p| p.has_output())
+                        .unwrap_or(false);
+                    SessionView::from_session(s, self.pr_statuses.get(&s.id), terminals, has_output)
                 })
                 .collect(),
             changed_files: ChangedFilesView {
@@ -280,6 +297,69 @@ mod tests {
         assert_eq!(terminals.len(), 1);
         assert_eq!(terminals[0].id, terminal_id);
         assert_eq!(terminals[0].label, label);
+    }
+
+    #[test]
+    fn session_without_provider_is_not_ready() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        engine.sessions.push(sample_session("s1", "p1", "feature"));
+
+        let vm = engine.view_model();
+
+        assert!(!vm.sessions[0].has_output);
+    }
+
+    #[test]
+    fn running_provider_marks_session_ready() {
+        use std::time::Duration;
+
+        let (mut engine, _tmp) = test_engine();
+
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feature");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+
+        // Spawn a real `cat` PTY as the session's provider. `cat` echoes input,
+        // so writing to it guarantees the child emits output we can latch on.
+        let client = crate::pty::PtyClient::spawn_with_env(
+            "cat",
+            &[],
+            worktree.path(),
+            24,
+            80,
+            engine.config.ui.agent_scrollback_lines,
+            &[],
+        )
+        .expect("spawn cat provider");
+        engine.providers.insert("s1".to_string(), client);
+
+        // Before any output, the session is not ready.
+        assert!(!engine.view_model().sessions[0].has_output);
+
+        engine
+            .providers
+            .get("s1")
+            .expect("provider exists")
+            .write_bytes(b"hello\n")
+            .expect("write to provider");
+
+        // Poll for up to ~2s while the reader thread processes the echo.
+        let mut became_ready = false;
+        for _ in 0..40 {
+            if engine.view_model().sessions[0].has_output {
+                became_ready = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        assert!(became_ready, "session should become ready after output");
     }
 
     #[test]
