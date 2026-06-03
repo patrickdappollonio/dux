@@ -28,6 +28,7 @@ export interface DuxState {
   selectedSessionId: string | null
   lastMessage: string
   commitTarget: string | null
+  commitDraft: string
   deleteTarget: string | null
   globalEnvOpen: boolean
   projectSettingsTarget: string | null
@@ -57,6 +58,7 @@ let state: DuxState = {
   selectedSessionId: null,
   lastMessage: "",
   commitTarget: null,
+  commitDraft: "",
   deleteTarget: null,
   globalEnvOpen: false,
   projectSettingsTarget: null,
@@ -171,6 +173,13 @@ socket.onTerminalCreated = (sessionId, terminalId) => {
   selectTerminal(terminalId, sessionId)
 }
 
+socket.onCommitMessage = (message) => {
+  // Fill the open commit dialog's draft with the generated message.
+  if (state.commitTarget !== null) {
+    setState({ commitDraft: message })
+  }
+}
+
 socket.onDiff = (sessionId, path, diff, error) => {
   // Ignore stale responses for a file the user already navigated away from.
   if (state.currentDiff?.path !== path || state.currentDiff?.sessionId !== sessionId) {
@@ -221,11 +230,19 @@ export function deleteTerminal(terminalId: string): void {
 }
 
 export function openCommit(sessionId: string): void {
-  setState({ commitTarget: sessionId })
+  setState({ commitTarget: sessionId, commitDraft: "" })
 }
 
 export function closeCommit(): void {
-  setState({ commitTarget: null })
+  setState({ commitTarget: null, commitDraft: "" })
+}
+
+export function setCommitDraft(text: string): void {
+  setState({ commitDraft: text })
+}
+
+export function generateCommitMessage(sessionId: string): void {
+  socket.sendCommand("generate_commit_message", { session_id: sessionId })
 }
 
 export function requestDiff(sessionId: string, path: string): void {

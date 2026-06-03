@@ -32,6 +32,7 @@ export class DuxSocket {
   onPtyBytes: (bytes: Uint8Array) => void = () => {}
   onTerminalCreated: (sessionId: string, terminalId: string) => void = () => {}
   onStatus: (tone: string, message: string) => void = () => {}
+  onCommitMessage: (message: string) => void = () => {}
   onDiff: (
     sessionId: string,
     path: string,
@@ -104,6 +105,9 @@ export class DuxSocket {
         break
       case "status":
         this.onStatus(message.tone, message.message)
+        break
+      case "commit_message":
+        this.onCommitMessage(message.message)
         break
       case "diff":
         this.onDiff(message.session_id, message.path, message.diff, message.error)

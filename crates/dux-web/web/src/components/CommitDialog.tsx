@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { Sparkles } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -8,28 +8,36 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Textarea } from "@/components/ui/textarea"
-import { closeCommit, socket, useDux } from "@/lib/store"
+import {
+  closeCommit,
+  generateCommitMessage,
+  setCommitDraft,
+  socket,
+  useDux,
+} from "@/lib/store"
 
 export function CommitDialog() {
-  const { commitTarget } = useDux()
-  const [message, setMessage] = useState("")
+  const { commitTarget, commitDraft, viewModel } = useDux()
 
   const isOpen = commitTarget !== null
+  const stagedCount = viewModel?.changed_files.staged.length ?? 0
 
   function handleCommit() {
-    if (!commitTarget || !message.trim()) return
-    socket.sendCommand("commit_changes", { session_id: commitTarget, message: message.trim() })
-    setMessage("")
+    if (!commitTarget || !commitDraft.trim()) return
+    socket.sendCommand("commit_changes", {
+      session_id: commitTarget,
+      message: commitDraft.trim(),
+    })
     closeCommit()
   }
 
-  function handleCancel() {
-    setMessage("")
-    closeCommit()
+  function handleGenerate() {
+    if (!commitTarget) return
+    generateCommitMessage(commitTarget)
   }
 
   function handleOpenChange(open: boolean) {
-    if (!open) handleCancel()
+    if (!open) closeCommit()
   }
 
   return (
@@ -40,8 +48,8 @@ export function CommitDialog() {
         </DialogHeader>
         <Textarea
           placeholder="Commit message…"
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
+          value={commitDraft}
+          onChange={(e) => setCommitDraft(e.target.value)}
           className="min-h-24 resize-none"
           autoFocus
           onKeyDown={(e) => {
@@ -51,13 +59,23 @@ export function CommitDialog() {
             }
           }}
         />
-        <DialogFooter>
-          <Button variant="outline" onClick={handleCancel}>
-            Cancel
+        <DialogFooter className="sm:justify-between">
+          <Button
+            variant="outline"
+            onClick={handleGenerate}
+            disabled={stagedCount === 0}
+          >
+            <Sparkles />
+            Generate with AI
           </Button>
-          <Button onClick={handleCommit} disabled={!message.trim()}>
-            Commit
-          </Button>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => closeCommit()}>
+              Cancel
+            </Button>
+            <Button onClick={handleCommit} disabled={!commitDraft.trim()}>
+              Commit
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>
