@@ -1,18 +1,9 @@
+import { StatusBadge } from "@/components/StatusBadge"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { GitPullRequest } from "lucide-react"
 import { reconnect, useDux } from "@/lib/store"
-import type { PrView, SessionStatus } from "@/lib/types"
-
-// Map a session status onto a Badge variant + label for the statusline.
-const STATUS_BADGE: Record<
-  SessionStatus,
-  { variant: "default" | "secondary" | "outline"; label: string }
-> = {
-  active: { variant: "default", label: "active" },
-  detached: { variant: "secondary", label: "detached" },
-  exited: { variant: "outline", label: "exited" },
-}
+import type { PrView } from "@/lib/types"
 
 // Colored PR badge matching GitHub/TUI semantics: green=open, purple=merged, red=closed.
 function prBadgeClass(state: PrView["state"]): string {
@@ -32,7 +23,6 @@ export function StatusBar() {
   const { viewModel, selectedSessionId, selectedTarget, lastMessage, conn } =
     useDux()
   const session = viewModel?.sessions.find((s) => s.id === selectedSessionId)
-  const status = session ? STATUS_BADGE[session.status] : null
   const focusLabel =
     selectedTarget?.kind === "terminal" ? "terminal" : "agent"
 
@@ -45,9 +35,7 @@ export function StatusBar() {
             <span className="truncate font-mono">
               {session.provider} · {session.branch_name}
             </span>
-            {status ? (
-              <Badge variant={status.variant}>{status.label}</Badge>
-            ) : null}
+            {session ? <StatusBadge status={session.status} /> : null}
             {session.pr ? (
               <Badge
                 className={prBadgeClass(session.pr.state)}

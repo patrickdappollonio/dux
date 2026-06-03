@@ -18,6 +18,7 @@ import {
 } from "lucide-react"
 import type * as React from "react"
 
+import { StatusBadge } from "@/components/StatusBadge"
 import { Badge } from "@/components/ui/badge"
 import {
   Empty,
@@ -79,21 +80,9 @@ import type { SelectedTarget } from "@/lib/store"
 import type {
   ConnState,
   PrView,
-  SessionStatus,
   SessionView,
   TerminalView,
 } from "@/lib/types"
-
-// Map a session status onto a Badge variant + label. Status is communicated as
-// a Badge, never as a colored dot.
-const STATUS_BADGE: Record<
-  SessionStatus,
-  { variant: "default" | "secondary" | "outline"; label: string }
-> = {
-  active: { variant: "default", label: "active" },
-  detached: { variant: "secondary", label: "detached" },
-  exited: { variant: "outline", label: "exited" },
-}
 
 // Return a className for PR badge coloring. This is the ONE intentional
 // semantic-color exception: GitHub PR states carry real-world meaning that
@@ -105,7 +94,8 @@ function prBadgeClass(state: PrView["state"]): string {
 }
 
 // A single companion terminal nested beneath its owning agent session. The
-// terminal glyph is reserved for terminals — agents use a provider icon.
+// terminal glyph is reserved for companion terminals; agents use a consistent
+// Bot icon (provider shown as text).
 function TerminalSubItem({
   terminal,
   sessionId,
@@ -161,7 +151,6 @@ function SessionSubItem({
   session: SessionView
   selectedTarget: SelectedTarget | null
 }) {
-  const status = STATUS_BADGE[session.status]
   const label = session.title || session.branch_name
   const agentSelected =
     selectedTarget?.kind === "agent" && selectedTarget.sessionId === session.id
@@ -221,7 +210,7 @@ function SessionSubItem({
                 }
               />
             ) : null}
-            <Badge variant={status.variant}>{status.label}</Badge>
+            <StatusBadge status={session.status} />
           </span>
         </ContextMenuTrigger>
         <ContextMenuContent>
