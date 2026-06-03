@@ -318,7 +318,9 @@ function SessionSubItem({
       </DropdownMenu>
 
       {session.terminals.length > 0 ? (
-        <SidebarMenuSub>
+        // mr-0/pr-0 drop the nested list's right inset (the left side is the
+        // tree indent) so terminal rows reach the same right edge as the rest.
+        <SidebarMenuSub className="mr-0 pr-0">
           {session.terminals.map((terminal) => (
             <TerminalSubItem
               key={terminal.id}
@@ -389,7 +391,9 @@ function ProjectItem({
           </DropdownMenuContent>
         </DropdownMenu>
         <CollapsibleContent>
-          <SidebarMenuSub>
+          {/* mr-0/pr-0 drop the nested list's right inset (the left side is the
+              tree indent) so agent rows use the sidebar's full width. */}
+          <SidebarMenuSub className="mr-0 pr-0">
             {sessions.map((session) => (
               <SessionSubItem
                 key={session.id}
