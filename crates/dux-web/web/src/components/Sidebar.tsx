@@ -182,11 +182,11 @@ function SessionSubItem({
       <ContextMenu>
         <ContextMenuTrigger
           render={
-            // pr-14 reserves space for the two SidebarMenuAction buttons
-            // (⋯ at right-1, + at right-7) so they never overlap the badges.
+            // pr-8 reserves space for the ⋯ SidebarMenuAction (at right-1) so
+            // it never overlaps the badges. (New terminal lives in the menus.)
             <SidebarMenuSubButton
               isActive={agentSelected}
-              className="pr-14"
+              className="pr-8"
               onClick={() => selectSession(session.id)}
             />
           }
@@ -266,16 +266,6 @@ function SessionSubItem({
           </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
-
-      <SidebarMenuAction
-        showOnHover
-        className="right-7"
-        title="New terminal"
-        aria-label="New terminal"
-        onClick={() => createTerminal(session.id)}
-      >
-        <Plus />
-      </SidebarMenuAction>
 
       <DropdownMenu>
         <SidebarMenuAction
