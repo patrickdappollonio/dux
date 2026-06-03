@@ -7,6 +7,7 @@ mod companion;
 pub mod config_saver;
 mod events;
 mod in_flight;
+mod lifecycle;
 mod resume_fallback;
 mod spawn_worker;
 
@@ -23,6 +24,7 @@ pub use events::{
     ProjectPersistenceView, StatusUpdate, WorktreeRemoval,
 };
 pub use in_flight::{InFlightKey, InFlightSet};
+pub use lifecycle::{PrunedPty, PrunedPtyKind};
 pub use resume_fallback::ResumeFallbackOutcome;
 pub use spawn_worker::{BackgroundWorkerSpec, CommandWorkerSpec, LoopControl, LoopWorkerSpec};
 

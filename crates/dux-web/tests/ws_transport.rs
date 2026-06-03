@@ -309,3 +309,71 @@ async fn create_and_stream_a_terminal() {
         acc.len()
     );
 }
+
+/// A companion terminal whose child process exits (here `cat` receiving EOF) is
+/// reaped by the engine's per-tick prune, so its id disappears from the
+/// ViewModel. Confirm the id is present after creation, then absent afterward.
+#[tokio::test]
+async fn exited_terminal_is_pruned_from_view_model() {
+    let (addr, _tmp) = boot().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let _ = ws.next().await; // initial view_model
+
+    ws.send(Message::Text(
+        r#"{"type":"create_terminal","session_id":"s1"}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    // Read until the terminal_created message arrives, extracting the terminal_id.
+    let mut terminal_id = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline && terminal_id.is_empty() {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"type\":\"terminal_created\"")
+        {
+            let v: serde_json::Value = serde_json::from_str(&t).expect("parse terminal_created");
+            terminal_id = v["terminal_id"].as_str().expect("terminal_id").to_string();
+        }
+    }
+    assert!(!terminal_id.is_empty(), "never received terminal_created");
+
+    ws.send(Message::Text(format!(
+        r#"{{"type":"subscribe_terminal","terminal_id":"{terminal_id}"}}"#
+    )))
+    .await
+    .unwrap();
+
+    // Ctrl-D (EOF) makes the `cat` companion terminal exit; the engine prunes it.
+    ws.send(Message::Binary(b"\x04".to_vec())).await.unwrap();
+
+    // Watch view_model frames: first one with the id, then a later one without it.
+    let mut saw_with_id = false;
+    let mut saw_without_id = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"view_model\"")
+        {
+            if t.contains(&terminal_id) {
+                saw_with_id = true;
+            } else if saw_with_id {
+                saw_without_id = true;
+                break;
+            }
+        }
+    }
+
+    assert!(
+        saw_with_id,
+        "view_model never contained the created terminal id {terminal_id}"
+    );
+    assert!(
+        saw_without_id,
+        "view_model still contained terminal id {terminal_id} after it exited"
+    );
+}

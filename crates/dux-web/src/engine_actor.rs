@@ -145,6 +145,11 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
                 let _ = engine.process_worker_event(event);
             }
 
+            // Reap agent/terminal PTYs whose child process exited so they stop
+            // lingering in `providers`/`companion_terminals` and disappear from
+            // the ViewModel. (Status broadcasting of these is added in a later slice.)
+            engine.prune_exited_ptys();
+
             // Resolve or expire pending subscribes now that providers may have appeared.
             let now = Instant::now();
             pending.retain_mut(|p| {
