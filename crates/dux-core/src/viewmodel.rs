@@ -27,6 +27,11 @@ pub struct ProjectView {
     pub name: String,
     pub path: String,
     pub default_provider: String,
+    /// Explicit per-project provider override (None = inherits the global default).
+    pub explicit_default_provider: Option<String>,
+    pub auto_reopen_agents: Option<bool>,
+    pub startup_command: Option<String>,
+    pub env: std::collections::BTreeMap<String, String>,
     pub current_branch: String,
     /// "leading" | "not_leading" | "unknown"
     pub branch_status: String,
@@ -92,6 +97,13 @@ impl ProjectView {
             name: p.name.clone(),
             path: p.path.clone(),
             default_provider: p.default_provider.as_str().to_string(),
+            explicit_default_provider: p
+                .explicit_default_provider
+                .as_ref()
+                .map(|pk| pk.as_str().to_string()),
+            auto_reopen_agents: p.auto_reopen_agents,
+            startup_command: p.startup_command.clone(),
+            env: p.env.clone(),
             current_branch: p.current_branch.clone(),
             branch_status: match p.branch_status {
                 ProjectBranchStatus::Leading => "leading",
@@ -236,6 +248,41 @@ mod tests {
         assert_eq!(vm.changed_files.staged[0].path, "src/lib.rs");
         assert_eq!(vm.changed_files.staged[0].additions, 3);
         assert_eq!(vm.changed_files.unstaged.len(), 0);
+    }
+
+    #[test]
+    fn project_settings_fields_are_projected() {
+        use crate::model::ProviderKind;
+
+        let (mut engine, _tmp) = test_engine();
+        let mut project = sample_project("p1", "/repo");
+        project.explicit_default_provider = Some(ProviderKind::new("codex"));
+        project.auto_reopen_agents = Some(true);
+        project.startup_command = Some("npm install".to_string());
+        project.env.insert("KEY".to_string(), "value".to_string());
+        engine.projects.push(project);
+
+        let vm = engine.view_model();
+
+        let p = &vm.projects[0];
+        assert_eq!(p.explicit_default_provider.as_deref(), Some("codex"));
+        assert_eq!(p.auto_reopen_agents, Some(true));
+        assert_eq!(p.startup_command.as_deref(), Some("npm install"));
+        assert_eq!(p.env.get("KEY").map(String::as_str), Some("value"));
+    }
+
+    #[test]
+    fn project_without_settings_has_none() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+
+        let vm = engine.view_model();
+
+        let p = &vm.projects[0];
+        assert!(p.explicit_default_provider.is_none());
+        assert!(p.auto_reopen_agents.is_none());
+        assert!(p.startup_command.is_none());
+        assert!(p.env.is_empty());
     }
 
     #[test]

@@ -7,7 +7,9 @@
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use dux_core::engine::{Command, Engine, InFlightKey, PrunedPtyKind};
+use dux_core::engine::{
+    Command, Engine, EventReaction, InFlightKey, ProjectPersistenceView, PrunedPtyKind,
+};
 use dux_core::pty::PtyClient;
 use dux_core::wire::{WireCommand, WireCommandOutcome, WireStatus};
 use dux_core::worker::AgentLaunchKind;
@@ -170,6 +172,23 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
                 }
                 for status in engine.drive_delete_followup(&reaction) {
                     let _ = thread_status_tx.send(status);
+                }
+
+                // A project mutation just updated SQLite + in-memory projects; mirror
+                // it into the portable config.toml so a later TUI start doesn't clobber it.
+                if let EventReaction::ProjectPersistenceOutcome(outcome) = &reaction
+                    && !matches!(
+                        outcome.view,
+                        ProjectPersistenceView::PersistenceFailed { .. }
+                    )
+                    && let Err(e) = engine.persist_projects_to_config()
+                {
+                    let _ = thread_status_tx.send(WireStatus::new(
+                        "error",
+                        format!(
+                            "Saved to the database, but config.toml could not be updated: {e:#}"
+                        ),
+                    ));
                 }
             }
 

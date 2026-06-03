@@ -14,8 +14,9 @@ use crate::engine::{
     AgentLaunchFailedOutcome, BeginDeleteSessionOutcome, Command, Engine, EventReaction,
     FinishDeleteSessionOutcome, StatusUpdate, WorktreeRemoval,
 };
+use crate::model::ProviderKind;
 use crate::statusline::StatusTone;
-use crate::worker::PullTarget;
+use crate::worker::{ProjectPersistenceAction, PullTarget};
 
 /// A command as received from a generic transport (e.g. the web WebSocket).
 /// `#[serde(tag = "command", content = "args")]` matches the `{ "command": "...",
@@ -53,6 +54,22 @@ pub enum WireCommand {
         delete_worktree: bool,
     },
     PersistGlobalEnv {
+        env: BTreeMap<String, String>,
+    },
+    UpdateProjectProvider {
+        project_id: String,
+        provider: Option<String>,
+    },
+    UpdateProjectAutoReopen {
+        project_id: String,
+        auto_reopen_agents: Option<bool>,
+    },
+    UpdateProjectStartupCommand {
+        project_id: String,
+        startup_command: Option<String>,
+    },
+    UpdateProjectEnv {
+        project_id: String,
         env: BTreeMap<String, String>,
     },
 }
@@ -315,7 +332,61 @@ impl Engine {
                 delete_worktree,
             },
             WireCommand::PersistGlobalEnv { env } => Command::PersistGlobalEnv { env },
+            WireCommand::UpdateProjectProvider {
+                project_id,
+                provider,
+            } => {
+                let project_name = self.project_name(&project_id)?;
+                Command::PersistProject(Box::new(
+                    ProjectPersistenceAction::UpdateDefaultProvider {
+                        project_id,
+                        project_name,
+                        provider: provider.map(ProviderKind::new),
+                        global_default: self.config.default_provider(),
+                    },
+                ))
+            }
+            WireCommand::UpdateProjectAutoReopen {
+                project_id,
+                auto_reopen_agents,
+            } => {
+                let project_name = self.project_name(&project_id)?;
+                Command::PersistProject(Box::new(ProjectPersistenceAction::UpdateAutoReopen {
+                    project_id,
+                    project_name,
+                    auto_reopen_agents,
+                }))
+            }
+            WireCommand::UpdateProjectStartupCommand {
+                project_id,
+                startup_command,
+            } => {
+                let project_name = self.project_name(&project_id)?;
+                Command::PersistProject(Box::new(
+                    ProjectPersistenceAction::UpdateStartupCommand {
+                        project_id,
+                        project_name,
+                        startup_command,
+                    },
+                ))
+            }
+            WireCommand::UpdateProjectEnv { project_id, env } => {
+                let project_name = self.project_name(&project_id)?;
+                Command::PersistProject(Box::new(ProjectPersistenceAction::UpdateEnv {
+                    project_id,
+                    project_name,
+                    env,
+                }))
+            }
         })
+    }
+
+    fn project_name(&self, project_id: &str) -> anyhow::Result<String> {
+        self.projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| p.name.clone())
+            .ok_or_else(|| anyhow::anyhow!("unknown project: {project_id}"))
     }
 
     fn session_worktree(&self, session_id: &str) -> anyhow::Result<PathBuf> {
@@ -488,6 +559,97 @@ mod tests {
             }
             _ => panic!("expected WireCommand::PersistGlobalEnv variant"),
         }
+    }
+
+    #[test]
+    fn wire_update_project_provider_deserializes() {
+        let json = r#"{"command":"update_project_provider","args":{"project_id":"p1","provider":"codex"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::UpdateProjectProvider {
+                project_id: "p1".to_string(),
+                provider: Some("codex".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn wire_update_project_auto_reopen_deserializes() {
+        let json = r#"{"command":"update_project_auto_reopen","args":{"project_id":"p1","auto_reopen_agents":true}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::UpdateProjectAutoReopen {
+                project_id: "p1".to_string(),
+                auto_reopen_agents: Some(true),
+            }
+        );
+    }
+
+    #[test]
+    fn wire_update_project_startup_command_deserializes() {
+        let json = r#"{"command":"update_project_startup_command","args":{"project_id":"p1","startup_command":"echo hi"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::UpdateProjectStartupCommand {
+                project_id: "p1".to_string(),
+                startup_command: Some("echo hi".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn wire_update_project_env_deserializes() {
+        let json =
+            r#"{"command":"update_project_env","args":{"project_id":"p1","env":{"FOO":"bar"}}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        match cmd {
+            WireCommand::UpdateProjectEnv { project_id, env } => {
+                assert_eq!(project_id, "p1");
+                assert_eq!(env.get("FOO").map(String::as_str), Some("bar"));
+            }
+            _ => panic!("expected WireCommand::UpdateProjectEnv variant"),
+        }
+    }
+
+    #[test]
+    fn wire_to_command_update_project_startup_command_builds_persist_action() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        let cmd = engine
+            .wire_to_command(WireCommand::UpdateProjectStartupCommand {
+                project_id: "p1".to_string(),
+                startup_command: Some("echo hi".to_string()),
+            })
+            .expect("reconstruct");
+        match cmd {
+            Command::PersistProject(action) => match *action {
+                ProjectPersistenceAction::UpdateStartupCommand {
+                    project_id,
+                    project_name,
+                    startup_command,
+                } => {
+                    assert_eq!(project_id, "p1");
+                    assert_eq!(project_name, "p1-name");
+                    assert_eq!(startup_command.as_deref(), Some("echo hi"));
+                }
+                other => panic!("expected UpdateStartupCommand, got {other:?}"),
+            },
+            _ => panic!("expected Command::PersistProject variant"),
+        }
+    }
+
+    #[test]
+    fn wire_to_command_update_project_unknown_project_errors() {
+        let (engine, _tmp) = test_engine();
+        let result = engine.wire_to_command(WireCommand::UpdateProjectStartupCommand {
+            project_id: "ghost".to_string(),
+            startup_command: None,
+        });
+        let err = result.map(|_| ()).unwrap_err();
+        assert!(err.to_string().contains("unknown project"), "err: {err}");
     }
 
     #[test]

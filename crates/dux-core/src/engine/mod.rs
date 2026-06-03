@@ -116,6 +116,25 @@ pub struct Engine {
     pub pr_last_checked: HashMap<String, Instant>,
 }
 
+/// Map a runtime [`Project`] to a portable [`ProjectConfig`] for config.toml.
+/// Uses the same field mapping as the persistence worker's `Add` arm so the
+/// on-disk shape stays consistent regardless of which path wrote it.
+fn project_to_project_config(p: &Project) -> ProjectConfig {
+    ProjectConfig {
+        id: p.id.clone(),
+        path: p.path.clone(),
+        name: Some(p.name.clone()),
+        default_provider: p
+            .explicit_default_provider
+            .as_ref()
+            .map(|pk| pk.as_str().to_string()),
+        leading_branch: p.leading_branch.clone(),
+        auto_reopen_agents: p.auto_reopen_agents,
+        startup_command: p.startup_command.clone(),
+        env: p.env.clone(),
+    }
+}
+
 impl Engine {
     /// Mark an operation as in-flight. Returns `true` if it was newly
     /// inserted, `false` if it was already present.
@@ -239,6 +258,20 @@ impl Engine {
             ));
         }
         Ok(path)
+    }
+
+    /// Rebuild config.toml's `[[projects]]` from the current runtime projects and
+    /// persist via the shared writer. Surfaces (web) call this after a project
+    /// persistence so the portable config stays in sync with SQLite. (The TUI has
+    /// its own config-sync path.) Small synchronous write; runs on the caller.
+    pub fn persist_projects_to_config(&self) -> anyhow::Result<()> {
+        let mut config = self.config.clone();
+        config.projects = self
+            .projects
+            .iter()
+            .map(project_to_project_config)
+            .collect();
+        crate::config_write::save_config(&self.paths.config_path, &config)
     }
 
     /// Re-resolve the in-memory `default_provider` for each project against
@@ -884,5 +917,49 @@ impl Engine {
     pub fn should_resume_session(&self, session: &AgentSession) -> bool {
         let cfg = crate::config::provider_config(&self.config, &session.provider);
         cfg.supports_session_resume() && session.has_started_provider(&session.provider)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::test_support::{sample_project, test_engine};
+
+    #[test]
+    fn persist_projects_to_config_round_trips_runtime_projects() {
+        let (mut engine, _tmp) = test_engine();
+        // The patch path requires an existing file; create a minimal one.
+        std::fs::write(&engine.paths.config_path, "# dux config\n").expect("seed config");
+
+        let mut p1 = sample_project("p1", "/repo/one");
+        p1.startup_command = Some("npm install".to_string());
+        p1.env.insert("KEY".to_string(), "value".to_string());
+        let mut p2 = sample_project("p2", "/repo/two");
+        p2.explicit_default_provider = Some(ProviderKind::new("codex"));
+        engine.projects.push(p1);
+        engine.projects.push(p2);
+
+        engine
+            .persist_projects_to_config()
+            .expect("persist projects to config");
+
+        let saved = std::fs::read_to_string(&engine.paths.config_path).expect("read back");
+        let parsed: Config = toml::from_str(&saved).expect("reparse");
+        assert_eq!(parsed.projects.len(), 2);
+
+        let one = parsed
+            .projects
+            .iter()
+            .find(|p| p.id == "p1")
+            .expect("p1 present");
+        assert_eq!(one.startup_command.as_deref(), Some("npm install"));
+        assert_eq!(one.env.get("KEY").map(String::as_str), Some("value"));
+
+        let two = parsed
+            .projects
+            .iter()
+            .find(|p| p.id == "p2")
+            .expect("p2 present");
+        assert_eq!(two.default_provider.as_deref(), Some("codex"));
     }
 }

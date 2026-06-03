@@ -99,6 +99,48 @@ async fn boot() -> (SocketAddr, tempfile::TempDir) {
     (addr, tmp)
 }
 
+/// Like `boot()`, but writes a real (minimal) `config.toml` into `root` first so
+/// the config-sync patch path in the engine actor has a file to patch. Returns
+/// the temp dir's config.toml path so the test can read it back.
+async fn boot_for_config() -> (SocketAddr, tempfile::TempDir, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let config_path = root.join("config.toml");
+    std::fs::write(&config_path, "# dux config\n").unwrap();
+    let paths = DuxPaths {
+        root: root.clone(),
+        config_path: config_path.clone(),
+        sessions_db_path: root.join("sessions.sqlite3"),
+        worktrees_root: root.join("worktrees"),
+        lock_path: root.join("dux.lock"),
+    };
+    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    {
+        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        store
+            .upsert_project(&ProjectConfig {
+                id: "p1".to_string(),
+                path: root.to_string_lossy().into_owned(),
+                name: Some("p1-name".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: Default::default(),
+            })
+            .unwrap();
+    }
+    let engine = bootstrap_engine(&paths).unwrap();
+    let (handle, _join) = spawn_engine_thread(engine);
+    let app = router(handle);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, tmp, config_path)
+}
+
 /// Like `boot()`, but the session's worktree is a REAL git repo: `f.txt` is
 /// committed with three lines, then its working copy is modified WITHOUT a
 /// commit so a working-tree-vs-HEAD diff exists.
@@ -771,5 +813,57 @@ async fn deleted_session_inline_disappears_from_view_model() {
     assert!(
         saw_without_id,
         "view_model still contained session id s1 after deletion"
+    );
+}
+
+/// Updating a project's startup command over the wire persists to BOTH the
+/// in-memory ViewModel (reflected back to clients) AND config.toml (the portable
+/// source of truth). The engine actor writes config.toml synchronously right
+/// after applying the persistence outcome.
+#[tokio::test]
+async fn update_project_startup_command_persists_to_config() {
+    let (addr, _tmp, config_path) = boot_for_config().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let _ = ws.next().await; // initial view_model
+
+    let cmd = r#"{"type":"command","command":"update_project_startup_command","args":{"project_id":"p1","startup_command":"echo hi"}}"#;
+    ws.send(Message::Text(cmd.into())).await.unwrap();
+
+    // Poll for a view_model showing the in-memory update.
+    let mut saw_startup = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline && !saw_startup {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"type\":\"view_model\"")
+            && t.contains("\"startup_command\":\"echo hi\"")
+        {
+            saw_startup = true;
+        }
+    }
+    assert!(
+        saw_startup,
+        "view_model never reflected the startup command"
+    );
+
+    // The config write happens synchronously in the actor; poll the file briefly
+    // in case the OS write lands just after the view_model frame.
+    let mut config_has_value = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline && !config_has_value {
+        if let Ok(saved) = std::fs::read_to_string(&config_path)
+            && saved.contains("echo hi")
+        {
+            config_has_value = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let saved = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        config_has_value,
+        "config.toml never received the startup command: {saved}"
     );
 }
