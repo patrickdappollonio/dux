@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { Check, MousePointerClick } from "lucide-react"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 import { Badge } from "@/components/ui/badge"
@@ -30,9 +30,10 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet"
+import { highlightLine, languageForPath } from "@/lib/highlight"
 import { closeDiff, openCommit, requestDiff, socket, useDux } from "@/lib/store"
 import type { DuxState } from "@/lib/store"
-import type { ChangedFileView, DiffLine } from "@/lib/types"
+import type { ChangedFileView, DiffLine, FileDiff } from "@/lib/types"
 
 // Map raw git status codes to a short display glyph.
 function statusGlyph(status: string): string {
@@ -269,15 +270,35 @@ function DiffBody({ state }: { state: DiffState }) {
   if (diff.unchanged || diff.hunks.length === 0) {
     return <div className="py-6 text-sm text-muted-foreground">No changes.</div>
   }
+  return <DiffHunks diff={diff} />
+}
+
+// Renders the hunk rows for a real (non-binary, non-empty) diff. Lives in its
+// own component so its hooks always run in a stable order — DiffBody's early
+// returns must not gate the `useMemo`s below (React rules-of-hooks).
+function DiffHunks({ diff }: { diff: FileDiff }) {
+  const language = useMemo(() => languageForPath(diff.path), [diff.path])
+  // Precompute highlighted HTML per line to avoid re-highlighting on re-render.
+  const hunks = useMemo(
+    () =>
+      diff.hunks.map((hunk) => ({
+        header: hunk.header,
+        lines: hunk.lines.map((line) => ({
+          line,
+          html: highlightLine(line.content, language),
+        })),
+      })),
+    [diff, language],
+  )
   return (
     <div className="overflow-x-auto rounded border font-mono text-xs leading-relaxed">
-      {diff.hunks.map((hunk, hi) => (
+      {hunks.map((hunk, hi) => (
         <div key={hi}>
           <div className="bg-muted px-2 py-0.5 text-muted-foreground">
             {hunk.header}
           </div>
-          {hunk.lines.map((line, li) => (
-            <DiffRow key={li} line={line} />
+          {hunk.lines.map(({ line, html }, li) => (
+            <DiffRow key={li} line={line} html={html} />
           ))}
         </div>
       ))}
@@ -285,7 +306,7 @@ function DiffBody({ state }: { state: DiffState }) {
   )
 }
 
-function DiffRow({ line }: { line: DiffLine }) {
+function DiffRow({ line, html }: { line: DiffLine; html: string }) {
   const sign = line.kind === "insert" ? "+" : line.kind === "delete" ? "-" : " "
   const rowClass =
     line.kind === "insert"
@@ -310,7 +331,11 @@ function DiffRow({ line }: { line: DiffLine }) {
       <span className={`w-4 shrink-0 select-none text-center ${signClass}`}>
         {sign}
       </span>
-      <span className="whitespace-pre">{line.content}</span>
+      <span
+        className="whitespace-pre"
+        // Safe: highlight.js escapes the source; `html` is escaped plain text when no language.
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
     </div>
   )
 }

@@ -148,3 +148,28 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     @apply font-sans;
     }
 }
+
+/* highlight.js token colors for the diff viewer — foreground only so the
+   green/red diff row backgrounds remain visible behind the highlighted code. */
+.hljs-keyword,
+.hljs-built_in,
+.hljs-literal { color: oklch(0.72 0.16 320); }
+.hljs-string,
+.hljs-attr,
+.hljs-meta-string { color: oklch(0.77 0.15 145); }
+.hljs-number,
+.hljs-symbol { color: oklch(0.80 0.12 70); }
+.hljs-comment,
+.hljs-quote { color: oklch(0.60 0.02 260); font-style: italic; }
+.hljs-function .hljs-title,
+.hljs-title,
+.hljs-section { color: oklch(0.80 0.13 230); }
+.hljs-type,
+.hljs-class .hljs-title { color: oklch(0.82 0.12 200); }
+.hljs-variable,
+.hljs-template-variable,
+.hljs-attribute { color: oklch(0.85 0.05 60); }
+.hljs-meta,
+.hljs-tag { color: oklch(0.65 0.03 260); }
+.hljs-deletion { color: inherit; }
+.hljs-addition { color: inherit; }
