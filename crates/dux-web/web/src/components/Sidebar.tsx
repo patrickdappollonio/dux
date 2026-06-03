@@ -30,13 +30,6 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty"
 import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuSeparator,
-  ContextMenuTrigger,
-} from "@/components/ui/context-menu"
-import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuGroup,
@@ -114,32 +107,22 @@ function TerminalSubItem({
 }) {
   return (
     <SidebarMenuSubItem>
-      <ContextMenu>
-        <ContextMenuTrigger
-          render={
-            <SidebarMenuSubButton
-              isActive={active}
-              className="pr-8"
-              onClick={() => selectTerminal(terminal.id, sessionId)}
-            />
-          }
-        >
-          <SquareTerminal />
-          <span className="flex-1 truncate">{terminal.label}</span>
-        </ContextMenuTrigger>
-        <ContextMenuContent>
-          <ContextMenuItem
-            className="cursor-pointer text-destructive"
-            onClick={() => deleteTerminal(terminal.id)}
-          >
-            Close terminal
-          </ContextMenuItem>
-        </ContextMenuContent>
-      </ContextMenu>
+      {/* The close button's slot only exists while THIS row is hovered/focused
+          (always on touch layouts), so the label keeps the full width otherwise.
+          Visibility is scoped to the row's own group — shadcn's showOnHover keys
+          off the ancestor menu-item, which here is the whole project block. */}
+      <SidebarMenuSubButton
+        isActive={active}
+        className="max-md:pr-8 group-focus-within/menu-sub-item:pr-8 group-hover/menu-sub-item:pr-8"
+        onClick={() => selectTerminal(terminal.id, sessionId)}
+      >
+        <SquareTerminal />
+        <span className="flex-1 truncate">{terminal.label}</span>
+      </SidebarMenuSubButton>
       <SidebarMenuAction
-        showOnHover
         title="Close terminal"
         aria-label="Close terminal"
+        className="md:opacity-0 group-focus-within/menu-sub-item:opacity-100 group-hover/menu-sub-item:opacity-100"
         onClick={(event) => {
           event.stopPropagation()
           deleteTerminal(terminal.id)
@@ -179,99 +162,52 @@ function SessionSubItem({
 
   return (
     <SidebarMenuSubItem>
-      <ContextMenu>
-        <ContextMenuTrigger
-          render={
-            // pr-8 reserves space for the ⋯ SidebarMenuAction (at right-1) so
-            // it never overlaps the badges. (New terminal lives in the menus.)
-            <SidebarMenuSubButton
-              isActive={agentSelected}
-              className="pr-8"
-              onClick={() => selectSession(session.id)}
+      {/* The ⋯ slot only exists while THIS row is hovered/focused or its menu
+          is open (always on touch layouts), so badges sit flush right
+          otherwise. Reveal is scoped to the row's own group — shadcn's
+          showOnHover keys off the ancestor menu-item, i.e. the whole project. */}
+      <SidebarMenuSubButton
+        isActive={agentSelected}
+        className="max-md:pr-8 group-focus-within/menu-sub-item:pr-8 group-hover/menu-sub-item:pr-8 group-has-[[aria-expanded=true]]/menu-sub-item:pr-8"
+        onClick={() => selectSession(session.id)}
+      >
+        {/* All agents use the same Bot icon — provider is shown as text. */}
+        <Bot />
+        <span className="truncate">{label}</span>
+        <span className="ml-auto flex shrink-0 items-center gap-1">
+          {session.pr ? (
+            <Badge
+              className={prBadgeClass(session.pr.state)}
+              title={session.pr.title}
+              render={
+                <a
+                  href={session.pr.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    window.open(
+                      session.pr!.url,
+                      "_blank",
+                      "noopener",
+                    )
+                  }}
+                >
+                  <GitPullRequest data-icon="inline-start" />#
+                  {session.pr.number}
+                </a>
+              }
             />
-          }
-        >
-          {/* All agents use the same Bot icon — provider is shown as text. */}
-          <Bot />
-          <span className="truncate">{label}</span>
-          {/* Badges sit inline in the content area so hover actions (SidebarMenuAction)
-              have their own right-edge slot and cannot overlap the badges. */}
-          <span className="ml-auto flex shrink-0 items-center gap-1">
-            {session.pr ? (
-              <Badge
-                className={prBadgeClass(session.pr.state)}
-                title={session.pr.title}
-                render={
-                  <a
-                    href={session.pr.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      window.open(
-                        session.pr!.url,
-                        "_blank",
-                        "noopener",
-                      )
-                    }}
-                  >
-                    <GitPullRequest data-icon="inline-start" />#
-                    {session.pr.number}
-                  </a>
-                }
-              />
-            ) : null}
-            <StatusBadge status={session.status} iconOnly />
-          </span>
-        </ContextMenuTrigger>
-        <ContextMenuContent>
-          <ContextMenuItem
-            className="cursor-pointer"
-            onClick={() => selectSession(session.id)}
-          >
-            Stream
-          </ContextMenuItem>
-          <ContextMenuSeparator />
-          <ContextMenuItem
-            className="cursor-pointer"
-            onClick={handleToggleAutoReopen}
-          >
-            Toggle auto-reopen
-          </ContextMenuItem>
-          <ContextMenuItem className="cursor-pointer" onClick={handlePush}>
-            Push
-          </ContextMenuItem>
-          <ContextMenuItem className="cursor-pointer" onClick={handlePull}>
-            Pull
-          </ContextMenuItem>
-          <ContextMenuItem
-            className="cursor-pointer"
-            onClick={() => openCommit(session.id)}
-          >
-            Commit…
-          </ContextMenuItem>
-          <ContextMenuSeparator />
-          <ContextMenuItem
-            className="cursor-pointer"
-            onClick={() => createTerminal(session.id)}
-          >
-            New terminal
-          </ContextMenuItem>
-          <ContextMenuSeparator />
-          <ContextMenuItem
-            className="cursor-pointer text-destructive"
-            onClick={() => openDelete(session.id)}
-          >
-            Delete…
-          </ContextMenuItem>
-        </ContextMenuContent>
-      </ContextMenu>
+          ) : null}
+          <StatusBadge status={session.status} iconOnly />
+        </span>
+      </SidebarMenuSubButton>
 
       <DropdownMenu>
         <SidebarMenuAction
-          showOnHover
           render={<DropdownMenuTrigger />}
           aria-label="Session actions"
+          className="md:opacity-0 group-focus-within/menu-sub-item:opacity-100 group-hover/menu-sub-item:opacity-100 aria-expanded:opacity-100"
         >
           <Ellipsis />
         </SidebarMenuAction>
