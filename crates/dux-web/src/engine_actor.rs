@@ -153,6 +153,9 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
                 for status in dux_core::wire::wire_statuses_from_reaction(&reaction) {
                     let _ = thread_status_tx.send(status);
                 }
+                for status in engine.drive_delete_followup(&reaction) {
+                    let _ = thread_status_tx.send(status);
+                }
             }
 
             // Reap agent/terminal PTYs whose child process exited so they stop

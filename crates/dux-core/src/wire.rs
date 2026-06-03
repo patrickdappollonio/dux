@@ -9,7 +9,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::engine::{AgentLaunchFailedOutcome, Command, Engine, EventReaction, StatusUpdate};
+use crate::engine::{
+    AgentLaunchFailedOutcome, BeginDeleteSessionOutcome, Command, Engine, EventReaction,
+    FinishDeleteSessionOutcome, StatusUpdate, WorktreeRemoval,
+};
 use crate::statusline::StatusTone;
 
 /// A command as received from a generic transport (e.g. the web WebSocket).
@@ -18,12 +21,32 @@ use crate::statusline::StatusTone;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "command", content = "args", rename_all = "snake_case")]
 pub enum WireCommand {
-    StageFile { session_id: String, path: String },
-    UnstageFile { session_id: String, path: String },
-    CommitChanges { session_id: String, message: String },
-    Push { session_id: String },
-    ToggleAgentAutoReopen { session_id: String, enabled: bool },
-    DeleteTerminal { terminal_id: String },
+    StageFile {
+        session_id: String,
+        path: String,
+    },
+    UnstageFile {
+        session_id: String,
+        path: String,
+    },
+    CommitChanges {
+        session_id: String,
+        message: String,
+    },
+    Push {
+        session_id: String,
+    },
+    ToggleAgentAutoReopen {
+        session_id: String,
+        enabled: bool,
+    },
+    DeleteTerminal {
+        terminal_id: String,
+    },
+    DeleteSession {
+        session_id: String,
+        delete_worktree: bool,
+    },
 }
 
 /// A status-line update in wire-safe form.
@@ -122,14 +145,111 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
     }
 }
 
+/// User-facing message for a completed session deletion, varying by what
+/// happened to the worktree.
+pub fn delete_session_status_message(
+    outcome: &FinishDeleteSessionOutcome,
+    removal: &WorktreeRemoval,
+) -> String {
+    let name = outcome
+        .session
+        .title
+        .clone()
+        .unwrap_or_else(|| outcome.session.branch_name.clone());
+    match removal {
+        WorktreeRemoval::Performed { .. } => {
+            format!("Deleted agent \"{name}\" and removed its worktree.")
+        }
+        WorktreeRemoval::PreservedShared => {
+            format!("Deleted agent \"{name}\". Worktree kept (shared with other agents).")
+        }
+        WorktreeRemoval::SkippedForSiblings => {
+            format!("Deleted agent \"{name}\". Worktree kept (still used by other agents).")
+        }
+        WorktreeRemoval::PreservedOrphan => {
+            format!("Deleted agent \"{name}\". Worktree left on disk.")
+        }
+    }
+}
+
 impl Engine {
     /// Reconstruct and dispatch a wire command, returning a wire-safe outcome.
     pub fn apply_wire(&mut self, command: WireCommand) -> anyhow::Result<WireCommandOutcome> {
         let core = self.wire_to_command(command)?;
         let reaction = self.apply(core)?;
-        Ok(WireCommandOutcome {
-            status: wire_status_from_reaction(&reaction),
-        })
+        let mut status = wire_status_from_reaction(&reaction);
+        if status.is_none() {
+            status = self.drive_delete_followup(&reaction).into_iter().next();
+        }
+        Ok(WireCommandOutcome { status })
+    }
+
+    /// Drive a delete-related reaction to completion, returning user-facing
+    /// statuses. Used by `apply_wire` (synchronous Begin/Inline) and by the web
+    /// engine actor's worker-event drain (async worktree-removal completion), so
+    /// deletions finish without a view layer. Non-delete reactions return `[]`.
+    pub fn drive_delete_followup(&mut self, reaction: &EventReaction) -> Vec<WireStatus> {
+        match reaction {
+            EventReaction::BeginDeleteSessionView(view) => match &view.outcome {
+                BeginDeleteSessionOutcome::AlreadyInFlight => vec![WireStatus::new(
+                    "error",
+                    "Deletion already in progress for this agent. Wait for it to finish.",
+                )],
+                BeginDeleteSessionOutcome::NotFound => vec![],
+                BeginDeleteSessionOutcome::AsyncStarted { busy_message } => {
+                    vec![WireStatus::new("busy", busy_message.clone())]
+                }
+                BeginDeleteSessionOutcome::Inline { removal } => {
+                    let removal = *removal;
+                    self.finish_delete_and_status(&view.session_id, removal)
+                }
+            },
+            EventReaction::WorktreeRemoveSucceeded {
+                session_id,
+                branch_already_deleted,
+                ..
+            } => {
+                if self.sessions.iter().any(|s| s.id == *session_id) {
+                    self.finish_delete_and_status(
+                        session_id,
+                        WorktreeRemoval::Performed {
+                            branch_already_deleted: *branch_already_deleted,
+                        },
+                    )
+                } else {
+                    vec![]
+                }
+            }
+            EventReaction::WorktreeRemoveFailed { message, .. } => {
+                vec![WireStatus::new(
+                    "error",
+                    format!("Worktree delete failed: {message}"),
+                )]
+            }
+            _ => vec![],
+        }
+    }
+
+    fn finish_delete_and_status(
+        &mut self,
+        session_id: &str,
+        removal: WorktreeRemoval,
+    ) -> Vec<WireStatus> {
+        match self.apply(Command::FinishDeleteSession {
+            session_id: session_id.to_string(),
+            removal,
+            update_status: true,
+        }) {
+            Ok(EventReaction::FinishDeleteSessionView(view)) => vec![WireStatus::new(
+                "info",
+                delete_session_status_message(&view.outcome, &view.removal),
+            )],
+            Ok(_) => vec![],
+            Err(e) => vec![WireStatus::new(
+                "error",
+                format!("Session cleanup failed: {e:#}"),
+            )],
+        }
     }
 
     fn wire_to_command(&self, command: WireCommand) -> anyhow::Result<Command> {
@@ -171,6 +291,13 @@ impl Engine {
                 }
             }
             WireCommand::DeleteTerminal { terminal_id } => Command::DeleteTerminal { terminal_id },
+            WireCommand::DeleteSession {
+                session_id,
+                delete_worktree,
+            } => Command::BeginDeleteSession {
+                session_id,
+                delete_worktree,
+            },
         })
     }
 
@@ -188,7 +315,7 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::engine::DeleteTerminalView;
-    use crate::engine::test_support::{sample_session, test_engine};
+    use crate::engine::test_support::{sample_project, sample_session, test_engine};
     use std::path::Path;
 
     #[test]
@@ -285,6 +412,43 @@ mod tests {
         run(&["config", "user.name", "t"]);
         std::fs::write(dir.path().join("a.txt"), "hello\n").expect("write file");
         dir
+    }
+
+    #[test]
+    fn wire_delete_session_deserializes() {
+        let json =
+            r#"{"command":"delete_session","args":{"session_id":"s1","delete_worktree":true}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::DeleteSession {
+                session_id: "s1".to_string(),
+                delete_worktree: true,
+            }
+        );
+    }
+
+    #[test]
+    fn apply_wire_delete_session_inline_removes_session() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let outcome = engine
+            .apply_wire(WireCommand::DeleteSession {
+                session_id: "s1".to_string(),
+                delete_worktree: false,
+            })
+            .expect("apply_wire");
+        let status = outcome.status.expect("status");
+        assert!(
+            status.message.contains("Deleted agent"),
+            "unexpected status: {}",
+            status.message
+        );
+        assert!(!engine.sessions.iter().any(|s| s.id == "s1"));
     }
 
     #[test]

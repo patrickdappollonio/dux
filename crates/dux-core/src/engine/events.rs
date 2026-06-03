@@ -736,6 +736,8 @@ impl Engine {
         self.running_provider_pins.remove(&session.id);
         self.resume_fallback_candidates.remove(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
+        self.companion_terminals
+            .retain(|_, t| t.session_id != session.id);
         self.update_branch_sync_sessions();
 
         let project_still_has_sessions = self
@@ -1448,6 +1450,48 @@ mod tests {
         assert_eq!(outcome.project.as_ref().map(|p| p.id.as_str()), Some("p1"));
         assert!(!outcome.other_sessions_on_worktree);
         assert!(!outcome.project_still_has_sessions);
+    }
+
+    #[test]
+    fn finish_delete_session_removes_companion_terminals() {
+        let (mut engine, _tmp) = test_engine();
+
+        // A real worktree directory the companion PTY can `cwd` into.
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat/x");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        // `cat` is always on PATH and simply echoes — a safe stand-in terminal.
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        engine
+            .create_companion_terminal("s1")
+            .expect("create companion terminal");
+        assert!(
+            engine
+                .companion_terminals
+                .values()
+                .any(|t| t.session_id == "s1")
+        );
+
+        engine
+            .finish_delete_session("s1")
+            .unwrap()
+            .expect("outcome");
+
+        assert!(
+            !engine
+                .companion_terminals
+                .values()
+                .any(|t| t.session_id == "s1"),
+            "deleted session's companion terminals should be removed"
+        );
     }
 
     #[test]

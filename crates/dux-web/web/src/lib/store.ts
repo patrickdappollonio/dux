@@ -28,6 +28,7 @@ export interface DuxState {
   selectedSessionId: string | null
   lastMessage: string
   commitTarget: string | null
+  deleteTarget: string | null
   paletteOpen: boolean
   sidebarWidth: string
 }
@@ -47,6 +48,7 @@ let state: DuxState = {
   selectedSessionId: null,
   lastMessage: "",
   commitTarget: null,
+  deleteTarget: null,
   paletteOpen: false,
   sidebarWidth: loadSidebarWidth(),
 }
@@ -192,6 +194,23 @@ export function openCommit(sessionId: string): void {
 
 export function closeCommit(): void {
   setState({ commitTarget: null })
+}
+
+export function openDelete(sessionId: string): void {
+  setState({ deleteTarget: sessionId })
+}
+
+export function closeDelete(): void {
+  setState({ deleteTarget: null })
+}
+
+// Ask the server to delete an agent session. `deleteWorktree` opts into the
+// destructive removal of the git worktree on disk (default off in the UI).
+export function deleteSession(sessionId: string, deleteWorktree: boolean): void {
+  socket.sendCommand("delete_session", {
+    session_id: sessionId,
+    delete_worktree: deleteWorktree,
+  })
 }
 
 export function setPaletteOpen(open: boolean): void {

@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use dux_core::config::{DuxPaths, ProviderCommandConfig};
+use dux_core::config::{DuxPaths, ProjectConfig, ProviderCommandConfig};
 use dux_core::storage::SessionStore;
 use dux_web::bootstrap::bootstrap_engine;
 use dux_web::engine_actor::spawn_engine_thread;
@@ -49,6 +49,20 @@ async fn boot() -> (SocketAddr, tempfile::TempDir) {
     std::fs::create_dir_all(&paths.worktrees_root).unwrap();
     {
         let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        // Seed the owning project so session-delete (which looks up the project)
+        // can take the inline path.
+        store
+            .upsert_project(&ProjectConfig {
+                id: "p1".to_string(),
+                path: root.to_string_lossy().into_owned(),
+                name: Some("p1-name".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: Default::default(),
+            })
+            .unwrap();
         store
             .upsert_session(&sample_session(
                 "s1",
@@ -516,5 +530,63 @@ async fn deleted_terminal_disappears_from_view_model() {
     assert!(
         saw_without_id,
         "view_model still contained terminal id {terminal_id} after deletion"
+    );
+}
+
+/// A web client can delete an agent session with the `delete_session` command.
+/// With `delete_worktree:false` the engine takes the inline path (no git), so the
+/// "Deleted agent" status returns synchronously as the command_result and a later
+/// view_model no longer carries the session id.
+#[tokio::test]
+async fn deleted_session_inline_disappears_from_view_model() {
+    let (addr, _tmp) = boot().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+
+    // Confirm the session appears in a view_model before we delete it.
+    let mut saw_with_id = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline && !saw_with_id {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"view_model\"")
+            && t.contains("\"id\":\"s1\"")
+        {
+            saw_with_id = true;
+        }
+    }
+    assert!(saw_with_id, "view_model never contained the session id s1");
+
+    ws.send(Message::Text(
+        r#"{"type":"command","command":"delete_session","args":{"session_id":"s1","delete_worktree":false}}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    // The inline finish returns the "Deleted agent" status synchronously as the
+    // command_result, and a later view_model should drop the session id.
+    let mut saw_status = false;
+    let mut saw_without_id = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    while tokio::time::Instant::now() < deadline && !(saw_status && saw_without_id) {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+        {
+            if (t.contains("\"type\":\"command_result\"") || t.contains("\"type\":\"status\""))
+                && t.contains("Deleted agent")
+            {
+                saw_status = true;
+            }
+            if t.contains("\"view_model\"") && !t.contains("\"id\":\"s1\"") {
+                saw_without_id = true;
+            }
+        }
+    }
+
+    assert!(saw_status, "never received a Deleted agent status for s1");
+    assert!(
+        saw_without_id,
+        "view_model still contained session id s1 after deletion"
     );
 }

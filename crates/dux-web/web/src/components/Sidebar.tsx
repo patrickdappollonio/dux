@@ -11,6 +11,7 @@ import {
   Send,
   SquareTerminal,
   Terminal,
+  Trash2,
   Wifi,
   WifiOff,
   X,
@@ -67,6 +68,7 @@ import {
   createTerminal,
   deleteTerminal,
   openCommit,
+  openDelete,
   selectSession,
   selectTerminal,
   setSidebarWidth,
@@ -252,6 +254,13 @@ function SessionSubItem({
           >
             New terminal
           </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem
+            className="cursor-pointer text-destructive"
+            onClick={() => openDelete(session.id)}
+          >
+            Delete…
+          </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
 
@@ -298,6 +307,14 @@ function SessionSubItem({
             <DropdownMenuItem onClick={() => createTerminal(session.id)}>
               <SquareTerminal />
               New terminal
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              className="text-destructive"
+              onClick={() => openDelete(session.id)}
+            >
+              <Trash2 />
+              Delete…
             </DropdownMenuItem>
           </DropdownMenuGroup>
         </DropdownMenuContent>
