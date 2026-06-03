@@ -16,7 +16,7 @@ use crate::engine::{
 };
 use crate::model::{Project, ProjectBranchStatus, ProviderKind};
 use crate::statusline::StatusTone;
-use crate::worker::{ProjectPersistenceAction, PullTarget};
+use crate::worker::{CreateAgentRequest, ProjectPersistenceAction, PullTarget};
 
 /// A command as received from a generic transport (e.g. the web WebSocket).
 /// `#[serde(tag = "command", content = "args")]` matches the `{ "command": "...",
@@ -95,6 +95,12 @@ pub enum WireCommand {
     /// Remove a project from the workspace by id (does not touch its checkout).
     RemoveProject {
         project_id: String,
+    },
+    /// Create a new agent in a project. `name` may be empty to auto-generate a
+    /// branch name; a non-empty name becomes the custom branch/agent name.
+    CreateAgent {
+        project_id: String,
+        name: String,
     },
 }
 
@@ -459,6 +465,31 @@ impl Engine {
                     project_name,
                     project_id,
                 }))
+            }
+            WireCommand::CreateAgent { project_id, name } => {
+                let project = self
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project_id)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("unknown project: {project_id}"))?;
+                let trimmed = name.trim();
+                let custom_name = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                };
+                let request = CreateAgentRequest::NewProject {
+                    project,
+                    custom_name,
+                    use_existing_branch: false,
+                    pull_before_create: self.config.defaults.pull_before_creating_agent_by_default,
+                };
+                Command::DispatchCreateAgentRequest {
+                    request: Box::new(request),
+                    busy_message: "Creating a new agent\u{2026}".to_string(),
+                    term_size: (80, 24),
+                }
             }
         })
     }
@@ -1099,6 +1130,77 @@ mod tests {
             err.to_string().contains("Delete this project's agents"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn wire_create_agent_deserializes() {
+        let json = r#"{"command":"create_agent","args":{"project_id":"p1","name":"feature-x"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::CreateAgent {
+                project_id: "p1".to_string(),
+                name: "feature-x".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn wire_to_command_create_agent_builds_request() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+
+        // Non-empty name -> Some(custom_name), use_existing_branch == false.
+        let cmd = engine
+            .wire_to_command(WireCommand::CreateAgent {
+                project_id: "p1".to_string(),
+                name: "feature-x".to_string(),
+            })
+            .expect("reconstruct");
+        match cmd {
+            Command::DispatchCreateAgentRequest { request, .. } => match *request {
+                CreateAgentRequest::NewProject {
+                    project,
+                    custom_name,
+                    use_existing_branch,
+                    ..
+                } => {
+                    assert_eq!(project.id, "p1");
+                    assert_eq!(custom_name.as_deref(), Some("feature-x"));
+                    assert!(!use_existing_branch);
+                }
+                other => panic!("expected NewProject, got {other:?}"),
+            },
+            _ => panic!("expected Command::DispatchCreateAgentRequest variant"),
+        }
+
+        // Empty name -> custom_name == None.
+        let cmd = engine
+            .wire_to_command(WireCommand::CreateAgent {
+                project_id: "p1".to_string(),
+                name: String::new(),
+            })
+            .expect("reconstruct");
+        match cmd {
+            Command::DispatchCreateAgentRequest { request, .. } => match *request {
+                CreateAgentRequest::NewProject { custom_name, .. } => {
+                    assert_eq!(custom_name, None);
+                }
+                other => panic!("expected NewProject, got {other:?}"),
+            },
+            _ => panic!("expected Command::DispatchCreateAgentRequest variant"),
+        }
+    }
+
+    #[test]
+    fn wire_to_command_create_agent_unknown_project_errors() {
+        let (engine, _tmp) = test_engine();
+        let result = engine.wire_to_command(WireCommand::CreateAgent {
+            project_id: "ghost".to_string(),
+            name: "feature-x".to_string(),
+        });
+        let err = result.map(|_| ()).unwrap_err();
+        assert!(err.to_string().contains("unknown project"), "err: {err}");
     }
 
     #[test]

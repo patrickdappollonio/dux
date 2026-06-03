@@ -220,6 +220,77 @@ async fn boot_with_repo() -> (SocketAddr, tempfile::TempDir) {
     (addr, tmp)
 }
 
+/// Like `boot()`, but project `p1`'s path is a REAL git repo (init + commit) so
+/// `git worktree add` succeeds, and no session is seeded (the test creates one).
+/// `pull_before_creating_agent_by_default` is disabled because the test repo has
+/// no remote, so a pre-create pull would fail.
+async fn boot_for_create_agent() -> (SocketAddr, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+
+    let run = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .status()
+            .expect("spawn git")
+            .success();
+        assert!(ok, "git {args:?} failed");
+    };
+    run(&["init", "-q"]);
+    run(&["config", "user.email", "t@example.com"]);
+    run(&["config", "user.name", "t"]);
+    std::fs::write(root.join("f.txt"), "line1\n").expect("write file");
+    run(&["add", "f.txt"]);
+    run(&["commit", "-q", "-m", "init"]);
+
+    let paths = DuxPaths {
+        root: root.clone(),
+        config_path: root.join("config.toml"),
+        sessions_db_path: root.join("sessions.sqlite3"),
+        worktrees_root: root.join("worktrees"),
+        lock_path: root.join("dux.lock"),
+    };
+    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    {
+        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        store
+            .upsert_project(&ProjectConfig {
+                id: "p1".to_string(),
+                path: root.to_string_lossy().into_owned(),
+                name: Some("p1-name".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: Default::default(),
+            })
+            .unwrap();
+    }
+    let mut engine = bootstrap_engine(&paths).unwrap();
+    // The spawned agent provider defaults to "claude"; override with `cat` so the
+    // launch flow spawns a runnable PTY in CI.
+    engine.config.providers.commands.insert(
+        "claude".to_string(),
+        ProviderCommandConfig {
+            command: "cat".to_string(),
+            args: vec![],
+            resume_args: None,
+            ..Default::default()
+        },
+    );
+    // The test repo has no remote, so a pre-create pull would fail; disable it.
+    engine.config.defaults.pull_before_creating_agent_by_default = false;
+    let (handle, _join) = spawn_engine_thread(engine);
+    let app = router(handle);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, tmp)
+}
+
 /// Like `boot()`, but the session's worktree is a REAL git repo with a STAGED
 /// change, and the provider is overridden to a deterministic one-shot command
 /// (`bash -c 'echo …'`) that ignores the prompt and prints a known string to
@@ -1187,5 +1258,82 @@ async fn add_and_remove_project() {
     assert!(
         saw_without_id,
         "view_model still contained project id {project_id} after removal"
+    );
+}
+
+/// A web client can create a new agent in a project with the `create_agent`
+/// command. The create worker does real git worktree creation (off the project's
+/// committed branch) and spawns the `cat` provider; the resulting session and
+/// provider reach the web via the existing worker-drain path, so a later
+/// ViewModel carries a new session under p1 whose branch name is "webagent".
+#[tokio::test]
+async fn create_agent_adds_a_session() {
+    let (addr, _tmp) = boot_for_create_agent().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+
+    // Drain the initial view_model and record p1's existing session ids (likely none).
+    let mut initial_ids: Vec<String> = Vec::new();
+    {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Some(Ok(m))) =
+                tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+                && let Ok(t) = m.into_text()
+                && t.contains("\"type\":\"view_model\"")
+            {
+                let v: serde_json::Value = serde_json::from_str(&t).expect("parse view_model");
+                if let Some(sessions) = v["data"]["sessions"].as_array() {
+                    initial_ids = sessions
+                        .iter()
+                        .filter(|s| s["project_id"].as_str() == Some("p1"))
+                        .filter_map(|s| s["id"].as_str().map(|id| id.to_string()))
+                        .collect();
+                }
+                break;
+            }
+        }
+    }
+
+    ws.send(Message::Text(
+        r#"{"type":"command","command":"create_agent","args":{"project_id":"p1","name":"webagent"}}"#
+            .into(),
+    ))
+    .await
+    .unwrap();
+
+    // Poll for a view_model with a NEW session under p1 whose branch name carries
+    // "webagent". The create worker does real git work then spawns `cat`, so give
+    // it a generous deadline.
+    let mut found = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while tokio::time::Instant::now() < deadline && !found {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"type\":\"view_model\"")
+        {
+            let v: serde_json::Value = serde_json::from_str(&t).expect("parse view_model");
+            if let Some(sessions) = v["data"]["sessions"].as_array()
+                && sessions.iter().any(|s| {
+                    s["project_id"].as_str() == Some("p1")
+                        && s["id"]
+                            .as_str()
+                            .map(|id| !initial_ids.iter().any(|prev| prev == id))
+                            .unwrap_or(false)
+                        && s["branch_name"]
+                            .as_str()
+                            .map(|b| b.contains("webagent"))
+                            .unwrap_or(false)
+                })
+            {
+                found = true;
+            }
+        }
+    }
+
+    assert!(
+        found,
+        "view_model never contained a new p1 session with branch 'webagent'"
     );
 }
