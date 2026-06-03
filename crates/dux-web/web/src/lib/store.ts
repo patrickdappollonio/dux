@@ -79,6 +79,27 @@ export const socket = new DuxSocket(`ws://${location.host}/ws`)
 
 socket.onViewModel = (vm) => {
   setState({ viewModel: vm })
+  // If the focused target vanished (an agent session was removed, or a
+  // companion terminal exited and was pruned server-side), drop the selection
+  // so the center pane shows the empty state instead of a dead terminal.
+  pruneSelectionIfGone(vm)
+}
+
+// Clear the selection when its target no longer exists in the latest ViewModel.
+// Agents persist after exiting (their session stays, marked detached), so they
+// only vanish on deletion; terminals are removed outright when their PTY exits.
+function pruneSelectionIfGone(vm: ViewModel): void {
+  const target = state.selectedTarget
+  if (!target) return
+  const stillExists =
+    target.kind === "agent"
+      ? vm.sessions.some((s) => s.id === target.sessionId)
+      : vm.sessions.some((s) =>
+          s.terminals.some((t) => t.id === target.terminalId),
+        )
+  if (!stillExists) {
+    selectSession(null)
+  }
 }
 
 socket.onConn = (conn) => {
@@ -98,6 +119,25 @@ socket.onCommandResult = (status, error) => {
 socket.onError = (message) => {
   setState({ lastMessage: message })
   toast.error(message)
+}
+
+// Asynchronous status/lifecycle events (background push/pull completing, an
+// agent launch failing, a PTY exiting). Surface them as a toast toned by the
+// engine's StatusTone and keep the latest in the status bar.
+socket.onStatus = (tone, message) => {
+  setState({ lastMessage: message })
+  switch (tone) {
+    case "error":
+      toast.error(message)
+      break
+    case "warning":
+      toast.warning(message)
+      break
+    default:
+      // "info" and "busy" are both non-alarming progress notices.
+      toast.info(message)
+      break
+  }
 }
 
 // A freshly created terminal auto-focuses so the user lands on it immediately.

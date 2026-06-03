@@ -30,6 +30,7 @@ export class DuxSocket {
   onConn: (state: ConnState) => void = () => {}
   onPtyBytes: (bytes: Uint8Array) => void = () => {}
   onTerminalCreated: (sessionId: string, terminalId: string) => void = () => {}
+  onStatus: (tone: string, message: string) => void = () => {}
 
   constructor(url: string) {
     this.url = url
@@ -93,6 +94,9 @@ export class DuxSocket {
         break
       case "error":
         this.onError(message.message)
+        break
+      case "status":
+        this.onStatus(message.tone, message.message)
         break
     }
   }

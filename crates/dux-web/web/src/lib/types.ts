@@ -73,6 +73,7 @@ export type ServerMessage =
   | { type: "subscribed"; session_id: string }
   | { type: "terminal_created"; session_id: string; terminal_id: string }
   | { type: "error"; message: string }
+  | { type: "status"; tone: string; message: string }
 
 // Client -> server JSON text frames, tagged by `type`.
 export type ClientMessage =
