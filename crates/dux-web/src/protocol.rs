@@ -32,6 +32,18 @@ pub enum ClientMessage {
     CreateTerminal { session_id: String },
     /// Request the working-tree-vs-HEAD diff for one changed file.
     GetDiff { session_id: String, path: String },
+    /// List subdirectories of a server-side path so the client can pick a git
+    /// repo to add as a project. `None` starts at the user's `$HOME`.
+    BrowseDir { path: Option<String> },
+}
+
+/// A single directory-browser entry in serializable form (the engine's
+/// `BrowserEntry` is not `Serialize`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DirEntryView {
+    pub path: String,
+    pub label: String,
+    pub is_git_repo: bool,
 }
 
 /// Server -> browser (JSON text frames). PTY bytes are sent as separate binary frames.
@@ -68,6 +80,13 @@ pub enum ServerMessage {
     /// An AI-generated commit message produced by a one-shot provider run,
     /// pushed asynchronously after a `generate_commit_message` command.
     CommitMessage { message: String },
+    /// Response to `BrowseDir`: the resolved directory and its entries, or an
+    /// error string when the listing failed.
+    DirEntries {
+        path: String,
+        entries: Vec<DirEntryView>,
+        error: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -133,6 +152,22 @@ mod tests {
             json,
             r#"{"type":"commit_message","message":"Fix the thing"}"#
         );
+    }
+
+    #[test]
+    fn browse_dir_message_parses_with_and_without_path() {
+        let with = r#"{"type":"browse_dir","path":"/some/dir"}"#;
+        let msg: ClientMessage = serde_json::from_str(with).unwrap();
+        assert_eq!(
+            msg,
+            ClientMessage::BrowseDir {
+                path: Some("/some/dir".to_string()),
+            }
+        );
+
+        let without = r#"{"type":"browse_dir"}"#;
+        let msg: ClientMessage = serde_json::from_str(without).unwrap();
+        assert_eq!(msg, ClientMessage::BrowseDir { path: None });
     }
 
     #[test]

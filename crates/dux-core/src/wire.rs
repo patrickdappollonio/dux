@@ -14,7 +14,7 @@ use crate::engine::{
     AgentLaunchFailedOutcome, BeginDeleteSessionOutcome, Command, Engine, EventReaction,
     FinishDeleteSessionOutcome, StatusUpdate, WorktreeRemoval,
 };
-use crate::model::ProviderKind;
+use crate::model::{Project, ProjectBranchStatus, ProviderKind};
 use crate::statusline::StatusTone;
 use crate::worker::{ProjectPersistenceAction, PullTarget};
 
@@ -86,6 +86,16 @@ pub enum WireCommand {
     /// Overwrite `config.toml` from the current in-memory config. Empty struct
     /// variant for the same reason as [`WireCommand::ReloadConfig`].
     RecoverConfig {},
+    /// Register an existing git repository on the server as a project. `name`
+    /// may be empty to derive the display name from the path's basename.
+    AddProject {
+        path: String,
+        name: String,
+    },
+    /// Remove a project from the workspace by id (does not touch its checkout).
+    RemoveProject {
+        project_id: String,
+    },
 }
 
 /// A status-line update in wire-safe form.
@@ -397,6 +407,50 @@ impl Engine {
             }
             WireCommand::ReloadConfig {} => Command::ReloadConfig,
             WireCommand::RecoverConfig {} => Command::RecoverConfig,
+            WireCommand::AddProject { path, name } => {
+                let validated = self
+                    .validate_project_add_path(&path)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                let branch = crate::git::current_branch(&validated)?;
+                let leading_branch =
+                    crate::project_browser::leading_branch_for_project(&validated, &branch);
+                let path_str = validated.to_string_lossy().to_string();
+                let display_name = if name.trim().is_empty() {
+                    validated
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("project")
+                        .to_string()
+                } else {
+                    name.trim().to_string()
+                };
+                let project = Project {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: display_name.clone(),
+                    path: path_str,
+                    explicit_default_provider: None,
+                    default_provider: self.config.default_provider(),
+                    leading_branch: Some(leading_branch),
+                    auto_reopen_agents: None,
+                    startup_command: None,
+                    env: std::collections::BTreeMap::new(),
+                    current_branch: branch,
+                    branch_status: ProjectBranchStatus::Unknown,
+                    path_missing: false,
+                };
+                let status_message =
+                    format!("Added project \"{display_name}\" to the workspace.");
+                Command::PersistProject(Box::new(ProjectPersistenceAction::Add {
+                    project,
+                    status_message,
+                }))
+            }
+            WireCommand::RemoveProject { project_id } => {
+                Command::PersistProject(Box::new(ProjectPersistenceAction::Remove {
+                    project_name: self.project_name(&project_id)?,
+                    project_id,
+                }))
+            }
         })
     }
 
@@ -907,6 +961,117 @@ mod tests {
                 assert!(update.message.contains("Unknown session"));
             }
             _ => panic!("expected Error Status reaction"),
+        }
+    }
+
+    /// Like `init_repo`, but also stages and commits the file so HEAD exists
+    /// and `current_branch` resolves a normal (born) branch.
+    fn init_repo_with_commit() -> tempfile::TempDir {
+        let dir = init_repo();
+        let run = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .expect("spawn git")
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        run(&["add", "a.txt"]);
+        run(&["commit", "-q", "-m", "init"]);
+        dir
+    }
+
+    #[test]
+    fn wire_add_project_deserializes() {
+        let json = r#"{"command":"add_project","args":{"path":"/repo","name":"My Project"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::AddProject {
+                path: "/repo".to_string(),
+                name: "My Project".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn wire_remove_project_deserializes() {
+        let json = r#"{"command":"remove_project","args":{"project_id":"p1"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::RemoveProject {
+                project_id: "p1".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn wire_to_command_add_project_builds_persist_add() {
+        let repo = init_repo_with_commit();
+        let (engine, _tmp) = test_engine();
+        let cmd = engine
+            .wire_to_command(WireCommand::AddProject {
+                path: repo.path().to_string_lossy().into_owned(),
+                name: String::new(),
+            })
+            .expect("reconstruct");
+        // canonicalize so the assertion survives symlinked temp dirs (e.g. /tmp -> /private/tmp).
+        let expected_path = repo.path().canonicalize().unwrap();
+        let expected_name = expected_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap()
+            .to_string();
+        match cmd {
+            Command::PersistProject(action) => match *action {
+                ProjectPersistenceAction::Add { project, .. } => {
+                    assert_eq!(PathBuf::from(&project.path), expected_path);
+                    assert_eq!(project.name, expected_name);
+                }
+                other => panic!("expected Add, got {other:?}"),
+            },
+            _ => panic!("expected Command::PersistProject variant"),
+        }
+    }
+
+    #[test]
+    fn wire_to_command_add_project_rejects_non_repo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, _tmp) = test_engine();
+        let result = engine.wire_to_command(WireCommand::AddProject {
+            path: dir.path().to_string_lossy().into_owned(),
+            name: String::new(),
+        });
+        let err = result.map(|_| ()).unwrap_err();
+        assert!(
+            err.to_string().contains("not a git repository"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn wire_to_command_remove_project() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        let cmd = engine
+            .wire_to_command(WireCommand::RemoveProject {
+                project_id: "p1".to_string(),
+            })
+            .expect("reconstruct");
+        match cmd {
+            Command::PersistProject(action) => match *action {
+                ProjectPersistenceAction::Remove {
+                    project_id,
+                    project_name,
+                } => {
+                    assert_eq!(project_id, "p1");
+                    assert_eq!(project_name, "p1-name");
+                }
+                other => panic!("expected Remove, got {other:?}"),
+            },
+            _ => panic!("expected Command::PersistProject variant"),
         }
     }
 

@@ -1048,3 +1048,144 @@ async fn reload_config_reapplies_and_reports() {
         "view_model never reflected the reloaded default provider"
     );
 }
+
+/// Create a real git repo (init + commit) at a fresh temp dir, returning it.
+fn init_repo_with_commit() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let run = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .status()
+            .expect("spawn git")
+            .success();
+        assert!(ok, "git {args:?} failed");
+    };
+    run(&["init", "-q"]);
+    run(&["config", "user.email", "t@example.com"]);
+    run(&["config", "user.name", "t"]);
+    std::fs::write(dir.path().join("a.txt"), "hello\n").expect("write file");
+    run(&["add", "a.txt"]);
+    run(&["commit", "-q", "-m", "init"]);
+    dir
+}
+
+/// Browsing a server-side directory returns a `dir_entries` frame listing its
+/// subdirectories (git repos and plain dirs alike) plus the leading `../`
+/// parent entry. A child dir is created so the listing is deterministic and the
+/// path is passed explicitly so the test doesn't depend on `$HOME`.
+#[tokio::test]
+async fn browse_dir_lists_entries() {
+    let (addr, _tmp) = boot().await;
+    let parent = tempfile::tempdir().unwrap();
+    std::fs::create_dir(parent.path().join("child-dir")).unwrap();
+    let parent_path = parent.path().to_string_lossy().to_string();
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let _ = ws.next().await; // initial view_model
+
+    ws.send(Message::Text(format!(
+        r#"{{"type":"browse_dir","path":"{parent_path}"}}"#
+    )))
+    .await
+    .unwrap();
+
+    let mut frame = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    while tokio::time::Instant::now() < deadline && frame.is_empty() {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"type\":\"dir_entries\"")
+        {
+            frame = t.to_string();
+        }
+    }
+    assert!(!frame.is_empty(), "never received a dir_entries frame");
+
+    let v: serde_json::Value = serde_json::from_str(&frame).expect("parse dir_entries frame");
+    assert!(v["error"].is_null(), "unexpected error: {frame}");
+    let entries = v["entries"].as_array().expect("entries array");
+    let labels: Vec<&str> = entries.iter().filter_map(|e| e["label"].as_str()).collect();
+    assert!(labels.contains(&"../"), "missing parent entry: {labels:?}");
+    assert!(
+        labels.iter().any(|l| l.starts_with("child-dir")),
+        "missing child dir: {labels:?}"
+    );
+}
+
+/// A web client can register an existing git repo as a project with the
+/// `add_project` command, see it appear in the ViewModel, then remove it with
+/// `remove_project`. The actor syncs config.toml after each persistence; the
+/// ViewModel assertions are the core of the test.
+#[tokio::test]
+async fn add_and_remove_project() {
+    let (addr, _tmp, _config_path) = boot_for_config().await;
+    let repo = init_repo_with_commit();
+    let repo_path = repo.path().to_string_lossy().to_string();
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let _ = ws.next().await; // initial view_model
+
+    ws.send(Message::Text(format!(
+        r#"{{"type":"command","command":"add_project","args":{{"path":"{repo_path}","name":"webproj"}}}}"#
+    )))
+    .await
+    .unwrap();
+
+    // Poll for a view_model whose projects include "webproj"; capture its id.
+    let mut project_id = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    while tokio::time::Instant::now() < deadline && project_id.is_empty() {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"type\":\"view_model\"")
+            && t.contains("\"webproj\"")
+        {
+            let v: serde_json::Value = serde_json::from_str(&t).expect("parse view_model");
+            if let Some(projects) = v["data"]["projects"].as_array()
+                && let Some(p) = projects
+                    .iter()
+                    .find(|p| p["name"].as_str() == Some("webproj"))
+            {
+                project_id = p["id"].as_str().expect("project id").to_string();
+            }
+        }
+    }
+    assert!(
+        !project_id.is_empty(),
+        "view_model never contained the added project webproj"
+    );
+
+    ws.send(Message::Text(format!(
+        r#"{{"type":"command","command":"remove_project","args":{{"project_id":"{project_id}"}}}}"#
+    )))
+    .await
+    .unwrap();
+
+    // Poll for a view_model whose projects no longer include that id.
+    let mut saw_without_id = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    while tokio::time::Instant::now() < deadline && !saw_without_id {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"type\":\"view_model\"")
+        {
+            let v: serde_json::Value = serde_json::from_str(&t).expect("parse view_model");
+            if let Some(projects) = v["data"]["projects"].as_array()
+                && !projects
+                    .iter()
+                    .any(|p| p["id"].as_str() == Some(project_id.as_str()))
+            {
+                saw_without_id = true;
+            }
+        }
+    }
+    assert!(
+        saw_without_id,
+        "view_model still contained project id {project_id} after removal"
+    );
+}

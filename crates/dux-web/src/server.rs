@@ -242,6 +242,38 @@ async fn handle_socket(socket: WebSocket, engine: EngineHandle) {
                         )
                         .await;
                     }
+                    ClientMessage::BrowseDir { path } => {
+                        let dir = path.unwrap_or_else(|| {
+                            std::env::var("HOME").unwrap_or_else(|_| "/".to_string())
+                        });
+                        // fs read off the reactor.
+                        let result = tokio::task::spawn_blocking(move || {
+                            let p = std::path::Path::new(&dir);
+                            let entries = dux_core::project_browser::browser_entries(p)
+                                .into_iter()
+                                .map(|e| crate::protocol::DirEntryView {
+                                    path: e.path.to_string_lossy().to_string(),
+                                    label: e.label,
+                                    is_git_repo: e.is_git_repo,
+                                })
+                                .collect::<Vec<_>>();
+                            (dir, entries)
+                        })
+                        .await;
+                        let msg = match result {
+                            Ok((dir, entries)) => ServerMessage::DirEntries {
+                                path: dir,
+                                entries,
+                                error: None,
+                            },
+                            Err(e) => ServerMessage::DirEntries {
+                                path: String::new(),
+                                entries: vec![],
+                                error: Some(format!("browse failed: {e}")),
+                            },
+                        };
+                        let _ = send_json(&sink, &msg).await;
+                    }
                 }
             }
             Message::Close(_) => break,
