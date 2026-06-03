@@ -635,6 +635,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "similar",
  "sysinfo",
  "tempfile",
  "toml 1.1.2+spec-1.1.0",
