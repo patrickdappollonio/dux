@@ -5,6 +5,7 @@ import { ChangedFiles } from "@/components/ChangedFiles"
 import { CommandPalette } from "@/components/CommandPalette"
 import { CommitDialog } from "@/components/CommitDialog"
 import { DeleteSessionDialog } from "@/components/DeleteSessionDialog"
+import { GlobalEnvDialog } from "@/components/GlobalEnvDialog"
 import { StatusBar } from "@/components/StatusBar"
 import { TerminalPane } from "@/components/TerminalPane"
 import { Badge } from "@/components/ui/badge"
@@ -179,6 +180,7 @@ function App() {
       <CommandPalette />
       <CommitDialog />
       <DeleteSessionDialog />
+      <GlobalEnvDialog />
       <Toaster />
     </SidebarProvider>
   )

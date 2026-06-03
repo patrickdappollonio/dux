@@ -29,6 +29,7 @@ export interface DuxState {
   lastMessage: string
   commitTarget: string | null
   deleteTarget: string | null
+  globalEnvOpen: boolean
   paletteOpen: boolean
   sidebarWidth: string
   currentDiff: {
@@ -56,6 +57,7 @@ let state: DuxState = {
   lastMessage: "",
   commitTarget: null,
   deleteTarget: null,
+  globalEnvOpen: false,
   paletteOpen: false,
   sidebarWidth: loadSidebarWidth(),
   currentDiff: null,
@@ -248,6 +250,18 @@ export function deleteSession(sessionId: string, deleteWorktree: boolean): void 
     session_id: sessionId,
     delete_worktree: deleteWorktree,
   })
+}
+
+export function openGlobalEnv(): void {
+  setState({ globalEnvOpen: true })
+}
+
+export function closeGlobalEnv(): void {
+  setState({ globalEnvOpen: false })
+}
+
+export function saveGlobalEnv(env: Record<string, string>): void {
+  socket.sendCommand("persist_global_env", { env })
 }
 
 export function setPaletteOpen(open: boolean): void {

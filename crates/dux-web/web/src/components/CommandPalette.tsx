@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/command"
 import {
   openCommit,
+  openGlobalEnv,
   selectSession,
   setPaletteOpen,
   socket,
@@ -93,6 +94,19 @@ export function CommandPalette() {
             <CommandSeparator />
           </>
         )}
+
+        <CommandGroup heading="Workspace">
+          <CommandItem
+            className="cursor-pointer"
+            onSelect={() => {
+              openGlobalEnv()
+              close()
+            }}
+          >
+            Global environment…
+          </CommandItem>
+        </CommandGroup>
+        <CommandSeparator />
 
         <CommandGroup heading="Switch session">
           {sessions.map((s) => (

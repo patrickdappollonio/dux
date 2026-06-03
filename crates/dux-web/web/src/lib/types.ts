@@ -84,6 +84,7 @@ export interface ViewModel {
   projects: ProjectView[]
   sessions: SessionView[]
   changed_files: ChangedFiles
+  global_env: Record<string, string>
 }
 
 export interface CommandStatus {
