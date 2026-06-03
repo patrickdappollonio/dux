@@ -190,6 +190,28 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
                         ),
                     ));
                 }
+
+                // A reload worker re-read config.toml; apply the new config to the
+                // running engine. This consumes `reaction`, so it MUST be the last
+                // use of it in the loop body (all `&reaction` borrows above end
+                // first). `ApplyReloadedConfig` and `ProjectPersistenceOutcome` are
+                // distinct variants, so consuming here never skips the project sync.
+                if let EventReaction::ApplyReloadedConfig(config) = reaction {
+                    match engine.apply_reloaded_config(*config) {
+                        Ok(()) => {
+                            let _ = thread_status_tx.send(WireStatus::new(
+                                "info",
+                                "Configuration reloaded. New settings are active.",
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = thread_status_tx.send(WireStatus::new(
+                                "error",
+                                format!("Config reload failed to apply: {e:#}"),
+                            ));
+                        }
+                    }
+                }
             }
 
             // Reap agent/terminal PTYs whose child process exited so they stop

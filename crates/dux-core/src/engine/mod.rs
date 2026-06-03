@@ -274,6 +274,21 @@ impl Engine {
         crate::config_write::save_config(&self.paths.config_path, &config)
     }
 
+    /// Apply a freshly-reloaded config to the running engine (headless subset of
+    /// the TUI's apply): refresh GitHub-integration flag, re-merge projects from
+    /// the store under the new config, swap the config, and refresh derived
+    /// project/branch-sync state. View concerns (theme, keybindings, panes) are
+    /// the surface's responsibility and are not touched here.
+    pub fn apply_reloaded_config(&mut self, config: Config) -> anyhow::Result<()> {
+        self.github_integration_enabled = config.ui.github_integration;
+        self.projects =
+            crate::project_browser::load_projects(&self.session_store.load_projects()?, &config);
+        self.config = config;
+        self.refresh_project_defaults();
+        self.update_branch_sync_sessions();
+        Ok(())
+    }
+
     /// Re-resolve the in-memory `default_provider` for each project against
     /// the current config. Projects with an explicit `default_provider` keep
     /// their override; projects without one pick up the new global default.
@@ -961,5 +976,26 @@ mod tests {
             .find(|p| p.id == "p2")
             .expect("p2 present");
         assert_eq!(two.default_provider.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn apply_reloaded_config_swaps_config_and_refreshes_state() {
+        let (mut engine, _tmp) = test_engine();
+        // Baseline differs from the values we'll reload.
+        engine.config.ui.github_integration = false;
+        engine.config.defaults.provider = "claude".to_string();
+        engine.github_integration_enabled = false;
+
+        let mut new_config = Config::default();
+        new_config.ui.github_integration = true;
+        new_config.defaults.provider = "codex".to_string();
+
+        engine
+            .apply_reloaded_config(new_config)
+            .expect("apply reloaded config");
+
+        assert!(engine.config.ui.github_integration);
+        assert!(engine.github_integration_enabled);
+        assert_eq!(engine.config.defaults.provider, "codex");
     }
 }

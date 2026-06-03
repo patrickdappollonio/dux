@@ -60,9 +60,11 @@ impl ConfigSaver for WebConfigSaver {
         worker_tx: mpsc::Sender<WorkerEvent>,
     ) {
         std::thread::spawn(move || {
-            // The web has no canonical commented renderer (that needs the TUI's
-            // RuntimeBindings); write a valid plain serialization via the shared writer.
-            let result = dux_core::config_write::save_config(&config_path, &config)
+            // Recover must overwrite unconditionally, even when the on-disk file is
+            // corrupt/unparseable. The web has no canonical commented renderer (that
+            // needs the TUI's RuntimeBindings); write a valid plain serialization via
+            // the shared force-plain writer, which never patches an existing file.
+            let result = dux_core::config_write::write_config_plain(&config_path, &config)
                 .map_err(|err| format!("failed to write {}: {err}", config_path.display()));
             let _ = worker_tx.send(WorkerEvent::ConfigRecoverCompleted(result));
         });

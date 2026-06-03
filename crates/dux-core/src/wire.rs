@@ -72,6 +72,17 @@ pub enum WireCommand {
         project_id: String,
         env: BTreeMap<String, String>,
     },
+    /// Re-read `config.toml` from disk and apply it to the running engine.
+    ///
+    /// Modeled as an empty struct variant (not a unit variant) so it deserializes
+    /// from both `{"command":"reload_config"}` and `{"command":"reload_config",
+    /// "args":{}}`. The frontend's generic command envelope always carries an
+    /// `args` object, and serde's `content="args"` tagging rejects a map for a
+    /// true unit variant — an empty struct variant accepts both forms.
+    ReloadConfig {},
+    /// Overwrite `config.toml` from the current in-memory config. Empty struct
+    /// variant for the same reason as [`WireCommand::ReloadConfig`].
+    RecoverConfig {},
 }
 
 /// A status-line update in wire-safe form.
@@ -378,6 +389,8 @@ impl Engine {
                     env,
                 }))
             }
+            WireCommand::ReloadConfig {} => Command::ReloadConfig,
+            WireCommand::RecoverConfig {} => Command::RecoverConfig,
         })
     }
 
@@ -612,6 +625,43 @@ mod tests {
             }
             _ => panic!("expected WireCommand::UpdateProjectEnv variant"),
         }
+    }
+
+    #[test]
+    fn wire_reload_config_deserializes_with_empty_args_object() {
+        // The frontend sends `args: {}` through the generic command envelope, and
+        // the server always re-includes the `args` key when reconstructing the
+        // envelope. The empty struct variant deserializes from that map form. (A
+        // true unit variant would reject the `args:{}` map; the empty struct
+        // variant requires the `args` key, which is exactly what the wire carries.)
+        let json = r#"{"command":"reload_config","args":{}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(cmd, WireCommand::ReloadConfig {});
+    }
+
+    #[test]
+    fn wire_recover_config_deserializes_with_empty_args_object() {
+        let json = r#"{"command":"recover_config","args":{}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(cmd, WireCommand::RecoverConfig {});
+    }
+
+    #[test]
+    fn wire_to_command_reload_config_maps_to_command() {
+        let (engine, _tmp) = test_engine();
+        let cmd = engine
+            .wire_to_command(WireCommand::ReloadConfig {})
+            .expect("reconstruct");
+        assert!(matches!(cmd, Command::ReloadConfig));
+    }
+
+    #[test]
+    fn wire_to_command_recover_config_maps_to_command() {
+        let (engine, _tmp) = test_engine();
+        let cmd = engine
+            .wire_to_command(WireCommand::RecoverConfig {})
+            .expect("reconstruct");
+        assert!(matches!(cmd, Command::RecoverConfig));
     }
 
     #[test]

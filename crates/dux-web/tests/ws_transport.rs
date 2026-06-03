@@ -867,3 +867,55 @@ async fn update_project_startup_command_persists_to_config() {
         "config.toml never received the startup command: {saved}"
     );
 }
+
+/// Reloading config re-reads config.toml from disk and APPLIES it to the running
+/// engine: a "Configuration reloaded" status reaches the client, and a value
+/// changed on disk after boot (here `defaults.provider`) becomes observable in a
+/// later ViewModel frame (project p1 inherits the new global default provider).
+#[tokio::test]
+async fn reload_config_reapplies_and_reports() {
+    let (addr, _tmp, config_path) = boot_for_config().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let _ = ws.next().await; // initial view_model
+
+    // Boot's config has no [defaults] override, so p1 inherits the built-in
+    // default provider ("claude"). Rewrite config.toml on disk with a different
+    // global default before asking the engine to reload.
+    std::fs::write(&config_path, "[defaults]\nprovider = \"codex\"\n").unwrap();
+
+    ws.send(Message::Text(
+        r#"{"type":"command","command":"reload_config","args":{}}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    // Look for BOTH the reload status and a view_model showing the applied change.
+    let mut saw_status = false;
+    let mut saw_applied = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline && !(saw_status && saw_applied) {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+        {
+            if (t.contains("\"type\":\"command_result\"") || t.contains("\"type\":\"status\""))
+                && t.contains("Configuration reloaded")
+            {
+                saw_status = true;
+            }
+            if t.contains("\"type\":\"view_model\"")
+                && t.contains("\"id\":\"p1\"")
+                && t.contains("\"default_provider\":\"codex\"")
+            {
+                saw_applied = true;
+            }
+        }
+    }
+
+    assert!(saw_status, "never received a Configuration reloaded status");
+    assert!(
+        saw_applied,
+        "view_model never reflected the reloaded default provider"
+    );
+}

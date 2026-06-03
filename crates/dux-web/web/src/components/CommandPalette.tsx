@@ -105,6 +105,24 @@ export function CommandPalette() {
           >
             Global environment…
           </CommandItem>
+          <CommandItem
+            className="cursor-pointer"
+            onSelect={() => {
+              socket.sendCommand("reload_config", {})
+              close()
+            }}
+          >
+            Reload config from disk
+          </CommandItem>
+          <CommandItem
+            className="cursor-pointer"
+            onSelect={() => {
+              socket.sendCommand("recover_config", {})
+              close()
+            }}
+          >
+            Recover config (overwrite config.toml)
+          </CommandItem>
         </CommandGroup>
         <CommandSeparator />
 

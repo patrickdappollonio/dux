@@ -46,10 +46,18 @@ pub fn save_config(config_path: &Path, config: &Config) -> Result<()> {
     if config_path.exists() {
         return patch_config_file(config_path, config);
     }
+    write_config_plain(config_path, config)
+}
 
-    // Missing-file fallback: build a fresh document from scratch using the same
-    // patch helpers against an empty document. No comments — this is the web's
-    // plain fallback, not the TUI's pretty first-creation path.
+/// Unconditionally write a fresh plain (uncommented) `toml_edit` serialization,
+/// overwriting whatever is on disk. Unlike [`save_config`], this never patches
+/// an existing file, so it succeeds even when the current `config.toml` is
+/// corrupt or unparseable. Used by the web's "recover config" path, which must
+/// overwrite a broken file from the in-memory config.
+pub fn write_config_plain(config_path: &Path, config: &Config) -> Result<()> {
+    // Build a fresh document from scratch using the same patch helpers against
+    // an empty document. No comments — this is the plain fallback, not the
+    // TUI's pretty first-creation path.
     let mut doc = DocumentMut::new();
     apply_patches(&mut doc, config);
     fs::write(config_path, doc.to_string())
@@ -526,6 +534,25 @@ unknown_key = \"untouched\"
         assert_eq!(project.startup_command.as_deref(), Some("npm install"));
         assert_eq!(project.auto_reopen_agents, Some(true));
         assert_eq!(project.env.get("KEY").map(String::as_str), Some("value"));
+    }
+
+    #[test]
+    fn write_config_plain_overwrites() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        // Seed a corrupt/unparseable file that `save_config`'s patch path would
+        // choke on. `write_config_plain` must overwrite it regardless.
+        fs::write(&config_path, "this is not = valid toml [[[ \n broken").expect("write garbage");
+
+        let mut config = Config::default();
+        config.env.insert("FOO".to_string(), "bar".to_string());
+
+        write_config_plain(&config_path, &config).expect("write_config_plain");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        let parsed: Config = toml::from_str(&saved).expect("reparse valid config");
+        assert_eq!(parsed.env.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(parsed.defaults.provider, config.defaults.provider);
     }
 
     #[test]
