@@ -99,6 +99,154 @@ async fn boot() -> (SocketAddr, tempfile::TempDir) {
     (addr, tmp)
 }
 
+/// Like `boot()`, but the session's worktree is a REAL git repo: `f.txt` is
+/// committed with three lines, then its working copy is modified WITHOUT a
+/// commit so a working-tree-vs-HEAD diff exists.
+async fn boot_with_repo() -> (SocketAddr, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+
+    // Build the git repo at the worktree root.
+    let run = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .status()
+            .expect("spawn git")
+            .success();
+        assert!(ok, "git {args:?} failed");
+    };
+    run(&["init", "-q"]);
+    run(&["config", "user.email", "t@example.com"]);
+    run(&["config", "user.name", "t"]);
+    std::fs::write(root.join("f.txt"), "line1\nline2\nline3\n").expect("write file");
+    run(&["add", "f.txt"]);
+    run(&["commit", "-q", "-m", "init"]);
+    // Modify the working copy without committing so HEAD != working tree.
+    std::fs::write(root.join("f.txt"), "line1\nCHANGED\nline3\n").expect("overwrite");
+
+    let paths = DuxPaths {
+        root: root.clone(),
+        config_path: root.join("config.toml"),
+        sessions_db_path: root.join("sessions.sqlite3"),
+        worktrees_root: root.join("worktrees"),
+        lock_path: root.join("dux.lock"),
+    };
+    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    {
+        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        store
+            .upsert_project(&ProjectConfig {
+                id: "p1".to_string(),
+                path: root.to_string_lossy().into_owned(),
+                name: Some("p1-name".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: Default::default(),
+            })
+            .unwrap();
+        store
+            .upsert_session(&sample_session(
+                "s1",
+                "p1",
+                "feat",
+                root.to_string_lossy().as_ref(),
+            ))
+            .unwrap();
+    }
+    let mut engine = bootstrap_engine(&paths).unwrap();
+    engine.config.providers.commands.insert(
+        "claude".to_string(),
+        ProviderCommandConfig {
+            command: "cat".to_string(),
+            args: vec![],
+            resume_args: None,
+            ..Default::default()
+        },
+    );
+    engine.config.terminal.command = "cat".to_string();
+    engine.config.terminal.args = vec![];
+    let (handle, _join) = spawn_engine_thread(engine);
+    let app = router(handle);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, tmp)
+}
+
+/// Fetching the diff for a changed file returns hunks carrying the insert/delete
+/// content; a path-traversal request returns an error frame with a null diff.
+#[tokio::test]
+async fn get_diff_returns_hunks_for_a_changed_file() {
+    let (addr, _tmp) = boot_with_repo().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let _ = ws.next().await; // initial view_model
+
+    ws.send(Message::Text(
+        r#"{"type":"get_diff","session_id":"s1","path":"f.txt"}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    let mut diff_frame = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    while tokio::time::Instant::now() < deadline && diff_frame.is_empty() {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"type\":\"diff\"")
+        {
+            diff_frame = t.to_string();
+        }
+    }
+    assert!(!diff_frame.is_empty(), "never received a diff frame");
+
+    let v: serde_json::Value = serde_json::from_str(&diff_frame).expect("parse diff frame");
+    assert!(v["diff"].is_object(), "diff missing: {diff_frame}");
+    assert!(v["error"].is_null(), "unexpected error: {diff_frame}");
+    let hunks = v["diff"]["hunks"].as_array().expect("hunks array");
+    assert!(!hunks.is_empty(), "hunks empty: {diff_frame}");
+    assert!(
+        diff_frame.contains("CHANGED"),
+        "missing inserted content: {diff_frame}"
+    );
+    assert!(
+        diff_frame.contains("line2"),
+        "missing deleted content: {diff_frame}"
+    );
+
+    // A path that escapes the worktree must yield an error frame with a null diff.
+    ws.send(Message::Text(
+        r#"{"type":"get_diff","session_id":"s1","path":"../escape"}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    let mut err_frame = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    while tokio::time::Instant::now() < deadline && err_frame.is_empty() {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"type\":\"diff\"")
+            && t.contains("../escape")
+        {
+            err_frame = t.to_string();
+        }
+    }
+    assert!(
+        !err_frame.is_empty(),
+        "never received the escape diff frame"
+    );
+    let v: serde_json::Value = serde_json::from_str(&err_frame).expect("parse escape frame");
+    assert!(v["diff"].is_null(), "diff should be null: {err_frame}");
+    assert!(!v["error"].is_null(), "error should be set: {err_frame}");
+}
+
 #[tokio::test]
 async fn client_receives_view_model_on_connect() {
     let (addr, _tmp) = boot().await;

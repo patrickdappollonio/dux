@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use dux_core::diff::FileDiff;
 use dux_core::wire::WireStatus;
 
 /// Browser -> server (JSON text frames). PTY input is sent as binary frames instead.
@@ -29,6 +30,8 @@ pub enum ClientMessage {
     SubscribeTerminal { terminal_id: String },
     /// Create a new companion terminal for a session (distinct from its agent).
     CreateTerminal { session_id: String },
+    /// Request the working-tree-vs-HEAD diff for one changed file.
+    GetDiff { session_id: String, path: String },
 }
 
 /// Server -> browser (JSON text frames). PTY bytes are sent as separate binary frames.
@@ -55,6 +58,13 @@ pub enum ServerMessage {
     /// a background push/pull completing, an agent launch failing, or a PTY
     /// exiting. Same tone+message shape as a command result's status.
     Status { tone: String, message: String },
+    /// Response to `GetDiff`: the file's diff, or an error string.
+    Diff {
+        session_id: String,
+        path: String,
+        diff: Option<FileDiff>,
+        error: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -95,6 +105,19 @@ mod tests {
             }
             _ => panic!("expected Command variant"),
         }
+    }
+
+    #[test]
+    fn get_diff_message_parses() {
+        let json = r#"{"type":"get_diff","session_id":"s1","path":"a.txt"}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            msg,
+            ClientMessage::GetDiff {
+                session_id: "s1".to_string(),
+                path: "a.txt".to_string(),
+            }
+        );
     }
 
     #[test]

@@ -190,6 +190,35 @@ async fn handle_socket(socket: WebSocket, engine: EngineHandle) {
                             }
                         }
                     }
+                    ClientMessage::GetDiff { session_id, path } => {
+                        let (diff, error) = match engine.session_worktree(session_id.clone()).await
+                        {
+                            None => (None, Some("unknown session".to_string())),
+                            Some(worktree) => {
+                                let p = path.clone();
+                                // git I/O off the engine thread AND off the async reactor.
+                                match tokio::task::spawn_blocking(move || {
+                                    dux_core::diff::file_diff(std::path::Path::new(&worktree), &p)
+                                })
+                                .await
+                                {
+                                    Ok(Ok(d)) => (Some(d), None),
+                                    Ok(Err(e)) => (None, Some(e.to_string())),
+                                    Err(e) => (None, Some(format!("diff task failed: {e}"))),
+                                }
+                            }
+                        };
+                        let _ = send_json(
+                            &sink,
+                            &ServerMessage::Diff {
+                                session_id,
+                                path,
+                                diff,
+                                error,
+                            },
+                        )
+                        .await;
+                    }
                 }
             }
             Message::Close(_) => break,

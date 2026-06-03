@@ -30,6 +30,9 @@ pub enum EngineRequest {
     SubscribeTerminal(String, oneshot::Sender<Result<PtySubscription, String>>),
     /// Create a companion terminal for a session, replying `(terminal_id, label)`.
     CreateTerminal(String, oneshot::Sender<Result<(String, String), String>>),
+    /// Resolve a session's worktree path (instant lookup; diff I/O happens
+    /// off-thread in the server handler).
+    SessionWorktree(String, oneshot::Sender<Option<String>>),
 }
 
 /// Resolve the live PTY for an id, which may name either an agent provider
@@ -127,6 +130,18 @@ impl EngineHandle {
             .send(EngineRequest::CreateTerminal(session_id, tx))
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
+    }
+
+    pub async fn session_worktree(&self, session_id: String) -> Option<String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::SessionWorktree(session_id, tx))
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
     }
 }
 
@@ -279,6 +294,14 @@ fn handle_request(engine: &mut Engine, req: EngineRequest) {
                 .create_companion_terminal(&session_id)
                 .map_err(|e| e.to_string());
             let _ = reply.send(res);
+        }
+        EngineRequest::SessionWorktree(session_id, reply) => {
+            let worktree = engine
+                .sessions
+                .iter()
+                .find(|s| s.id == session_id)
+                .map(|s| s.worktree_path.clone());
+            let _ = reply.send(worktree);
         }
     }
 }
