@@ -19,6 +19,7 @@ rustix.workspace = true
 serde.workspace = true
 similar = "3"
 toml = "1.1.2"
+toml_edit = "0.25"
 serde_json.workspace = true
 sysinfo.workspace = true
 uuid.workspace = true

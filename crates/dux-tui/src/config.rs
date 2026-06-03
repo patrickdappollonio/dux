@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use toml_edit::{Array, DocumentMut, Formatted, InlineTable, Item, Table, Value};
+use toml_edit::{DocumentMut, Item, Value};
 
 use crate::keybindings;
 
@@ -91,7 +91,9 @@ fn apply_config_deprecations_with(
 ) -> Result<bool> {
     let mut changed = false;
     for rule in rules {
-        let Some(old_item) = remove_table_key_item(doc, rule.old.section, rule.old.key) else {
+        let Some(old_item) =
+            dux_core::config_write::remove_table_key_item(doc, rule.old.section, rule.old.key)
+        else {
             continue;
         };
         match rule.action {
@@ -126,7 +128,7 @@ fn migrate_prompt_for_name(
         );
     };
 
-    let table = ensure_table(doc, "defaults");
+    let table = dux_core::config_write::ensure_table(doc, "defaults");
     if !table.contains_key("enable_randomized_pet_name_by_default") {
         table["enable_randomized_pet_name_by_default"] = toml_edit::value(!prompt_for_name);
     }
@@ -423,7 +425,7 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
                         let _ = writeln!(out, "{key} = {b}");
                     }
                     FieldValue::MultilineStr(Some(s)) => {
-                        let escaped = escape_toml_multiline(&s);
+                        let escaped = dux_core::config_write::escape_toml_multiline(&s);
                         let _ = writeln!(out, "{key} = \"\"\"\n{escaped}\"\"\"");
                     }
                     FieldValue::MultilineStr(None) => {
@@ -469,390 +471,20 @@ pub fn save_config(
     config: &Config,
     _bindings: &crate::keybindings::RuntimeBindings,
 ) -> Result<()> {
-    let raw = match fs::read_to_string(config_path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // No existing file — write the full canonical config.
-            let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
-            let body = render_config(config, &bindings);
-            fs::write(config_path, body)
-                .with_context(|| format!("failed to write {}", config_path.display()))?;
-            return Ok(());
-        }
-        Err(e) => {
-            return Err(e).with_context(|| format!("failed to read {}", config_path.display()));
-        }
-    };
-
-    let mut doc: DocumentMut = raw
-        .parse()
-        .with_context(|| format!("failed to parse {}", config_path.display()))?;
-
-    // --- [defaults] ---
-    patch_table_str(&mut doc, "defaults", "provider", &config.defaults.provider);
-    patch_table_opt_str(
-        &mut doc,
-        "defaults",
-        "start_directory",
-        config.defaults.start_directory.as_deref(),
-    );
-    patch_table_opt_multiline(
-        &mut doc,
-        "defaults",
-        "commit_prompt",
-        config.defaults.commit_prompt.as_deref(),
-    );
-    patch_table_bool(
-        &mut doc,
-        "defaults",
-        "enable_randomized_pet_name_by_default",
-        config.defaults.enable_randomized_pet_name_by_default,
-    );
-    patch_table_bool(
-        &mut doc,
-        "defaults",
-        "pull_before_creating_agent_by_default",
-        config.defaults.pull_before_creating_agent_by_default,
-    );
-    remove_table_key(&mut doc, "defaults", "prompt_for_name");
-
-    // --- [env] ---
-    patch_env_table(&mut doc, "env", &config.env);
-
-    // --- [logging] ---
-    patch_table_str(&mut doc, "logging", "level", &config.logging.level);
-    patch_table_str(&mut doc, "logging", "path", &config.logging.path);
-
-    // --- [ui] ---
-    patch_table_u16(&mut doc, "ui", "left_width_pct", config.ui.left_width_pct);
-    patch_table_u16(&mut doc, "ui", "right_width_pct", config.ui.right_width_pct);
-    patch_table_u16(
-        &mut doc,
-        "ui",
-        "terminal_pane_height_pct",
-        config.ui.terminal_pane_height_pct,
-    );
-    patch_table_u16(
-        &mut doc,
-        "ui",
-        "empty_project_separator_min_projects",
-        config.ui.empty_project_separator_min_projects,
-    );
-    patch_table_u16(
-        &mut doc,
-        "ui",
-        "staged_pane_height_pct",
-        config.ui.staged_pane_height_pct,
-    );
-    patch_table_u16(
-        &mut doc,
-        "ui",
-        "commit_pane_height_pct",
-        config.ui.commit_pane_height_pct,
-    );
-    patch_table_usize(
-        &mut doc,
-        "ui",
-        "agent_scrollback_lines",
-        config.ui.agent_scrollback_lines,
-    );
-    patch_table_u16(
-        &mut doc,
-        "ui",
-        "branch_sync_interval",
-        config.ui.branch_sync_interval,
-    );
-    patch_table_bool(
-        &mut doc,
-        "ui",
-        "show_diff_line_numbers",
-        config.ui.show_diff_line_numbers,
-    );
-    patch_table_u16(&mut doc, "ui", "diff_tab_width", config.ui.diff_tab_width);
-    patch_table_bool(
-        &mut doc,
-        "ui",
-        "github_integration",
-        config.ui.github_integration,
-    );
-    patch_table_bool(
-        &mut doc,
-        "ui",
-        "auto_reopen_agents",
-        config.ui.auto_reopen_agents,
-    );
-    patch_table_str(
-        &mut doc,
-        "ui",
-        "pr_banner_position",
-        &config.ui.pr_banner_position,
-    );
-    patch_table_str(&mut doc, "ui", "theme", &config.ui.theme);
-
-    // --- [editor] ---
-    patch_table_str(&mut doc, "editor", "default", &config.editor.default);
-
-    // --- [terminal] ---
-    patch_table_str(&mut doc, "terminal", "command", &config.terminal.command);
-    patch_table_string_array(&mut doc, "terminal", "args", &config.terminal.args);
-
-    // --- [startup_command_terminal] ---
-    patch_table_str(
-        &mut doc,
-        "startup_command_terminal",
-        "command",
-        &config.startup_command_terminal.command,
-    );
-    patch_table_string_array(
-        &mut doc,
-        "startup_command_terminal",
-        "args",
-        &config.startup_command_terminal.args,
-    );
-
-    // --- [keys] ---
-    patch_table_bool(
-        &mut doc,
-        "keys",
-        "show_terminal_keys",
-        config.keys.show_terminal_keys,
-    );
-    {
-        let keys_table = doc
-            .entry("keys")
-            .or_insert_with(|| Item::Table(Table::new()))
-            .as_table_mut()
-            .unwrap();
-        for (action, key_strs) in &config.keys.bindings {
-            let mut arr = Array::new();
-            for s in key_strs {
-                arr.push(s.as_str());
-            }
-            keys_table[action] = toml_edit::value(arr);
-        }
-    }
-
-    // --- [providers.*] ---
-    patch_providers(&mut doc, &config.providers);
-
-    // --- [[projects]] ---
-    patch_projects(&mut doc, &config.projects);
-
-    // --- [macros] ---
-    patch_macros(&mut doc, &config.macros);
-
-    fs::write(config_path, doc.to_string())
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// toml_edit patch helpers
-// ---------------------------------------------------------------------------
-
-fn ensure_table<'a>(doc: &'a mut DocumentMut, section: &str) -> &'a mut Table {
-    doc.entry(section)
-        .or_insert_with(|| Item::Table(Table::new()))
-        .as_table_mut()
-        .unwrap()
-}
-
-fn patch_table_str(doc: &mut DocumentMut, section: &str, key: &str, value: &str) {
-    let table = ensure_table(doc, section);
-    table[key] = toml_edit::value(value);
-}
-
-fn patch_table_opt_str(doc: &mut DocumentMut, section: &str, key: &str, value: Option<&str>) {
-    let table = ensure_table(doc, section);
-    table[key] = toml_edit::value(value.unwrap_or(""));
-}
-
-fn patch_table_opt_multiline(doc: &mut DocumentMut, section: &str, key: &str, value: Option<&str>) {
-    let table = ensure_table(doc, section);
-    match value {
-        Some(s) => {
-            // Build a tiny TOML document with a triple-quoted string and extract
-            // the parsed value so the repr uses the multiline form.
-            let escaped = escape_toml_multiline(s);
-            let snippet = format!("v = \"\"\"\n{escaped}\"\"\"");
-            if let Ok(mini) = snippet.parse::<DocumentMut>()
-                && let Some(item) = mini.get("v")
-            {
-                table[key] = item.clone();
-                return;
-            }
-            // Fallback: regular string (newlines escaped as \n).
-            table[key] = toml_edit::value(s);
-        }
-        None => {
-            table[key] = toml_edit::value("");
-        }
-    }
-}
-
-fn patch_table_u16(doc: &mut DocumentMut, section: &str, key: &str, value: u16) {
-    let table = ensure_table(doc, section);
-    table[key] = toml_edit::value(i64::from(value));
-}
-
-fn patch_table_usize(doc: &mut DocumentMut, section: &str, key: &str, value: usize) {
-    let table = ensure_table(doc, section);
-    table[key] = toml_edit::value(value as i64);
-}
-
-fn patch_table_bool(doc: &mut DocumentMut, section: &str, key: &str, value: bool) {
-    let table = ensure_table(doc, section);
-    table[key] = toml_edit::value(value);
-}
-
-fn remove_table_key(doc: &mut DocumentMut, section: &str, key: &str) {
-    let _ = remove_table_key_item(doc, section, key);
-}
-
-fn remove_table_key_item(doc: &mut DocumentMut, section: &str, key: &str) -> Option<Item> {
-    doc.get_mut(section)
-        .and_then(Item::as_table_mut)
-        .and_then(|table| table.remove(key))
-}
-
-fn patch_table_string_array(doc: &mut DocumentMut, section: &str, key: &str, values: &[String]) {
-    let table = ensure_table(doc, section);
-    let mut arr = Array::new();
-    for v in values {
-        arr.push(v.as_str());
-    }
-    table[key] = toml_edit::value(arr);
-}
-
-fn patch_providers(doc: &mut DocumentMut, providers: &ProvidersConfig) {
-    let providers_table = doc
-        .entry("providers")
-        .or_insert_with(|| Item::Table(Table::new()))
-        .as_table_mut()
-        .unwrap();
-
-    for (name, config) in &providers.commands {
-        let tbl = providers_table
-            .entry(name)
-            .or_insert_with(|| Item::Table(Table::new()))
-            .as_table_mut()
-            .unwrap();
-
-        tbl["command"] = toml_edit::value(&config.command);
-
-        let mut args = Array::new();
-        for a in &config.args {
-            args.push(a.as_str());
-        }
-        tbl["args"] = toml_edit::value(args);
-
-        let mut resume = Array::new();
-        for a in config.resume_args.as_deref().unwrap_or(&[]) {
-            resume.push(a.as_str());
-        }
-        tbl["resume_args"] = toml_edit::value(resume);
-        if let Some(timeout_ms) = config.resume_wait_timeout_ms {
-            tbl["resume_wait_timeout_ms"] = toml_edit::value(timeout_ms as i64);
-        }
-
-        let mut oneshot = Array::new();
-        for a in &config.oneshot_args {
-            oneshot.push(a.as_str());
-        }
-        tbl["oneshot_args"] = toml_edit::value(oneshot);
-
-        let output = match config.oneshot_output {
-            OneshotOutput::Stdout => "stdout",
-            OneshotOutput::Tempfile => "tempfile",
-        };
-        tbl["oneshot_output"] = toml_edit::value(output);
-
-        if let Some(hint) = &config.install_hint {
-            tbl["install_hint"] = toml_edit::value(hint.as_str());
-        }
-
-        tbl["forward_scroll"] = toml_edit::value(config.forward_scroll);
-    }
-}
-
-fn patch_macros(doc: &mut DocumentMut, macros: &MacrosConfig) {
-    let table = ensure_table(doc, "macros");
-
-    // Remove entries that no longer exist in config.
-    let existing_keys: Vec<String> = table
-        .iter()
-        .filter(|(_, v)| v.is_inline_table())
-        .map(|(k, _)| k.to_string())
-        .collect();
-    for key in &existing_keys {
-        if !macros.entries.contains_key(key) {
-            table.remove(key);
-        }
-    }
-
-    // Add or update entries.
-    for (name, entry) in &macros.entries {
-        let mut inline = InlineTable::new();
-        inline.insert("text", Value::String(Formatted::new(entry.text.clone())));
-        let surface_str = match entry.surface {
-            MacroSurface::Agent => "agent",
-            MacroSurface::Terminal => "terminal",
-            MacroSurface::Both => "both",
-        };
-        inline.insert(
-            "surface",
-            Value::String(Formatted::new(surface_str.to_string())),
-        );
-        table[name] = toml_edit::value(Value::InlineTable(inline));
-    }
-}
-
-fn patch_projects(doc: &mut DocumentMut, projects: &[ProjectConfig]) {
-    let _ = doc.remove("projects");
-    if projects.is_empty() {
-        return;
-    }
-
-    let mut array = toml_edit::ArrayOfTables::new();
-    for project in projects {
-        let mut table = Table::new();
-        table["id"] = toml_edit::value(project.id.as_str());
-        table["path"] = toml_edit::value(project.path.as_str());
-        if let Some(name) = project.name.as_deref() {
-            table["name"] = toml_edit::value(name);
-        }
-        if let Some(provider) = project.default_provider.as_deref() {
-            table["default_provider"] = toml_edit::value(provider);
-        }
-        if let Some(auto_reopen_agents) = project.auto_reopen_agents {
-            table["auto_reopen_agents"] = toml_edit::value(auto_reopen_agents);
-        }
-        if let Some(command) = project.startup_command.as_deref() {
-            table["startup_command"] = toml_edit::value(command);
-        }
-        if !project.env.is_empty() {
-            let mut inline = InlineTable::new();
-            for (name, value) in &project.env {
-                inline.insert(name, Value::String(Formatted::new(value.clone())));
-            }
-            table["env"] = toml_edit::value(Value::InlineTable(inline));
-        }
-        array.push(table);
-    }
-    doc["projects"] = Item::ArrayOfTables(array);
-}
-
-fn patch_env_table(doc: &mut DocumentMut, section: &str, env: &BTreeMap<String, String>) {
-    let table = ensure_table(doc, section);
-    let existing = table
-        .iter()
-        .map(|(key, _)| key.to_string())
-        .collect::<Vec<_>>();
-    for key in existing {
-        table.remove(&key);
-    }
-    for (name, value) in env {
-        table[name] = toml_edit::value(value.as_str());
+    if config_path.exists() {
+        // Shared with the web: surgical toml_edit patch preserving user edits.
+        dux_core::config_write::patch_config_file(config_path, config)?;
+        Ok(())
+    } else {
+        // First creation: the fully-commented canonical template (TUI-only,
+        // needs bindings for two dynamic comment strings). Render from the
+        // config's own keys so the documented [keys] section matches what is
+        // written, exactly as before.
+        let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
+        let body = render_config(config, &bindings);
+        fs::write(config_path, body)
+            .with_context(|| format!("failed to write {}", config_path.display()))?;
+        Ok(())
     }
 }
 
@@ -959,13 +591,6 @@ fn render_macros_config(
             );
         }
     }
-}
-
-/// Escape triple-quotes in a TOML multiline basic string.
-/// Per the TOML spec, `"""` inside `"""..."""` can be included by escaping
-/// at least one quote: `""\"`.
-fn escape_toml_multiline(value: &str) -> String {
-    value.replace("\"\"\"", "\"\"\\\"")
 }
 
 fn escape_toml_string(value: &str) -> String {

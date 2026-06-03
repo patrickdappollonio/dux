@@ -7,6 +7,7 @@ pub mod action;
 pub mod agent_job;
 pub mod browser;
 pub mod config;
+pub mod config_write;
 pub mod diff;
 pub mod editor;
 pub mod engine;
