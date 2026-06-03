@@ -2115,6 +2115,7 @@ impl App {
             worktree_path,
             rel_path,
         };
+        self.prune_visible_diff_comments();
         self.focus = FocusPane::Center;
         self.fullscreen_overlay = FullscreenOverlay::Diff;
         Ok(())
@@ -2148,7 +2149,23 @@ impl App {
             worktree_path,
             rel_path,
         };
+        self.prune_visible_diff_comments();
         Ok(())
+    }
+
+    fn prune_visible_diff_comments(&mut self) {
+        match self.prune_current_diff_orphaned_comments() {
+            Ok(0) => {}
+            Ok(count) => {
+                self.set_info(format!(
+                    "Removed {count} stale diff comment{}.",
+                    if count == 1 { "" } else { "s" }
+                ));
+            }
+            Err(err) => {
+                self.set_warning(format!("Couldn't remove stale diff comments: {err:#}"));
+            }
+        }
     }
 
     pub(crate) fn copy_selected_path(&mut self) -> Result<()> {

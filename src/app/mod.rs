@@ -2269,8 +2269,38 @@ impl App {
         comments
     }
 
-    pub(crate) fn current_diff_orphaned_comment_count(&self) -> usize {
-        self.current_diff_orphaned_comments().len()
+    pub(crate) fn prune_current_diff_orphaned_comments(&mut self) -> Result<usize> {
+        let comments = self.current_diff_orphaned_comments();
+        let count = comments.len();
+        for comment in comments {
+            self.delete_diff_comment_key(comment.key)?;
+        }
+        Ok(count)
+    }
+
+    pub(crate) fn prune_selected_session_diff_comments_for_changed_files(
+        &mut self,
+    ) -> Result<usize> {
+        let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
+            return Ok(0);
+        };
+        let visible_files: HashSet<String> = self
+            .unstaged_files
+            .iter()
+            .chain(self.staged_files.iter())
+            .map(|file| file.path.clone())
+            .collect();
+        let keys: Vec<DiffCommentKey> = self
+            .diff_comments
+            .keys()
+            .filter(|key| key.session_id == session_id && !visible_files.contains(&key.rel_path))
+            .cloned()
+            .collect();
+        let count = keys.len();
+        for key in keys {
+            self.delete_diff_comment_key(key)?;
+        }
+        Ok(count)
     }
 
     pub(crate) fn current_diff_selected_anchor(&self) -> Option<DiffAnchor> {
@@ -3226,11 +3256,18 @@ impl App {
         if let Ok(mut guard) = self.watched_worktree.lock() {
             *guard = worktree.clone();
         }
-        let (staged, unstaged) = worktree
-            .and_then(|p| git::changed_files(&p).ok())
-            .unwrap_or_default();
-        self.staged_files = staged;
-        self.unstaged_files = unstaged;
+        if let Some((staged, unstaged)) = worktree.and_then(|p| git::changed_files(&p).ok()) {
+            self.staged_files = staged;
+            self.unstaged_files = unstaged;
+            if let Err(err) = self.prune_selected_session_diff_comments_for_changed_files() {
+                logger::error(&format!(
+                    "failed to prune stale diff comments after changed-files reload: {err:#}"
+                ));
+            }
+        } else {
+            self.staged_files = Vec::new();
+            self.unstaged_files = Vec::new();
+        }
         self.clamp_files_cursor();
         // Opportunistically check PR status for the newly-selected session.
         if let Some(sid) = session_id {

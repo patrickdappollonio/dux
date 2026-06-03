@@ -18,6 +18,12 @@ impl App {
                 WorkerEvent::ChangedFilesReady { staged, unstaged } => {
                     self.staged_files = staged;
                     self.unstaged_files = unstaged;
+                    if let Err(err) = self.prune_selected_session_diff_comments_for_changed_files()
+                    {
+                        logger::error(&format!(
+                            "failed to prune stale diff comments after changed-files poll: {err:#}"
+                        ));
+                    }
                     self.clamp_files_cursor();
                 }
                 WorkerEvent::CommitMessageGenerated(msg) => {

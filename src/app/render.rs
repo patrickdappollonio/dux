@@ -1044,7 +1044,6 @@ impl App {
             let send_comments = self.bindings.label_for(Action::SendDiffComments);
             let close = self.bindings.label_for(Action::ExitInteractive);
             let pending = self.pending_diff_comment_count_for_selected_session();
-            let orphaned = self.current_diff_orphaned_comment_count();
             let selected_comment = self.current_diff_selected_comment_key().is_some();
             let mut spans: Vec<Span> = Vec::new();
             let mut send_spans: Vec<Span> = Vec::new();
@@ -1053,21 +1052,11 @@ impl App {
                 spans.extend(self.theme.dim_key_badge_default(&add_comment));
                 spans.push(Span::styled(" comment. ", desc_style));
             }
-            if !delete_comment.is_empty() && (selected_comment || orphaned > 0) {
+            if !delete_comment.is_empty() && selected_comment {
                 spans.extend(self.theme.dim_key_badge_default(&delete_comment));
-                if selected_comment {
-                    spans.push(Span::styled(" delete comment. ", desc_style));
-                } else if orphaned > 0 {
-                    spans.push(Span::styled(" dismiss orphaned. ", desc_style));
-                }
+                spans.push(Span::styled(" delete comment. ", desc_style));
             }
             if pending > 0 && !send_comments.is_empty() {
-                if orphaned > 0 {
-                    spans.push(Span::styled(
-                        format!("{orphaned} orphaned in this diff. "),
-                        Style::default().fg(self.theme.warning_fg),
-                    ));
-                }
                 send_spans.push(Span::styled(
                     format!("{} to send  ", diff_comment_count_label(pending)),
                     Style::default().fg(self.theme.hint_key_fg),
@@ -1167,54 +1156,6 @@ impl App {
                         inline_editor: true,
                     });
                 }
-            }
-        }
-
-        let orphaned = self.current_diff_orphaned_comments();
-        if !orphaned.is_empty() {
-            decorated.push(DecoratedDiffLine {
-                line: Line::from(""),
-                source_row: usize::MAX,
-                inline_editor: false,
-            });
-            decorated.push(DecoratedDiffLine {
-                line: Line::from(vec![Span::styled(
-                    "  Queued comments no longer matching visible diff lines",
-                    Style::default().fg(self.theme.warning_fg),
-                )]),
-                source_row: usize::MAX,
-                inline_editor: false,
-            });
-            for comment in orphaned {
-                let key = &comment.key;
-                decorated.push(DecoratedDiffLine {
-                    line: Line::from(vec![
-                        Span::styled("! ", Style::default().fg(self.theme.warning_fg)),
-                        Span::styled(
-                            format!(
-                                "{}:{} ({}) ",
-                                key.rel_path,
-                                key.line_number,
-                                side_label(key.side)
-                            ),
-                            Style::default().fg(self.theme.hint_key_fg),
-                        ),
-                        Span::styled(
-                            key.line_content.clone(),
-                            Style::default().fg(self.theme.hint_dim_desc_fg),
-                        ),
-                    ]),
-                    source_row: usize::MAX,
-                    inline_editor: false,
-                });
-                decorated.push(DecoratedDiffLine {
-                    line: Line::from(vec![
-                        Span::styled("  Comment: ", Style::default().fg(self.theme.hint_key_fg)),
-                        Span::styled(comment.text, Style::default().fg(self.theme.text_fg)),
-                    ]),
-                    source_row: usize::MAX,
-                    inline_editor: false,
-                });
             }
         }
 

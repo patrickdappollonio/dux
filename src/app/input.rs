@@ -9395,6 +9395,60 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn pruning_current_diff_removes_comments_missing_from_visible_anchors() {
+        let mut app = test_app(default_bindings());
+        open_commentable_diff(&mut app);
+        let matching = crate::app::DiffCommentKey::new("session-1", &diff_anchor(45, "## title"));
+        let orphaned = crate::app::DiffCommentKey::new("session-1", &diff_anchor(45, "**title**"));
+
+        app.save_diff_comment(matching, "Visible comment".to_string());
+        app.save_diff_comment(orphaned, "Orphaned comment".to_string());
+
+        assert_eq!(app.prune_current_diff_orphaned_comments().unwrap(), 1);
+        assert_eq!(app.pending_diff_comment_count_for_selected_session(), 1);
+        let stored = app.session_store.load_diff_comments().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].comment_text, "Visible comment");
+    }
+
+    #[test]
+    fn pruning_changed_files_removes_comments_for_files_no_longer_visible() {
+        let mut app = test_app(default_bindings());
+        let selected_file =
+            crate::app::DiffCommentKey::new("session-1", &diff_anchor(45, "## title"));
+        let hidden_file = crate::app::DiffCommentKey::new(
+            "session-1",
+            &DiffAnchor {
+                rel_path: "OTHER.md".to_string(),
+                side: DiffSide::New,
+                line_number: 8,
+                line_content: "Other file".to_string(),
+                tag: DiffRowTag::Add,
+            },
+        );
+        app.unstaged_files = vec![ChangedFile {
+            path: "README.md".into(),
+            status: "M".into(),
+            additions: 1,
+            deletions: 0,
+            binary: false,
+        }];
+
+        app.save_diff_comment(selected_file, "Visible comment".to_string());
+        app.save_diff_comment(hidden_file, "Hidden comment".to_string());
+
+        assert_eq!(
+            app.prune_selected_session_diff_comments_for_changed_files()
+                .unwrap(),
+            1
+        );
+        assert_eq!(app.pending_diff_comment_count_for_selected_session(), 1);
+        let stored = app.session_store.load_diff_comments().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].rel_path, "README.md");
+    }
+
+    #[test]
     fn diff_comment_count_for_path_counts_selected_session_matching_file_only() {
         let mut app = test_app(default_bindings());
         let now = Utc::now();
