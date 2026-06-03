@@ -41,6 +41,11 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
       // Fallback silently — resolvedBg stays black.
     }
 
+    // Apply the resolved bg to the host so the padding area matches the canvas,
+    // making the padding feel like it belongs to the terminal rather than being
+    // an external border.
+    container.style.background = resolvedBg
+
     const term = new Terminal({
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
       fontSize: 13,
@@ -85,5 +90,7 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
     }
   }, [kind, id])
 
-  return <div ref={containerRef} className="h-full w-full" />
+  // The host div owns the padding so the resolved bg fills the padding area
+  // seamlessly — no external "border" look. FitAddon measures the content box.
+  return <div ref={containerRef} className="h-full w-full p-2" />
 }

@@ -65,7 +65,7 @@ function InsetHeader() {
   return (
     <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
       <SidebarTrigger className="-ml-1" />
-      <Separator orientation="vertical" className="h-4" />
+      <Separator orientation="vertical" className="mx-1 h-4" />
       <Breadcrumb>
         <BreadcrumbList>
           {session ? (
@@ -138,8 +138,10 @@ function TerminalArea() {
       ? selectedTarget.terminalId
       : selectedTarget.sessionId
 
+  // TerminalPane owns its own background and padding (via inline style) so the
+  // padding area is seamlessly part of the terminal surface.
   return (
-    <div className="h-full min-h-0 bg-background p-3">
+    <div className="h-full min-h-0">
       <TerminalPane
         key={targetId}
         kind={selectedTarget.kind}

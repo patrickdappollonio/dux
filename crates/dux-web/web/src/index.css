@@ -122,6 +122,21 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --sidebar-ring: oklch(0.556 0 0);
 }
 
+/* Slim the xterm scrollbar so it doesn't dominate the terminal column. */
+.xterm .xterm-viewport {
+  scrollbar-width: thin;
+}
+.xterm .xterm-viewport::-webkit-scrollbar {
+  width: 10px;
+}
+.xterm .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+.xterm .xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 9999px;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

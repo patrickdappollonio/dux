@@ -1,7 +1,8 @@
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { GitPullRequest } from "lucide-react"
 import { reconnect, useDux } from "@/lib/store"
-import type { SessionStatus } from "@/lib/types"
+import type { PrView, SessionStatus } from "@/lib/types"
 
 // Map a session status onto a Badge variant + label for the statusline.
 const STATUS_BADGE: Record<
@@ -11,6 +12,13 @@ const STATUS_BADGE: Record<
   active: { variant: "default", label: "active" },
   detached: { variant: "secondary", label: "detached" },
   exited: { variant: "outline", label: "exited" },
+}
+
+// Colored PR badge matching GitHub/TUI semantics: green=open, purple=merged, red=closed.
+function prBadgeClass(state: PrView["state"]): string {
+  if (state === "open") return "border-transparent bg-green-600/15 text-green-500"
+  if (state === "merged") return "border-transparent bg-purple-600/15 text-purple-400"
+  return "border-transparent bg-red-600/15 text-red-400"
 }
 
 const CONN_LABEL: Record<string, string> = {
@@ -41,14 +49,19 @@ export function StatusBar() {
               <Badge variant={status.variant}>{status.label}</Badge>
             ) : null}
             {session.pr ? (
-              <a
-                href={session.pr.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="truncate text-foreground hover:underline"
-              >
-                PR #{session.pr.number} · {session.pr.title}
-              </a>
+              <Badge
+                className={prBadgeClass(session.pr.state)}
+                render={
+                  <a
+                    href={session.pr.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={session.pr.title}
+                  >
+                    <GitPullRequest data-icon="inline-start" />#{session.pr.number}
+                  </a>
+                }
+              />
             ) : null}
           </>
         ) : (

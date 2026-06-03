@@ -1,7 +1,6 @@
 import {
   Bot,
   ChevronRight,
-  Cpu,
   Ellipsis,
   Folder,
   FolderOpen,
@@ -10,14 +9,12 @@ import {
   Plus,
   RefreshCw,
   Send,
-  Sparkles,
   SquareTerminal,
   Terminal,
   Wifi,
   WifiOff,
 } from "lucide-react"
 import type * as React from "react"
-import type { ComponentType } from "react"
 
 import { Badge } from "@/components/ui/badge"
 import {
@@ -57,7 +54,6 @@ import {
   SidebarHeader,
   SidebarMenu,
   SidebarMenuAction,
-  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarMenuSub,
@@ -84,20 +80,6 @@ import type {
   TerminalView,
 } from "@/lib/types"
 
-// Pick a lucide glyph that hints at the provider behind a session.
-function providerIcon(provider: string): ComponentType {
-  switch (provider.toLowerCase()) {
-    case "claude":
-      return Bot
-    case "codex":
-      return Cpu
-    case "gemini":
-      return Sparkles
-    default:
-      return Bot
-  }
-}
-
 // Map a session status onto a Badge variant + label. Status is communicated as
 // a Badge, never as a colored dot.
 const STATUS_BADGE: Record<
@@ -109,15 +91,13 @@ const STATUS_BADGE: Record<
   exited: { variant: "outline", label: "exited" },
 }
 
-// Map a PR state onto a Badge variant. PR state is communicated as a Badge
-// variant, never as a concrete color.
-const PR_BADGE_VARIANT: Record<
-  PrView["state"],
-  "default" | "secondary" | "outline"
-> = {
-  open: "default",
-  merged: "secondary",
-  closed: "outline",
+// Return a className for PR badge coloring. This is the ONE intentional
+// semantic-color exception: GitHub PR states carry real-world meaning that
+// maps directly to green/purple/red (matching the dux TUI colors).
+function prBadgeClass(state: PrView["state"]): string {
+  if (state === "open") return "border-transparent bg-green-600/15 text-green-500"
+  if (state === "merged") return "border-transparent bg-purple-600/15 text-purple-400"
+  return "border-transparent bg-red-600/15 text-red-400"
 }
 
 // A single companion terminal nested beneath its owning agent session. The
@@ -151,7 +131,6 @@ function SessionSubItem({
   session: SessionView
   selectedTarget: SelectedTarget | null
 }) {
-  const Icon = providerIcon(session.provider)
   const status = STATUS_BADGE[session.status]
   const label = session.title || session.branch_name
   const agentSelected =
@@ -173,39 +152,47 @@ function SessionSubItem({
       <ContextMenu>
         <ContextMenuTrigger
           render={
+            // pr-14 reserves space for the two SidebarMenuAction buttons
+            // (⋯ at right-1, + at right-7) so they never overlap the badges.
             <SidebarMenuSubButton
               isActive={agentSelected}
+              className="pr-14"
               onClick={() => selectSession(session.id)}
             />
           }
         >
-          <Icon />
-          <span className="flex-1 truncate">{label}</span>
-          {session.pr ? (
-            <Badge
-              variant={PR_BADGE_VARIANT[session.pr.state]}
-              title={session.pr.title}
-              render={
-                <a
-                  href={session.pr.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    window.open(
-                      session.pr!.url,
-                      "_blank",
-                      "noopener",
-                    )
-                  }}
-                >
-                  <GitPullRequest data-icon="inline-start" />#
-                  {session.pr.number}
-                </a>
-              }
-            />
-          ) : null}
-          <Badge variant={status.variant}>{status.label}</Badge>
+          {/* All agents use the same Bot icon — provider is shown as text. */}
+          <Bot />
+          <span className="truncate">{label}</span>
+          {/* Badges sit inline in the content area so hover actions (SidebarMenuAction)
+              have their own right-edge slot and cannot overlap the badges. */}
+          <span className="ml-auto flex shrink-0 items-center gap-1">
+            {session.pr ? (
+              <Badge
+                className={prBadgeClass(session.pr.state)}
+                title={session.pr.title}
+                render={
+                  <a
+                    href={session.pr.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      window.open(
+                        session.pr!.url,
+                        "_blank",
+                        "noopener",
+                      )
+                    }}
+                  >
+                    <GitPullRequest data-icon="inline-start" />#
+                    {session.pr.number}
+                  </a>
+                }
+              />
+            ) : null}
+            <Badge variant={status.variant}>{status.label}</Badge>
+          </span>
         </ContextMenuTrigger>
         <ContextMenuContent>
           <ContextMenuItem
@@ -321,12 +308,12 @@ function ProjectItem({
       <SidebarMenuItem>
         <CollapsibleTrigger render={<SidebarMenuButton />}>
           <Folder />
-          <span className="flex-1 truncate">{name}</span>
-          <ChevronRight className="ml-auto transition-transform group-data-[state=open]/collapsible:rotate-90" />
+          {/* font-semibold makes project names visually distinct from agent rows. */}
+          <span className="truncate font-semibold">{name}</span>
+          {/* Session count badge sits inline, right after the name. */}
+          <Badge variant="secondary" className="shrink-0">{sessions.length}</Badge>
+          <ChevronRight className="ml-auto shrink-0 transition-transform group-data-[state=open]/collapsible:rotate-90" />
         </CollapsibleTrigger>
-        <SidebarMenuBadge>
-          <Badge variant="secondary">{sessions.length}</Badge>
-        </SidebarMenuBadge>
         <CollapsibleContent>
           <SidebarMenuSub>
             {sessions.map((session) => (
