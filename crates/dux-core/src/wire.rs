@@ -446,8 +446,17 @@ impl Engine {
                 }))
             }
             WireCommand::RemoveProject { project_id } => {
+                let project_name = self.project_name(&project_id)?;
+                // Mirror the TUI guard: refuse to remove a project that still has
+                // agents, otherwise their sessions would be orphaned (pointing at a
+                // vanished project id). The user must delete the agents first.
+                if self.sessions.iter().any(|s| s.project_id == project_id) {
+                    anyhow::bail!(
+                        "Delete this project's agents before removing \"{project_name}\"."
+                    );
+                }
                 Command::PersistProject(Box::new(ProjectPersistenceAction::Remove {
-                    project_name: self.project_name(&project_id)?,
+                    project_name,
                     project_id,
                 }))
             }
@@ -1073,6 +1082,23 @@ mod tests {
             },
             _ => panic!("expected Command::PersistProject variant"),
         }
+    }
+
+    #[test]
+    fn wire_to_command_remove_project_with_sessions_errors() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        let err = engine
+            .wire_to_command(WireCommand::RemoveProject {
+                project_id: "p1".to_string(),
+            })
+            .map(|_| ())
+            .expect_err("removing a project with agents must be refused");
+        assert!(
+            err.to_string().contains("Delete this project's agents"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
