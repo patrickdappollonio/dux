@@ -35,6 +35,10 @@ pub enum EngineRequest {
     /// Resolve a session's worktree path (instant lookup; diff I/O happens
     /// off-thread in the server handler).
     SessionWorktree(String, oneshot::Sender<Option<String>>),
+    /// Gracefully wind down every running PTY (SIGTERM the children so CLIs can
+    /// save state for a later resume), then stop the engine thread. Replies once
+    /// the wind-down completes so the server can finish exiting.
+    Shutdown(oneshot::Sender<()>),
 }
 
 /// Resolve the live PTY for an id, which may name either an agent provider
@@ -137,6 +141,17 @@ impl EngineHandle {
             .send(EngineRequest::CreateTerminal(session_id, tx))
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
+    }
+
+    /// Gracefully wind down the engine: SIGTERM the agent/terminal children so
+    /// CLIs can save state for a later resume, then stop the engine thread.
+    /// Errors are ignored — if the thread is already gone, shutdown has already
+    /// happened.
+    pub async fn shutdown(&self) {
+        let (tx, rx) = oneshot::channel();
+        if self.req_tx.send(EngineRequest::Shutdown(tx)).is_ok() {
+            let _ = rx.await;
+        }
     }
 
     pub async fn session_worktree(&self, session_id: String) -> Option<String> {
@@ -300,6 +315,15 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
                     Ok(EngineRequest::SubscribePty(session_id, reply)) => {
                         handle_subscribe(&mut engine, &mut pending, session_id, reply);
                     }
+                    Ok(EngineRequest::Shutdown(reply)) => {
+                        // SIGTERM children, wait briefly for them to flush state,
+                        // then mark agent sessions Detached. Handled here (not in
+                        // `handle_request`) because it must stop the loop.
+                        engine.shutdown_ptys(Duration::from_millis(1500));
+                        let _ = reply.send(());
+                        disconnected = true;
+                        break;
+                    }
                     Ok(req) => handle_request(&mut engine, req),
                     Err(mpsc::error::TryRecvError::Empty) => break,
                     Err(mpsc::error::TryRecvError::Disconnected) => {
@@ -338,6 +362,8 @@ fn handle_request(engine: &mut Engine, req: EngineRequest) {
         }
         // SubscribePty is handled inline in the loop (it needs `&mut pending`).
         EngineRequest::SubscribePty(_, _) => unreachable!("SubscribePty handled in the loop"),
+        // Shutdown is handled inline in the loop (it must stop the thread).
+        EngineRequest::Shutdown(_) => unreachable!("Shutdown handled in the loop"),
         EngineRequest::WritePty(id, bytes) => {
             if let Some(client) = pty_for(engine, &id) {
                 let _ = client.write_bytes(&bytes);
@@ -514,5 +540,50 @@ mod tests {
             );
             let _ = tokio::time::timeout(std::time::Duration::from_millis(200), rx.changed()).await;
         }
+    }
+
+    #[tokio::test]
+    async fn shutdown_acks_and_stops_the_engine_thread() {
+        let (_tmp, paths) = temp_paths();
+        {
+            let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
+            store
+                .upsert_session(&sample_session(
+                    "s1",
+                    "p1",
+                    "feat",
+                    paths.root.to_string_lossy().as_ref(),
+                ))
+                .unwrap();
+        }
+        let mut engine = bootstrap_engine(&paths).expect("bootstrap");
+        // A `cat`-backed companion terminal that must be SIGTERMed on shutdown.
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        engine
+            .create_companion_terminal("s1")
+            .expect("create companion terminal");
+        let (handle, join) = spawn_engine_thread(engine);
+
+        // Shutdown should ack within a reasonable window (grace is 1.5s).
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("shutdown acked");
+
+        // The engine thread has stopped, so further requests fail.
+        let res = handle
+            .apply_wire(WireCommand::ToggleAgentAutoReopen {
+                session_id: "s1".to_string(),
+                enabled: true,
+            })
+            .await;
+        assert!(res.is_err(), "requests should fail after shutdown");
+
+        // The thread should have exited; join in a blocking task to avoid blocking
+        // the async runtime.
+        tokio::task::spawn_blocking(move || join.join())
+            .await
+            .expect("join task")
+            .expect("engine thread joined");
     }
 }

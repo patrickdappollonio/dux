@@ -74,7 +74,10 @@ impl ConfigSaver for WebConfigSaver {
 /// Assemble a headless `Engine` from `paths`, loading sessions from the store and
 /// acquiring the single-instance lock at `paths.lock_path`. Config is loaded
 /// read-only from `config.toml` via `load_config` — no file creation, migration,
-/// or write-back occurs here.
+/// or write-back occurs here. Persisted session statuses are normalized before
+/// returning (the headless counterpart of the TUI's `restore_sessions`): nothing
+/// is running yet, so a session whose worktree still exists is `Detached` and one
+/// whose worktree vanished is `Exited`.
 pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     let config = dux_core::config::load_config(paths);
     let session_store = SessionStore::open(&paths.sessions_db_path)?;
@@ -87,7 +90,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
 
     let github_integration_enabled = config.ui.github_integration;
 
-    Ok(Engine {
+    let mut engine = Engine {
         config,
         paths: paths.clone(),
         session_store,
@@ -118,7 +121,11 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         has_active_processes: Arc::new(AtomicBool::new(false)),
         in_flight: InFlightSet::new(),
         pr_last_checked: HashMap::new(),
-    })
+    };
+
+    engine.normalize_restored_sessions();
+
+    Ok(engine)
 }
 
 #[cfg(test)]

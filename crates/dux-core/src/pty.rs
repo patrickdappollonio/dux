@@ -704,6 +704,16 @@ impl PtyClient {
         self.child.process_id()
     }
 
+    /// Politely ask the child to exit (SIGTERM), so CLIs can flush state before
+    /// the hard `kill()` in `Drop` (or process teardown) reaps stragglers.
+    pub fn terminate(&self) {
+        if let Some(pid) = self.child_process_id()
+            && let Some(pid) = rustix::process::Pid::from_raw(pid as i32)
+        {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+        }
+    }
+
     /// Returns the name of the foreground process running in this PTY, or
     /// `None` if the shell itself is in the foreground (idle).
     ///
