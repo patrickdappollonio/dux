@@ -155,6 +155,28 @@ mod resolve_bind_tests {
         let addr = resolve_bind("[::1]:8080", false, None, false).expect("ipv6 loopback ok");
         assert!(addr.ip().is_loopback());
     }
+
+    #[test]
+    fn unspecified_ipv6_without_opt_in_errors() {
+        let err = resolve_bind("[::]:8080", false, None, false)
+            .expect_err("ipv6 unspecified without opt-in should error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--insecure-allow-remote"),
+            "error should point to the CLI flag: {msg}"
+        );
+        assert!(
+            msg.contains("authentication"),
+            "error should explain why it refused: {msg}"
+        );
+    }
+
+    #[test]
+    fn loopback_range_beyond_one_passes_without_opt_in() {
+        let addr =
+            resolve_bind("127.0.0.2:8080", false, None, false).expect("127.0.0.2 loopback ok");
+        assert_eq!(addr.to_string(), "127.0.0.2:8080");
+    }
 }
 
 #[cfg(test)]

@@ -172,6 +172,15 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
     // --- [editor] ---
     patch_table_str(doc, "editor", "default", &config.editor.default);
 
+    // --- [server] ---
+    patch_table_str(doc, "server", "bind", &config.server.bind);
+    patch_table_bool(
+        doc,
+        "server",
+        "insecure_allow_remote",
+        config.server.insecure_allow_remote,
+    );
+
     // --- [terminal] ---
     patch_table_str(doc, "terminal", "command", &config.terminal.command);
     patch_table_string_array(doc, "terminal", "args", &config.terminal.args);
@@ -553,6 +562,23 @@ unknown_key = \"untouched\"
         let parsed: Config = toml::from_str(&saved).expect("reparse valid config");
         assert_eq!(parsed.env.get("FOO").map(String::as_str), Some("bar"));
         assert_eq!(parsed.defaults.provider, config.defaults.provider);
+    }
+
+    #[test]
+    fn write_config_plain_round_trips_server_section() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+
+        let mut config = Config::default();
+        config.server.bind = "0.0.0.0:9000".to_string();
+        config.server.insecure_allow_remote = true;
+
+        write_config_plain(&config_path, &config).expect("write_config_plain");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        let parsed: Config = toml::from_str(&saved).expect("reparse");
+        assert_eq!(parsed.server.bind, "0.0.0.0:9000");
+        assert!(parsed.server.insecure_allow_remote);
     }
 
     #[test]
