@@ -321,6 +321,21 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
         ),
         tui: None,
     },
+    // The in-process flip: discoverable from both sides. The web variant winks
+    // at how the user may have gotten here; the TUI variant advertises the way
+    // out. `start-web-server` is a palette-only command (no keybinding), so
+    // naming it literally is correct — there is no label to resolve.
+    WelcomeTip {
+        web: Some(
+            "This whole web UI can be born from the TUI: `start-web-server` in the palette flips dux inside out — agents never notice.",
+        ),
+        tui: Some(|resolve| {
+            format!(
+                "dux has a second face: `start-web-server` in the palette (`{}`) serves this whole thing to your browser. Your agents keep purring through the swap.",
+                resolve(Action::OpenPalette)
+            )
+        }),
+    },
 ];
 
 /// The web-surface tip strings, in declaration order.

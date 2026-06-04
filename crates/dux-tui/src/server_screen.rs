@@ -264,8 +264,10 @@ fn wrapped_row_count(segments: &ScreenLine, inner_width: u16) -> u16 {
 /// on-screen hints) is correct rather than a tenet violation. `q`/`Q` and `Esc`
 /// return to the TUI; `Ctrl-C` quits the process; everything else is ignored.
 fn action_for_key(key: KeyEvent) -> Option<ServerScreenTick> {
-    // Ignore key-release/repeat duplicates so a single press maps to a single
-    // action on terminals that report release events (kitty protocol).
+    // Ignore key-release events so a single press maps to a single action on
+    // terminals that report them (kitty protocol). Repeat events are not
+    // filtered: crossterm only emits them under keyboard-enhancement flags this
+    // screen never enables, and a repeated exit key would be benign anyway.
     if key.kind == KeyEventKind::Release {
         return None;
     }
