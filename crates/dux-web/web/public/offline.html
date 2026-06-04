@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <title>dux is unreachable</title>
+    <!--
+      Fully self-contained: inline CSS only, no external requests. This page must
+      render with the dux server unreachable, so it cannot depend on any asset
+      that would itself need a network fetch.
+    -->
+    <style>
+      :root { color-scheme: dark; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #0a0a0a;
+        color: #fafafa;
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        text-align: center;
+        padding: 1.5rem;
+      }
+      .wrap { max-width: 28rem; }
+      pre {
+        margin: 0 0 1.5rem;
+        color: #a1a1aa;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        line-height: 1.15;
+      }
+      h1 { margin: 0 0 0.5rem; font-size: 1.25rem; font-weight: 600; }
+      p { margin: 0 0 1.5rem; color: #a1a1aa; font-size: 0.9rem; line-height: 1.5; }
+      button {
+        appearance: none;
+        cursor: pointer;
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 0.5rem;
+        background: #fafafa;
+        color: #0a0a0a;
+        font: inherit;
+        font-weight: 600;
+        font-size: 0.9rem;
+        padding: 0.5rem 1.25rem;
+      }
+      button:hover { background: #e4e4e7; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <pre aria-label="dux">       _
+     __| |_   ___  __
+    / _` | | | \ \/ /
+   | (_| | |_| |>  <
+    \__,_|\__,_/_/\_\</pre>
+      <h1>dux is unreachable</h1>
+      <p>
+        The dux server may be down, or this device may be offline. Reconnect to
+        the network or restart the server, then try again.
+      </p>
+      <button type="button" onclick="location.reload()">Retry</button>
+    </div>
+  </body>
+</html>

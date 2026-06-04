@@ -58,3 +58,72 @@ async fn unknown_path_falls_back_to_index() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+/// Build a router backed by a throwaway engine for static-asset assertions.
+fn test_router() -> (tempfile::TempDir, axum::Router) {
+    let (tmp, paths) = temp_paths();
+    let engine = bootstrap_engine(&paths).unwrap();
+    let (handle, _join) = spawn_engine_thread(engine);
+    (tmp, router(handle))
+}
+
+async fn get(app: axum::Router, uri: &str) -> axum::http::Response<Body> {
+    app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+fn header(resp: &axum::http::Response<Body>, name: &str) -> Option<String> {
+    resp.headers()
+        .get(name)
+        .map(|v| v.to_str().unwrap().to_string())
+}
+
+#[tokio::test]
+async fn manifest_served_with_manifest_mime() {
+    let (_tmp, app) = test_router();
+    let resp = get(app, "/manifest.webmanifest").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        header(&resp, "content-type").as_deref(),
+        Some("application/manifest+json"),
+        "the web manifest must advertise the PWA manifest MIME type"
+    );
+}
+
+#[tokio::test]
+async fn service_worker_served_no_cache_and_js_mime() {
+    let (_tmp, app) = test_router();
+    let resp = get(app, "/sw.js").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        header(&resp, "cache-control").as_deref(),
+        Some("no-cache"),
+        "the service worker must not be cached so SW updates are picked up promptly"
+    );
+    let ctype = header(&resp, "content-type").unwrap_or_default();
+    assert!(
+        ctype.contains("javascript"),
+        "sw.js must be served with a JavaScript MIME type, got {ctype}"
+    );
+}
+
+#[tokio::test]
+async fn offline_page_reachable_and_not_shadowed_by_spa_fallback() {
+    let (_tmp, app) = test_router();
+    let resp = get(app, "/offline.html").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&bytes);
+    // The real offline page, not the SPA index served by the fallback.
+    assert!(
+        html.contains("dux is unreachable"),
+        "the offline page itself must be served, not the SPA index fallback"
+    );
+    assert!(
+        !html.contains("id=\"root\""),
+        "offline.html should not be the SPA shell"
+    );
+}
