@@ -2679,6 +2679,7 @@ mod tests {
             in_bracket_paste: false,
             macro_bar: None,
             sigwinch_flag: Arc::new(AtomicBool::new(false)),
+            sigwinch_sig_id: None,
             force_redraw: false,
             welcome_tip_index: 0,
             welcome_logo_visible: false,

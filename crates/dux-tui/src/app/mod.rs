@@ -135,6 +135,11 @@ pub struct App {
     pub(crate) in_bracket_paste: bool,
     pub(crate) macro_bar: Option<MacroBarState>,
     pub(crate) sigwinch_flag: Arc<AtomicBool>,
+    /// Registration id for the SIGWINCH handler, unregistered when the App is
+    /// consumed by the TUI→server flip so repeated flip cycles don't accumulate
+    /// orphaned signal-hook registrations. `None` only in tests that build the
+    /// App directly without registering a real handler.
+    pub(crate) sigwinch_sig_id: Option<signal_hook::SigId>,
     pub(crate) force_redraw: bool,
     pub(crate) welcome_tip_index: usize,
     /// Whether the ASCII logo was rendered in the previous frame.
@@ -1193,7 +1198,8 @@ impl App {
         // Register SIGWINCH handler so we can detect terminal resizes even when
         // bypassing crossterm's event reader during interactive mode.
         let sigwinch_flag = Arc::new(AtomicBool::new(false));
-        signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&sigwinch_flag))?;
+        let sigwinch_sig_id =
+            signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&sigwinch_flag))?;
 
         let session_store = SessionStore::open(&paths.sessions_db_path)?;
         sync_config_projects_with_store(&mut config, &paths, &bindings, &session_store)?;
@@ -1263,6 +1269,7 @@ impl App {
             bindings,
             interactive_patterns,
             sigwinch_flag,
+            Some(sigwinch_sig_id),
             status,
             theme,
             SessionRestore::Restore,
@@ -1282,6 +1289,7 @@ impl App {
         bindings: RuntimeBindings,
         interactive_patterns: InteractiveBytePatterns,
         sigwinch_flag: Arc<AtomicBool>,
+        sigwinch_sig_id: Option<signal_hook::SigId>,
         status: StatusLine,
         theme: Theme,
         restore: SessionRestore,
@@ -1353,6 +1361,7 @@ impl App {
             in_bracket_paste: false,
             macro_bar: None,
             sigwinch_flag,
+            sigwinch_sig_id,
             force_redraw: false,
             welcome_tip_index: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1387,14 +1396,15 @@ impl App {
     /// flip), so session restoration is skipped; only view state is rebuilt.
     /// Keybindings, the interactive byte patterns, and the theme are re-derived
     /// from `engine.config` exactly as bootstrap does, and a fresh SIGWINCH
-    /// handler is registered (signal-hook simply appends another setter on a new
-    /// flag — registering twice across flips is harmless).
+    /// handler is registered; the previous App's registration was removed in
+    /// `into_engine`, so flip cycles don't accumulate handlers.
     pub fn resume(engine: Engine) -> Result<Self> {
         logger::info("resuming dux TUI after the web server stopped");
         let bindings = RuntimeBindings::from_keys_config(&engine.config.keys);
         let interactive_patterns = bindings.interactive_byte_patterns();
         let sigwinch_flag = Arc::new(AtomicBool::new(false));
-        signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&sigwinch_flag))?;
+        let sigwinch_sig_id =
+            signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&sigwinch_flag))?;
         let (theme, theme_warning) =
             crate::theme::load_or_fallback(&engine.config.ui.theme, &engine.paths);
         let mut status = StatusLine::new(
@@ -1408,6 +1418,7 @@ impl App {
             bindings,
             interactive_patterns,
             sigwinch_flag,
+            Some(sigwinch_sig_id),
             status,
             theme,
             SessionRestore::Skip,
@@ -1419,6 +1430,12 @@ impl App {
     /// must survive the flip, so the engine is moved out wholesale. Neither
     /// `App` nor `Engine` implements `Drop`, so nothing is torn down here.
     pub fn into_engine(self) -> Engine {
+        // Unregister this App's SIGWINCH handler so repeated flip cycles don't
+        // pile up orphaned registrations (each resume registers a fresh flag;
+        // without this, every SIGWINCH would fire one stale setter per cycle).
+        if let Some(sig_id) = self.sigwinch_sig_id {
+            signal_hook::low_level::unregister(sig_id);
+        }
         self.engine
     }
 
