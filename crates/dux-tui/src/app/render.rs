@@ -7,7 +7,9 @@ use crate::tui_color::{to_ratatui_color, to_ratatui_modifier};
 use std::path::Path;
 
 /// ASCII art logo displayed in the agent pane when no content is active.
-const ASCII_LOGO: &[&str] = &[
+/// Shared with the server status screen (`crate::server_screen`) so the flip's
+/// "server running" view reuses the same wordmark instead of duplicating it.
+pub(crate) const ASCII_LOGO: &[&str] = &[
     "       ░██                       ",
     "       ░██                       ",
     " ░████████ ░██    ░██ ░██    ░██ ",
@@ -17,7 +19,7 @@ const ASCII_LOGO: &[&str] = &[
     " ░█████░██  ░█████░██ ░██    ░██ ",
 ];
 /// Display width of each line in `ASCII_LOGO` (all lines are equal width).
-const ASCII_LOGO_WIDTH: u16 = 33;
+pub(crate) const ASCII_LOGO_WIDTH: u16 = 33;
 /// Number of lines in `ASCII_LOGO`.
 const ASCII_LOGO_HEIGHT: u16 = 7;
 

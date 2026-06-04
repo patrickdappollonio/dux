@@ -1179,6 +1179,10 @@ mod sessions;
 pub(crate) mod text_input;
 mod workers;
 
+// Re-export the welcome wordmark so the server status screen
+// (`crate::server_screen`) can reuse it without making `render` public.
+pub(crate) use render::{ASCII_LOGO, ASCII_LOGO_WIDTH};
+
 impl App {
     /// Bootstrap the TUI. The caller must have already resolved `paths`,
     /// created its directories, and acquired the single-instance lock.

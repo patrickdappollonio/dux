@@ -8,10 +8,16 @@ mod config_saver;
 mod diff;
 mod keybindings;
 mod raw_input;
+mod server_screen;
 mod theme;
 mod tui_color;
 
 pub(crate) use config_saver::TuiConfigSaver;
+
+/// Server status screen shown by the binary while serving after a TUI↔server
+/// flip. Re-exported so `crates/dux/src/main.rs` can drive it as the
+/// `serve_with_engine` tick.
+pub use server_screen::{ServerScreenTick, ServerStatusScreen};
 
 // Domain modules now live in dux-core. Re-export them at the crate root so
 // existing `crate::<mod>::…` paths across the binary keep resolving unchanged.

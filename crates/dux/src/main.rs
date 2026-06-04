@@ -25,9 +25,10 @@ fn main() -> Result<()> {
 /// same engine in this process until the server stops, then resume the TUI.
 /// The cycle repeats until the user quits from either surface.
 ///
-/// This intermediate step uses a `Continue`-only tick, so the only way out of
-/// the server is SIGINT/SIGTERM (→ `QuitProcess`); sub-step 5c replaces the
-/// tick with the interactive status screen that adds a return-to-TUI key.
+/// While serving, the terminal shows the dux-tui status screen
+/// ([`dux_tui::ServerStatusScreen`]); its keys drive the flip — `q`/`Esc`
+/// returns to the TUI, `Ctrl-C` quits the process — alongside SIGINT/SIGTERM
+/// (→ `QuitProcess`) handled inside `serve_with_engine`.
 fn run_tui_with_flip() -> Result<()> {
     let mut next = dux_tui::run()?;
     loop {
@@ -38,12 +39,60 @@ fn run_tui_with_flip() -> Result<()> {
                 listener,
                 url,
             } => {
-                println!(
-                    "dux server running at {url} — Ctrl-C stops it (status screen lands in the next change)"
-                );
+                // Read everything the status screen needs BEFORE the engine and
+                // listener move into `serve_with_engine`. The theme name lives
+                // on the engine's config; `loopback` decides whether to show the
+                // no-auth warning. `local_addr` failures default to treating the
+                // bind as loopback (the safe, no-warning assumption is wrong if
+                // it's actually remote, but the bind already passed the gate in
+                // the TUI pre-flight, so a non-loopback bind without the opt-in
+                // never reaches here).
+                let theme_name = engine.config.ui.theme.clone();
+                let paths = engine.paths.clone();
+                let loopback = listener
+                    .local_addr()
+                    .map(|addr| addr.ip().is_loopback())
+                    .unwrap_or(true);
+
+                // Try to set up the interactive status screen. If it fails (no
+                // TTY, raw-mode error), fall back to a plain line — the server
+                // must still run. `screen` lives outside the tick closure so we
+                // can drop it (restoring the terminal) AFTER serving returns.
+                let mut screen =
+                    match dux_tui::ServerStatusScreen::new(&url, loopback, &theme_name, &paths) {
+                        Ok(screen) => Some(screen),
+                        Err(err) => {
+                            eprintln!(
+                                "dux server running at {url} (status screen unavailable: {err}) \
+                                 — press Ctrl-C to stop"
+                            );
+                            None
+                        }
+                    };
+
                 let (engine, exit) = dux_web::serve_with_engine(*engine, listener, || {
-                    dux_web::ServerTick::Continue
+                    // With the screen up, its keys drive the exit; without it,
+                    // only SIGINT/SIGTERM (handled inside serve) can stop us.
+                    match screen.as_mut() {
+                        Some(screen) => match screen.tick() {
+                            dux_tui::ServerScreenTick::Continue => dux_web::ServerTick::Continue,
+                            dux_tui::ServerScreenTick::ReturnToTui => {
+                                dux_web::ServerTick::ReturnToTui
+                            }
+                            dux_tui::ServerScreenTick::QuitProcess => {
+                                dux_web::ServerTick::QuitProcess
+                            }
+                        },
+                        None => dux_web::ServerTick::Continue,
+                    }
                 })?;
+
+                // Serving has stopped. Drop the status screen explicitly to
+                // restore the terminal (leave raw mode + alt screen, show the
+                // cursor) BEFORE resuming the TUI (which re-inits ratatui) or
+                // before any final messages on quit.
+                drop(screen);
+
                 match exit {
                     dux_web::ServerExit::QuitProcess => break,
                     dux_web::ServerExit::ReturnToTui => {
