@@ -2,14 +2,14 @@
 // A compact, build-time strip of live download counters, sized to sit directly
 // under the install widget in the hero. Any counter whose lookup fails is
 // dropped; if all fail, nothing renders.
-import { getReleaseDownloads, getNpmLastMonth, formatCount } from "../lib/stats";
+import { getReleaseDownloads, getNpmTotal, formatCount } from "../lib/stats";
 
 const repo = "patrickdappollonio/dux";
 const pkg = "@patrickdappollonio/dux";
 
 const [downloads, npm] = await Promise.all([
   getReleaseDownloads(repo),
-  getNpmLastMonth(pkg),
+  getNpmTotal(pkg),
 ]);
 
 interface Stat {
@@ -29,8 +29,8 @@ if (downloads !== null) {
 if (npm !== null) {
   stats.push({
     value: formatCount(npm),
-    label: "npm / month",
-    note: "last 30 days",
+    label: "npm",
+    note: "all time",
   });
 }
 // Combined total, shown only when both sources are present. The "=" beside it
