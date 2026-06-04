@@ -26,5 +26,6 @@ pub mod statusline;
 pub mod storage;
 pub mod theme;
 pub mod viewmodel;
+pub mod welcome;
 pub mod wire;
 pub mod worker;

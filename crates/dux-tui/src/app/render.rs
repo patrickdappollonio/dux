@@ -51,174 +51,6 @@ const TIP_GAP: u16 = 2;
 /// Maximum number of wrapped lines a tip may occupy.
 const TIP_MAX_LINES: u16 = 3;
 
-/// Welcome-screen tips shown beneath the ASCII logo. Wrap text in backticks
-/// to highlight it in an accent color (the backticks themselves are not
-/// rendered). Each function receives `&RuntimeBindings` so keybinding labels
-/// stay accurate after rebinding.
-const WELCOME_TIPS: &[fn(&RuntimeBindings) -> String] = &[
-    // --- rewritten originals ---
-    |b| {
-        format!(
-            "Lost? `{}` opens the command palette. Every action lives there, even the ones you forgot existed.",
-            b.label_for(Action::OpenPalette)
-        )
-    },
-    |b| {
-        format!(
-            "Need more room? `{}` toggles interactive mode, going fullscreen. Focus mode: activated.",
-            b.label_for(Action::ExitInteractive)
-        )
-    },
-    |b| {
-        format!(
-            "`{}` spawns a new agent in the current worktree. The more, the merrier.",
-            b.label_for(Action::NewAgent)
-        )
-    },
-    |_b| {
-        "Any CLI tool can be a provider. Just set its `command` in config.toml. No plugins, no adapters.".into()
-    },
-    |b| {
-        format!(
-            "`{}` flips between agent and companion terminal. Two views, one worktree.",
-            b.label_for(Action::ShowTerminal)
-        )
-    },
-    |b| {
-        format!(
-            "`{}` stages or unstages the selected file. Git add, minus the typing.",
-            b.label_for(Action::StageUnstage)
-        )
-    },
-    |b| {
-        format!(
-            "Tired of writing commit messages? `{}` lets AI do it for you.",
-            b.label_for(Action::GenerateCommitMessage)
-        )
-    },
-    |b| {
-        format!(
-            "`{}` forks the current agent into a brand new session. Cloning never felt so good.",
-            b.label_for(Action::ForkAgent)
-        )
-    },
-    |b| {
-        format!(
-            "`{}` and `{}` hop between panes. Tab your way through everything.",
-            b.label_for(Action::FocusNext),
-            b.label_for(Action::FocusPrev)
-        )
-    },
-    |b| {
-        format!(
-            "Open the palette with `{}` and run `change-agent-provider` to swap a worktree's CLI. Been here before? dux resumes that provider's last session automatically.",
-            b.label_for(Action::OpenPalette)
-        )
-    },
-    |_b| {
-        "dux remembers which providers you've run on each worktree. Swap away and back, and each one picks up right where you left it.".into()
-    },
-    |_b| {
-        "Need to change which CLI new agents use? `change-default-provider` updates the global fallback. `change-project-default-provider` overrides just one project.".into()
-    },
-    |_b| {
-        "Swapped providers while an agent was still running? The sidebar shows `(old → new)` until you exit and relaunch. dux queues the swap, you run the show.".into()
-    },
-    // --- new tips ---
-    |_b| {
-        "The mouse works everywhere: click panes, scroll output, select files. Go ahead, click around.".into()
-    },
-    |_b| "Drag pane borders with the mouse to resize them. No keybindings required.".into(),
-    |b| {
-        format!(
-            "Each agent gets its own companion terminal. Press `{}` to spawn more than one.",
-            b.label_for(Action::ShowTerminal)
-        )
-    },
-    |b| {
-        format!(
-            "Don't need the git pane? `{}` hides it. Want it gone for good? Check the command palette.",
-            b.label_for(Action::ToggleGitPane)
-        )
-    },
-    |b| {
-        format!(
-            "The `{}` key toggles the left sidebar. Maximum screen real estate, minimum distractions.",
-            b.label_for(Action::ToggleSidebar)
-        )
-    },
-    |_b| "Every keybinding is configurable. Open config.toml and make dux truly yours.".into(),
-    |_b| {
-        "Worktrees are the secret sauce: each agent gets its own isolated branch. No conflicts, ever."
-            .into()
-    },
-    |b| {
-        format!(
-            "`{}` opens the project browser. Add worktrees from anywhere on disk.",
-            b.label_for(Action::OpenProjectBrowser)
-        )
-    },
-    |b| {
-        format!(
-            "`{}` opens the help overlay, the full keybinding reference, right in the app.",
-            b.label_for(Action::ToggleHelp)
-        )
-    },
-    |b| {
-        format!(
-            "Macros let you save and replay prompts. Configure them in config.toml, trigger with `{}`.",
-            b.label_for(Action::OpenMacroBar)
-        )
-    },
-    |_b| {
-        "Launch 5 agents on 5 worktrees and let them all work in parallel. Conflicts? Let AI sort it out."
-            .into()
-    },
-    |_b| {
-        "Tired of typing the same prompt to your AI agent over and over? Turn it into a macro!"
-            .into()
-    },
-    |_b| "Dux runs Claude the way Anthropic intended. No workarounds, no bans. Just vibes.".into(),
-    |_b| {
-        "The config file is also the documentation. Every option is configurable and the comments explain it all."
-            .into()
-    },
-    |_b| {
-        "Curious what you changed in your config? Run `dux config diff` to see exactly what's different from the defaults."
-            .into()
-    },
-    |b| {
-        format!(
-            "Agent keybinds clashing with dux? `{}` toggles interactive mode. Most keys go straight to the agent.",
-            b.label_for(Action::ExitInteractive)
-        )
-    },
-    |_b| {
-        "New agent prompt looking too empty? Tick the pet-name checkbox and let dux name your next chaos gremlin."
-            .into()
-    },
-    |_b| {
-        "Install the `gh` CLI and your agents can create commits and pull requests. Pair it with macros or skills to match your style."
-            .into()
-    },
-    |_b| {
-        "Your MCP servers, tools, and hooks? They all just work. We don't mess with your setup. Promise."
-            .into()
-    },
-    |b| {
-        format!(
-            "Terminal looking glitchy? `{}` redraws the entire screen. Good as new.",
-            b.label_for(Action::ForceRedraw)
-        )
-    },
-    |b| {
-        format!(
-            "The command palette (`{}`) has features that don't have keybinds. Poke around, you might be surprised.",
-            b.label_for(Action::OpenPalette)
-        )
-    },
-];
-
 /// Capitalize the first character of a string.
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
@@ -1097,8 +929,13 @@ impl App {
 
         // --- tip pill ---
         if show_tip {
-            let text_fn = &WELCOME_TIPS[self.welcome_tip_index % WELCOME_TIPS.len()];
-            let tip_text = text_fn(&self.bindings);
+            let bindings = &self.bindings;
+            let resolve = |action: Action| bindings.label_for(action);
+            let tui_tips: Vec<_> = dux_core::welcome::WELCOME_TIPS
+                .iter()
+                .filter_map(|t| t.tui)
+                .collect();
+            let tip_text = tui_tips[self.welcome_tip_index % tui_tips.len()](&resolve);
 
             let pill_span = Span::styled(
                 " Tip ",

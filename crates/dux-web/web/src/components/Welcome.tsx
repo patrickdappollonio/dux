@@ -1,5 +1,7 @@
 import { useState } from "react"
 
+import { useDux } from "@/lib/store"
+
 // The dux welcome screen, mirroring the TUI's idle agent pane: the braille
 // duck over the block-letter logo, with one playful tip underneath. Art is
 // ported verbatim from crates/dux-tui/src/app/render.rs (ASCII_LOGO_ALT and
@@ -28,20 +30,7 @@ const TEXT_LOGO = `       ░██
 ░██   ░███ ░██   ░███  ░██  ░██
  ░█████░██  ░█████░██ ░██    ░██ `
 
-// Welcome tips: same sassy spirit as the TUI's WELCOME_TIPS, rewritten where
-// the original referenced TUI keybindings. Backticked spans render accented.
-const TIPS: string[] = [
-  "Lost? `⌘K` opens the command palette. Every action lives there, even the ones you forgot existed.",
-  "Need every keystroke? The `fullscreen` button on a terminal captures even `Ctrl+T`. Focus mode: activated.",
-  "Any CLI tool can be a provider. Just set its `command` in config.toml. No plugins, no adapters.",
-  "Each agent gets companion terminals. The `⋯` menu spawns as many as you like.",
-  "Tired of writing commit messages? `Generate with AI` in the commit dialog does it for you.",
-  "dux remembers which providers you've run on each worktree. Swap away and back, and each one picks up right where you left it.",
-  "Click a changed file to read its diff — syntax highlighting included, no checkout required.",
-  "Agents keep running when you close this tab. Come back any time; the terminal repaints like you never left.",
-  "Drag the sidebar's right edge to resize it. It remembers.",
-  "Hover an agent's status icon to see how it's doing: green runs, amber waits, gray is gone.",
-]
+// Tips come from the server's ViewModel — the single source of truth is crates/dux-core/src/welcome.rs (WELCOME_TIPS). Add new tips THERE, with both surface variants.
 
 // Render a tip, highlighting `backticked` spans in the foreground accent
 // (the backticks themselves are not shown) — same convention as the TUI.
@@ -63,9 +52,16 @@ function TipText({ tip }: { tip: string }) {
 }
 
 export function Welcome() {
-  // One tip per visit to the welcome screen (the component remounts whenever
-  // the center pane returns to the idle state).
-  const [tip] = useState(() => TIPS[Math.floor(Math.random() * TIPS.length)])
+  const tips = useDux().viewModel?.welcome_tips ?? []
+  // Pick a stable random fraction once per visit to the welcome screen (the
+  // component remounts whenever the center pane returns to the idle state).
+  // Storing the fraction — not an index — keeps the choice stable across
+  // ViewModel re-renders while still working when tips arrive AFTER mount.
+  const [tipFraction] = useState(() => Math.random())
+  const tip =
+    tips.length > 0
+      ? tips[Math.floor(tipFraction * tips.length) % tips.length]
+      : null
 
   return (
     <div className="flex h-full w-full select-none flex-col items-center justify-center gap-1 overflow-hidden">
@@ -81,9 +77,11 @@ export function Welcome() {
       >
         {TEXT_LOGO}
       </pre>
-      <p className="mt-6 max-w-md px-6 text-center text-sm text-muted-foreground">
-        <TipText tip={tip} />
-      </p>
+      {tip && (
+        <p className="mt-6 max-w-md px-6 text-center text-sm text-muted-foreground">
+          <TipText tip={tip} />
+        </p>
+      )}
     </div>
   )
 }

@@ -96,6 +96,7 @@ export interface ViewModel {
   changed_files: ChangedFiles
   global_env: Record<string, string>
   available_providers: string[]
+  welcome_tips: string[]
 }
 
 export interface CommandStatus {

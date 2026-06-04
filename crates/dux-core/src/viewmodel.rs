@@ -22,6 +22,10 @@ pub struct ViewModel {
     /// Configured provider command names, sorted. Surfaced so a client can
     /// populate a per-project default-provider picker.
     pub available_providers: Vec<String>,
+    /// Web-surface welcome-screen tips, from the shared `dux_core::welcome`
+    /// list. Static content; the watch channel coalesces identical frames so
+    /// this does not cause churn.
+    pub welcome_tips: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -219,6 +223,7 @@ impl Engine {
             },
             global_env: self.config.env.clone(),
             available_providers,
+            welcome_tips: crate::welcome::web_tips(),
         }
     }
 }
@@ -255,6 +260,10 @@ mod tests {
         assert_eq!(vm.changed_files.staged[0].path, "src/lib.rs");
         assert_eq!(vm.changed_files.staged[0].additions, 3);
         assert_eq!(vm.changed_files.unstaged.len(), 0);
+        assert!(
+            !vm.welcome_tips.is_empty(),
+            "welcome_tips should carry the shared web tips"
+        );
     }
 
     #[test]
