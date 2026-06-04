@@ -185,6 +185,15 @@ enum SessionRestore {
     Skip,
 }
 
+/// SIGWINCH wiring handed to `App::assemble`: the flag the run loop polls plus
+/// the signal-hook registration id, unregistered in `into_engine` so flip
+/// cycles don't accumulate handlers. `sig_id` is `None` only in tests that
+/// build the App directly without registering a real handler.
+struct SigwinchHandle {
+    flag: Arc<AtomicBool>,
+    sig_id: Option<signal_hook::SigId>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FocusPane {
     Left,
@@ -1268,8 +1277,10 @@ impl App {
             engine,
             bindings,
             interactive_patterns,
-            sigwinch_flag,
-            Some(sigwinch_sig_id),
+            SigwinchHandle {
+                flag: sigwinch_flag,
+                sig_id: Some(sigwinch_sig_id),
+            },
             status,
             theme,
             SessionRestore::Restore,
@@ -1288,8 +1299,7 @@ impl App {
         engine: Engine,
         bindings: RuntimeBindings,
         interactive_patterns: InteractiveBytePatterns,
-        sigwinch_flag: Arc<AtomicBool>,
-        sigwinch_sig_id: Option<signal_hook::SigId>,
+        sigwinch: SigwinchHandle,
         status: StatusLine,
         theme: Theme,
         restore: SessionRestore,
@@ -1360,8 +1370,8 @@ impl App {
             loading_input_buf: Vec::new(),
             in_bracket_paste: false,
             macro_bar: None,
-            sigwinch_flag,
-            sigwinch_sig_id,
+            sigwinch_flag: sigwinch.flag,
+            sigwinch_sig_id: sigwinch.sig_id,
             force_redraw: false,
             welcome_tip_index: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1417,8 +1427,10 @@ impl App {
             engine,
             bindings,
             interactive_patterns,
-            sigwinch_flag,
-            Some(sigwinch_sig_id),
+            SigwinchHandle {
+                flag: sigwinch_flag,
+                sig_id: Some(sigwinch_sig_id),
+            },
             status,
             theme,
             SessionRestore::Skip,
