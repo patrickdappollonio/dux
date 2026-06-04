@@ -54,6 +54,65 @@ fn pty_for<'a>(engine: &'a Engine, id: &str) -> Option<&'a PtyClient> {
 
 const TICK: Duration = Duration::from_millis(50);
 
+/// Per-iteration control for [`run_engine_loop`]. Checked once at the top of
+/// every outer loop iteration: `Continue` runs another tick, `Exit` stops the
+/// loop and returns the engine to the caller. The in-process flip's status
+/// screen drives this (via [`crate::serve_with_engine`]); the dedicated-thread
+/// path always returns `Continue` (it exits only on the `Shutdown` request).
+pub enum LoopControl {
+    Continue,
+    Exit,
+}
+
+/// The loop-side ends of the actor channels, owned by [`run_engine_loop`].
+/// Split out from [`EngineHandle`] (the caller-facing ends) so both the
+/// dedicated-thread path and the in-process flip can build the channels once
+/// and run the same loop body.
+pub(crate) struct ActorLoopEnds {
+    req_rx: mpsc::UnboundedReceiver<EngineRequest>,
+    vm_tx: watch::Sender<String>,
+    status_tx: broadcast::Sender<WireStatus>,
+    commit_msg_tx: broadcast::Sender<String>,
+}
+
+/// Build the actor channels and split them into the caller-facing
+/// [`EngineHandle`] and the loop-side [`ActorLoopEnds`]. Both server entry
+/// points (the dedicated engine thread and the in-process flip) call this so
+/// the channel topology is defined in exactly one place.
+pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopEnds) {
+    let (req_tx, req_rx) = mpsc::unbounded_channel::<EngineRequest>();
+    let (vm_tx, vm_rx) = watch::channel(view_model_json(engine));
+    let (status_tx, _status_rx) = broadcast::channel::<WireStatus>(256);
+    let (commit_msg_tx, _commit_msg_rx) = broadcast::channel::<String>(64);
+    (
+        EngineHandle {
+            req_tx,
+            view_model_rx: vm_rx,
+            status_tx: status_tx.clone(),
+            commit_msg_tx: commit_msg_tx.clone(),
+        },
+        ActorLoopEnds {
+            req_rx,
+            vm_tx,
+            status_tx,
+            commit_msg_tx,
+        },
+    )
+}
+
+/// Spawn the four global background workers on `engine`. Both `App::run` (the
+/// TUI) and every server entry point spawn these, and the in-process flip hands
+/// the SAME engine — with these workers already running — to the other surface,
+/// which calls this again. The spawn helpers are individually idempotent for
+/// the long-lived pollers (see `dux_core::engine`), so a redundant call here is
+/// safe: it will not start a second poller.
+pub(crate) fn spawn_global_workers(engine: &mut Engine) {
+    engine.spawn_changed_files_poller();
+    engine.spawn_branch_sync_worker();
+    engine.spawn_project_branch_status_checks();
+    engine.spawn_gh_status_check();
+}
+
 /// How long to wait for an agent provider to come up before failing a subscribe.
 /// The launch runs in a background worker and the provider appears via the
 /// worker-event drain, so the subscribe reply is deferred until then.
@@ -168,186 +227,209 @@ impl EngineHandle {
 }
 
 /// Spawn the engine thread. Returns a handle and the thread's join handle.
+///
+/// This is the dedicated-thread server path (`dux server`): the engine lives on
+/// its own std thread for its whole life. The channel setup, worker spawns, and
+/// loop body are shared with the in-process flip ([`crate::serve_with_engine`])
+/// via [`build_actor_channels`], [`spawn_global_workers`], and
+/// [`run_engine_loop`] — this path simply runs the loop on a spawned thread and
+/// drops the returned engine. The control closure always returns `Continue`, so
+/// the loop's only exit is the inline `Shutdown` request, exactly as before.
 pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>) {
-    let (req_tx, mut req_rx) = mpsc::unbounded_channel::<EngineRequest>();
-    let (vm_tx, vm_rx) = watch::channel(view_model_json(&engine));
-    let (status_tx, _status_rx) = broadcast::channel::<WireStatus>(256);
-    let thread_status_tx = status_tx.clone();
-    let (commit_msg_tx, _commit_msg_rx) = broadcast::channel::<String>(64);
-    let thread_commit_tx = commit_msg_tx.clone();
+    let (handle, ends) = build_actor_channels(&engine);
+    spawn_global_workers(&mut engine);
 
-    engine.spawn_changed_files_poller();
-    engine.spawn_branch_sync_worker();
-    engine.spawn_project_branch_status_checks();
-    engine.spawn_gh_status_check();
+    let join = thread::spawn(move || {
+        // The dedicated thread never asks the loop to exit; the loop stops only
+        // on the `Shutdown` request handled inline. The returned engine is
+        // dropped here (thread end), exactly as the previous implementation did.
+        let _engine = run_engine_loop(engine, ends, || LoopControl::Continue);
+    });
 
-    let handle = thread::spawn(move || {
-        // Subscribes waiting for their provider to come up via the worker-event drain.
-        let mut pending: Vec<PendingSubscribe> = Vec::new();
-        loop {
-            // Draining worker events may insert a launched provider (AgentLaunchReady)
-            // into `engine.providers`, which resolves pending subscribes below.
-            while let Ok(event) = engine.worker_rx.try_recv() {
-                let reaction = engine.process_worker_event(event);
-                for status in dux_core::wire::wire_statuses_from_reaction(&reaction) {
-                    let _ = thread_status_tx.send(status);
-                }
-                for status in engine.drive_delete_followup(&reaction) {
-                    let _ = thread_status_tx.send(status);
-                }
+    (handle, join)
+}
 
-                // A project mutation just updated SQLite + in-memory projects; mirror
-                // it into the portable config.toml so a later TUI start doesn't clobber it.
-                if let EventReaction::ProjectPersistenceOutcome(outcome) = &reaction
-                    && !matches!(
-                        outcome.view,
-                        ProjectPersistenceView::PersistenceFailed { .. }
-                    )
-                    && let Err(e) = engine.persist_projects_to_config()
-                {
-                    let _ = thread_status_tx.send(WireStatus::new(
-                        "error",
-                        format!(
-                            "Saved to the database, but config.toml could not be updated: {e:#}"
-                        ),
-                    ));
-                }
+/// The shared engine request/drain loop. Runs on the CALLER's thread (a spawned
+/// std thread for `dux server`, the main thread for the in-process flip) and
+/// owns `engine` for the loop's duration, returning it on exit so the flip can
+/// resume the TUI around the same live engine (PTYs intact).
+///
+/// `control` is consulted once at the top of each outer iteration: `Exit` stops
+/// the loop and returns the engine WITHOUT shutting down any PTYs (the flip's
+/// ReturnToTui path relies on this). The inline `Shutdown` request still stops
+/// the loop too — it SIGTERMs the children first (the CLI/quit teardown).
+pub(crate) fn run_engine_loop(
+    mut engine: Engine,
+    ends: ActorLoopEnds,
+    mut control: impl FnMut() -> LoopControl,
+) -> Engine {
+    let ActorLoopEnds {
+        mut req_rx,
+        vm_tx,
+        status_tx: thread_status_tx,
+        commit_msg_tx: thread_commit_tx,
+    } = ends;
+    // Subscribes waiting for their provider to come up via the worker-event drain.
+    let mut pending: Vec<PendingSubscribe> = Vec::new();
+    loop {
+        // Caller-driven exit (the flip's status screen asked to stop). Checked
+        // before any work so an exit takes effect on the next tick. PTYs are
+        // left untouched — teardown, if any, is the caller's responsibility.
+        if matches!(control(), LoopControl::Exit) {
+            break;
+        }
 
-                // A one-shot commit-message worker completed: push the generated
-                // message to subscribed web clients, or surface a failure on the
-                // status stream. Handled via `&reaction` so it coexists with the
-                // borrows above and stays before the by-value consume below.
-                match &reaction {
-                    EventReaction::CommitMessageGenerated(msg) => {
-                        let _ = thread_commit_tx.send(msg.clone());
-                    }
-                    EventReaction::CommitMessageFailed(err) => {
-                        let _ = thread_status_tx.send(WireStatus::new(
-                            "error",
-                            format!("Couldn't generate a commit message: {err}"),
-                        ));
-                    }
-                    _ => {}
-                }
-
-                // A reload worker re-read config.toml; apply the new config to the
-                // running engine. This consumes `reaction`, so it MUST be the last
-                // use of it in the loop body (all `&reaction` borrows above end
-                // first). `ApplyReloadedConfig` and `ProjectPersistenceOutcome` are
-                // distinct variants, so consuming here never skips the project sync.
-                if let EventReaction::ApplyReloadedConfig(config) = reaction {
-                    match engine.apply_reloaded_config(*config) {
-                        Ok(()) => {
-                            let _ = thread_status_tx.send(WireStatus::new(
-                                "info",
-                                "Configuration reloaded. New settings are active.",
-                            ));
-                        }
-                        Err(e) => {
-                            let _ = thread_status_tx.send(WireStatus::new(
-                                "error",
-                                format!("Config reload failed to apply: {e:#}"),
-                            ));
-                        }
-                    }
-                }
+        // Draining worker events may insert a launched provider (AgentLaunchReady)
+        // into `engine.providers`, which resolves pending subscribes below.
+        while let Ok(event) = engine.worker_rx.try_recv() {
+            let reaction = engine.process_worker_event(event);
+            for status in dux_core::wire::wire_statuses_from_reaction(&reaction) {
+                let _ = thread_status_tx.send(status);
             }
-
-            // Reap agent/terminal PTYs whose child process exited so they stop
-            // lingering in `providers`/`companion_terminals` and disappear from
-            // the ViewModel, broadcasting a status for each so web clients learn.
-            for pruned in engine.prune_exited_ptys() {
-                let status = match pruned.kind {
-                    PrunedPtyKind::Agent => {
-                        WireStatus::new("warning", format!("Agent \"{}\" exited.", pruned.label))
-                    }
-                    PrunedPtyKind::Terminal => {
-                        WireStatus::new("info", format!("Terminal \"{}\" closed.", pruned.label))
-                    }
-                };
+            for status in engine.drive_delete_followup(&reaction) {
                 let _ = thread_status_tx.send(status);
             }
 
-            // Resolve or expire pending subscribes now that providers may have appeared.
-            let now = Instant::now();
-            pending.retain_mut(|p| {
-                if let Some(client) = engine.providers.get(&p.session_id) {
-                    if let Some(reply) = p.reply.take() {
-                        let _ = reply.send(Ok(client.subscribe_with_repaint()));
-                    }
-                    false
-                } else if !engine.is_in_flight(&InFlightKey::AgentLaunch(p.session_id.clone())) {
-                    // The launch worker finished but no provider came up: it failed.
-                    // Fail fast with a clear message instead of waiting for the timeout;
-                    // the specific error was already broadcast on the status stream.
-                    if let Some(reply) = p.reply.take() {
-                        let _ = reply.send(Err(format!(
-                            "Agent failed to launch for session {}. Check dux.log for details.",
-                            p.session_id
-                        )));
-                    }
-                    false
-                } else if now > p.deadline {
-                    if let Some(reply) = p.reply.take() {
-                        let _ = reply.send(Err("timed out launching agent".to_string()));
-                    }
-                    false
-                } else {
-                    true
-                }
-            });
+            // A project mutation just updated SQLite + in-memory projects; mirror
+            // it into the portable config.toml so a later TUI start doesn't clobber it.
+            if let EventReaction::ProjectPersistenceOutcome(outcome) = &reaction
+                && !matches!(
+                    outcome.view,
+                    ProjectPersistenceView::PersistenceFailed { .. }
+                )
+                && let Err(e) = engine.persist_projects_to_config()
+            {
+                let _ = thread_status_tx.send(WireStatus::new(
+                    "error",
+                    format!("Saved to the database, but config.toml could not be updated: {e:#}"),
+                ));
+            }
 
-            // Only notify ViewModel subscribers when the projection actually changed,
-            // so idle ticks don't wake every WS client ~20x/second.
-            let json = view_model_json(&engine);
-            vm_tx.send_if_modified(|current| {
-                if *current != json {
-                    *current = json;
-                    true
-                } else {
-                    false
+            // A one-shot commit-message worker completed: push the generated
+            // message to subscribed web clients, or surface a failure on the
+            // status stream. Handled via `&reaction` so it coexists with the
+            // borrows above and stays before the by-value consume below.
+            match &reaction {
+                EventReaction::CommitMessageGenerated(msg) => {
+                    let _ = thread_commit_tx.send(msg.clone());
                 }
-            });
+                EventReaction::CommitMessageFailed(err) => {
+                    let _ = thread_status_tx.send(WireStatus::new(
+                        "error",
+                        format!("Couldn't generate a commit message: {err}"),
+                    ));
+                }
+                _ => {}
+            }
 
-            let mut disconnected = false;
-            loop {
-                match req_rx.try_recv() {
-                    Ok(EngineRequest::SubscribePty(session_id, reply)) => {
-                        handle_subscribe(&mut engine, &mut pending, session_id, reply);
+            // A reload worker re-read config.toml; apply the new config to the
+            // running engine. This consumes `reaction`, so it MUST be the last
+            // use of it in the loop body (all `&reaction` borrows above end
+            // first). `ApplyReloadedConfig` and `ProjectPersistenceOutcome` are
+            // distinct variants, so consuming here never skips the project sync.
+            if let EventReaction::ApplyReloadedConfig(config) = reaction {
+                match engine.apply_reloaded_config(*config) {
+                    Ok(()) => {
+                        let _ = thread_status_tx.send(WireStatus::new(
+                            "info",
+                            "Configuration reloaded. New settings are active.",
+                        ));
                     }
-                    Ok(EngineRequest::Shutdown(reply)) => {
-                        // SIGTERM children, wait briefly for them to flush state,
-                        // then mark agent sessions Detached. Handled here (not in
-                        // `handle_request`) because it must stop the loop.
-                        engine.shutdown_ptys(Duration::from_millis(1500));
-                        let _ = reply.send(());
-                        disconnected = true;
-                        break;
-                    }
-                    Ok(req) => handle_request(&mut engine, req),
-                    Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                        disconnected = true;
-                        break;
+                    Err(e) => {
+                        let _ = thread_status_tx.send(WireStatus::new(
+                            "error",
+                            format!("Config reload failed to apply: {e:#}"),
+                        ));
                     }
                 }
             }
-            if disconnected {
-                break;
-            }
-            thread::sleep(TICK);
         }
-    });
 
-    (
-        EngineHandle {
-            req_tx,
-            view_model_rx: vm_rx,
-            status_tx,
-            commit_msg_tx,
-        },
-        handle,
-    )
+        // Reap agent/terminal PTYs whose child process exited so they stop
+        // lingering in `providers`/`companion_terminals` and disappear from
+        // the ViewModel, broadcasting a status for each so web clients learn.
+        for pruned in engine.prune_exited_ptys() {
+            let status = match pruned.kind {
+                PrunedPtyKind::Agent => {
+                    WireStatus::new("warning", format!("Agent \"{}\" exited.", pruned.label))
+                }
+                PrunedPtyKind::Terminal => {
+                    WireStatus::new("info", format!("Terminal \"{}\" closed.", pruned.label))
+                }
+            };
+            let _ = thread_status_tx.send(status);
+        }
+
+        // Resolve or expire pending subscribes now that providers may have appeared.
+        let now = Instant::now();
+        pending.retain_mut(|p| {
+            if let Some(client) = engine.providers.get(&p.session_id) {
+                if let Some(reply) = p.reply.take() {
+                    let _ = reply.send(Ok(client.subscribe_with_repaint()));
+                }
+                false
+            } else if !engine.is_in_flight(&InFlightKey::AgentLaunch(p.session_id.clone())) {
+                // The launch worker finished but no provider came up: it failed.
+                // Fail fast with a clear message instead of waiting for the timeout;
+                // the specific error was already broadcast on the status stream.
+                if let Some(reply) = p.reply.take() {
+                    let _ = reply.send(Err(format!(
+                        "Agent failed to launch for session {}. Check dux.log for details.",
+                        p.session_id
+                    )));
+                }
+                false
+            } else if now > p.deadline {
+                if let Some(reply) = p.reply.take() {
+                    let _ = reply.send(Err("timed out launching agent".to_string()));
+                }
+                false
+            } else {
+                true
+            }
+        });
+
+        // Only notify ViewModel subscribers when the projection actually changed,
+        // so idle ticks don't wake every WS client ~20x/second.
+        let json = view_model_json(&engine);
+        vm_tx.send_if_modified(|current| {
+            if *current != json {
+                *current = json;
+                true
+            } else {
+                false
+            }
+        });
+
+        let mut disconnected = false;
+        loop {
+            match req_rx.try_recv() {
+                Ok(EngineRequest::SubscribePty(session_id, reply)) => {
+                    handle_subscribe(&mut engine, &mut pending, session_id, reply);
+                }
+                Ok(EngineRequest::Shutdown(reply)) => {
+                    // SIGTERM children, wait briefly for them to flush state,
+                    // then mark agent sessions Detached. Handled here (not in
+                    // `handle_request`) because it must stop the loop.
+                    engine.shutdown_ptys(Duration::from_millis(1500));
+                    let _ = reply.send(());
+                    disconnected = true;
+                    break;
+                }
+                Ok(req) => handle_request(&mut engine, req),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+        if disconnected {
+            break;
+        }
+        thread::sleep(TICK);
+    }
+    engine
 }
 
 fn view_model_json(engine: &Engine) -> String {

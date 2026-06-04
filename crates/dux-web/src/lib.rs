@@ -12,43 +12,21 @@ pub mod server;
 pub mod web_assets;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::Result;
 use dux_core::config::DuxPaths;
+use dux_core::engine::Engine;
 
-/// Resolve the address `dux server` should bind to, enforcing the no-auth safety
-/// gate. CLI values take precedence over config values.
-///
-/// The web UI ships with NO authentication yet, so binding to anything other than
-/// loopback is refused unless the operator explicitly opts in (via the
-/// `--insecure-allow-remote` CLI flag or `insecure_allow_remote = true` under
-/// `[server]` in config.toml).
-pub fn resolve_bind(
-    cfg_bind: &str,
-    cfg_insecure_allow_remote: bool,
-    cli_bind: Option<&str>,
-    cli_insecure_allow_remote: bool,
-) -> Result<SocketAddr> {
-    let raw = cli_bind.unwrap_or(cfg_bind);
-    let addr: SocketAddr = raw.parse().map_err(|_| {
-        anyhow!(
-            "invalid bind address \"{raw}\": expected IP:port, \
-             e.g. 127.0.0.1:8080 or 0.0.0.0:8080"
-        )
-    })?;
+use crate::engine_actor::LoopControl;
 
-    let allow_remote = cli_insecure_allow_remote || cfg_insecure_allow_remote;
-    if !addr.ip().is_loopback() && !allow_remote {
-        bail!(
-            "refusing to bind {addr}: the dux web UI has no authentication yet, \
-             so anyone who can reach this address can control your agents and worktrees. \
-             To proceed deliberately, re-run with --insecure-allow-remote, \
-             or set insecure_allow_remote = true under [server] in config.toml."
-        );
-    }
-
-    Ok(addr)
-}
+/// The no-auth bind gate now lives in `dux-core` so both server entry points
+/// (the `dux server` CLI and the in-process TUI↔server flip's pre-flight in
+/// dux-tui) share it without dux-tui depending on dux-web. Re-exported here so
+/// `crates/dux/src/main.rs` keeps calling `dux_web::resolve_bind` unchanged.
+pub use dux_core::config::resolve_server_bind as resolve_bind;
 
 /// Boot the engine on its own thread and serve the web UI on `addr` (loopback for now).
 /// Blocking entry — builds its own tokio runtime.
@@ -71,6 +49,139 @@ pub fn run_server(paths: DuxPaths, addr: SocketAddr) -> Result<()> {
     })
 }
 
+/// What the status-screen tick asks `serve_with_engine` to do after the current
+/// iteration. `Continue` keeps serving; `ReturnToTui` flips back to the TUI
+/// (server torn down, PTYs preserved); `QuitProcess` exits the whole process
+/// (server torn down, agents SIGTERMed).
+pub enum ServerTick {
+    Continue,
+    ReturnToTui,
+    QuitProcess,
+}
+
+/// How `serve_with_engine` exited, so the binary's orchestration loop knows
+/// whether to resume the TUI or quit.
+pub enum ServerExit {
+    ReturnToTui,
+    QuitProcess,
+}
+
+/// Grace period given to agent/terminal children to flush state on a quit, the
+/// same window the dedicated-thread `Shutdown` path uses.
+const QUIT_PTY_GRACE: Duration = Duration::from_millis(1500);
+
+/// Upper bound on how long the flip waits for the axum server task to finish
+/// after graceful shutdown is triggered. A wedged client connection must not be
+/// able to hang the flip back to the TUI, so we cap the join: the runtime is
+/// dropped afterward regardless, which aborts any straggler task.
+const SERVER_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Serve the web UI over an EXISTING engine on the CALLER's thread, returning
+/// the engine when serving stops. This is the in-process TUI↔server flip's
+/// entry point: the TUI hands its live `Engine` (PTYs running, owned on the main
+/// thread) and a pre-bound std `TcpListener` here; this turns the caller's
+/// thread INTO the engine-actor loop while axum serves on a background runtime.
+///
+/// `on_tick` runs once per engine-loop iteration (the binary implements it with
+/// a dux-tui status screen that polls keys and redraws). Its return value drives
+/// the exit:
+/// - `Continue` keeps serving.
+/// - `ReturnToTui` triggers graceful axum shutdown and returns `(engine,
+///   ReturnToTui)` with PTYs UNTOUCHED — the TUI resumes around the same agents.
+/// - `QuitProcess` (or a SIGINT/SIGTERM during serving) triggers graceful axum
+///   shutdown, then SIGTERMs the children (`shutdown_ptys`) like the CLI path,
+///   and returns `(engine, QuitProcess)`.
+pub fn serve_with_engine(
+    mut engine: Engine,
+    listener: std::net::TcpListener,
+    mut on_tick: impl FnMut() -> ServerTick,
+) -> Result<(Engine, ServerExit)> {
+    let (handle, ends) = engine_actor::build_actor_channels(&engine);
+    engine_actor::spawn_global_workers(&mut engine);
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    // The std listener travels through the flip (the TUI bound it BEFORE tearing
+    // down, so there is no rebind race); tokio needs it non-blocking.
+    listener.set_nonblocking(true)?;
+    let tokio_listener = {
+        let _guard = runtime.enter();
+        tokio::net::TcpListener::from_std(listener)?
+    };
+
+    // Graceful-shutdown trigger for axum: the synchronous engine loop flips this
+    // watch to `true` on exit, and the server's shutdown future awaits it.
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    // Set by the signal task; polled by the control closure so a SIGINT/SIGTERM
+    // received while serving breaks the engine loop too (not just axum).
+    let signal_quit = Arc::new(AtomicBool::new(false));
+
+    let app = server::router(handle);
+    let server_task = runtime.spawn(async move {
+        axum::serve(tokio_listener, app)
+            .with_graceful_shutdown(async move {
+                // Wait until the loop flips the watch to `true`.
+                while !*shutdown_rx.borrow_and_update() {
+                    if shutdown_rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .await
+    });
+
+    // Signal task: trip the flag on SIGINT/SIGTERM so the control closure exits
+    // the loop with QuitProcess on the next tick.
+    let signal_flag = Arc::clone(&signal_quit);
+    runtime.spawn(async move {
+        shutdown_signal().await;
+        signal_flag.store(true, Ordering::SeqCst);
+    });
+
+    // Run the engine loop on the CURRENT thread. The control closure decides the
+    // exit reason: a tripped signal flag wins (QuitProcess), otherwise the
+    // caller's tick result maps straight through.
+    let mut exit = ServerExit::ReturnToTui;
+    let mut engine = engine_actor::run_engine_loop(engine, ends, || {
+        if signal_quit.load(Ordering::SeqCst) {
+            exit = ServerExit::QuitProcess;
+            return LoopControl::Exit;
+        }
+        match on_tick() {
+            ServerTick::Continue => LoopControl::Continue,
+            ServerTick::ReturnToTui => {
+                exit = ServerExit::ReturnToTui;
+                LoopControl::Exit
+            }
+            ServerTick::QuitProcess => {
+                exit = ServerExit::QuitProcess;
+                LoopControl::Exit
+            }
+        }
+    });
+
+    // Trigger graceful axum shutdown and wait (bounded) for the server task to
+    // wind down. Dropping the runtime afterward aborts any straggler.
+    let _ = shutdown_tx.send(true);
+    runtime.block_on(async {
+        let _ = tokio::time::timeout(SERVER_JOIN_TIMEOUT, server_task).await;
+    });
+
+    if matches!(exit, ServerExit::QuitProcess) {
+        // Quit teardown: SIGTERM the children so CLIs can save state for a later
+        // resume, mark agent sessions Detached. We own the engine here, so we
+        // call `shutdown_ptys` directly (the dedicated-thread path routes the
+        // equivalent through the `Shutdown` request).
+        engine.shutdown_ptys(QUIT_PTY_GRACE);
+    }
+    // ReturnToTui intentionally leaves PTYs untouched so the resumed TUI finds
+    // the same live agents.
+
+    Ok((engine, exit))
+}
+
 /// Resolves when the process receives SIGINT (Ctrl-C) or SIGTERM, the standard
 /// signals an operator or supervisor sends to stop the server.
 async fn shutdown_signal() {
@@ -88,94 +199,6 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
-    }
-}
-
-#[cfg(test)]
-mod resolve_bind_tests {
-    use super::resolve_bind;
-
-    #[test]
-    fn default_loopback_passes_without_opt_in() {
-        let addr = resolve_bind("127.0.0.1:8080", false, None, false).expect("loopback ok");
-        assert_eq!(addr.to_string(), "127.0.0.1:8080");
-    }
-
-    #[test]
-    fn cli_bind_overrides_config_bind() {
-        let addr =
-            resolve_bind("127.0.0.1:8080", false, Some("127.0.0.1:9999"), false).expect("cli ok");
-        assert_eq!(addr.to_string(), "127.0.0.1:9999");
-    }
-
-    #[test]
-    fn invalid_value_error_mentions_the_value() {
-        let err = resolve_bind("not-an-addr", false, None, false)
-            .expect_err("invalid address should error");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("not-an-addr"),
-            "error should name the value: {msg}"
-        );
-        assert!(
-            msg.contains("IP:port"),
-            "error should explain the shape: {msg}"
-        );
-    }
-
-    #[test]
-    fn non_loopback_without_opt_in_errors() {
-        let err = resolve_bind("0.0.0.0:8080", false, None, false)
-            .expect_err("non-loopback without opt-in should error");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("--insecure-allow-remote"),
-            "error should point to the CLI flag: {msg}"
-        );
-        assert!(
-            msg.contains("authentication"),
-            "error should explain why it refused: {msg}"
-        );
-    }
-
-    #[test]
-    fn non_loopback_with_cli_opt_in_passes() {
-        let addr = resolve_bind("0.0.0.0:8080", false, None, true).expect("cli opt-in ok");
-        assert_eq!(addr.to_string(), "0.0.0.0:8080");
-    }
-
-    #[test]
-    fn non_loopback_with_config_opt_in_passes() {
-        let addr = resolve_bind("0.0.0.0:8080", true, None, false).expect("config opt-in ok");
-        assert_eq!(addr.to_string(), "0.0.0.0:8080");
-    }
-
-    #[test]
-    fn loopback_ipv6_passes_without_opt_in() {
-        let addr = resolve_bind("[::1]:8080", false, None, false).expect("ipv6 loopback ok");
-        assert!(addr.ip().is_loopback());
-    }
-
-    #[test]
-    fn unspecified_ipv6_without_opt_in_errors() {
-        let err = resolve_bind("[::]:8080", false, None, false)
-            .expect_err("ipv6 unspecified without opt-in should error");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("--insecure-allow-remote"),
-            "error should point to the CLI flag: {msg}"
-        );
-        assert!(
-            msg.contains("authentication"),
-            "error should explain why it refused: {msg}"
-        );
-    }
-
-    #[test]
-    fn loopback_range_beyond_one_passes_without_opt_in() {
-        let addr =
-            resolve_bind("127.0.0.2:8080", false, None, false).expect("127.0.0.2 loopback ok");
-        assert_eq!(addr.to_string(), "127.0.0.2:8080");
     }
 }
 

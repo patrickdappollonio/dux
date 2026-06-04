@@ -942,6 +942,134 @@ fn is_executable_file(path: &Path) -> bool {
     metadata.permissions().mode() & 0o111 != 0
 }
 
+/// Resolve the address the dux web server should bind to, enforcing the no-auth
+/// safety gate. CLI values take precedence over config values.
+///
+/// The web UI ships with NO authentication yet, so binding to anything other
+/// than loopback is refused unless the operator explicitly opts in (via the
+/// `--insecure-allow-remote` CLI flag or `insecure_allow_remote = true` under
+/// `[server]` in config.toml).
+///
+/// Lives in dux-core (not dux-web) because both server entry points need the
+/// same gate: the `dux server` CLI and the in-process TUI↔server flip. The flip
+/// pre-flight runs in dux-tui, which must not depend on dux-web, so the shared
+/// gate belongs in the crate both depend on.
+pub fn resolve_server_bind(
+    cfg_bind: &str,
+    cfg_insecure_allow_remote: bool,
+    cli_bind: Option<&str>,
+    cli_insecure_allow_remote: bool,
+) -> Result<std::net::SocketAddr> {
+    let raw = cli_bind.unwrap_or(cfg_bind);
+    let addr: std::net::SocketAddr = raw.parse().map_err(|_| {
+        anyhow!(
+            "invalid bind address \"{raw}\": expected IP:port, \
+             e.g. 127.0.0.1:8080 or 0.0.0.0:8080"
+        )
+    })?;
+
+    let allow_remote = cli_insecure_allow_remote || cfg_insecure_allow_remote;
+    if !addr.ip().is_loopback() && !allow_remote {
+        bail!(
+            "refusing to bind {addr}: the dux web UI has no authentication yet, \
+             so anyone who can reach this address can control your agents and worktrees. \
+             To proceed deliberately, re-run with --insecure-allow-remote, \
+             or set insecure_allow_remote = true under [server] in config.toml."
+        );
+    }
+
+    Ok(addr)
+}
+
+#[cfg(test)]
+mod resolve_server_bind_tests {
+    use super::resolve_server_bind;
+
+    #[test]
+    fn default_loopback_passes_without_opt_in() {
+        let addr = resolve_server_bind("127.0.0.1:8080", false, None, false).expect("loopback ok");
+        assert_eq!(addr.to_string(), "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn cli_bind_overrides_config_bind() {
+        let addr = resolve_server_bind("127.0.0.1:8080", false, Some("127.0.0.1:9999"), false)
+            .expect("cli ok");
+        assert_eq!(addr.to_string(), "127.0.0.1:9999");
+    }
+
+    #[test]
+    fn invalid_value_error_mentions_the_value() {
+        let err = resolve_server_bind("not-an-addr", false, None, false)
+            .expect_err("invalid address should error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not-an-addr"),
+            "error should name the value: {msg}"
+        );
+        assert!(
+            msg.contains("IP:port"),
+            "error should explain the shape: {msg}"
+        );
+    }
+
+    #[test]
+    fn non_loopback_without_opt_in_errors() {
+        let err = resolve_server_bind("0.0.0.0:8080", false, None, false)
+            .expect_err("non-loopback without opt-in should error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--insecure-allow-remote"),
+            "error should point to the CLI flag: {msg}"
+        );
+        assert!(
+            msg.contains("authentication"),
+            "error should explain why it refused: {msg}"
+        );
+    }
+
+    #[test]
+    fn non_loopback_with_cli_opt_in_passes() {
+        let addr = resolve_server_bind("0.0.0.0:8080", false, None, true).expect("cli opt-in ok");
+        assert_eq!(addr.to_string(), "0.0.0.0:8080");
+    }
+
+    #[test]
+    fn non_loopback_with_config_opt_in_passes() {
+        let addr =
+            resolve_server_bind("0.0.0.0:8080", true, None, false).expect("config opt-in ok");
+        assert_eq!(addr.to_string(), "0.0.0.0:8080");
+    }
+
+    #[test]
+    fn loopback_ipv6_passes_without_opt_in() {
+        let addr = resolve_server_bind("[::1]:8080", false, None, false).expect("ipv6 loopback ok");
+        assert!(addr.ip().is_loopback());
+    }
+
+    #[test]
+    fn unspecified_ipv6_without_opt_in_errors() {
+        let err = resolve_server_bind("[::]:8080", false, None, false)
+            .expect_err("ipv6 unspecified without opt-in should error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--insecure-allow-remote"),
+            "error should point to the CLI flag: {msg}"
+        );
+        assert!(
+            msg.contains("authentication"),
+            "error should explain why it refused: {msg}"
+        );
+    }
+
+    #[test]
+    fn loopback_range_beyond_one_passes_without_opt_in() {
+        let addr = resolve_server_bind("127.0.0.2:8080", false, None, false)
+            .expect("127.0.0.2 loopback ok");
+        assert_eq!(addr.to_string(), "127.0.0.2:8080");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;

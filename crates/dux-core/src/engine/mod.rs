@@ -114,6 +114,17 @@ pub struct Engine {
     /// `PrStatusReady` arm and read by `spawn_pr_check_for_session` to
     /// skip checks made within the last 10 seconds.
     pub pr_last_checked: HashMap<String, Instant>,
+    /// Guard so the long-lived `changed-files` poller is spawned at most once
+    /// for the engine's life. Both `App::run` and the web engine-actor spawn
+    /// the global workers, and the in-process TUI↔server flip hands the same
+    /// engine (with its workers already running) to the other surface, which
+    /// re-calls the spawn helpers. Without this guard a flip would start a
+    /// second concurrent poller. `AtomicBool` so the `&self` spawn helper can
+    /// flip it; never shared across threads (`Engine` is `!Send`).
+    pub changed_files_poller_started: AtomicBool,
+    /// Guard so the long-lived `branch-sync` poller is spawned at most once.
+    /// Same rationale as `changed_files_poller_started`.
+    pub branch_sync_worker_started: AtomicBool,
 }
 
 /// Map a runtime [`Project`] to a portable [`ProjectConfig`] for config.toml.
@@ -307,6 +318,16 @@ impl Engine {
         if interval_secs == 0 {
             return; // disabled by config
         }
+        // Idempotent: a long-lived poller must never be duplicated. The flip
+        // hands a live engine to the other surface, which re-calls this; a
+        // second call is a no-op. `swap` is the atomic test-and-set, placed
+        // after the disabled check so the flag means "a poller thread is live".
+        if self
+            .branch_sync_worker_started
+            .swap(true, Ordering::Relaxed)
+        {
+            return;
+        }
         let interval = Duration::from_secs(u64::from(interval_secs));
         let sessions = Arc::clone(&self.branch_sync_sessions);
         self.spawn_loop_worker(
@@ -450,6 +471,10 @@ impl Engine {
     }
 
     pub fn spawn_gh_status_check(&mut self) {
+        // Not guarded against re-spawn: this is a one-shot job (check PATH +
+        // auth, post one `GhStatusChecked` event, exit). Re-running it on a
+        // flip-back is harmless and desirable — a fresh check picks up any
+        // `gh login` the user did while the other surface was active.
         if !self.github_integration_enabled {
             return;
         }
@@ -499,6 +524,15 @@ impl Engine {
     }
 
     pub fn spawn_changed_files_poller(&self) {
+        // Idempotent: a long-lived poller must never be duplicated. The flip
+        // hands a live engine to the other surface, which re-calls this; a
+        // second call is a no-op. `swap` is the atomic test-and-set.
+        if self
+            .changed_files_poller_started
+            .swap(true, Ordering::Relaxed)
+        {
+            return;
+        }
         let watched = Arc::clone(&self.watched_worktree);
         let has_agent = Arc::clone(&self.has_active_processes);
         self.spawn_loop_worker(
@@ -587,6 +621,11 @@ impl Engine {
     }
 
     pub fn spawn_project_branch_status_checks(&mut self) {
+        // Not guarded against re-spawn: each project's check is a one-shot
+        // background job (post per-branch events, exit). Re-running on a
+        // flip-back is harmless and desirable — a fresh check reflects branch
+        // movement that happened while the other surface was active.
+        //
         // Snapshot the project list before iterating: `spawn_background_worker`
         // takes `&mut self`, so we cannot hold a borrow of `self.projects`
         // across the per-project spawn calls.
@@ -997,5 +1036,65 @@ mod tests {
         assert!(engine.config.ui.github_integration);
         assert!(engine.github_integration_enabled);
         assert_eq!(engine.config.defaults.provider, "codex");
+    }
+
+    // -- Global worker spawn idempotence (lifecycle flip: the flipped engine
+    //    arrives with these workers already running, and the other surface
+    //    re-calls the spawn helpers, so a second call must NOT start a second
+    //    concurrent poller). The guard flag is the observable: a long-lived
+    //    poller sleeps before posting events, so counting events would be slow
+    //    and flaky; the flag flips false->true on the first real spawn and a
+    //    blocked second call leaves it unchanged.
+
+    #[test]
+    fn changed_files_poller_spawns_once() {
+        let (engine, _tmp) = test_engine();
+        assert!(
+            !engine.changed_files_poller_started.load(Ordering::Relaxed),
+            "guard starts false"
+        );
+        engine.spawn_changed_files_poller();
+        assert!(
+            engine.changed_files_poller_started.load(Ordering::Relaxed),
+            "first spawn flips the guard"
+        );
+        // A second call must be a no-op (the flip re-invokes this on a live
+        // engine). The guard stays set and no second poller is created.
+        engine.spawn_changed_files_poller();
+        assert!(
+            engine.changed_files_poller_started.load(Ordering::Relaxed),
+            "second call stays guarded, no second poller"
+        );
+    }
+
+    #[test]
+    fn branch_sync_worker_spawns_once() {
+        let (mut engine, _tmp) = test_engine();
+        // Ensure the poller is enabled so the guard path is exercised.
+        engine.config.ui.branch_sync_interval = 30;
+        assert!(!engine.branch_sync_worker_started.load(Ordering::Relaxed));
+        engine.spawn_branch_sync_worker();
+        assert!(
+            engine.branch_sync_worker_started.load(Ordering::Relaxed),
+            "first spawn flips the guard"
+        );
+        engine.spawn_branch_sync_worker();
+        assert!(
+            engine.branch_sync_worker_started.load(Ordering::Relaxed),
+            "second call stays guarded, no second poller"
+        );
+    }
+
+    #[test]
+    fn branch_sync_worker_disabled_leaves_guard_unset() {
+        let (mut engine, _tmp) = test_engine();
+        // `0` disables the poller; nothing is spawned, so the guard stays
+        // false and a later enable+re-call would still be able to start it.
+        engine.config.ui.branch_sync_interval = 0;
+        engine.spawn_branch_sync_worker();
+        assert!(
+            !engine.branch_sync_worker_started.load(Ordering::Relaxed),
+            "disabled config spawns nothing, so the guard means 'thread live' and stays false"
+        );
     }
 }

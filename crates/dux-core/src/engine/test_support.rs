@@ -65,6 +65,8 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         has_active_processes: Arc::new(AtomicBool::new(false)),
         in_flight: HashSet::new(),
         pr_last_checked: HashMap::new(),
+        changed_files_poller_started: AtomicBool::new(false),
+        branch_sync_worker_started: AtomicBool::new(false),
     };
     (engine, tmp)
 }

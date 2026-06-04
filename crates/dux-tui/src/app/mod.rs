@@ -1239,6 +1239,8 @@ impl App {
             has_active_processes,
             in_flight: HashSet::new(),
             pr_last_checked: HashMap::new(),
+            changed_files_poller_started: AtomicBool::new(false),
+            branch_sync_worker_started: AtomicBool::new(false),
         };
         let mut app = Self {
             show_diff_line_numbers,
