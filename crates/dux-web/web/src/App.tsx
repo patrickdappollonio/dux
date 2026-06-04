@@ -36,6 +36,7 @@ import {
 } from "@/components/ui/sidebar"
 import { Toaster } from "@/components/ui/sonner"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import { CONN_BADGE } from "@/lib/conn"
 import { setPaletteOpen, useDux } from "@/lib/store"
 
@@ -179,22 +180,42 @@ function DesktopShell() {
   )
 }
 
+// Mobile gets the hub-&-spoke shell (no SidebarProvider — that's desktop-only
+// chrome). The shell fills the column above the fixed-height status bar; the
+// shared dialogs/palette/toaster mount in both layouts. Split out from `App` so
+// the store/viewport subscriptions live here and never run on the desktop path.
+function MobileApp() {
+  const { mobileScreen } = useDux()
+  // On the terminal screen the soft keyboard opens, and h-svh does NOT shrink
+  // for it — so the bottom of the shell (accessory bar + status bar) would hide
+  // behind the keyboard. The visual viewport DOES track the keyboard, so pin the
+  // mobile root to it there. Other screens (home/changes) have no focused text
+  // input, so the viewport equals h-svh and we keep the default class height.
+  const viewportHeight = useVisualViewportHeight()
+  const constrainToKeyboard =
+    mobileScreen === "terminal" && viewportHeight !== null
+
+  return (
+    <div
+      className="flex min-h-0 flex-col overflow-hidden"
+      style={
+        constrainToKeyboard ? { height: viewportHeight } : { height: "100svh" }
+      }
+    >
+      <div className="min-h-0 flex-1">
+        <MobileShell />
+      </div>
+      <StatusBar />
+      <GlobalOverlays />
+    </div>
+  )
+}
+
 function App() {
   const isMobile = useIsMobile()
 
-  // Mobile gets the hub-&-spoke shell (no SidebarProvider — that's desktop-only
-  // chrome). The shell fills the column above the fixed-height status bar; the
-  // shared dialogs/palette/toaster mount in both layouts.
   if (isMobile) {
-    return (
-      <div className="flex h-svh min-h-0 flex-col overflow-hidden">
-        <div className="min-h-0 flex-1">
-          <MobileShell />
-        </div>
-        <StatusBar />
-        <GlobalOverlays />
-      </div>
-    )
+    return <MobileApp />
   }
 
   return <DesktopShell />

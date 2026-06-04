@@ -3,7 +3,10 @@ import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
 import { Maximize2, Minimize2 } from "lucide-react"
+import { AccessoryBar } from "@/components/AccessoryBar"
 import { Button } from "@/components/ui/button"
+import { useIsMobile } from "@/hooks/use-mobile"
+import { applyModifiers, arrowSeq, ESC, TAB } from "@/lib/termkeys"
 import { selectSession, socket, useDux } from "@/lib/store"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 
@@ -40,6 +43,24 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
   const wrapperRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const isMobile = useIsMobile()
+
+  // Sticky (one-shot latched) soft-keyboard modifiers for the mobile accessory
+  // bar. The state drives the latch's visual highlight; the ref mirrors it so
+  // the value is readable inside the stable `onData` closure (which is created
+  // once per [kind, id] and would otherwise capture a stale `ctrl`/`alt`).
+  // `setMods` writes BOTH together, so they never diverge. This is the
+  // ref-mirror approach — no setState-in-effect — chosen over a render-tick
+  // split because the byte path must see the latch synchronously on the very
+  // next keystroke, and the latch must clear the instant it's consumed.
+  const [ctrl, setCtrl] = useState(false)
+  const [alt, setAlt] = useState(false)
+  const modsRef = useRef({ ctrl: false, alt: false })
+  function setMods(next: { ctrl: boolean; alt: boolean }) {
+    modsRef.current = next
+    setCtrl(next.ctrl)
+    setAlt(next.alt)
+  }
 
   const { viewModel } = useDux()
   const session =
@@ -114,15 +135,34 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(container)
+    // xterm already sets autocorrect/autocapitalize="off" and spellcheck="false"
+    // on its hidden input, but leaves autocomplete unset; turn it off too so the
+    // mobile keyboard never injects autofill/suggestions into the PTY stream.
+    if (term.textarea) {
+      term.textarea.setAttribute("autocomplete", "off")
+    }
     fit.fit()
     termRef.current = term
 
     // Feed live PTY bytes into the terminal.
     socket.onPtyBytes = (bytes) => term.write(bytes)
 
-    // Forward keystrokes to the PTY as binary.
+    // Forward keystrokes to the PTY as binary. On mobile, sticky modifiers from
+    // the accessory bar transform a single typed char (Ctrl-chord, Alt/Meta
+    // prefix) before sending; the latch then clears one-shot (visual included).
+    // Multi-char chunks (paste/IME) pass through untransformed but still clear
+    // any latch. `modsRef` is read live so this once-created closure sees the
+    // current latch rather than a stale capture.
     const encoder = new TextEncoder()
-    const dataSub = term.onData((s) => socket.sendInput(encoder.encode(s)))
+    const dataSub = term.onData((s) => {
+      const mods = modsRef.current
+      const out =
+        mods.ctrl || mods.alt ? applyModifiers(s, mods) : s
+      if (mods.ctrl || mods.alt) {
+        setMods({ ctrl: false, alt: false })
+      }
+      socket.sendInput(encoder.encode(out))
+    })
 
     // Subscribe to the selected target's PTY. The server tracks the currently
     // subscribed id (agent session OR terminal) and routes input/resize to it,
@@ -212,12 +252,52 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
     termRef.current?.focus()
   }
 
+  // Accessory-bar key sends. Esc/Tab/arrows are full sequences, not single
+  // chars, so they bypass `applyModifiers` (which only transforms single-char
+  // input). We still honor a latched Alt by prefixing ESC, and we clear any
+  // latch one-shot afterward — Ctrl on a non-char key has no meaning here, so
+  // it's simply consumed. Sends go through the same socket path as typed input.
+  const encoder = new TextEncoder()
+  function sendSeq(seq: string) {
+    const mods = modsRef.current
+    const out = mods.alt ? ESC + seq : seq
+    if (mods.ctrl || mods.alt) {
+      setMods({ ctrl: false, alt: false })
+    }
+    socket.sendInput(encoder.encode(out))
+    termRef.current?.focus()
+  }
+
+  function onArrow(dir: "up" | "down" | "left" | "right") {
+    const app = termRef.current?.modes.applicationCursorKeysMode ?? false
+    sendSeq(arrowSeq(dir, app))
+  }
+
+  function toggleCtrl() {
+    setMods({ ctrl: !modsRef.current.ctrl, alt: modsRef.current.alt })
+    termRef.current?.focus()
+  }
+
+  function toggleAlt() {
+    setMods({ ctrl: modsRef.current.ctrl, alt: !modsRef.current.alt })
+    termRef.current?.focus()
+  }
+
   // The host div owns the padding so the resolved bg fills the padding area
   // seamlessly — no external "border" look. FitAddon measures the content box.
   // The wrapper is `relative` so the readiness spinner can overlay the host
-  // until the PTY emits its first output (latched via `everReady`).
-  return (
-    <div ref={wrapperRef} className="group relative h-full w-full bg-background">
+  // until the PTY emits its first output (latched via `everReady`). On mobile it
+  // becomes the flex-1 child of a column root so the accessory bar can sit
+  // beneath it; on desktop it stays the lone full-size element.
+  const pane = (
+    <div
+      ref={wrapperRef}
+      className={
+        isMobile
+          ? "group relative min-h-0 w-full flex-1 bg-background"
+          : "group relative h-full w-full bg-background"
+      }
+    >
       <div ref={containerRef} className="h-full w-full p-2" />
       {/* Fullscreen toggle: embedded mode already forwards every key the
           browser will give a page; fullscreen + keyboard lock additionally
@@ -248,6 +328,28 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
           </div>
         </div>
       ) : null}
+    </div>
+  )
+
+  // Desktop: render the pane exactly as before — no extra wrapper, no bar.
+  if (!isMobile) return pane
+
+  // Mobile: a column root so the terminal host (flex-1 min-h-0) and the
+  // accessory bar (shrink-0) stack. The ResizeObserver on the host already
+  // refits + debounce-resizes the PTY when this column reflows, so no extra
+  // resize wiring is needed.
+  return (
+    <div className="flex h-full w-full flex-col">
+      {pane}
+      <AccessoryBar
+        onEsc={() => sendSeq(ESC)}
+        onTab={() => sendSeq(TAB)}
+        onArrow={onArrow}
+        ctrl={ctrl}
+        alt={alt}
+        onToggleCtrl={toggleCtrl}
+        onToggleAlt={toggleAlt}
+      />
     </div>
   )
 }
