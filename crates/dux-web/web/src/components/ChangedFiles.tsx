@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useMemo, useState, useSyncExternalStore } from "react"
 import { Check, MousePointerClick } from "lucide-react"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 import { Badge } from "@/components/ui/badge"
@@ -30,7 +30,12 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet"
-import { highlightLine, languageForPath } from "@/lib/highlight"
+import {
+  getHighlighterReady,
+  highlightLine,
+  languageForPath,
+  subscribeHighlighter,
+} from "@/lib/highlight"
 import { closeDiff, openCommit, requestDiff, socket, useDux } from "@/lib/store"
 import type { DuxState } from "@/lib/store"
 import type { ChangedFileView, DiffLine, FileDiff } from "@/lib/types"
@@ -296,6 +301,14 @@ function DiffBody({ state }: { state: DiffState }) {
 // returns must not gate the `useMemo`s below (React rules-of-hooks).
 function DiffHunks({ diff }: { diff: FileDiff }) {
   const language = useMemo(() => languageForPath(diff.path), [diff.path])
+  // The highlighter (highlight.js) loads lazily in its own async chunk. Subscribe
+  // so this component re-renders the moment it's ready; until then highlightLine
+  // returns escaped plain text. `highlighterReady` flips false → true once and
+  // feeds the useMemo below so the lines re-highlight on arrival.
+  const highlighterReady = useSyncExternalStore(
+    subscribeHighlighter,
+    getHighlighterReady,
+  )
   // Precompute highlighted HTML per line to avoid re-highlighting on re-render.
   const hunks = useMemo(
     () =>
@@ -303,10 +316,10 @@ function DiffHunks({ diff }: { diff: FileDiff }) {
         header: hunk.header,
         lines: hunk.lines.map((line) => ({
           line,
-          html: highlightLine(line.content, language),
+          html: highlightLine(line.content, language, highlighterReady),
         })),
       })),
-    [diff, language],
+    [diff, language, highlighterReady],
   )
   return (
     <div className="overflow-x-auto rounded border font-mono text-xs leading-relaxed">

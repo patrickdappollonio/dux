@@ -1,4 +1,5 @@
 import type * as React from "react"
+import { Suspense } from "react"
 
 import { AddProjectDialog } from "@/components/AddProjectDialog"
 import { AppSidebar } from "@/components/Sidebar"
@@ -11,8 +12,8 @@ import { GlobalEnvDialog } from "@/components/GlobalEnvDialog"
 import { MobileShell } from "@/components/MobileShell"
 import { ProjectSettingsDialog } from "@/components/ProjectSettingsDialog"
 import { RemoveProjectDialog } from "@/components/RemoveProjectDialog"
+import { LazyTerminalPane } from "@/components/LazyTerminalPane"
 import { StatusBar } from "@/components/StatusBar"
-import { TerminalPane } from "@/components/TerminalPane"
 import { Welcome } from "@/components/Welcome"
 import { Badge } from "@/components/ui/badge"
 import {
@@ -122,13 +123,18 @@ function TerminalArea() {
 
   // TerminalPane owns its own background and padding (via inline style) so the
   // padding area is seamlessly part of the terminal surface.
+  // Suspense fallback is null: the lazy chunk loads fast and TerminalPane shows
+  // its own readiness spinner the moment it mounts, so a fallback spinner here
+  // would just double up.
   return (
     <div className="h-full min-h-0">
-      <TerminalPane
-        key={targetId}
-        kind={selectedTarget.kind}
-        id={targetId}
-      />
+      <Suspense fallback={null}>
+        <LazyTerminalPane
+          key={targetId}
+          kind={selectedTarget.kind}
+          id={targetId}
+        />
+      </Suspense>
     </div>
   )
 }

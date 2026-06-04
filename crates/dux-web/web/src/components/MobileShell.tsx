@@ -15,10 +15,11 @@ import {
   Trash2,
   X,
 } from "lucide-react"
+import { Suspense } from "react"
 
 import { ChangedFiles } from "@/components/ChangedFiles"
+import { LazyTerminalPane } from "@/components/LazyTerminalPane"
 import { StatusBadge } from "@/components/StatusBadge"
-import { TerminalPane } from "@/components/TerminalPane"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -491,11 +492,15 @@ function TerminalScreen() {
       </header>
 
       <div className="min-h-0 flex-1">
-        <TerminalPane
-          key={targetId}
-          kind={selectedTarget.kind}
-          id={targetId}
-        />
+        {/* Suspense fallback null: the lazy chunk loads fast and TerminalPane
+            shows its own readiness spinner once mounted. */}
+        <Suspense fallback={null}>
+          <LazyTerminalPane
+            key={targetId}
+            kind={selectedTarget.kind}
+            id={targetId}
+          />
+        </Suspense>
       </div>
     </div>
   )
