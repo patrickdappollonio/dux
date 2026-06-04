@@ -3,8 +3,9 @@
 // These functions translate logical key intents (a control-modified character,
 // an arrow press, a chunk of typed text with sticky modifiers) into the raw
 // byte sequences a PTY expects. They are intentionally free of any React, DOM,
-// or window access so they can be exhaustively unit-tested in isolation and
-// reused from any caller (the mobile accessory bar, the onData transform, etc.).
+// or window access so they can be unit-tested in isolation (see
+// `termkeys.test.ts`) and reused from any caller (the mobile accessory bar, the
+// onData transform, etc.).
 
 // The ASCII escape character — the lead byte of every CSI/SS3 sequence and the
 // Alt (Meta) prefix.
@@ -33,6 +34,28 @@ const CTRL_PUNCTUATION: Record<string, number> = {
   " ": 0x00,
 }
 
+// Digits that map to a control byte, mirroring how a real terminal treats
+// Ctrl-<digit>. These reuse the caret-notation aliases of the control
+// punctuation above (e.g. Ctrl-2 == Ctrl-@ == NUL), which is the behavior
+// xterm and friends emit:
+//   Ctrl-2 -> 0x00 (NUL, alias of Ctrl-@)
+//   Ctrl-3 -> 0x1B (ESC, alias of Ctrl-[)
+//   Ctrl-4 -> 0x1C (FS,  alias of Ctrl-\)
+//   Ctrl-5 -> 0x1D (GS,  alias of Ctrl-])
+//   Ctrl-6 -> 0x1E (RS,  alias of Ctrl-^)
+//   Ctrl-7 -> 0x1F (US,  alias of Ctrl-_)
+//   Ctrl-8 -> 0x7F (DEL)
+// Digits 0, 1, and 9 have no control mapping and return `null`.
+const CTRL_DIGIT: Record<string, number> = {
+  "2": 0x00,
+  "3": 0x1b,
+  "4": 0x1c,
+  "5": 0x1d,
+  "6": 0x1e,
+  "7": 0x1f,
+  "8": 0x7f,
+}
+
 /**
  * Maps a single character to its control byte, or `null` when the character has
  * no control mapping.
@@ -40,6 +63,8 @@ const CTRL_PUNCTUATION: Record<string, number> = {
  * - `a`-`z` and `A`-`Z` map to `0x01`-`0x1A` (Ctrl-A .. Ctrl-Z), case-folded.
  * - The standard control punctuation (`@ [ \ ] ^ _` and Space) map per the
  *   table above.
+ * - Digits `2`-`8` map to their control aliases (see `CTRL_DIGIT`); `0`, `1`,
+ *   and `9` have no mapping.
  * - Everything else returns `null`.
  */
 export function ctrlByte(ch: string): string | null {
@@ -51,6 +76,9 @@ export function ctrlByte(ch: string): string | null {
   }
   if (ch in CTRL_PUNCTUATION) {
     return String.fromCharCode(CTRL_PUNCTUATION[ch])
+  }
+  if (ch in CTRL_DIGIT) {
+    return String.fromCharCode(CTRL_DIGIT[ch])
   }
   return null
 }
