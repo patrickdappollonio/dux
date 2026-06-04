@@ -2158,7 +2158,9 @@ impl App {
             .sessions
             .sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         self.rebuild_left_items();
-        self.set_info("Agents sorted by most recently updated.");
+        if self.persist_sorted_session_order() {
+            self.set_info("Agents sorted by most recently updated.");
+        }
     }
 
     pub(crate) fn sort_sessions_by_created(&mut self) {
@@ -2166,7 +2168,9 @@ impl App {
             .sessions
             .sort_by_key(|b| std::cmp::Reverse(b.created_at));
         self.rebuild_left_items();
-        self.set_info("Agents sorted by creation date (newest first).");
+        if self.persist_sorted_session_order() {
+            self.set_info("Agents sorted by creation date (newest first).");
+        }
     }
 
     pub(crate) fn sort_sessions_by_name(&mut self) {
@@ -2176,7 +2180,27 @@ impl App {
             name_a.to_lowercase().cmp(&name_b.to_lowercase())
         });
         self.rebuild_left_items();
-        self.set_info("Agents sorted alphabetically by name.");
+        if self.persist_sorted_session_order() {
+            self.set_info("Agents sorted alphabetically by name.");
+        }
+    }
+
+    /// Persist the freshly-sorted in-memory session order into SQLite so it
+    /// survives a reload and matches the web UI by construction. Returns `true`
+    /// on success. A failure is non-fatal: the sort still applies in-memory; we
+    /// log and surface a status-line error rather than crash, and the caller
+    /// skips its success message so the error stays visible.
+    fn persist_sorted_session_order(&mut self) -> bool {
+        match self.engine.persist_session_order() {
+            Ok(()) => true,
+            Err(err) => {
+                logger::error(&format!("failed to persist sorted agent order: {err:#}"));
+                self.set_error(format!(
+                    "Sorted agents on screen, but couldn't save the new order: {err}"
+                ));
+                false
+            }
+        }
     }
 
     pub(crate) fn toggle_collapse_selected_project(&mut self) {

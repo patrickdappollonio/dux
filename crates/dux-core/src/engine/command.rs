@@ -168,6 +168,27 @@ pub enum Command {
     /// `EventReaction::Status(Busy(...))` immediately; an error status if the
     /// session is unknown or there is nothing staged to summarize.
     GenerateCommitMessage { session_id: String },
+
+    /// Persist a custom display order for the agent sessions within a single
+    /// project. `session_ids` must be EXACTLY the full set of that project's
+    /// sessions — no missing ids, no extras, no duplicates, all belonging to
+    /// `project_id` — otherwise the engine returns an actionable error and
+    /// touches nothing. On success it writes the order to storage and reorders
+    /// the matching rows of `self.sessions` in place, leaving other projects'
+    /// rows in their existing relative positions. Returns
+    /// `EventReaction::Nothing` (silent success; the refreshed view is the
+    /// feedback), since reorders are high-frequency during a drag.
+    ReorderSessions {
+        project_id: String,
+        session_ids: Vec<String>,
+    },
+
+    /// Persist a custom display order for the workspace's projects.
+    /// `project_ids` must be EXACTLY the full set of known project ids (same
+    /// strict validation as [`Command::ReorderSessions`]). On success it writes
+    /// the order to storage and reorders `self.projects` to match. Returns
+    /// `EventReaction::Nothing`.
+    ReorderProjects { project_ids: Vec<String> },
 }
 
 impl Engine {
@@ -551,6 +572,377 @@ impl Engine {
                     "Generating an AI commit message from the staged diff\u{2026}",
                 )))
             }
+
+            Command::ReorderSessions {
+                project_id,
+                session_ids,
+            } => {
+                self.reorder_sessions(&project_id, &session_ids)?;
+                Ok(EventReaction::Nothing)
+            }
+
+            Command::ReorderProjects { project_ids } => {
+                self.reorder_projects(&project_ids)?;
+                Ok(EventReaction::Nothing)
+            }
         }
+    }
+
+    /// Validate and apply a new per-project session order. See
+    /// [`Command::ReorderSessions`] for the strict-set contract. On success the
+    /// store is written first (DB-first, matching the rest of the engine), then
+    /// `self.sessions` is re-sorted so the project's rows follow `session_ids`
+    /// while every other project's rows keep their existing relative order.
+    fn reorder_sessions(&mut self, project_id: &str, session_ids: &[String]) -> anyhow::Result<()> {
+        let current: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|s| s.project_id == project_id)
+            .map(|s| s.id.clone())
+            .collect();
+        validate_reorder(&current, session_ids, "agent")?;
+
+        self.session_store
+            .reorder_sessions(project_id, session_ids)?;
+
+        // Build a position lookup for this project's ids, then stably re-sort
+        // the whole Vec. Rows outside this project sort by their existing index
+        // (kept stable); rows inside it sort by their new position. Because the
+        // sort is stable and out-of-project keys preserve the original index,
+        // cross-project relative order is untouched.
+        let new_pos: std::collections::HashMap<&str, usize> = session_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.as_str(), i))
+            .collect();
+        reorder_in_place(&mut self.sessions, |s| {
+            if s.project_id == project_id {
+                new_pos.get(s.id.as_str()).copied()
+            } else {
+                None
+            }
+        });
+        Ok(())
+    }
+
+    /// Validate and apply a new project order. See [`Command::ReorderProjects`].
+    fn reorder_projects(&mut self, project_ids: &[String]) -> anyhow::Result<()> {
+        let current: Vec<String> = self.projects.iter().map(|p| p.id.clone()).collect();
+        validate_reorder(&current, project_ids, "project")?;
+
+        self.session_store.reorder_projects(project_ids)?;
+
+        let new_pos: std::collections::HashMap<&str, usize> = project_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.as_str(), i))
+            .collect();
+        reorder_in_place(&mut self.projects, |p| new_pos.get(p.id.as_str()).copied());
+        Ok(())
+    }
+
+    /// Persist the current in-memory session order to storage, per project. The
+    /// TUI calls this after its sort actions mutate `self.sessions` so the
+    /// chosen order survives a reload and matches the web UI by construction.
+    /// Does NOT re-sort the Vec (it is already in the desired order); it only
+    /// writes each project's ordered id list. Errors propagate to the caller.
+    pub fn persist_session_order(&self) -> anyhow::Result<()> {
+        use std::collections::BTreeMap;
+        // Preserve the Vec's project encounter order so the writes are
+        // deterministic; the per-project id lists follow the Vec order exactly.
+        let mut per_project: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+        for session in &self.sessions {
+            per_project
+                .entry(session.project_id.as_str())
+                .or_default()
+                .push(session.id.clone());
+        }
+        for (project_id, ids) in per_project {
+            self.session_store.reorder_sessions(project_id, &ids)?;
+        }
+        Ok(())
+    }
+}
+
+/// Strict reorder validation: `requested` must be a permutation of `current`
+/// (same elements, no missing, no extras, no duplicates). `noun` names the
+/// entity for the error message (e.g. "agent", "project").
+fn validate_reorder(current: &[String], requested: &[String], noun: &str) -> anyhow::Result<()> {
+    use std::collections::HashSet;
+    let current_set: HashSet<&str> = current.iter().map(String::as_str).collect();
+    let requested_set: HashSet<&str> = requested.iter().map(String::as_str).collect();
+
+    if requested.len() != requested_set.len() {
+        anyhow::bail!("Cannot reorder {noun}s: the new order contains duplicate ids.");
+    }
+    if requested_set != current_set {
+        anyhow::bail!(
+            "Cannot reorder {noun}s: the new order must list exactly the current {noun}s (expected {} ids, got {}).",
+            current.len(),
+            requested.len(),
+        );
+    }
+    Ok(())
+}
+
+/// Re-sort `items` so that elements for which `position` returns `Some(p)` are
+/// ordered by `p` among themselves, while elements returning `None` keep their
+/// original relative order. The slots a positioned item may occupy are exactly
+/// the slots its group already occupied, so out-of-group ("None") items never
+/// move. This is how a single project's sessions get reordered without
+/// disturbing any other project's rows in the shared Vec.
+fn reorder_in_place<T>(items: &mut Vec<T>, position: impl Fn(&T) -> Option<usize>) {
+    // Build the desired index order: a stable sort of the original indices by
+    // (key, original_index), where the key is the new position for positioned
+    // items and the original index for the rest. Positioned items can interleave
+    // with None items, but because we then write the reordered elements back
+    // into the SAME slot sequence, the relative order of None items is preserved
+    // and positioned items land in ascending-position order.
+    let mut indices: Vec<usize> = (0..items.len()).collect();
+    indices.sort_by(|&a, &b| {
+        let ka = position(&items[a]).unwrap_or(a);
+        let kb = position(&items[b]).unwrap_or(b);
+        ka.cmp(&kb).then(a.cmp(&b))
+    });
+
+    // Move out every element, then re-collect in the sorted index order. Works
+    // for non-Clone `T` (Project/AgentSession are not trivially copyable here).
+    let mut taken: Vec<Option<T>> = items.drain(..).map(Some).collect();
+    *items = indices
+        .into_iter()
+        .map(|i| taken[i].take().expect("each index visited once"))
+        .collect();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::test_support::{sample_project, sample_session, test_engine};
+
+    fn session_ids_for(engine: &Engine, project_id: &str) -> Vec<String> {
+        engine
+            .sessions
+            .iter()
+            .filter(|s| s.project_id == project_id)
+            .map(|s| s.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn reorder_sessions_happy_path_reorders_vec_and_persists() {
+        let (mut engine, _tmp) = test_engine();
+        for id in ["a", "b", "c"] {
+            let session = sample_session(id, "p1", id);
+            engine.session_store.upsert_session(&session).unwrap();
+            engine.sessions.push(session);
+        }
+
+        let reaction = engine
+            .apply(Command::ReorderSessions {
+                project_id: "p1".to_string(),
+                session_ids: vec!["c".into(), "a".into(), "b".into()],
+            })
+            .expect("apply");
+        assert!(matches!(reaction, EventReaction::Nothing));
+
+        // In-memory Vec follows the new order.
+        assert_eq!(session_ids_for(&engine, "p1"), vec!["c", "a", "b"]);
+        // Persisted: reload from the store reflects the same order.
+        let reloaded: Vec<String> = engine
+            .session_store
+            .load_sessions()
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.project_id == "p1")
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(reloaded, vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn reorder_sessions_keeps_other_projects_relative_order() {
+        let (mut engine, _tmp) = test_engine();
+        // Interleave two projects in the Vec: p1-a, p2-x, p1-b, p2-y.
+        for (id, proj) in [("a", "p1"), ("x", "p2"), ("b", "p1"), ("y", "p2")] {
+            let session = sample_session(id, proj, id);
+            engine.session_store.upsert_session(&session).unwrap();
+            engine.sessions.push(session);
+        }
+
+        engine
+            .apply(Command::ReorderSessions {
+                project_id: "p1".to_string(),
+                session_ids: vec!["b".into(), "a".into()],
+            })
+            .expect("apply");
+
+        // p1 reordered to b, a.
+        assert_eq!(session_ids_for(&engine, "p1"), vec!["b", "a"]);
+        // p2's relative order (x before y) is untouched.
+        assert_eq!(session_ids_for(&engine, "p2"), vec!["x", "y"]);
+    }
+
+    #[test]
+    fn reorder_sessions_rejects_missing_id() {
+        let (mut engine, _tmp) = test_engine();
+        for id in ["a", "b"] {
+            engine.sessions.push(sample_session(id, "p1", id));
+        }
+        let err = engine
+            .apply(Command::ReorderSessions {
+                project_id: "p1".to_string(),
+                session_ids: vec!["a".into()], // missing "b"
+            })
+            .map(|_| ())
+            .expect_err("missing id must error");
+        assert!(
+            err.to_string().contains("exactly the current"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn reorder_sessions_rejects_extra_id() {
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(sample_session("a", "p1", "a"));
+        let err = engine
+            .apply(Command::ReorderSessions {
+                project_id: "p1".to_string(),
+                session_ids: vec!["a".into(), "ghost".into()],
+            })
+            .map(|_| ())
+            .expect_err("extra id must error");
+        assert!(
+            err.to_string().contains("exactly the current"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn reorder_sessions_rejects_duplicate_id() {
+        let (mut engine, _tmp) = test_engine();
+        for id in ["a", "b"] {
+            engine.sessions.push(sample_session(id, "p1", id));
+        }
+        let err = engine
+            .apply(Command::ReorderSessions {
+                project_id: "p1".to_string(),
+                session_ids: vec!["a".into(), "a".into()],
+            })
+            .map(|_| ())
+            .expect_err("duplicate id must error");
+        assert!(err.to_string().contains("duplicate"), "err: {err}");
+    }
+
+    #[test]
+    fn reorder_sessions_rejects_foreign_id() {
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(sample_session("a", "p1", "a"));
+        engine.sessions.push(sample_session("b", "p2", "b"));
+        // "b" belongs to p2, not p1; reordering p1 with it is rejected.
+        let err = engine
+            .apply(Command::ReorderSessions {
+                project_id: "p1".to_string(),
+                session_ids: vec!["a".into(), "b".into()],
+            })
+            .map(|_| ())
+            .expect_err("foreign id must error");
+        assert!(
+            err.to_string().contains("exactly the current"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn reorder_projects_happy_path_reorders_and_persists() {
+        let (mut engine, _tmp) = test_engine();
+        for id in ["a", "b", "c"] {
+            engine
+                .projects
+                .push(sample_project(id, &format!("/repo/{id}")));
+            engine
+                .session_store
+                .upsert_project(&crate::config::ProjectConfig {
+                    id: id.to_string(),
+                    path: format!("/repo/{id}"),
+                    name: Some(id.to_string()),
+                    default_provider: None,
+                    leading_branch: Some("main".to_string()),
+                    auto_reopen_agents: None,
+                    startup_command: None,
+                    env: Default::default(),
+                })
+                .unwrap();
+        }
+
+        let reaction = engine
+            .apply(Command::ReorderProjects {
+                project_ids: vec!["c".into(), "a".into(), "b".into()],
+            })
+            .expect("apply");
+        assert!(matches!(reaction, EventReaction::Nothing));
+
+        let ids: Vec<String> = engine.projects.iter().map(|p| p.id.clone()).collect();
+        assert_eq!(ids, vec!["c", "a", "b"]);
+        let reloaded: Vec<String> = engine
+            .session_store
+            .load_projects()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(reloaded, vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn reorder_projects_rejects_wrong_set() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("a", "/repo/a"));
+        engine.projects.push(sample_project("b", "/repo/b"));
+
+        // Missing one.
+        let err = engine
+            .apply(Command::ReorderProjects {
+                project_ids: vec!["a".into()],
+            })
+            .map(|_| ())
+            .expect_err("missing id must error");
+        assert!(
+            err.to_string().contains("exactly the current"),
+            "err: {err}"
+        );
+
+        // Duplicate.
+        let err = engine
+            .apply(Command::ReorderProjects {
+                project_ids: vec!["a".into(), "a".into()],
+            })
+            .map(|_| ())
+            .expect_err("duplicate id must error");
+        assert!(err.to_string().contains("duplicate"), "err: {err}");
+    }
+
+    #[test]
+    fn persist_session_order_writes_current_vec_order() {
+        let (mut engine, _tmp) = test_engine();
+        for id in ["a", "b", "c"] {
+            let session = sample_session(id, "p1", id);
+            engine.session_store.upsert_session(&session).unwrap();
+            engine.sessions.push(session);
+        }
+        // Manually reorder the in-memory Vec (as a TUI sort action would), then
+        // persist. A reload must reflect the same order.
+        engine.sessions.reverse(); // c, b, a
+        engine.persist_session_order().expect("persist");
+
+        let reloaded: Vec<String> = engine
+            .session_store
+            .load_sessions()
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.project_id == "p1")
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(reloaded, vec!["c", "b", "a"]);
     }
 }

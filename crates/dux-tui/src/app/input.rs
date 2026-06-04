@@ -7624,6 +7624,68 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn sort_sessions_by_name_persists_order_to_store() {
+        let mut app = test_app(default_bindings());
+        let now = Utc::now();
+        let project_id = app.engine.projects[0].id.clone();
+        let project_path = app.engine.projects[0].path.clone();
+
+        // Replace the seeded session set with three named sessions so we can
+        // assert a deterministic alphabetical order. Each must also exist in the
+        // store so reorder_sessions can update its row.
+        app.engine.sessions.clear();
+        for name in ["charlie", "alpha", "bravo"] {
+            let session = AgentSession {
+                id: format!("session-{name}"),
+                project_id: project_id.clone(),
+                project_path: Some(project_path.clone()),
+                provider: ProviderKind::from_str("codex"),
+                source_branch: "main".to_string(),
+                branch_name: name.to_string(),
+                worktree_path: app
+                    .engine
+                    .paths
+                    .worktrees_root
+                    .join(name)
+                    .display()
+                    .to_string(),
+                title: None,
+                started_providers: Vec::new(),
+                desired_running: false,
+                auto_reopen_enabled: true,
+                status: SessionStatus::Detached,
+                created_at: now,
+                updated_at: now,
+            };
+            app.engine.session_store.upsert_session(&session).unwrap();
+            app.engine.sessions.push(session);
+        }
+
+        app.sort_sessions_by_name();
+
+        // In-memory Vec is alphabetical.
+        let in_memory: Vec<String> = app
+            .engine
+            .sessions
+            .iter()
+            .map(|s| s.branch_name.clone())
+            .collect();
+        assert_eq!(in_memory, vec!["alpha", "bravo", "charlie"]);
+
+        // Reloading the store reflects the same persisted order.
+        let reloaded: Vec<String> = app
+            .engine
+            .session_store
+            .load_sessions()
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.project_id == project_id)
+            .map(|s| s.branch_name)
+            .collect();
+        assert_eq!(reloaded, vec!["alpha", "bravo", "charlie"]);
+    }
+
+    #[test]
     fn kill_selected_removes_running_targets_and_resets_terminal_surface() {
         let mut app = test_app(default_bindings());
         let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path);

@@ -111,6 +111,18 @@ impl SessionStore {
             "auto_reopen_enabled",
             "integer not null default 1",
         )?;
+        // Persisted per-project display order for agent sessions. When the
+        // column is added on an existing database, backfill positions per
+        // project from the legacy `updated_at DESC` order so the visible order
+        // is preserved exactly across the upgrade.
+        if ensure_column(
+            &self.conn,
+            "agent_sessions",
+            "sort_order",
+            "integer not null default 0",
+        )? {
+            self.backfill_session_sort_order()?;
+        }
         self.conn.execute_batch(
             r#"
             create table if not exists session_prs (
@@ -426,12 +438,21 @@ impl SessionStore {
     }
 
     pub fn upsert_session(&self, session: &AgentSession) -> Result<()> {
+        // A brand-new session lands at the TOP of its project's order:
+        // one position above the current minimum (negative values are fine —
+        // positions are relative, only their ordering matters). On UPDATE the
+        // `on conflict` set deliberately omits `sort_order` so re-upserting an
+        // existing session never disturbs the user's chosen order.
+        let new_sort_order = self
+            .min_session_sort_order(&session.project_id)?
+            .unwrap_or(1)
+            - 1;
         self.conn.execute(
             r#"
             insert into agent_sessions
-                (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, desired_running, auto_reopen_enabled, status, created_at, updated_at)
+                (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, desired_running, auto_reopen_enabled, status, sort_order, created_at, updated_at)
             values
-                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
             on conflict(id) do update set
                 project_path=excluded.project_path,
                 provider=excluded.provider,
@@ -458,10 +479,93 @@ impl SessionStore {
                 session.desired_running,
                 session.auto_reopen_enabled,
                 session.status.as_str(),
+                new_sort_order,
                 session.created_at.to_rfc3339(),
                 session.updated_at.to_rfc3339(),
             ],
         )?;
+        Ok(())
+    }
+
+    /// The smallest `sort_order` currently assigned to any session in
+    /// `project_id`, or `None` when the project has no sessions yet. Used to
+    /// place a new session one position above the current top.
+    pub fn min_session_sort_order(&self, project_id: &str) -> Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "select min(sort_order) from agent_sessions where project_id = ?1",
+                params![project_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .context("failed to compute min session sort order")
+    }
+
+    /// Assign positions `0..n` to exactly `ordered_ids`, in that order, scoped
+    /// to `project_id`. Runs in a single transaction. The storage layer is
+    /// intentionally "dumb": it does not validate that `ordered_ids` is the
+    /// complete set of the project's sessions — that strict validation lives in
+    /// `Engine::apply`. `updated_at` is deliberately NOT touched, because doing
+    /// so would corrupt the "sort by most recently updated" semantics.
+    pub fn reorder_sessions(&self, project_id: &str, ordered_ids: &[String]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "update agent_sessions set sort_order = ?1 where id = ?2 and project_id = ?3",
+            )?;
+            for (position, id) in ordered_ids.iter().enumerate() {
+                stmt.execute(params![position as i64, id, project_id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Assign positions `0..n` to exactly `ordered_ids`, in that order, over the
+    /// `projects.sort_order` column. Single transaction. Like
+    /// [`reorder_sessions`], validation that `ordered_ids` is the complete set
+    /// of known projects lives in `Engine::apply`, not here.
+    pub fn reorder_projects(&self, ordered_ids: &[String]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare("update projects set sort_order = ?1 where id = ?2")?;
+            for (position, id) in ordered_ids.iter().enumerate() {
+                stmt.execute(params![position as i64, id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// One-time backfill run when the `sort_order` column is first added to an
+    /// existing `agent_sessions` table. Numbers each project's sessions
+    /// `0,1,2,…` following the legacy `updated_at DESC` order so the visible
+    /// order is preserved exactly after the upgrade.
+    fn backfill_session_sort_order(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare(
+            "select id, project_id from agent_sessions order by project_id, updated_at desc",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut update =
+                tx.prepare("update agent_sessions set sort_order = ?1 where id = ?2")?;
+            let mut position = 0i64;
+            let mut current_project: Option<String> = None;
+            for (id, project_id) in rows {
+                if current_project.as_deref() != Some(project_id.as_str()) {
+                    position = 0;
+                    current_project = Some(project_id);
+                }
+                update.execute(params![position, id])?;
+                position += 1;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -470,7 +574,7 @@ impl SessionStore {
             r#"
             select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, desired_running, auto_reopen_enabled, status, created_at, updated_at
             from agent_sessions
-            order by updated_at desc
+            order by sort_order asc, updated_at desc
             "#,
         )?;
         let rows = stmt.query_map([], |row| {
@@ -605,18 +709,34 @@ fn test_session(
     }
 }
 
+/// Like [`test_session`] but lets the caller pick the project id, for tests
+/// that exercise per-project ordering across multiple projects.
+#[cfg(test)]
+fn test_session_in(
+    id: &str,
+    project_id: &str,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+) -> crate::model::AgentSession {
+    crate::model::AgentSession {
+        project_id: project_id.to_string(),
+        ..test_session(id, created_at, updated_at)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Duration;
 
     #[test]
-    fn load_sessions_ordered_by_updated_at_desc() {
+    fn new_sessions_land_at_top_of_their_project() {
         let store = test_store();
         let now = Utc::now();
 
-        // Insert three sessions with different updated_at values.
-        // oldest updated first, newest updated last.
+        // Insert three sessions into the same project. Each new insert takes the
+        // top slot (sort_order = current min - 1), so the load order is the
+        // reverse of the insertion order regardless of updated_at.
         let s1 = test_session("a", now - Duration::hours(3), now - Duration::hours(3));
         let s2 = test_session("b", now - Duration::hours(2), now - Duration::hours(1));
         let s3 = test_session("c", now - Duration::hours(1), now - Duration::hours(2));
@@ -628,12 +748,12 @@ mod tests {
         let loaded = store.load_sessions().unwrap();
         let ids: Vec<&str> = loaded.iter().map(|s| s.id.as_str()).collect();
 
-        // s2 has the most recent updated_at, then s3, then s1.
-        assert_eq!(ids, vec!["b", "c", "a"]);
+        // Most recently inserted (c) is at the top, then b, then a.
+        assert_eq!(ids, vec!["c", "b", "a"]);
     }
 
     #[test]
-    fn upsert_without_changing_updated_at_preserves_order() {
+    fn upsert_existing_session_preserves_sort_order() {
         let store = test_store();
         let now = Utc::now();
 
@@ -643,13 +763,13 @@ mod tests {
         store.upsert_session(&s1).unwrap();
         store.upsert_session(&s2).unwrap();
 
-        // Re-upsert s1 with same timestamps (simulating a no-op status update).
+        // After two inserts the order is b (top), a. Re-upserting an existing
+        // session must NOT touch its sort_order (the on-conflict set omits it).
         store.upsert_session(&s1).unwrap();
 
         let loaded = store.load_sessions().unwrap();
         let ids: Vec<&str> = loaded.iter().map(|s| s.id.as_str()).collect();
 
-        // Order unchanged: s2 still has the more recent updated_at.
         assert_eq!(ids, vec!["b", "a"]);
     }
 
@@ -790,6 +910,251 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert!(!loaded[0].desired_running);
         assert!(loaded[0].auto_reopen_enabled);
+    }
+
+    /// Builds a legacy `agent_sessions` table (no `sort_order` column) and seeds
+    /// it with rows so the migration's backfill has something to number.
+    fn legacy_store_with_sessions(rows: &[(&str, &str, &str)]) -> SessionStore {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            create table agent_sessions (
+                id text primary key,
+                project_id text not null,
+                provider text not null,
+                source_branch text not null,
+                branch_name text not null,
+                worktree_path text not null,
+                title text,
+                project_path text,
+                status text not null,
+                created_at text not null,
+                updated_at text not null
+            );
+            "#,
+        )
+        .unwrap();
+        for (id, project_id, updated_at) in rows {
+            conn.execute(
+                r#"
+                insert into agent_sessions (
+                    id, project_id, provider, source_branch, branch_name,
+                    worktree_path, title, project_path, status, created_at, updated_at
+                ) values (?1, ?2, 'claude', 'main', ?1, '/tmp/x', null, null, 'detached', ?3, ?3)
+                "#,
+                params![id, project_id, updated_at],
+            )
+            .unwrap();
+        }
+        let store = SessionStore { conn };
+        store.migrate().unwrap();
+        store
+    }
+
+    #[test]
+    fn migration_backfill_preserves_updated_at_desc_order_per_project() {
+        // Two projects, interleaved updated_at values. After backfill, each
+        // project's sessions must be numbered 0..n following updated_at DESC,
+        // and load_sessions (sort_order asc, updated_at desc) must reflect that.
+        let store = legacy_store_with_sessions(&[
+            ("p1-old", "p1", "2026-01-01T00:00:00Z"),
+            ("p1-new", "p1", "2026-03-01T00:00:00Z"),
+            ("p1-mid", "p1", "2026-02-01T00:00:00Z"),
+            ("p2-new", "p2", "2026-05-01T00:00:00Z"),
+            ("p2-old", "p2", "2026-04-01T00:00:00Z"),
+        ]);
+
+        let loaded = store.load_sessions().unwrap();
+        let ordered: Vec<(&str, &str)> = loaded
+            .iter()
+            .map(|s| (s.project_id.as_str(), s.id.as_str()))
+            .collect();
+
+        // Group the loaded ids by project and assert each project's internal
+        // order is updated_at DESC. (Cross-project interleaving in the global
+        // Vec is not meaningful — the UI groups by project.)
+        let p1: Vec<&str> = ordered
+            .iter()
+            .filter(|(p, _)| *p == "p1")
+            .map(|(_, id)| *id)
+            .collect();
+        let p2: Vec<&str> = ordered
+            .iter()
+            .filter(|(p, _)| *p == "p2")
+            .map(|(_, id)| *id)
+            .collect();
+        assert_eq!(p1, vec!["p1-new", "p1-mid", "p1-old"]);
+        assert_eq!(p2, vec!["p2-new", "p2-old"]);
+    }
+
+    #[test]
+    fn reorder_sessions_assigns_zero_to_n_positions() {
+        let store = test_store();
+        let now = Utc::now();
+        store
+            .upsert_session(&test_session_in("a", "proj", now, now))
+            .unwrap();
+        store
+            .upsert_session(&test_session_in("b", "proj", now, now))
+            .unwrap();
+        store
+            .upsert_session(&test_session_in("c", "proj", now, now))
+            .unwrap();
+
+        // Reorder to a, b, c (explicitly) and confirm load order matches.
+        store
+            .reorder_sessions("proj", &["a".into(), "b".into(), "c".into()])
+            .unwrap();
+        let ids: Vec<String> = store
+            .load_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
+
+        // Reorder again to a different order; positions are reassigned 0..n.
+        store
+            .reorder_sessions("proj", &["c".into(), "a".into(), "b".into()])
+            .unwrap();
+        let ids: Vec<String> = store
+            .load_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(ids, vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn reorder_sessions_does_not_touch_updated_at() {
+        let store = test_store();
+        let original = Utc::now() - chrono::Duration::hours(5);
+        store
+            .upsert_session(&test_session_in("a", "proj", original, original))
+            .unwrap();
+        store
+            .upsert_session(&test_session_in("b", "proj", original, original))
+            .unwrap();
+
+        store
+            .reorder_sessions("proj", &["a".into(), "b".into()])
+            .unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        for session in loaded {
+            assert_eq!(
+                session.updated_at.timestamp(),
+                original.timestamp(),
+                "reorder must not bump updated_at for {}",
+                session.id
+            );
+        }
+    }
+
+    #[test]
+    fn reorder_sessions_is_scoped_to_project() {
+        let store = test_store();
+        let now = Utc::now();
+        store
+            .upsert_session(&test_session_in("a", "p1", now, now))
+            .unwrap();
+        store
+            .upsert_session(&test_session_in("b", "p2", now, now))
+            .unwrap();
+
+        // Passing a foreign id in the wrong project is a silent no-op at the
+        // storage layer (the WHERE project_id guard matches nothing). Engine
+        // validation is what rejects such input; storage stays dumb.
+        store.reorder_sessions("p1", &["b".into()]).unwrap();
+        // b's sort_order in p2 is unchanged: it still loads.
+        let p2_ids: Vec<String> = store
+            .load_sessions()
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.project_id == "p2")
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(p2_ids, vec!["b"]);
+    }
+
+    #[test]
+    fn reorder_projects_assigns_zero_to_n_positions() {
+        let store = test_store();
+        let mk = |id: &str| ProjectConfig {
+            id: id.to_string(),
+            path: format!("/repo/{id}"),
+            name: Some(id.to_string()),
+            default_provider: None,
+            leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: Default::default(),
+        };
+        store.upsert_project(&mk("a")).unwrap();
+        store.upsert_project(&mk("b")).unwrap();
+        store.upsert_project(&mk("c")).unwrap();
+
+        store
+            .reorder_projects(&["c".into(), "a".into(), "b".into()])
+            .unwrap();
+        let ids: Vec<String> = store
+            .load_projects()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(ids, vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn load_sessions_tie_break_falls_back_to_updated_at_desc() {
+        // Two sessions sharing the same sort_order tie-break by updated_at DESC.
+        let store = test_store();
+        let now = Utc::now();
+        store
+            .upsert_session(&test_session_in(
+                "older",
+                "proj",
+                now,
+                now - Duration::hours(2),
+            ))
+            .unwrap();
+        store
+            .upsert_session(&test_session_in(
+                "newer",
+                "proj",
+                now,
+                now - Duration::hours(1),
+            ))
+            .unwrap();
+        // Force both to the same sort_order so only the tie-break differs.
+        store
+            .conn
+            .execute("update agent_sessions set sort_order = 0", [])
+            .unwrap();
+
+        let ids: Vec<String> = store
+            .load_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(ids, vec!["newer", "older"]);
+    }
+
+    #[test]
+    fn min_session_sort_order_reports_top_position() {
+        let store = test_store();
+        let now = Utc::now();
+        assert_eq!(store.min_session_sort_order("proj").unwrap(), None);
+        store
+            .upsert_session(&test_session_in("a", "proj", now, now))
+            .unwrap(); // sort_order 0
+        store
+            .upsert_session(&test_session_in("b", "proj", now, now))
+            .unwrap(); // sort_order -1
+        assert_eq!(store.min_session_sort_order("proj").unwrap(), Some(-1));
     }
 }
 
@@ -957,17 +1322,20 @@ mod pr_tests {
     }
 }
 
-fn ensure_column(conn: &Connection, table: &str, column: &str, sql_type: &str) -> Result<()> {
+/// Adds `column` to `table` if it is missing. Returns `true` when the column
+/// was just added by this call, `false` when it already existed. Callers that
+/// need a one-time backfill of a newly-added column branch on the return value.
+fn ensure_column(conn: &Connection, table: &str, column: &str, sql_type: &str) -> Result<bool> {
     let mut stmt = conn.prepare(&format!("pragma table_info({table})"))?;
     let existing = stmt
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     if existing.iter().any(|name| name == column) {
-        return Ok(());
+        return Ok(false);
     }
     conn.execute(
         &format!("alter table {table} add column {column} {sql_type}"),
         [],
     )?;
-    Ok(())
+    Ok(true)
 }

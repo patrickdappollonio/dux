@@ -102,6 +102,19 @@ pub enum WireCommand {
         project_id: String,
         name: String,
     },
+    /// Persist a custom display order for a project's agent sessions.
+    /// `session_ids` must list exactly that project's sessions (the engine
+    /// validates this strictly and errors otherwise). Drives the web UI's
+    /// drag-and-drop reordering.
+    ReorderSessions {
+        project_id: String,
+        session_ids: Vec<String>,
+    },
+    /// Persist a custom display order for the workspace's projects.
+    /// `project_ids` must list exactly the known projects.
+    ReorderProjects {
+        project_ids: Vec<String>,
+    },
 }
 
 /// A status-line update in wire-safe form.
@@ -490,6 +503,16 @@ impl Engine {
                     busy_message: "Creating a new agent\u{2026}".to_string(),
                     term_size: (80, 24),
                 }
+            }
+            WireCommand::ReorderSessions {
+                project_id,
+                session_ids,
+            } => Command::ReorderSessions {
+                project_id,
+                session_ids,
+            },
+            WireCommand::ReorderProjects { project_ids } => {
+                Command::ReorderProjects { project_ids }
             }
         })
     }
@@ -1201,6 +1224,101 @@ mod tests {
         });
         let err = result.map(|_| ()).unwrap_err();
         assert!(err.to_string().contains("unknown project"), "err: {err}");
+    }
+
+    #[test]
+    fn wire_reorder_sessions_deserializes() {
+        let json =
+            r#"{"command":"reorder_sessions","args":{"project_id":"p1","session_ids":["b","a"]}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::ReorderSessions {
+                project_id: "p1".to_string(),
+                session_ids: vec!["b".to_string(), "a".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn wire_reorder_projects_deserializes() {
+        let json = r#"{"command":"reorder_projects","args":{"project_ids":["c","a","b"]}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::ReorderProjects {
+                project_ids: vec!["c".to_string(), "a".to_string(), "b".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn wire_to_command_reorder_sessions_maps_to_command() {
+        let (engine, _tmp) = test_engine();
+        let cmd = engine
+            .wire_to_command(WireCommand::ReorderSessions {
+                project_id: "p1".to_string(),
+                session_ids: vec!["b".to_string(), "a".to_string()],
+            })
+            .expect("reconstruct");
+        match cmd {
+            Command::ReorderSessions {
+                project_id,
+                session_ids,
+            } => {
+                assert_eq!(project_id, "p1");
+                assert_eq!(session_ids, vec!["b".to_string(), "a".to_string()]);
+            }
+            _ => panic!("expected Command::ReorderSessions variant"),
+        }
+    }
+
+    #[test]
+    fn wire_to_command_reorder_projects_maps_to_command() {
+        let (engine, _tmp) = test_engine();
+        let cmd = engine
+            .wire_to_command(WireCommand::ReorderProjects {
+                project_ids: vec!["c".to_string(), "a".to_string()],
+            })
+            .expect("reconstruct");
+        match cmd {
+            Command::ReorderProjects { project_ids } => {
+                assert_eq!(project_ids, vec!["c".to_string(), "a".to_string()]);
+            }
+            _ => panic!("expected Command::ReorderProjects variant"),
+        }
+    }
+
+    #[test]
+    fn apply_wire_reorder_sessions_reorders_and_is_silent() {
+        let (mut engine, _tmp) = test_engine();
+        for id in ["a", "b"] {
+            let session = sample_session(id, "p1", id);
+            engine.session_store.upsert_session(&session).unwrap();
+            engine.sessions.push(session);
+        }
+        let outcome = engine
+            .apply_wire(WireCommand::ReorderSessions {
+                project_id: "p1".to_string(),
+                session_ids: vec!["b".to_string(), "a".to_string()],
+            })
+            .expect("apply_wire");
+        // Silent success: no status surfaced.
+        assert!(outcome.status.is_none());
+        let ids: Vec<String> = engine.sessions.iter().map(|s| s.id.clone()).collect();
+        assert_eq!(ids, vec!["b".to_string(), "a".to_string()]);
+    }
+
+    #[test]
+    fn apply_wire_reorder_sessions_invalid_set_errors() {
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(sample_session("a", "p1", "a"));
+        engine.sessions.push(sample_session("b", "p1", "b"));
+        let res = engine.apply_wire(WireCommand::ReorderSessions {
+            project_id: "p1".to_string(),
+            session_ids: vec!["a".to_string()],
+        });
+        assert!(res.is_err());
     }
 
     #[test]
