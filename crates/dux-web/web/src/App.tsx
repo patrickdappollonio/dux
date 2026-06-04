@@ -8,6 +8,7 @@ import { CommitDialog } from "@/components/CommitDialog"
 import { CreateAgentDialog } from "@/components/CreateAgentDialog"
 import { DeleteSessionDialog } from "@/components/DeleteSessionDialog"
 import { GlobalEnvDialog } from "@/components/GlobalEnvDialog"
+import { MobileShell } from "@/components/MobileShell"
 import { ProjectSettingsDialog } from "@/components/ProjectSettingsDialog"
 import { RemoveProjectDialog } from "@/components/RemoveProjectDialog"
 import { StatusBar } from "@/components/StatusBar"
@@ -34,18 +35,9 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar"
 import { Toaster } from "@/components/ui/sonner"
+import { useIsMobile } from "@/hooks/use-mobile"
+import { CONN_BADGE } from "@/lib/conn"
 import { setPaletteOpen, useDux } from "@/lib/store"
-import type { ConnState } from "@/lib/types"
-
-const CONN_BADGE: Record<
-  ConnState,
-  { variant: "default" | "secondary" | "outline"; label: string }
-> = {
-  open: { variant: "default", label: "Connected" },
-  connecting: { variant: "secondary", label: "Connecting" },
-  closed: { variant: "outline", label: "Offline" },
-  failed: { variant: "outline", label: "Disconnected" },
-}
 
 function InsetHeader() {
   const { viewModel, selectedSessionId, selectedTarget, conn } = useDux()
@@ -140,7 +132,25 @@ function TerminalArea() {
   )
 }
 
-function App() {
+// The palette, all dialogs, and the toaster live above the shell so they stay
+// mounted in both the desktop and mobile layouts. Shared JSX — never duplicated.
+function GlobalOverlays() {
+  return (
+    <>
+      <CommandPalette />
+      <CommitDialog />
+      <CreateAgentDialog />
+      <DeleteSessionDialog />
+      <GlobalEnvDialog />
+      <ProjectSettingsDialog />
+      <AddProjectDialog />
+      <RemoveProjectDialog />
+      <Toaster />
+    </>
+  )
+}
+
+function DesktopShell() {
   const { sidebarWidth } = useDux()
 
   return (
@@ -164,17 +174,30 @@ function App() {
         <StatusBar />
       </SidebarInset>
 
-      <CommandPalette />
-      <CommitDialog />
-      <CreateAgentDialog />
-      <DeleteSessionDialog />
-      <GlobalEnvDialog />
-      <ProjectSettingsDialog />
-      <AddProjectDialog />
-      <RemoveProjectDialog />
-      <Toaster />
+      <GlobalOverlays />
     </SidebarProvider>
   )
+}
+
+function App() {
+  const isMobile = useIsMobile()
+
+  // Mobile gets the hub-&-spoke shell (no SidebarProvider — that's desktop-only
+  // chrome). The shell fills the column above the fixed-height status bar; the
+  // shared dialogs/palette/toaster mount in both layouts.
+  if (isMobile) {
+    return (
+      <div className="flex h-svh min-h-0 flex-col overflow-hidden">
+        <div className="min-h-0 flex-1">
+          <MobileShell />
+        </div>
+        <StatusBar />
+        <GlobalOverlays />
+      </div>
+    )
+  }
+
+  return <DesktopShell />
 }
 
 export default App

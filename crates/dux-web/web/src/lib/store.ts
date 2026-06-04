@@ -11,6 +11,11 @@ export type SelectedTarget =
   | { kind: "agent"; sessionId: string }
   | { kind: "terminal"; terminalId: string; sessionId: string }
 
+// The mobile hub-&-spoke shell shows one screen at a time: the project/session
+// hub ("home"), the focused terminal, or the changed-files view. Desktop never
+// reads this — it renders all three panes at once.
+export type MobileScreen = "home" | "terminal" | "changes"
+
 // A tiny external store backed by `useSyncExternalStore`. A single module-level
 // `DuxSocket` instance feeds it: ViewModel updates, connection state, and
 // command/error results (surfaced as `lastMessage`). The PTY byte stream is
@@ -39,6 +44,9 @@ export interface DuxState {
   removeProjectTarget: string | null
   createAgentTarget: string | null
   paletteOpen: boolean
+  // Which screen the mobile shell is showing. Always "home" on desktop, which
+  // ignores it. Only the mobile UI advances it past "home".
+  mobileScreen: MobileScreen
   sidebarWidth: string
   currentDiff: {
     sessionId: string
@@ -77,6 +85,7 @@ let state: DuxState = {
   removeProjectTarget: null,
   createAgentTarget: null,
   paletteOpen: false,
+  mobileScreen: "home",
   sidebarWidth: loadSidebarWidth(),
   currentDiff: null,
 }
@@ -208,6 +217,25 @@ socket.onDirEntries = (path, entries, error) => {
 }
 
 socket.connect()
+
+// Hardware/browser Back for the mobile shell. Registered ONCE at module scope
+// (never in a React effect) so it survives re-renders and shell switches. The
+// browser has already popped its own entry by the time this fires, so we only
+// mirror that into our screen state. The target is derived from our own state
+// machine — changes unwinds to the terminal when a target is still focused
+// (else home), terminal unwinds to home — not from event.state contents, which
+// keeps it resilient to history entries we didn't author. When mobileScreen is
+// already "home" there is no spoke to unwind, so we no-op; this is also why
+// desktop (which never advances past "home") is unaffected.
+window.addEventListener("popstate", () => {
+  const current = state.mobileScreen
+  if (current === "home") return
+  if (current === "changes") {
+    setState({ mobileScreen: state.selectedTarget ? "terminal" : "home" })
+  } else {
+    setState({ mobileScreen: "home" })
+  }
+})
 
 export function useDux(): DuxState {
   return useSyncExternalStore(subscribe, getSnapshot)
@@ -356,6 +384,21 @@ export function createAgent(projectId: string, name: string): void {
 
 export function setPaletteOpen(open: boolean): void {
   setState({ paletteOpen: open })
+}
+
+// Mobile hub-&-spoke navigation. Moving INTO a spoke ("terminal" or "changes")
+// pushes a history entry so the hardware/browser Back button unwinds the stack
+// one screen at a time (see the popstate listener below). Returning to "home"
+// does not push — Back from home is the browser default (leaves the app).
+// Re-navigating to the screen we're already on is a no-op so we never stack
+// duplicate history entries (e.g. switching sessions while already on the
+// terminal screen must not deepen the back stack).
+export function mobileNavigate(screen: MobileScreen): void {
+  if (screen === state.mobileScreen) return
+  setState({ mobileScreen: screen })
+  if (screen !== "home") {
+    history.pushState({ duxMobile: screen }, "")
+  }
 }
 
 export function reconnect(): void {

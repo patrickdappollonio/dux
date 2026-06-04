@@ -60,6 +60,7 @@ import {
   SidebarRail,
 } from "@/components/ui/sidebar"
 import { useSidebar } from "@/components/ui/sidebar"
+import { partitionProjects } from "@/lib/projects"
 import {
   createTerminal,
   deleteTerminal,
@@ -430,37 +431,10 @@ export function AppSidebar() {
   const sessions = viewModel?.sessions ?? []
   const projects = viewModel?.projects ?? []
 
-  // Group sessions under EVERY project, then partition like the TUI: projects
-  // with agents first, agent-less ones under their own "Projects with no
-  // agents" heading. (A session whose project is somehow absent is kept under
-  // its own id so it's never dropped.)
-  const grouped = new Map<string, SessionView[]>()
-  for (const project of projects) {
-    grouped.set(project.id, [])
-  }
-  const orphanIds: string[] = []
-  for (const session of sessions) {
-    let bucket = grouped.get(session.project_id)
-    if (!bucket) {
-      bucket = []
-      grouped.set(session.project_id, bucket)
-      orphanIds.push(session.project_id)
-    }
-    bucket.push(session)
-  }
-  const withAgents: string[] = []
-  const withoutAgents: string[] = []
-  for (const project of projects) {
-    if ((grouped.get(project.id)?.length ?? 0) > 0) {
-      withAgents.push(project.id)
-    } else {
-      withoutAgents.push(project.id)
-    }
-  }
-  withAgents.push(...orphanIds)
-
-  const projectName = (id: string) =>
-    projects.find((p) => p.id === id)?.name ?? id.slice(0, 8)
+  const { grouped, withAgents, withoutAgents, projectName } = partitionProjects(
+    projects,
+    sessions,
+  )
 
   const renderProject = (projectId: string) => (
     <ProjectItem
