@@ -97,6 +97,7 @@ export interface ViewModel {
   global_env: Record<string, string>
   available_providers: string[]
   welcome_tips: string[]
+  randomize_agent_names_by_default: boolean
 }
 
 export interface CommandStatus {
@@ -126,6 +127,7 @@ export type ServerMessage =
       entries: DirEntryView[]
       error: string | null
     }
+  | { type: "agent_name"; name: string }
 
 // Client -> server JSON text frames, tagged by `type`.
 export type ClientMessage =
@@ -136,5 +138,6 @@ export type ClientMessage =
   | { type: "resize"; session_id: string; rows: number; cols: number }
   | { type: "get_diff"; session_id: string; path: string }
   | { type: "browse_dir"; path: string | null }
+  | { type: "generate_agent_name" }
 
 export type ConnState = "connecting" | "open" | "closed" | "failed"

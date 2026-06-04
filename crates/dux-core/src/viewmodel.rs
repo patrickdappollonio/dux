@@ -26,6 +26,10 @@ pub struct ViewModel {
     /// list. Static content; the watch channel coalesces identical frames so
     /// this does not cause churn.
     pub welcome_tips: Vec<String>,
+    /// Mirrors `defaults.enable_randomized_pet_name_by_default`. When true, the
+    /// web new-agent dialog pre-checks its "Use randomized pet name" box (and
+    /// requests a generated name on open), matching the TUI's prompt default.
+    pub randomize_agent_names_by_default: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -224,6 +228,10 @@ impl Engine {
             global_env: self.config.env.clone(),
             available_providers,
             welcome_tips: crate::welcome::web_tips(),
+            randomize_agent_names_by_default: self
+                .config
+                .defaults
+                .enable_randomized_pet_name_by_default,
         }
     }
 }
@@ -441,6 +449,17 @@ mod tests {
         let vm = engine.view_model();
 
         assert_eq!(vm.global_env.get("FOO").map(String::as_str), Some("bar"));
+    }
+
+    #[test]
+    fn randomize_agent_names_default_is_projected() {
+        let (mut engine, _tmp) = test_engine();
+
+        // Defaults to false out of the box.
+        assert!(!engine.view_model().randomize_agent_names_by_default);
+
+        engine.config.defaults.enable_randomized_pet_name_by_default = true;
+        assert!(engine.view_model().randomize_agent_names_by_default);
     }
 
     #[test]

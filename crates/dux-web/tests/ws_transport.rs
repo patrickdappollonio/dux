@@ -1186,6 +1186,46 @@ async fn browse_dir_lists_entries() {
     );
 }
 
+/// A web client can request a freshly generated agent name. Generation is pure
+/// (no engine thread), so the reply is an `agent_name` frame carrying a two-word
+/// dashed name made of ASCII alphanumerics and dashes.
+#[tokio::test]
+async fn generate_agent_name_returns_a_pet_name() {
+    let (addr, _tmp) = boot().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let _ = ws.next().await; // initial view_model
+
+    ws.send(Message::Text(r#"{"type":"generate_agent_name"}"#.into()))
+        .await
+        .unwrap();
+
+    let mut frame = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    while tokio::time::Instant::now() < deadline && frame.is_empty() {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"type\":\"agent_name\"")
+        {
+            frame = t.to_string();
+        }
+    }
+    assert!(!frame.is_empty(), "never received an agent_name frame");
+
+    let v: serde_json::Value = serde_json::from_str(&frame).expect("parse agent_name frame");
+    let name = v["name"].as_str().expect("name string");
+    assert!(!name.is_empty(), "name should be non-empty: {frame}");
+    assert!(
+        name.split('-').count() >= 2,
+        "expected a two-word dashed name, got {name:?}"
+    );
+    assert!(
+        name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+        "name should be ascii alphanumeric/dash only, got {name:?}"
+    );
+}
+
 /// A web client can register an existing git repo as a project with the
 /// `add_project` command, see it appear in the ViewModel, then remove it with
 /// `remove_project`. The actor syncs config.toml after each persistence; the

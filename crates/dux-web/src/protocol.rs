@@ -35,6 +35,10 @@ pub enum ClientMessage {
     /// List subdirectories of a server-side path so the client can pick a git
     /// repo to add as a project. `None` starts at the user's `$HOME`.
     BrowseDir { path: Option<String> },
+    /// Request a freshly generated two-word "pet" agent name. The reply is an
+    /// `AgentName` frame. Generation is pure, so the server answers directly
+    /// without touching the engine thread.
+    GenerateAgentName,
 }
 
 /// A single directory-browser entry in serializable form (the engine's
@@ -87,6 +91,9 @@ pub enum ServerMessage {
         entries: Vec<DirEntryView>,
         error: Option<String>,
     },
+    /// Response to `GenerateAgentName`: a freshly generated two-word pet name the
+    /// client fills into the new-agent dialog's input.
+    AgentName { name: String },
 }
 
 #[cfg(test)]
@@ -168,6 +175,22 @@ mod tests {
         let without = r#"{"type":"browse_dir"}"#;
         let msg: ClientMessage = serde_json::from_str(without).unwrap();
         assert_eq!(msg, ClientMessage::BrowseDir { path: None });
+    }
+
+    #[test]
+    fn generate_agent_name_message_parses() {
+        let json = r#"{"type":"generate_agent_name"}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg, ClientMessage::GenerateAgentName);
+    }
+
+    #[test]
+    fn agent_name_message_serializes() {
+        let msg = ServerMessage::AgentName {
+            name: "happy-otter".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"agent_name","name":"happy-otter"}"#);
     }
 
     #[test]

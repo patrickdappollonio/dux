@@ -45,6 +45,7 @@ export class DuxSocket {
     entries: DirEntryView[],
     error: string | null,
   ) => void = () => {}
+  onAgentName: (name: string) => void = () => {}
 
   constructor(url: string) {
     this.url = url
@@ -121,6 +122,9 @@ export class DuxSocket {
       case "dir_entries":
         this.onDirEntries(message.path, message.entries, message.error)
         break
+      case "agent_name":
+        this.onAgentName(message.name)
+        break
     }
   }
 
@@ -183,6 +187,10 @@ export class DuxSocket {
 
   browseDir(path: string | null): void {
     this.sendJson({ type: "browse_dir", path })
+  }
+
+  generateAgentName(): void {
+    this.sendJson({ type: "generate_agent_name" })
   }
 
   sendInput(bytes: Uint8Array): void {

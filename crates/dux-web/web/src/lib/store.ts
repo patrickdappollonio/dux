@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react"
 import { toast } from "sonner"
 
+import { sanitizeAgentName } from "./agentName"
 import { ordersMatch } from "./reorder"
 import { DuxSocket } from "./ws"
 import type { ConnState, DirEntryView, FileDiff, ViewModel } from "./types"
@@ -54,6 +55,17 @@ export interface DuxState {
   browseLoading: boolean
   removeProjectTarget: string | null
   createAgentTarget: string | null
+  // New-agent dialog state lives in the store (like `commitDraft`) so the input
+  // is fully store-controlled: the server's generated-name reply fills it via an
+  // event-driven callback, never a set-state-in-effect. Mirrors the TUI prompt.
+  //   - `createAgentDraft`: the sanitized branch-name input.
+  //   - `createAgentRandomize`: the "Use randomized pet name" checkbox.
+  //   - `createAgentGeneratedName`: the last name the server generated, so an
+  //     uncheck clears the input ONLY when it still equals that name (exact TUI
+  //     semantics); null once the user edits away from it or no name is pending.
+  createAgentDraft: string
+  createAgentRandomize: boolean
+  createAgentGeneratedName: string | null
   paletteOpen: boolean
   // Which screen the mobile shell is showing. Always "home" on desktop, which
   // ignores it. Only the mobile UI advances it past "home".
@@ -101,6 +113,9 @@ let state: DuxState = {
   browseLoading: false,
   removeProjectTarget: null,
   createAgentTarget: null,
+  createAgentDraft: "",
+  createAgentRandomize: false,
+  createAgentGeneratedName: null,
   paletteOpen: false,
   mobileScreen: "home",
   pendingSessionOrder: null,
@@ -287,6 +302,17 @@ socket.onDirEntries = (path, entries, error) => {
   if (error) toast.error(error)
 }
 
+// A freshly generated pet name for the new-agent dialog. The TUI fills the input
+// with the generated name (that fill IS the preview) and remembers it so a later
+// uncheck can tell "still the generated name" from "user-edited". We mirror that:
+// fill the draft and stash the name. Ignored if the dialog closed or the user
+// unchecked the box before the reply landed (a stale reply must not refill).
+socket.onAgentName = (name) => {
+  if (state.createAgentTarget !== null && state.createAgentRandomize) {
+    setState({ createAgentDraft: name, createAgentGeneratedName: name })
+  }
+}
+
 socket.connect()
 
 // Hardware/browser Back for the mobile shell. Registered ONCE at module scope
@@ -464,16 +490,63 @@ export function removeProject(projectId: string): void {
   socket.sendCommand("remove_project", { project_id: projectId })
 }
 
+// Open the new-agent dialog. The checkbox starts checked when
+// `randomize_agent_names_by_default` is set (mirroring the TUI prompt, which
+// pre-checks when opened with no initial name); in that case we request a name
+// right away so the input previews it. This runs in the click handler that opens
+// the dialog — never an effect — so there is no set-state-in-effect.
 export function openCreateAgent(projectId: string): void {
-  setState({ createAgentTarget: projectId })
+  const randomize = state.viewModel?.randomize_agent_names_by_default ?? false
+  setState({
+    createAgentTarget: projectId,
+    createAgentDraft: "",
+    createAgentRandomize: randomize,
+    createAgentGeneratedName: null,
+  })
+  if (randomize) socket.generateAgentName()
 }
 
 export function closeCreateAgent(): void {
-  setState({ createAgentTarget: null })
+  setState({
+    createAgentTarget: null,
+    createAgentDraft: "",
+    createAgentRandomize: false,
+    createAgentGeneratedName: null,
+  })
+}
+
+// Update the input as the user types, sanitizing live (space -> dash, drop
+// disallowed chars, etc.) exactly like the TUI char map. Editing away from the
+// generated name clears the remembered name so a later uncheck keeps the edits.
+export function setCreateAgentDraft(raw: string): void {
+  const draft = sanitizeAgentName(raw)
+  const generated =
+    draft === state.createAgentGeneratedName ? state.createAgentGeneratedName : null
+  setState({ createAgentDraft: draft, createAgentGeneratedName: generated })
+}
+
+// Toggle the "Use randomized pet name" checkbox with the TUI's exact semantics:
+//   ON  -> request a fresh name (the reply fills the input via `onAgentName`).
+//   OFF -> clear the input ONLY if it still equals the generated name; otherwise
+//          keep the user's edits. Either way, forget the generated name.
+export function toggleCreateAgentRandomize(): void {
+  if (!state.createAgentRandomize) {
+    setState({ createAgentRandomize: true })
+    socket.generateAgentName()
+  } else {
+    const keepText = state.createAgentDraft !== state.createAgentGeneratedName
+    setState({
+      createAgentRandomize: false,
+      createAgentDraft: keepText ? state.createAgentDraft : "",
+      createAgentGeneratedName: null,
+    })
+  }
 }
 
 // Ask the server to create a new agent in a project. An empty name lets the
-// server auto-generate a branch name.
+// server auto-generate a branch name (the equivalent outcome to the TUI's
+// generate-a-pet-name path). With the checkbox checked the input is effectively
+// never empty, so the empty path is the unchecked-and-blank case.
 export function createAgent(projectId: string, name: string): void {
   socket.sendCommand("create_agent", { project_id: projectId, name })
 }

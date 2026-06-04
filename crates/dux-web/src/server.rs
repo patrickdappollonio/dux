@@ -274,6 +274,12 @@ async fn handle_socket(socket: WebSocket, engine: EngineHandle) {
                         };
                         let _ = send_json(&sink, &msg).await;
                     }
+                    ClientMessage::GenerateAgentName => {
+                        // Pure, fast, and self-contained: answer directly without
+                        // round-tripping through the engine thread.
+                        let name = dux_core::git::docker_style_name();
+                        let _ = send_json(&sink, &ServerMessage::AgentName { name }).await;
+                    }
                 }
             }
             Message::Close(_) => break,

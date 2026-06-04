@@ -490,6 +490,18 @@ impl Engine {
                 let custom_name = if trimmed.is_empty() {
                     None
                 } else {
+                    // Backstop: the TUI prompt filters keystrokes so an invalid
+                    // name can't be typed, but a raw wire client (e.g. the web
+                    // UI before its own sanitizer, or a scripted client) can send
+                    // anything. Reject names git would refuse as a ref before
+                    // dispatching the create worker.
+                    if !crate::git::is_valid_agent_name(trimmed) {
+                        anyhow::bail!(
+                            "Invalid agent name \"{trimmed}\". Use only letters, digits, dashes, \
+                             underscores and slashes; it must start with a letter or digit, must \
+                             not contain \"//\", and must not end with \"/\"."
+                        );
+                    }
                     Some(trimmed.to_string())
                 };
                 let request = CreateAgentRequest::NewProject {
@@ -1224,6 +1236,84 @@ mod tests {
         });
         let err = result.map(|_| ()).unwrap_err();
         assert!(err.to_string().contains("unknown project"), "err: {err}");
+    }
+
+    #[test]
+    fn wire_to_command_create_agent_rejects_invalid_names() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+
+        // Raw wire clients can send anything; each of these must be rejected with
+        // an actionable message naming the rules.
+        for bad in [
+            "has space", // spaces aren't valid (the FE converts; raw wire doesn't)
+            "-leading",  // can't start with a dash
+            "a//b",      // no consecutive slashes
+            "trailing/", // can't end with a slash
+            "/leading",  // can't start with a slash
+            "naïve",     // non-ASCII dropped
+            "emoji😀",   // non-ASCII dropped
+            "with.dot",  // '.' isn't whitelisted
+        ] {
+            let result = engine.wire_to_command(WireCommand::CreateAgent {
+                project_id: "p1".to_string(),
+                name: bad.to_string(),
+            });
+            let err = result.map(|_| ()).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("Invalid agent name"),
+                "expected rejection for {bad:?}, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn wire_to_command_create_agent_accepts_valid_names() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+
+        for good in ["feature-x", "feat/sub-thing", "a_b-c", "AbC123"] {
+            let cmd = engine
+                .wire_to_command(WireCommand::CreateAgent {
+                    project_id: "p1".to_string(),
+                    name: good.to_string(),
+                })
+                .unwrap_or_else(|e| panic!("expected {good:?} to be accepted, got: {e}"));
+            match cmd {
+                Command::DispatchCreateAgentRequest { request, .. } => match *request {
+                    CreateAgentRequest::NewProject { custom_name, .. } => {
+                        assert_eq!(custom_name.as_deref(), Some(good));
+                    }
+                    other => panic!("expected NewProject, got {other:?}"),
+                },
+                _ => panic!("expected Command::DispatchCreateAgentRequest variant"),
+            }
+        }
+    }
+
+    #[test]
+    fn wire_to_command_create_agent_empty_after_trim_is_none() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+
+        // Whitespace-only names trim to empty -> None (server auto-generates),
+        // which is valid and must NOT trip the backstop.
+        let cmd = engine
+            .wire_to_command(WireCommand::CreateAgent {
+                project_id: "p1".to_string(),
+                name: "   ".to_string(),
+            })
+            .expect("whitespace-only name should reconstruct");
+        match cmd {
+            Command::DispatchCreateAgentRequest { request, .. } => match *request {
+                CreateAgentRequest::NewProject { custom_name, .. } => {
+                    assert_eq!(custom_name, None);
+                }
+                other => panic!("expected NewProject, got {other:?}"),
+            },
+            _ => panic!("expected Command::DispatchCreateAgentRequest variant"),
+        }
     }
 
     #[test]
