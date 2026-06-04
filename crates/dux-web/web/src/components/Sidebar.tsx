@@ -1,4 +1,18 @@
 import {
+  DndContext,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core"
+import type { DragEndEvent } from "@dnd-kit/core"
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable"
+import { CSS } from "@dnd-kit/utilities"
+import {
   Bot,
   Download,
   Ellipsis,
@@ -62,6 +76,11 @@ import {
 import { useSidebar } from "@/components/ui/sidebar"
 import { partitionProjects } from "@/lib/projects"
 import {
+  applyPendingOrders,
+  moveItem,
+  reorderProjectsInGroup,
+} from "@/lib/reorder"
+import {
   createTerminal,
   deleteTerminal,
   openAddProject,
@@ -70,6 +89,8 @@ import {
   openDelete,
   openProjectSettings,
   openRemoveProject,
+  reorderProjects,
+  reorderSessions,
   selectSession,
   selectTerminal,
   setSidebarWidth,
@@ -147,6 +168,17 @@ function SessionSubItem({
   const agentSelected =
     selectedTarget?.kind === "agent" && selectedTarget.sessionId === session.id
 
+  // The whole row is the drag handle. The enclosing PointerSensor's 6px
+  // activation distance keeps a plain click a select, not a drag. `isDragging`
+  // dims the lifted row for a clear "this is moving" affordance.
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: session.id })
+  const style: React.CSSProperties = {
+    transform: CSS.Translate.toString(transform),
+    transition,
+    opacity: isDragging ? 0.6 : undefined,
+  }
+
   function handleToggleAutoReopen() {
     socket.sendCommand("toggle_agent_auto_reopen", {
       session_id: session.id,
@@ -163,14 +195,16 @@ function SessionSubItem({
   }
 
   return (
-    <SidebarMenuSubItem>
+    <SidebarMenuSubItem ref={setNodeRef} style={style}>
       {/* The ⋯ slot only exists while THIS row is hovered/focused or its menu
           is open (always on touch layouts), so badges sit flush right
           otherwise. Reveal is scoped to the row's own group — shadcn's
           showOnHover keys off the ancestor menu-item, i.e. the whole project. */}
       <SidebarMenuSubButton
+        {...attributes}
+        {...listeners}
         isActive={agentSelected}
-        className="max-md:pr-8 group-focus-within/menu-sub-item:pr-8 group-hover/menu-sub-item:pr-8 group-has-[[aria-expanded=true]]/menu-sub-item:pr-8"
+        className="max-md:pr-8 touch-none group-focus-within/menu-sub-item:pr-8 group-hover/menu-sub-item:pr-8 group-has-[[aria-expanded=true]]/menu-sub-item:pr-8"
         onClick={() => selectSession(session.id)}
       >
         {/* All agents use the same Bot icon — provider is shown as text. */}
@@ -278,6 +312,61 @@ function SessionSubItem({
   )
 }
 
+// One project's sessions, made sortable within a DndContext scoped to THIS
+// project so a session drag never leaks into the project drag (separate
+// contexts, distinct sortable ids). On drop it recomputes the project's full
+// session order and sends it — the server requires the complete set.
+function SessionList({
+  projectId,
+  sessions,
+  selectedTarget,
+}: {
+  projectId: string
+  sessions: SessionView[]
+  selectedTarget: SelectedTarget | null
+}) {
+  // 6px activation distance: a plain click still selects; a small drag starts a
+  // reorder. Tuned low so selection feels instant yet drags are intentional.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+  )
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+    const ids = sessions.map((s) => s.id)
+    reorderSessions(
+      projectId,
+      moveItem(ids, String(active.id), String(over.id)),
+    )
+  }
+
+  return (
+    <DndContext
+      sensors={sensors}
+      collisionDetection={closestCenter}
+      onDragEnd={handleDragEnd}
+    >
+      <SortableContext
+        items={sessions.map((s) => s.id)}
+        strategy={verticalListSortingStrategy}
+      >
+        {/* mr-0/pr-0 drop the nested list's right inset (the left side is the
+            tree indent) so agent rows use the sidebar's full width. */}
+        <SidebarMenuSub className="mr-0 pr-0">
+          {sessions.map((session) => (
+            <SessionSubItem
+              key={session.id}
+              session={session}
+              selectedTarget={selectedTarget}
+            />
+          ))}
+        </SidebarMenuSub>
+      </SortableContext>
+    </DndContext>
+  )
+}
+
 function ProjectItem({
   id,
   name,
@@ -289,11 +378,26 @@ function ProjectItem({
   sessions: SessionView[]
   selectedTarget: SelectedTarget | null
 }) {
+  // Only the project HEADER row is the project drag handle (not the whole
+  // block, whose body hosts the sessions' own SortableContext). `isDragging`
+  // dims the lifted project for a clear affordance.
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id })
+  const style: React.CSSProperties = {
+    transform: CSS.Translate.toString(transform),
+    transition,
+    opacity: isDragging ? 0.6 : undefined,
+  }
+
   return (
     // Agent-less projects start collapsed — there's nothing inside to show.
     <Collapsible defaultOpen={sessions.length > 0} className="group/collapsible">
-      <SidebarMenuItem>
-        <CollapsibleTrigger render={<SidebarMenuButton />}>
+      <SidebarMenuItem ref={setNodeRef} style={style}>
+        <CollapsibleTrigger
+          {...attributes}
+          {...listeners}
+          render={<SidebarMenuButton className="touch-none" />}
+        >
           {/* The folder itself signals the expand state — open when the project
               is expanded, closed when collapsed — instead of a chevron. */}
           <Folder className="group-data-[state=open]/collapsible:hidden" />
@@ -338,17 +442,11 @@ function ProjectItem({
         </DropdownMenu>
         <CollapsibleContent>
           {sessions.length > 0 ? (
-            // mr-0/pr-0 drop the nested list's right inset (the left side is the
-            // tree indent) so agent rows use the sidebar's full width.
-            <SidebarMenuSub className="mr-0 pr-0">
-              {sessions.map((session) => (
-                <SessionSubItem
-                  key={session.id}
-                  session={session}
-                  selectedTarget={selectedTarget}
-                />
-              ))}
-            </SidebarMenuSub>
+            <SessionList
+              projectId={id}
+              sessions={sessions}
+              selectedTarget={selectedTarget}
+            />
           ) : null}
         </CollapsibleContent>
       </SidebarMenuItem>
@@ -426,25 +524,92 @@ function SidebarResizeHandle() {
   )
 }
 
+// One visual project group (with-agents or no-agents) made sortable. Each group
+// gets its OWN DndContext so a project drag can't cross group boundaries; on
+// drop it splices the group's new internal order back into the full project list
+// (`fullOrder`) because the server requires the complete ordered set of ALL
+// project ids. A single-item group is rendered without DnD scaffolding (nothing
+// to reorder).
+function ProjectGroup({
+  members,
+  fullOrder,
+  grouped,
+  projectName,
+  selectedTarget,
+}: {
+  members: string[]
+  fullOrder: string[]
+  grouped: Map<string, SessionView[]>
+  projectName: (id: string) => string
+  selectedTarget: SelectedTarget | null
+}) {
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+  )
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+    reorderProjects(
+      reorderProjectsInGroup(
+        fullOrder,
+        members,
+        String(active.id),
+        String(over.id),
+      ),
+    )
+  }
+
+  const items = members.map((projectId) => (
+    <ProjectItem
+      key={projectId}
+      id={projectId}
+      name={projectName(projectId)}
+      sessions={grouped.get(projectId) ?? []}
+      selectedTarget={selectedTarget}
+    />
+  ))
+
+  return (
+    <SidebarMenu>
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragEnd={handleDragEnd}
+      >
+        <SortableContext items={members} strategy={verticalListSortingStrategy}>
+          {items}
+        </SortableContext>
+      </DndContext>
+    </SidebarMenu>
+  )
+}
+
 export function AppSidebar() {
-  const { viewModel, selectedTarget } = useDux()
-  const sessions = viewModel?.sessions ?? []
-  const projects = viewModel?.projects ?? []
+  const {
+    viewModel,
+    selectedTarget,
+    pendingSessionOrder,
+    pendingProjectOrder,
+  } = useDux()
+  const rawSessions = viewModel?.sessions ?? []
+  const rawProjects = viewModel?.projects ?? []
+  // Fold any in-flight drag-and-drop overlay over the server order so the rows
+  // don't snap back during the ≤50ms round-trip (see `applyPendingOrders`).
+  const { projects, sessions } = applyPendingOrders(
+    rawProjects,
+    rawSessions,
+    pendingSessionOrder,
+    pendingProjectOrder,
+  )
 
   const { grouped, withAgents, withoutAgents, projectName } = partitionProjects(
     projects,
     sessions,
   )
-
-  const renderProject = (projectId: string) => (
-    <ProjectItem
-      key={projectId}
-      id={projectId}
-      name={projectName(projectId)}
-      sessions={grouped.get(projectId)!}
-      selectedTarget={selectedTarget}
-    />
-  )
+  // The complete ordered project set the server demands for `reorder_projects`:
+  // with-agents first, then no-agents, matching the display order.
+  const fullOrder = [...withAgents, ...withoutAgents]
 
   return (
     <Sidebar collapsible="icon">
@@ -482,7 +647,13 @@ export function AppSidebar() {
               </Empty>
             </SidebarGroupContent>
           ) : (
-            <SidebarMenu>{withAgents.map(renderProject)}</SidebarMenu>
+            <ProjectGroup
+              members={withAgents}
+              fullOrder={fullOrder}
+              grouped={grouped}
+              projectName={projectName}
+              selectedTarget={selectedTarget}
+            />
           )}
         </SidebarGroup>
 
@@ -491,7 +662,13 @@ export function AppSidebar() {
           // projects sink below the active ones under their own heading.
           <SidebarGroup>
             <SidebarGroupLabel>Projects with no agents</SidebarGroupLabel>
-            <SidebarMenu>{withoutAgents.map(renderProject)}</SidebarMenu>
+            <ProjectGroup
+              members={withoutAgents}
+              fullOrder={fullOrder}
+              grouped={grouped}
+              projectName={projectName}
+              selectedTarget={selectedTarget}
+            />
           </SidebarGroup>
         ) : null}
 

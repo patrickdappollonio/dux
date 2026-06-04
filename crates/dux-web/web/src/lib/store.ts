@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react"
 import { toast } from "sonner"
 
+import { ordersMatch } from "./reorder"
 import { DuxSocket } from "./ws"
 import type { ConnState, DirEntryView, FileDiff, ViewModel } from "./types"
 
@@ -15,6 +16,16 @@ export type SelectedTarget =
 // hub ("home"), the focused terminal, or the changed-files view. Desktop never
 // reads this — it renders all three panes at once.
 export type MobileScreen = "home" | "terminal" | "changes"
+
+// An optimistic session-order overlay for one project: while a drag-and-drop
+// reorder is in flight, the UI renders `ids` (the new complete order of that
+// project's sessions) instead of the server's order, so the row doesn't snap
+// back during the ≤50ms round-trip. Cleared when a ViewModel arrives whose order
+// already matches, or on any error status.
+export interface PendingSessionOrder {
+  projectId: string
+  ids: string[]
+}
 
 // A tiny external store backed by `useSyncExternalStore`. A single module-level
 // `DuxSocket` instance feeds it: ViewModel updates, connection state, and
@@ -47,6 +58,12 @@ export interface DuxState {
   // Which screen the mobile shell is showing. Always "home" on desktop, which
   // ignores it. Only the mobile UI advances it past "home".
   mobileScreen: MobileScreen
+  // Optimistic drag-and-drop ordering overlays (see `applyPendingOrders`). Each
+  // is set the moment a drag ends and cleared once the server's next ViewModel
+  // confirms the new order (or an error status arrives). Null when no reorder is
+  // in flight, which is the overwhelmingly common case.
+  pendingSessionOrder: PendingSessionOrder | null
+  pendingProjectOrder: string[] | null
   sidebarWidth: string
   currentDiff: {
     sessionId: string
@@ -86,6 +103,8 @@ let state: DuxState = {
   createAgentTarget: null,
   paletteOpen: false,
   mobileScreen: "home",
+  pendingSessionOrder: null,
+  pendingProjectOrder: null,
   sidebarWidth: loadSidebarWidth(),
   currentDiff: null,
 }
@@ -117,11 +136,43 @@ function getSnapshot(): DuxState {
 export const socket = new DuxSocket(`ws://${location.host}/ws`)
 
 socket.onViewModel = (vm) => {
-  setState({ viewModel: vm })
+  setState({
+    viewModel: vm,
+    // Retire each optimistic order overlay once the server's order matches it;
+    // until then keep showing the overlay so the row doesn't snap back during
+    // the round-trip. A stale (non-matching) overlay is kept — a later ViewModel
+    // confirming our reorder will clear it; an error status clears it outright.
+    pendingSessionOrder: reconcilePendingSessionOrder(vm, state.pendingSessionOrder),
+    pendingProjectOrder: reconcilePendingProjectOrder(vm, state.pendingProjectOrder),
+  })
   // If the focused target vanished (an agent session was removed, or a
   // companion terminal exited and was pruned server-side), drop the selection
   // so the center pane shows the empty state instead of a dead terminal.
   pruneSelectionIfGone(vm)
+}
+
+// Drop the pending session-order overlay once the incoming ViewModel's session
+// order for that project already equals the overlay; otherwise keep it.
+function reconcilePendingSessionOrder(
+  vm: ViewModel,
+  pending: PendingSessionOrder | null,
+): PendingSessionOrder | null {
+  if (!pending) return null
+  const serverIds = vm.sessions
+    .filter((s) => s.project_id === pending.projectId)
+    .map((s) => s.id)
+  return ordersMatch(serverIds, pending.ids) ? null : pending
+}
+
+// Drop the pending project-order overlay once the incoming ViewModel's project
+// order already equals the overlay; otherwise keep it.
+function reconcilePendingProjectOrder(
+  vm: ViewModel,
+  pending: string[] | null,
+): string[] | null {
+  if (!pending) return null
+  const serverIds = vm.projects.map((p) => p.id)
+  return ordersMatch(serverIds, pending) ? null : pending
 }
 
 // Clear the selection when its target no longer exists in the latest ViewModel.
@@ -174,7 +225,9 @@ function toastForTone(tone: string, message: string): void {
 
 socket.onCommandResult = (status, error) => {
   if (error) {
-    setState({ lastMessage: error })
+    // A rejected reorder (stale/partial id set) comes back as an error here;
+    // drop any optimistic overlay so the UI reverts to the server's order.
+    setState({ lastMessage: error, ...clearPendingOrders() })
     toast.error(error)
   } else if (status) {
     setState({ lastMessage: status.message })
@@ -183,15 +236,24 @@ socket.onCommandResult = (status, error) => {
 }
 
 socket.onError = (message) => {
-  setState({ lastMessage: message })
+  setState({ lastMessage: message, ...clearPendingOrders() })
   toast.error(message)
+}
+
+// Reset both optimistic order overlays. Returned as a patch so callers can fold
+// it into a single `setState`. Used on every error path so a rejected reorder
+// snaps the UI back to the server's authoritative order.
+function clearPendingOrders(): Partial<DuxState> {
+  return { pendingSessionOrder: null, pendingProjectOrder: null }
 }
 
 // Asynchronous status/lifecycle events (background push/pull completing, an
 // agent launch failing, a PTY exiting). Surface them as a toast toned by the
 // engine's StatusTone and keep the latest in the status bar.
 socket.onStatus = (tone, message) => {
-  setState({ lastMessage: message })
+  // An error-toned async status also unwinds any optimistic reorder overlay.
+  const patch = tone === "error" ? clearPendingOrders() : {}
+  setState({ lastMessage: message, ...patch })
   toastForTone(tone, message)
 }
 
@@ -409,6 +471,27 @@ export function closeCreateAgent(): void {
 // server auto-generate a branch name.
 export function createAgent(projectId: string, name: string): void {
   socket.sendCommand("create_agent", { project_id: projectId, name })
+}
+
+// Optimistically reorder a project's sessions, then tell the server. `orderedIds`
+// MUST be the complete ordered set of that project's session ids — the server
+// validates it as a strict permutation and rejects partial/stale sets. The
+// overlay clears when the next ViewModel confirms the order (or on error).
+export function reorderSessions(projectId: string, orderedIds: string[]): void {
+  setState({ pendingSessionOrder: { projectId, ids: orderedIds } })
+  socket.sendCommand("reorder_sessions", {
+    project_id: projectId,
+    session_ids: orderedIds,
+  })
+}
+
+// Optimistically reorder the projects, then tell the server. `orderedIds` MUST
+// be the complete ordered set of ALL project ids (both with and without agents);
+// the server validates it as a strict permutation. The overlay clears when the
+// next ViewModel confirms the order (or on error).
+export function reorderProjects(orderedIds: string[]): void {
+  setState({ pendingProjectOrder: orderedIds })
+  socket.sendCommand("reorder_projects", { project_ids: orderedIds })
 }
 
 export function setPaletteOpen(open: boolean): void {

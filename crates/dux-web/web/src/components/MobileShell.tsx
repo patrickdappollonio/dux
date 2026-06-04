@@ -1,4 +1,18 @@
 import {
+  DndContext,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core"
+import type { DragEndEvent } from "@dnd-kit/core"
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable"
+import { CSS } from "@dnd-kit/utilities"
+import {
   Bot,
   ChevronLeft,
   Download,
@@ -15,6 +29,7 @@ import {
   Trash2,
   X,
 } from "lucide-react"
+import type { CSSProperties } from "react"
 import { Suspense } from "react"
 
 import { ChangedFiles } from "@/components/ChangedFiles"
@@ -42,6 +57,11 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { CONN_BADGE } from "@/lib/conn"
 import { partitionProjects } from "@/lib/projects"
 import {
+  applyPendingOrders,
+  moveItem,
+  reorderProjectsInGroup,
+} from "@/lib/reorder"
+import {
   createTerminal,
   deleteTerminal,
   mobileNavigate,
@@ -51,6 +71,8 @@ import {
   openDelete,
   openProjectSettings,
   openRemoveProject,
+  reorderProjects,
+  reorderSessions,
   selectSession,
   selectTerminal,
   setPaletteOpen,
@@ -187,12 +209,26 @@ function SessionRow({
   const agentSelected =
     selectedTarget?.kind === "agent" && selectedTarget.sessionId === session.id
 
+  // Long-press (250ms) starts the drag so taps still select and vertical scroll
+  // isn't hijacked — see the sensor config on the enclosing DndContext. The
+  // session BUTTON is the handle; nested terminal rows ride along in the node
+  // but aren't themselves draggable.
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: session.id })
+  const style: CSSProperties = {
+    transform: CSS.Translate.toString(transform),
+    transition,
+    opacity: isDragging ? 0.6 : undefined,
+  }
+
   return (
-    <div className="flex flex-col gap-1">
+    <div ref={setNodeRef} style={style} className="flex flex-col gap-1">
       <div className="flex items-center gap-1">
         <Button
+          {...attributes}
+          {...listeners}
           variant={agentSelected ? "secondary" : "ghost"}
-          className="min-h-11 flex-1 justify-start gap-2 px-2"
+          className="min-h-11 flex-1 touch-none justify-start gap-2 px-2"
           onClick={() => selectAndOpen(session.id)}
         >
           <Bot />
@@ -256,7 +292,9 @@ function SessionRow({
 }
 
 // A project heading plus its session rows (or "New agent" entry point when it
-// has none), with the same ⋯ actions the sidebar's project menu offers.
+// has none), with the same ⋯ actions the sidebar's project menu offers. The
+// sessions get their OWN DndContext (scoped to this project) so a session drag
+// never bubbles into the project drag.
 function ProjectBlock({
   id,
   name,
@@ -268,10 +306,39 @@ function ProjectBlock({
   sessions: SessionView[]
   selectedTarget: SelectedTarget | null
 }) {
+  // The project HEADER is the drag handle (not the whole block, whose body
+  // hosts the sessions' own SortableContext). Long-press starts the drag.
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id })
+  const style: CSSProperties = {
+    transform: CSS.Translate.toString(transform),
+    transition,
+    opacity: isDragging ? 0.6 : undefined,
+  }
+
+  // Per-project session sensor: long-press (250ms) + 8px tolerance so taps
+  // select and scrolling isn't hijacked.
+  const sessionSensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { delay: 250, tolerance: 8 },
+    }),
+  )
+
+  function handleSessionDragEnd(event: DragEndEvent) {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+    const ids = sessions.map((s) => s.id)
+    reorderSessions(id, moveItem(ids, String(active.id), String(over.id)))
+  }
+
   return (
-    <div className="flex flex-col gap-1">
+    <div ref={setNodeRef} style={style} className="flex flex-col gap-1">
       <div className="flex items-center gap-1">
-        <div className="flex min-h-11 flex-1 items-center gap-2 px-2">
+        <div
+          {...attributes}
+          {...listeners}
+          className="flex min-h-11 flex-1 touch-none items-center gap-2 px-2"
+        >
           <span className="truncate font-semibold">{name}</span>
           {sessions.length > 0 ? (
             <Badge variant="secondary" className="shrink-0">
@@ -314,14 +381,83 @@ function ProjectBlock({
         </DropdownMenu>
       </div>
 
-      {sessions.map((session) => (
-        <SessionRow
-          key={session.id}
-          session={session}
-          selectedTarget={selectedTarget}
-        />
-      ))}
+      {sessions.length > 0 ? (
+        <DndContext
+          sensors={sessionSensors}
+          collisionDetection={closestCenter}
+          onDragEnd={handleSessionDragEnd}
+        >
+          <SortableContext
+            items={sessions.map((s) => s.id)}
+            strategy={verticalListSortingStrategy}
+          >
+            {sessions.map((session) => (
+              <SessionRow
+                key={session.id}
+                session={session}
+                selectedTarget={selectedTarget}
+              />
+            ))}
+          </SortableContext>
+        </DndContext>
+      ) : null}
     </div>
+  )
+}
+
+// One sortable group of project blocks (with-agents or no-agents). Its OWN
+// DndContext keeps a project drag from crossing into the other group; on drop it
+// splices the group's new order into the full project list the server requires.
+function ProjectGroupList({
+  members,
+  fullOrder,
+  grouped,
+  projectName,
+  selectedTarget,
+}: {
+  members: string[]
+  fullOrder: string[]
+  grouped: Map<string, SessionView[]>
+  projectName: (id: string) => string
+  selectedTarget: SelectedTarget | null
+}) {
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { delay: 250, tolerance: 8 },
+    }),
+  )
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+    reorderProjects(
+      reorderProjectsInGroup(
+        fullOrder,
+        members,
+        String(active.id),
+        String(over.id),
+      ),
+    )
+  }
+
+  return (
+    <DndContext
+      sensors={sensors}
+      collisionDetection={closestCenter}
+      onDragEnd={handleDragEnd}
+    >
+      <SortableContext items={members} strategy={verticalListSortingStrategy}>
+        {members.map((projectId) => (
+          <ProjectBlock
+            key={projectId}
+            id={projectId}
+            name={projectName(projectId)}
+            sessions={grouped.get(projectId) ?? []}
+            selectedTarget={selectedTarget}
+          />
+        ))}
+      </SortableContext>
+    </DndContext>
   )
 }
 
@@ -329,25 +465,25 @@ function ProjectBlock({
 // the sidebar's partition (projects with agents first, agent-less ones under
 // their own heading).
 function HomeScreen() {
-  const { viewModel, selectedTarget, conn } = useDux()
-  const sessions = viewModel?.sessions ?? []
-  const projects = viewModel?.projects ?? []
+  const { viewModel, selectedTarget, conn, pendingSessionOrder, pendingProjectOrder } =
+    useDux()
+  const rawSessions = viewModel?.sessions ?? []
+  const rawProjects = viewModel?.projects ?? []
+  // Fold the optimistic drag overlays over the server order (see
+  // `applyPendingOrders`) so rows don't snap back during the round-trip.
+  const { projects, sessions } = applyPendingOrders(
+    rawProjects,
+    rawSessions,
+    pendingSessionOrder,
+    pendingProjectOrder,
+  )
   const { grouped, withAgents, withoutAgents, projectName } = partitionProjects(
     projects,
     sessions,
   )
+  const fullOrder = [...withAgents, ...withoutAgents]
   const badge = CONN_BADGE[conn]
   const hasProjects = projects.length > 0 || sessions.length > 0
-
-  const renderProject = (projectId: string) => (
-    <ProjectBlock
-      key={projectId}
-      id={projectId}
-      name={projectName(projectId)}
-      sessions={grouped.get(projectId) ?? []}
-      selectedTarget={selectedTarget}
-    />
-  )
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
@@ -376,7 +512,15 @@ function HomeScreen() {
                   Projects
                 </p>
               ) : null}
-              {withAgents.map(renderProject)}
+              {withAgents.length > 0 ? (
+                <ProjectGroupList
+                  members={withAgents}
+                  fullOrder={fullOrder}
+                  grouped={grouped}
+                  projectName={projectName}
+                  selectedTarget={selectedTarget}
+                />
+              ) : null}
             </div>
 
             {withoutAgents.length > 0 ? (
@@ -384,7 +528,13 @@ function HomeScreen() {
                 <p className="px-2 text-xs font-medium text-muted-foreground">
                   Projects with no agents
                 </p>
-                {withoutAgents.map(renderProject)}
+                <ProjectGroupList
+                  members={withoutAgents}
+                  fullOrder={fullOrder}
+                  grouped={grouped}
+                  projectName={projectName}
+                  selectedTarget={selectedTarget}
+                />
               </div>
             ) : null}
 
