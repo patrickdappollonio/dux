@@ -355,6 +355,7 @@ function HomeScreen() {
           <Button
             variant="outline"
             size="icon"
+            className="size-11"
             aria-label="Search"
             onClick={() => setPaletteOpen(true)}
           >
@@ -450,6 +451,7 @@ function TerminalScreen() {
         <Button
           variant="ghost"
           size="icon"
+          className="size-11 shrink-0"
           aria-label="Back"
           onClick={() => history.back()}
         >
@@ -463,7 +465,7 @@ function TerminalScreen() {
         <Button
           variant="outline"
           size="sm"
-          className="shrink-0"
+          className="min-h-11 shrink-0"
           aria-label={`${changeCount} changed files`}
           onClick={() => mobileNavigate("changes")}
         >
@@ -475,7 +477,7 @@ function TerminalScreen() {
               <Button
                 variant="ghost"
                 size="icon"
-                className="shrink-0"
+                className="size-11 shrink-0"
                 aria-label="Session actions"
               />
             }
@@ -508,6 +510,7 @@ function ChangesScreen() {
         <Button
           variant="ghost"
           size="icon"
+          className="size-11 shrink-0"
           aria-label="Back"
           onClick={() => history.back()}
         >

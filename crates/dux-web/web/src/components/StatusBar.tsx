@@ -64,7 +64,9 @@ export function StatusBar() {
         ) : (
           <span>{CONN_LABEL[conn]}</span>
         )}
-        <span className="truncate">{lastMessage}</span>
+        <span className="truncate" title={lastMessage}>
+          {lastMessage}
+        </span>
       </div>
     </footer>
   )

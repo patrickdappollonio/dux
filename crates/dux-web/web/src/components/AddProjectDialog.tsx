@@ -50,9 +50,9 @@ function AddProjectBrowser() {
         </span>
       </DialogHeader>
 
-      <ScrollArea className="h-80 rounded-md border">
+      <ScrollArea className="h-[50vh] rounded-md border md:h-80">
         {browseLoading ? (
-          <div className="flex h-80 items-center justify-center">
+          <div className="flex h-[50vh] items-center justify-center md:h-80">
             <BrailleSpinner className="text-lg text-muted-foreground" />
           </div>
         ) : (
@@ -65,7 +65,9 @@ function AddProjectBrowser() {
                   key={entry.path}
                   type="button"
                   onClick={() => handleEntryClick(entry)}
-                  className={`flex items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent ${
+                  // min-h-11 on phones gives each row a ≥44px touch target;
+                  // desktop keeps the compact py-2 density via md:.
+                  className={`flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent md:min-h-0 ${
                     isSelected ? "bg-accent" : ""
                   }`}
                 >

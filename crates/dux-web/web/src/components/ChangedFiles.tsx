@@ -68,7 +68,7 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
   return (
     <div
       role="row"
-      className="group flex cursor-pointer items-center gap-2 rounded px-1 py-1 hover:bg-muted"
+      className="group flex cursor-pointer items-center gap-2 rounded px-1 py-1 hover:bg-muted max-md:min-h-11"
       onClick={() => onOpenDiff(file.path)}
     >
       {/* Status glyph */}
@@ -90,11 +90,12 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
         </span>
       )}
 
-      {/* Stage / Unstage action */}
+      {/* Stage / Unstage action. Hover-reveal works on desktop, but touch has
+          no hover — so on phones the button is always visible and ≥44px tall. */}
       <Button
         variant="ghost"
         size="sm"
-        className="shrink-0 opacity-0 group-hover:opacity-100"
+        className="shrink-0 opacity-100 max-md:min-h-11 md:opacity-0 md:group-hover:opacity-100"
         onClick={handleAction}
       >
         {action === "stage" ? "Stage" : "Unstage"}
@@ -118,7 +119,7 @@ function FileGroup({ heading, files, action, sessionId, onOpenDiff }: FileGroupP
 
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
-      <CollapsibleTrigger className="flex w-full items-center gap-2 rounded px-1 py-1 text-sm font-medium hover:bg-muted">
+      <CollapsibleTrigger className="flex w-full items-center gap-2 rounded px-1 py-1 text-sm font-medium hover:bg-muted max-md:min-h-11">
         <span className="flex-1 text-left">{heading}</span>
         <Badge variant="secondary">{files.length}</Badge>
       </CollapsibleTrigger>
@@ -167,7 +168,7 @@ export function ChangedFiles() {
       <Card className="h-full rounded-none border-0 ring-0">
         <CardHeader className="border-b">
           <CardTitle>Changes</CardTitle>
-          <CardAction className="flex items-center gap-1">
+          <CardAction className="flex items-center gap-1 max-md:[&_button]:min-h-11">
             <Button
               size="sm"
               onClick={() => openCommit(selectedSessionId)}
@@ -236,9 +237,19 @@ export function ChangedFiles() {
           if (!open) closeDiff()
         }}
       >
-        <SheetContent side="right" className="w-[90vw] sm:max-w-3xl">
+        {/* Width is set with the same data-[side=right] modifier the Sheet
+            primitive uses for its 3/4 default, so tailwind-merge dedupes
+            deterministically (a plain w-* would not override the modified one):
+            near-full on phones, capped to 3xl on desktop. */}
+        <SheetContent
+          side="right"
+          className="data-[side=right]:w-[92vw] data-[side=right]:sm:max-w-3xl"
+        >
           <SheetHeader>
-            <SheetTitle className="font-mono text-sm">
+            <SheetTitle
+              className="truncate font-mono text-sm"
+              title={currentDiff?.path ?? ""}
+            >
               {currentDiff?.path ?? ""}
             </SheetTitle>
           </SheetHeader>
