@@ -22,7 +22,11 @@ const OFFLINE_URL = "/offline.html";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(CACHE).then((cache) => cache.add(OFFLINE_URL)),
+    // `cache: "reload"` bypasses the HTTP cache so a stale browser-cached copy
+    // of offline.html can never be what we store here.
+    caches
+      .open(CACHE)
+      .then((cache) => cache.add(new Request(OFFLINE_URL, { cache: "reload" }))),
   );
   // Take over without waiting for existing tabs to close.
   self.skipWaiting();
@@ -47,6 +51,11 @@ self.addEventListener("fetch", (event) => {
     return;
   }
   event.respondWith(
-    fetch(event.request).catch(() => caches.match(OFFLINE_URL)),
+    fetch(event.request).catch(() =>
+      // If the offline page somehow isn't cached (e.g. a partially failed
+      // install), fall back to a network-error response rather than letting
+      // respondWith(undefined) throw and dead-end the navigation.
+      caches.match(OFFLINE_URL).then((cached) => cached ?? Response.error()),
+    ),
   );
 });
