@@ -2453,6 +2453,27 @@ impl App {
         self.last_pty_activity.remove(&detached.id);
         Some(detached.label)
     }
+
+    /// Palette action: tear down the TUI and serve the web UI in the same
+    /// process. Runs the full pre-flight (bind resolution + an actual
+    /// `TcpListener::bind`) BEFORE touching anything, so a refusal (non-loopback
+    /// without opt-in) or a port collision surfaces on the status line and the
+    /// TUI stays exactly where it was. On success the bound listener and its
+    /// display URL are stashed and the run loop breaks with
+    /// `RunExit::FlipToServer` on its next iteration.
+    pub(crate) fn start_web_server(&mut self) {
+        match preflight_server_listener(&self.engine.config) {
+            Ok((listener, url)) => {
+                self.set_busy(format!(
+                    "Starting the web server on {url} — your agents keep running."
+                ));
+                self.pending_server_flip = Some((listener, url));
+            }
+            Err(err) => {
+                self.set_error(format!("{err:#}"));
+            }
+        }
+    }
 }
 
 pub(crate) fn parse_pull_request_lookup(
@@ -2669,6 +2690,7 @@ mod tests {
             last_snapshot_id: None,
             terminal_selection: None,
             startup_log_selection: None,
+            pending_server_flip: None,
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();
@@ -2693,6 +2715,139 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    fn test_engine_with_sessions(
+        sessions: Vec<AgentSession>,
+        projects: Vec<Project>,
+    ) -> dux_core::engine::Engine {
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root: root.clone(),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).expect("worktrees dir");
+        let session_store = SessionStore::open(&paths.sessions_db_path).expect("session store");
+        let single_instance_lock = crate::lockfile::SingleInstanceLock::acquire(&paths.lock_path)
+            .expect("single-instance lock for test engine");
+        let (worker_tx, worker_rx) = mpsc::channel();
+        // auto_reopen on so bootstrap WOULD relaunch — proving resume's skip.
+        let mut config = Config::default();
+        config.ui.auto_reopen_agents = true;
+        dux_core::engine::Engine {
+            config,
+            paths,
+            session_store,
+            projects,
+            sessions,
+            staged_files: Vec::new(),
+            unstaged_files: Vec::new(),
+            terminal_counter: 0,
+            github_integration_enabled: false,
+            single_instance_lock,
+            worker_tx,
+            worker_rx,
+            config_saver: Box::new(crate::TuiConfigSaver),
+            providers: std::collections::HashMap::new(),
+            running_provider_pins: std::collections::HashMap::new(),
+            companion_terminals: std::collections::HashMap::new(),
+            gh_status: crate::model::GhStatus::Unknown,
+            pr_statuses: std::collections::HashMap::new(),
+            branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
+            pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
+            pr_sync_enabled: Arc::new(AtomicBool::new(false)),
+            refs_watcher: None,
+            refs_watch_paths: std::collections::HashMap::new(),
+            resume_fallback_candidates: std::collections::HashMap::new(),
+            pending_deletions: std::collections::HashSet::new(),
+            deletion_busy_messages: std::collections::HashMap::new(),
+            watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
+            has_active_processes: Arc::new(AtomicBool::new(false)),
+            in_flight: std::collections::HashSet::new(),
+            pr_last_checked: std::collections::HashMap::new(),
+            changed_files_poller_started: AtomicBool::new(false),
+            branch_sync_worker_started: AtomicBool::new(false),
+        }
+    }
+
+    #[test]
+    fn start_web_server_stashes_flip_on_success() {
+        let mut app = test_app_with_sessions(Vec::new(), Vec::new());
+        app.engine.config.server.bind = "127.0.0.1:0".to_string();
+
+        app.start_web_server();
+
+        let (_, url) = app
+            .pending_server_flip
+            .as_ref()
+            .expect("a successful pre-flight stashes the flip");
+        assert!(url.starts_with("http://127.0.0.1:"));
+        assert!(!url.ends_with(":0"), "URL must show the real bound port");
+        assert!(app.status.message().contains("Starting the web server"));
+    }
+
+    #[test]
+    fn start_web_server_stays_up_on_preflight_failure() {
+        let mut app = test_app_with_sessions(Vec::new(), Vec::new());
+        // Non-loopback without the opt-in is refused by the safety gate.
+        app.engine.config.server.bind = "0.0.0.0:0".to_string();
+        app.engine.config.server.insecure_allow_remote = false;
+
+        app.start_web_server();
+
+        assert!(
+            app.pending_server_flip.is_none(),
+            "a refused pre-flight must not arm the flip"
+        );
+        assert!(app.status.message().contains("no authentication"));
+    }
+
+    #[test]
+    fn resume_skips_session_restore_and_rebuilds_view() {
+        // A live session arrives from the web server already Running with
+        // desired_running set. bootstrap's restore_sessions would flip its
+        // status (worktree missing → Exited) and possibly relaunch it; resume
+        // must touch neither — the provider is already alive.
+        let mut session = make_session("agent-1", "codex", "/tmp/nonexistent-worktree");
+        session.status = SessionStatus::Active;
+        session.desired_running = true;
+        let project = make_project("project-1", "codex");
+        let engine = test_engine_with_sessions(vec![session], vec![project]);
+
+        let app = App::resume(engine).expect("resume builds an App");
+
+        // restore_sessions was skipped: the status is untouched (NOT flipped to
+        // Exited despite the missing worktree).
+        assert_eq!(
+            app.engine.sessions[0].status,
+            SessionStatus::Active,
+            "resume must not re-run restore_sessions"
+        );
+        // No provider was launched and no launch work was dispatched.
+        assert!(
+            app.engine.providers.is_empty(),
+            "resume must not spawn PTYs"
+        );
+        assert!(
+            app.engine.worker_rx.try_recv().is_err(),
+            "resume must not post any worker event (no agent relaunch)"
+        );
+        // View state was rebuilt: the session shows up in the left pane cache.
+        assert!(
+            !app.left_items_cache.is_empty(),
+            "resume must rebuild the left-pane items"
+        );
+        // The status line carries the verbose resume message.
+        assert!(
+            app.status.message().contains("Web server stopped"),
+            "resume should arrive with the agents-kept-running message"
+        );
     }
 
     fn make_project(id: &str, provider: &str) -> Project {

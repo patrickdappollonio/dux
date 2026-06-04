@@ -6590,6 +6590,7 @@ mod tests {
             last_snapshot_id: None,
             terminal_selection: None,
             startup_log_selection: None,
+            pending_server_flip: None,
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();

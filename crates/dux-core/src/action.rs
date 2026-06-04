@@ -110,6 +110,7 @@ pub enum Action {
     ForceReconnectAgent,
     ChangeTheme,
     ReloadConfig,
+    StartWebServer,
 }
 
 impl Action {
@@ -207,6 +208,7 @@ impl Action {
             Action::ForceReconnectAgent => "force_reconnect_agent",
             Action::ChangeTheme => "change_theme",
             Action::ReloadConfig => "reload_config",
+            Action::StartWebServer => "start_web_server",
         }
     }
 
@@ -338,6 +340,9 @@ impl Action {
             Action::ForceReconnectAgent => "Restart the agent without resuming the prior session.",
             Action::ChangeTheme => "Open a picker to switch the dux color theme.",
             Action::ReloadConfig => "Reload the configuration file.",
+            Action::StartWebServer => {
+                "Tear down the TUI and serve the dux web UI over the same agents."
+            }
         }
     }
 
@@ -433,7 +438,8 @@ impl Action {
             | Action::ChangeDefaultProvider
             | Action::ChangeProjectDefaultProvider
             | Action::ChangeTheme
-            | Action::ReloadConfig => None,
+            | Action::ReloadConfig
+            | Action::StartWebServer => None,
         }
     }
 }

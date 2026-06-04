@@ -155,6 +155,29 @@ pub struct App {
     pub(crate) terminal_selection: Option<TerminalSelection>,
     /// Active text selection in the startup command log output pane, if any.
     pub(crate) startup_log_selection: Option<TerminalSelection>,
+    /// When set, the run loop exits with [`RunExit::FlipToServer`], handing the
+    /// pre-bound listener and its display URL to the binary so the web server
+    /// can take over the same process (PTYs keep running). Populated by the
+    /// `StartWebServer` palette action only after its pre-flight succeeds.
+    pub(crate) pending_server_flip: Option<(std::net::TcpListener, String)>,
+}
+
+/// How [`App::run`] returned: a plain quit, or a request to flip the current
+/// process into the web server while keeping the live agents running.
+pub enum RunExit {
+    Quit,
+    FlipToServer {
+        listener: std::net::TcpListener,
+        url: String,
+    },
+}
+
+/// Whether the shared App constructor should relaunch prior sessions. First
+/// boot restores them from the database; a resume after the web server stops
+/// skips restoration because the providers are already live.
+enum SessionRestore {
+    Restore,
+    Skip,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1201,13 +1224,6 @@ impl App {
             status.warning(message);
         }
         let gh_integration_val = config.ui.github_integration;
-        let pr_banner_at_bottom = config.ui.pr_banner_position == "bottom";
-        let show_diff_line_numbers = config.ui.show_diff_line_numbers;
-        let left_width_pct = config.ui.left_width_pct;
-        let right_width_pct = config.ui.right_width_pct;
-        let terminal_pane_height_pct = config.ui.terminal_pane_height_pct;
-        let staged_pane_height_pct = config.ui.staged_pane_height_pct;
-        let commit_pane_height_pct = config.ui.commit_pane_height_pct;
         let engine = Engine {
             config,
             paths,
@@ -1242,6 +1258,41 @@ impl App {
             changed_files_poller_started: AtomicBool::new(false),
             branch_sync_worker_started: AtomicBool::new(false),
         };
+        Self::assemble(
+            engine,
+            bindings,
+            interactive_patterns,
+            sigwinch_flag,
+            status,
+            theme,
+            SessionRestore::Restore,
+        )
+    }
+
+    /// Shared App-struct construction used by both first-boot bootstrap and the
+    /// post-server resume. The caller supplies the already-built `engine` plus
+    /// the values that cannot be re-derived purely from `engine.config`
+    /// (`status` may carry a theme warning; `sigwinch_flag` is a live handler
+    /// registration). Everything else is derived here so bootstrap and resume
+    /// share one body. `restore` gates whether prior sessions are relaunched:
+    /// first boot restores them; resume skips restoration because the providers
+    /// handed back from the web server are already live.
+    fn assemble(
+        engine: Engine,
+        bindings: RuntimeBindings,
+        interactive_patterns: InteractiveBytePatterns,
+        sigwinch_flag: Arc<AtomicBool>,
+        status: StatusLine,
+        theme: Theme,
+        restore: SessionRestore,
+    ) -> Result<Self> {
+        let pr_banner_at_bottom = engine.config.ui.pr_banner_position == "bottom";
+        let show_diff_line_numbers = engine.config.ui.show_diff_line_numbers;
+        let left_width_pct = engine.config.ui.left_width_pct;
+        let right_width_pct = engine.config.ui.right_width_pct;
+        let terminal_pane_height_pct = engine.config.ui.terminal_pane_height_pct;
+        let staged_pane_height_pct = engine.config.ui.staged_pane_height_pct;
+        let commit_pane_height_pct = engine.config.ui.commit_pane_height_pct;
         let mut app = Self {
             show_diff_line_numbers,
             left_width_pct,
@@ -1316,8 +1367,14 @@ impl App {
             last_snapshot_id: None,
             terminal_selection: None,
             startup_log_selection: None,
+            pending_server_flip: None,
         };
-        app.restore_sessions();
+        // First boot relaunches prior sessions; a resume must not — the engine
+        // handed back from the web server already owns the live providers, and
+        // any session the user closed in the web UI must stay closed.
+        if matches!(restore, SessionRestore::Restore) {
+            app.restore_sessions();
+        }
         app.seed_pr_statuses_from_db();
         app.rebuild_left_items();
         app.reload_changed_files();
@@ -1325,7 +1382,47 @@ impl App {
         Ok(app)
     }
 
-    pub fn run(&mut self) -> Result<()> {
+    /// Rebuild an App around an EXISTING engine after the web server hands it
+    /// back. The engine's providers are live (PTYs never stopped across the
+    /// flip), so session restoration is skipped; only view state is rebuilt.
+    /// Keybindings, the interactive byte patterns, and the theme are re-derived
+    /// from `engine.config` exactly as bootstrap does, and a fresh SIGWINCH
+    /// handler is registered (signal-hook simply appends another setter on a new
+    /// flag — registering twice across flips is harmless).
+    pub fn resume(engine: Engine) -> Result<Self> {
+        logger::info("resuming dux TUI after the web server stopped");
+        let bindings = RuntimeBindings::from_keys_config(&engine.config.keys);
+        let interactive_patterns = bindings.interactive_byte_patterns();
+        let sigwinch_flag = Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&sigwinch_flag))?;
+        let (theme, theme_warning) =
+            crate::theme::load_or_fallback(&engine.config.ui.theme, &engine.paths);
+        let mut status = StatusLine::new(
+            "Web server stopped. Your agents kept running — reconnect to any session to pick up where it left off.",
+        );
+        if let Some(message) = theme_warning {
+            status.warning(message);
+        }
+        Self::assemble(
+            engine,
+            bindings,
+            interactive_patterns,
+            sigwinch_flag,
+            status,
+            theme,
+            SessionRestore::Skip,
+        )
+    }
+
+    /// Consume the App and hand back its engine. Used by the TUI→server flip:
+    /// the providers (PTYs) and the single-instance lock live in the engine and
+    /// must survive the flip, so the engine is moved out wholesale. Neither
+    /// `App` nor `Engine` implements `Drop`, so nothing is torn down here.
+    pub fn into_engine(self) -> Engine {
+        self.engine
+    }
+
+    pub fn run(&mut self) -> Result<RunExit> {
         self.engine.spawn_changed_files_poller();
         self.engine.spawn_branch_sync_worker();
         self.engine.spawn_project_branch_status_checks();
@@ -1333,8 +1430,8 @@ impl App {
         let mut terminal = ratatui::init();
         execute!(stdout(), EnableMouseCapture)?;
 
-        let result: Result<()> = {
-            loop {
+        let result: RunExit = {
+            'main: loop {
                 self.drain_events();
                 self.poll_pty_activity();
                 self.tick_count = self.tick_count.wrapping_add(1);
@@ -1363,6 +1460,15 @@ impl App {
                     continue;
                 }
 
+                // The `StartWebServer` palette action stashes a pre-bound
+                // listener (its pre-flight already succeeded) and we break here,
+                // after one more draw so the "Starting the web server…" Busy
+                // status is visible for the brief remainder. Teardown below runs
+                // identically to the quit path, then the binary takes over.
+                if let Some((listener, url)) = self.pending_server_flip.take() {
+                    break 'main RunExit::FlipToServer { listener, url };
+                }
+
                 if self.should_poll_raw_input() {
                     // Interactive mode: read raw stdin and forward to PTY.
                     // crossterm's event reader is not called — all bytes
@@ -1379,7 +1485,7 @@ impl App {
                         }
                     };
                     if should_exit {
-                        break;
+                        break 'main RunExit::Quit;
                     }
                 } else {
                     // Normal UI mode: use crossterm's structured event reader.
@@ -1457,17 +1563,16 @@ impl App {
                             }
                         }
                         if should_exit {
-                            break;
+                            break 'main RunExit::Quit;
                         }
                     }
                 }
             }
-            Ok(())
         };
 
         let _ = execute!(stdout(), DisableMouseCapture);
         ratatui::restore();
-        result
+        Ok(result)
     }
 
     fn should_poll_raw_input(&self) -> bool {
@@ -1776,6 +1881,10 @@ impl App {
             "change-project-default-provider" => self.open_change_project_default_provider_prompt(),
             "change-theme" => self.open_change_theme_prompt(),
             "reload-config" => self.reload_config_from_disk(),
+            "start-web-server" => {
+                self.start_web_server();
+                Ok(())
+            }
             "toggle-project-auto-reopen-agents" => self.toggle_project_auto_reopen_agents(),
             "toggle-agent-auto-reopen" => self.toggle_agent_auto_reopen(),
             "configure-startup-command" => self.open_configure_startup_command(),
@@ -2693,6 +2802,31 @@ pub(crate) fn sync_config_projects_with_store(
     Ok(())
 }
 
+/// Pre-flight for the in-process TUI→web flip: resolve the `[server]` bind
+/// through the shared safety gate and actually bind a std `TcpListener` BEFORE
+/// the TUI tears anything down. Returning the bound listener (rather than just
+/// the address) means there is no rebind race when the web server adopts it.
+///
+/// The display URL reflects the listener's `local_addr`, not the configured
+/// string, so an ephemeral `:0` port resolves to the real port the user can
+/// open. On any failure the TUI stays up and surfaces the (already actionable)
+/// error on the status line.
+fn preflight_server_listener(config: &Config) -> Result<(std::net::TcpListener, String)> {
+    let addr = dux_core::config::resolve_server_bind(
+        &config.server.bind,
+        config.server.insecure_allow_remote,
+        None,
+        false,
+    )?;
+    let listener = std::net::TcpListener::bind(addr).map_err(|err| {
+        anyhow::anyhow!(
+            "could not start the web server: {err} (is something already listening on {addr}?)"
+        )
+    })?;
+    let bound = listener.local_addr().unwrap_or(addr);
+    Ok((listener, format!("http://{bound}")))
+}
+
 fn validate_project_records(source: &str, projects: &[crate::config::ProjectConfig]) -> Result<()> {
     for (index, project) in projects.iter().enumerate() {
         for other in projects.iter().skip(index + 1) {
@@ -2874,6 +3008,72 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    fn server_test_config(bind: &str, insecure_allow_remote: bool) -> Config {
+        let mut config = Config::default();
+        config.server.bind = bind.to_string();
+        config.server.insecure_allow_remote = insecure_allow_remote;
+        config
+    }
+
+    #[test]
+    fn preflight_binds_loopback_and_reports_actual_port() {
+        // Port 0 lets the OS pick a free port; the display URL must reflect the
+        // ACTUAL bound port (via local_addr), not the configured ":0".
+        let config = server_test_config("127.0.0.1:0", false);
+        let (listener, url) =
+            preflight_server_listener(&config).expect("loopback bind should succeed");
+
+        let bound = listener.local_addr().expect("listener has a local addr");
+        assert!(bound.ip().is_loopback());
+        assert_ne!(bound.port(), 0, "OS must have assigned a real port");
+        assert_eq!(url, format!("http://{bound}"));
+        assert!(
+            !url.ends_with(":0"),
+            "URL must not show the placeholder port"
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_invalid_bind_string() {
+        let config = server_test_config("not-an-address", false);
+        let err = preflight_server_listener(&config)
+            .expect_err("an unparseable bind must fail pre-flight");
+        assert!(
+            format!("{err:#}").contains("invalid bind address"),
+            "error should explain the bad bind: {err:#}"
+        );
+    }
+
+    #[test]
+    fn preflight_refuses_non_loopback_without_opt_in() {
+        // Non-loopback bind without the insecure opt-in must be refused by the
+        // safety gate before any socket is opened.
+        let config = server_test_config("0.0.0.0:0", false);
+        let err = preflight_server_listener(&config)
+            .expect_err("non-loopback without opt-in must be refused");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("no authentication") && text.contains("insecure_allow_remote"),
+            "refusal should be actionable: {text}"
+        );
+    }
+
+    #[test]
+    fn preflight_reports_port_already_in_use() {
+        // Hold a loopback port, then ask the pre-flight to bind the same one.
+        let held = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a port");
+        let addr = held.local_addr().expect("held addr");
+        let config = server_test_config(&addr.to_string(), false);
+
+        let err = preflight_server_listener(&config)
+            .expect_err("binding an in-use port must fail pre-flight");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("could not start the web server") && text.contains(&addr.to_string()),
+            "collision error should name the address: {text}"
+        );
     }
 
     #[test]

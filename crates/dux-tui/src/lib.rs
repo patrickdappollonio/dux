@@ -24,14 +24,30 @@ use std::path::Path;
 
 use anyhow::Result;
 
+use dux_core::engine::Engine;
+
+/// How the TUI surface exited. `Done` ends the process; `FlipToServer` hands
+/// the live engine (PTYs still running, single-instance lock held inside the
+/// engine) and a pre-bound listener to the binary so the web server can take
+/// over the same process. The binary resumes the TUI via
+/// [`resume_after_server`] when the server stops.
+pub enum TuiExit {
+    Done,
+    FlipToServer {
+        engine: Box<Engine>,
+        listener: std::net::TcpListener,
+        url: String,
+    },
+}
+
 /// Run dux (TUI mode or a `config` subcommand). Called by the `dux` binary
 /// crate.
-pub fn run() -> Result<()> {
+pub fn run() -> Result<TuiExit> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
 
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_help();
-        return Ok(());
+        return Ok(TuiExit::Done);
     }
 
     let paths = config::DuxPaths::discover()?;
@@ -64,7 +80,8 @@ pub fn run() -> Result<()> {
             _ => None,
         };
 
-        return cli::run(config_args, &paths);
+        cli::run(config_args, &paths)?;
+        return Ok(TuiExit::Done);
     }
 
     // TUI: always create the root directory (so the lockfile can be
@@ -73,8 +90,33 @@ pub fn run() -> Result<()> {
     // empty root.
     std::fs::create_dir_all(&paths.root)?;
     let lock = acquire_lock_or_exit(&paths.lock_path);
-    let mut app = app::App::bootstrap_with_lock(paths, lock)?;
-    app.run()
+    let app = app::App::bootstrap_with_lock(paths, lock)?;
+    run_app(app)
+}
+
+/// Resume the TUI after the web server hands the engine back. The engine still
+/// owns the live providers and the single-instance lock, so this rebuilds the
+/// App view state around it (no session relaunch) and runs the loop. A resumed
+/// TUI can flip to the server again, so the flip↔serve cycle repeats.
+pub fn resume_after_server(engine: Box<Engine>) -> Result<TuiExit> {
+    let app = app::App::resume(*engine)?;
+    run_app(app)
+}
+
+/// Run an App's event loop and translate its [`app::RunExit`] into a
+/// [`TuiExit`] for the binary's orchestration loop. On a flip, the engine is
+/// moved out of the App (no `Drop` runs on the providers — neither `App` nor
+/// `Engine` has a `Drop` impl, so this is a plain move) and boxed for the
+/// caller; the single-instance lock rides along inside the engine.
+fn run_app(mut app: app::App) -> Result<TuiExit> {
+    match app.run()? {
+        app::RunExit::Quit => Ok(TuiExit::Done),
+        app::RunExit::FlipToServer { listener, url } => Ok(TuiExit::FlipToServer {
+            engine: Box::new(app.into_engine()),
+            listener,
+            url,
+        }),
+    }
 }
 
 pub fn print_help() {

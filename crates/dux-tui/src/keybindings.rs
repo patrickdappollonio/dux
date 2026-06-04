@@ -286,6 +286,17 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         }),
     },
     BindingDef {
+        action: Action::StartWebServer,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+        palette: Some(PaletteEntry {
+            name: "start-web-server",
+            description: "Stop the TUI and serve the dux web UI over your running agents",
+        }),
+    },
+    BindingDef {
         action: Action::ToggleProjectAutoReopenAgents,
         default_keys: &[],
         scopes: &[],
@@ -2244,6 +2255,47 @@ mod tests {
             let name = def.action.config_name();
             assert!(!name.is_empty());
         }
+    }
+
+    #[test]
+    fn start_web_server_is_palette_only_with_no_binding() {
+        let def = BINDING_DEFS
+            .iter()
+            .find(|d| d.action == Action::StartWebServer)
+            .expect("StartWebServer must be registered in BINDING_DEFS");
+
+        // It is a palette command with a name…
+        let palette = def
+            .palette
+            .as_ref()
+            .expect("StartWebServer must expose a palette entry");
+        assert_eq!(palette.name, "start-web-server");
+        assert!(!palette.description.is_empty());
+
+        // …but has no default key binding (palette-only) and no help section.
+        assert!(
+            def.default_keys.is_empty(),
+            "StartWebServer must have no default keybinding"
+        );
+        assert!(def.scopes.is_empty());
+        assert!(def.help.is_none());
+        assert_eq!(Action::StartWebServer.config_name(), "start_web_server");
+
+        // A default RuntimeBindings resolves no key to it in any scope.
+        let bindings = default_bindings();
+        assert!(
+            bindings.label_for(Action::StartWebServer).is_empty(),
+            "no key should be bound to StartWebServer by default"
+        );
+
+        // It shows up in the command palette listing.
+        assert!(
+            bindings
+                .filtered_palette("")
+                .iter()
+                .any(|b| b.palette_name == Some("start-web-server")),
+            "StartWebServer must appear in the command palette"
+        );
     }
 
     #[test]

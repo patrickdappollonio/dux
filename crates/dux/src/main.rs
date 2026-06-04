@@ -17,8 +17,43 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("server") => run_server(args),
-        _ => dux_tui::run(),
+        _ => run_tui_with_flip(),
     }
+}
+
+/// Default arm: run the TUI, and when it flips to the web server, serve the
+/// same engine in this process until the server stops, then resume the TUI.
+/// The cycle repeats until the user quits from either surface.
+///
+/// This intermediate step uses a `Continue`-only tick, so the only way out of
+/// the server is SIGINT/SIGTERM (→ `QuitProcess`); sub-step 5c replaces the
+/// tick with the interactive status screen that adds a return-to-TUI key.
+fn run_tui_with_flip() -> Result<()> {
+    let mut next = dux_tui::run()?;
+    loop {
+        match next {
+            dux_tui::TuiExit::Done => break,
+            dux_tui::TuiExit::FlipToServer {
+                engine,
+                listener,
+                url,
+            } => {
+                println!(
+                    "dux server running at {url} — Ctrl-C stops it (status screen lands in the next change)"
+                );
+                let (engine, exit) = dux_web::serve_with_engine(*engine, listener, || {
+                    dux_web::ServerTick::Continue
+                })?;
+                match exit {
+                    dux_web::ServerExit::QuitProcess => break,
+                    dux_web::ServerExit::ReturnToTui => {
+                        next = dux_tui::resume_after_server(Box::new(engine))?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn run_server(mut args: impl Iterator<Item = String>) -> Result<()> {
