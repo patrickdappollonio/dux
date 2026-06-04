@@ -133,33 +133,40 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
       socket.subscribe(id)
     }
 
-    // Fit + report the PTY size through ONE deduplicated path. Every resize we
-    // send triggers a SIGWINCH redraw in the child, and ResizeObserver fires an
-    // initial callback on observe — so the old unconditional fit-and-send here
-    // plus the observer's first tick produced back-to-back redraws at attach,
-    // visible as jitter. Only genuinely new dimensions are sent, and observer
-    // bursts are coalesced to one measurement per frame.
+    // Sizing has two halves with very different costs:
+    //  - LOCAL refits (fit.fit()) are cheap, so the canvas tracks the container
+    //    every frame while the user drags a divider or the window edge.
+    //  - PTY resizes are expensive: each one is a SIGWINCH that makes the child
+    //    TUI fully redraw. Sending them per-frame during a drag is the resize
+    //    jitter. So the send is DEBOUNCED — one resize with the final
+    //    dimensions once the drag settles — and deduplicated, since
+    //    ResizeObserver also fires an initial callback on observe.
     let lastRows = 0
     let lastCols = 0
     let fitFrame = 0
-    const syncSize = () => {
-      fit.fit()
+    let sendTimer: ReturnType<typeof setTimeout> | undefined
+    const sendSize = () => {
       if (term.rows !== lastRows || term.cols !== lastCols) {
         lastRows = term.rows
         lastCols = term.cols
         socket.resize(id, term.rows, term.cols)
       }
     }
-    syncSize()
+    // Attach: fit and report immediately so the launch/repaint uses real dims.
+    fit.fit()
+    sendSize()
 
     const ro = new ResizeObserver(() => {
       cancelAnimationFrame(fitFrame)
-      fitFrame = requestAnimationFrame(syncSize)
+      fitFrame = requestAnimationFrame(() => fit.fit())
+      clearTimeout(sendTimer)
+      sendTimer = setTimeout(sendSize, 200)
     })
     ro.observe(container)
 
     return () => {
       cancelAnimationFrame(fitFrame)
+      clearTimeout(sendTimer)
       ro.disconnect()
       dataSub.dispose()
       socket.onPtyBytes = () => {}
