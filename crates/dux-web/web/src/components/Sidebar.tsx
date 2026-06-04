@@ -204,7 +204,7 @@ function SessionSubItem({
         {...attributes}
         {...listeners}
         isActive={agentSelected}
-        className="max-md:pr-8 touch-none group-focus-within/menu-sub-item:pr-8 group-hover/menu-sub-item:pr-8 group-has-[[aria-expanded=true]]/menu-sub-item:pr-8"
+        className="max-md:pr-8 touch-manipulation group-focus-within/menu-sub-item:pr-8 group-hover/menu-sub-item:pr-8 group-has-[[aria-expanded=true]]/menu-sub-item:pr-8"
         onClick={() => selectSession(session.id)}
       >
         {/* All agents use the same Bot icon — provider is shown as text. */}
@@ -396,7 +396,7 @@ function ProjectItem({
         <CollapsibleTrigger
           {...attributes}
           {...listeners}
-          render={<SidebarMenuButton className="touch-none" />}
+          render={<SidebarMenuButton className="touch-manipulation" />}
         >
           {/* The folder itself signals the expand state — open when the project
               is expanded, closed when collapsed — instead of a chevron. */}

@@ -221,3 +221,23 @@ describe("applyPendingOrders", () => {
     expect(out.sessions.map((s) => s.id)).toEqual(["b", "a"])
   })
 })
+
+describe("applyPendingOrders with a drifted ViewModel", () => {
+  it("survives an overlay referencing a deleted session while a new one exists", () => {
+    // The Issue-2 self-heal path: the user reordered [a, b], then the server
+    // deleted "b" and a new session "c" appeared before the overlay cleared.
+    // The overlay's ghost id must be ignored, the unnamed newcomer must keep
+    // its slot, and nothing crashes or drops rows.
+    const projects = [project("p1")]
+    const sessions = [session("a", "p1"), session("c", "p1")]
+    const out = applyPendingOrders(
+      projects,
+      sessions,
+      { projectId: "p1", ids: ["b", "a"] },
+      null,
+    )
+    const ids = out.sessions.map((s) => s.id).sort()
+    expect(ids).toEqual(["a", "c"])
+    expect(out.sessions).toHaveLength(2)
+  })
+})

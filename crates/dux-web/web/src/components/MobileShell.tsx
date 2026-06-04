@@ -228,7 +228,7 @@ function SessionRow({
           {...attributes}
           {...listeners}
           variant={agentSelected ? "secondary" : "ghost"}
-          className="min-h-11 flex-1 touch-none justify-start gap-2 px-2"
+          className="min-h-11 flex-1 touch-manipulation justify-start gap-2 px-2"
           onClick={() => selectAndOpen(session.id)}
         >
           <Bot />
@@ -337,7 +337,7 @@ function ProjectBlock({
         <div
           {...attributes}
           {...listeners}
-          className="flex min-h-11 flex-1 touch-none items-center gap-2 px-2"
+          className="flex min-h-11 flex-1 touch-manipulation items-center gap-2 px-2"
         >
           <span className="truncate font-semibold">{name}</span>
           {sessions.length > 0 ? (

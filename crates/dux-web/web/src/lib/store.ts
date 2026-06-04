@@ -197,7 +197,12 @@ function pruneSelectionIfGone(vm: ViewModel): void {
 }
 
 socket.onConn = (conn) => {
-  setState({ conn })
+  // A connection break invalidates any in-flight optimistic reorder: the
+  // command (or its rejection) may have been lost, and after the reconnect
+  // nothing would ever reconcile a non-matching overlay — leaving the UI
+  // showing an order the server never persisted. Snap back to authoritative.
+  const patch = conn === "closed" || conn === "failed" ? clearPendingOrders() : {}
+  setState({ conn, ...patch })
 }
 
 // Show a toast colored by the engine's StatusTone. dux uses Info for positive
