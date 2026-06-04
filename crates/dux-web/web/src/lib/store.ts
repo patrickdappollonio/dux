@@ -137,6 +137,10 @@ function pruneSelectionIfGone(vm: ViewModel): void {
           s.terminals.some((t) => t.id === target.terminalId),
         )
   if (!stillExists) {
+    // `selectSession(null)` clears the target and, on mobile, unwinds the spoke
+    // so the back stack matches the screen (see `unwindMobileSpoke`). This is
+    // the other out-of-band clear path: a terminal whose PTY exited is dropped
+    // from the ViewModel while the user may be sitting in its spoke.
     selectSession(null)
   }
 }
@@ -237,6 +241,26 @@ window.addEventListener("popstate", () => {
   }
 })
 
+// INVARIANT: the number of history entries we've pushed equals the spoke depth
+// implied by `mobileScreen` (home = 0, terminal = 1, changes = 2). `mobileNavigate`
+// pushes on the way in; the popstate listener above pops on the way out. When the
+// focused target is cleared OUT-OF-BAND (an agent exits, or a terminal is pruned
+// from the ViewModel) the screen would otherwise fall back to home content while
+// our pushed entries linger, leaving Back as a stale no-op (terminal) or a
+// double-back (changes). This collapses the whole spoke back to home in one
+// `history.go`, which fires a SINGLE popstate at the destination; the listener
+// above then derives `mobileScreen: "home"` (selectedTarget is null by the time
+// it runs because callers clear it first), restoring the invariant.
+function unwindMobileSpoke(): void {
+  if (state.mobileScreen === "terminal") {
+    history.go(-1)
+  } else if (state.mobileScreen === "changes") {
+    history.go(-2)
+  }
+  // "home": no spoke entries to unwind. Desktop never advances past "home", so
+  // it never reaches this branch with entries to pop — desktop is untouched.
+}
+
 export function useDux(): DuxState {
   return useSyncExternalStore(subscribe, getSnapshot)
 }
@@ -245,7 +269,12 @@ export function useDux(): DuxState {
 // existing callers continue to work unchanged.
 export function selectSession(id: string | null): void {
   if (id === null) {
+    // Clear the target FIRST so any synchronous re-render shows the fallback,
+    // THEN collapse the mobile spoke so the back stack matches the screen. This
+    // is the out-of-band clear path (e.g. an agent exit) — see
+    // `unwindMobileSpoke`. Desktop stays on "home", so the unwind no-ops there.
     setState({ selectedTarget: null, selectedSessionId: null })
+    unwindMobileSpoke()
     return
   }
   setState({
@@ -388,17 +417,23 @@ export function setPaletteOpen(open: boolean): void {
 
 // Mobile hub-&-spoke navigation. Moving INTO a spoke ("terminal" or "changes")
 // pushes a history entry so the hardware/browser Back button unwinds the stack
-// one screen at a time (see the popstate listener below). Returning to "home"
-// does not push — Back from home is the browser default (leaves the app).
-// Re-navigating to the screen we're already on is a no-op so we never stack
-// duplicate history entries (e.g. switching sessions while already on the
-// terminal screen must not deepen the back stack).
+// one screen at a time (see the popstate listener above). Navigating to "home"
+// is a programmatic return: rather than just flipping state (which would leave
+// the pushed spoke entries dangling), it routes through `unwindMobileSpoke` so
+// the history depth collapses to match — keeping the back stack honest for any
+// future caller. Re-navigating to the screen we're already on is a no-op so we
+// never stack duplicate history entries (e.g. switching sessions while already
+// on the terminal screen must not deepen the back stack). The comparison reads
+// the LATEST `state.mobileScreen`, so a tap that races a pending popstate still
+// sees the up-to-date screen and won't double-push.
 export function mobileNavigate(screen: MobileScreen): void {
   if (screen === state.mobileScreen) return
-  setState({ mobileScreen: screen })
-  if (screen !== "home") {
-    history.pushState({ duxMobile: screen }, "")
+  if (screen === "home") {
+    unwindMobileSpoke()
+    return
   }
+  setState({ mobileScreen: screen })
+  history.pushState({ duxMobile: screen }, "")
 }
 
 export function reconnect(): void {
