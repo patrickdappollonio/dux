@@ -156,7 +156,11 @@ async fn handle_socket(socket: WebSocket, engine: EngineHandle) {
                                 send_binary(&sink, repaint).await;
                                 let _ = send_json(&sink, &ServerMessage::Subscribed { session_id })
                                     .await;
-                                pty_forwarder = Some(spawn_pty_forwarder(Arc::clone(&sink), rx));
+                                pty_forwarder = Some(spawn_pty_forwarder(
+                                    Arc::clone(&sink),
+                                    rx,
+                                    engine.shutdown_flag(),
+                                ));
                             }
                             Err(e) => {
                                 let _ =
@@ -187,7 +191,11 @@ async fn handle_socket(socket: WebSocket, engine: EngineHandle) {
                                     },
                                 )
                                 .await;
-                                pty_forwarder = Some(spawn_pty_forwarder(Arc::clone(&sink), rx));
+                                pty_forwarder = Some(spawn_pty_forwarder(
+                                    Arc::clone(&sink),
+                                    rx,
+                                    engine.shutdown_flag(),
+                                ));
                             }
                             Err(e) => {
                                 let _ =
@@ -293,20 +301,42 @@ async fn handle_socket(socket: WebSocket, engine: EngineHandle) {
     }
 }
 
+/// How long the forwarder's blocking reader parks per `recv_timeout` before
+/// re-checking `shutdown`. Bounds the worst-case time a forwarder lingers after
+/// a teardown begins, so the tokio blocking pool never wedges runtime shutdown.
+const FORWARDER_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Forward std-mpsc PTY bytes into the socket as binary frames, off the async runtime.
 ///
 /// Returns the async pump task's [`JoinHandle`]. Aborting it drops `async_rx`, which makes the
 /// blocking reader's `blocking_send` fail so the blocking task ends and drops its std `Receiver`;
 /// the owning `PtyClient` then prunes that stale subscriber on its next read.
+///
+/// The blocking reader parks on a bounded `recv_timeout` rather than `recv` so it can also exit on
+/// `shutdown`: the std-mpsc `Sender` lives in the `PtyClient` reader thread and, on a ReturnToTui
+/// flip, the engine (and thus that `Sender`) stays alive, so `recv` would never return Disconnected
+/// and would wedge the tokio blocking pool — hanging the runtime teardown. Polling `shutdown` every
+/// `FORWARDER_POLL` lets the task exit within one window of any teardown even with the engine alive.
 fn spawn_pty_forwarder(
     sink: SharedSink,
     rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
     let (tx, mut async_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
     tokio::task::spawn_blocking(move || {
-        while let Ok(chunk) = rx.recv() {
-            if tx.blocking_send(chunk).is_err() {
-                break;
+        loop {
+            match rx.recv_timeout(FORWARDER_POLL) {
+                Ok(chunk) => {
+                    if tx.blocking_send(chunk).is_err() {
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
     });

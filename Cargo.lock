@@ -681,6 +681,7 @@ dependencies = [
  "chrono",
  "dux-core",
  "futures-util",
+ "libc",
  "rust-embed",
  "serde",
  "serde_json",

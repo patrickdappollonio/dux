@@ -72,9 +72,17 @@ const QUIT_PTY_GRACE: Duration = Duration::from_millis(1500);
 
 /// Upper bound on how long the flip waits for the axum server task to finish
 /// after graceful shutdown is triggered. A wedged client connection must not be
-/// able to hang the flip back to the TUI, so we cap the join: the runtime is
-/// dropped afterward regardless, which aborts any straggler task.
+/// able to hang the flip back to the TUI, so we cap the join and tear the
+/// runtime down with a bounded timeout afterward.
 const SERVER_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Upper bound on the runtime teardown itself. `Runtime::drop` blocks until every
+/// `spawn_blocking` task returns and CANNOT abort them, so a parked blocking task
+/// (e.g. a PTY forwarder still inside `recv_timeout`) would hang an implicit drop
+/// forever. `shutdown_timeout` instead detaches stragglers after this window, so
+/// the flip back to the TUI always proceeds. The teardown flag should already
+/// have unparked the forwarders well within this bound; this is belt-and-braces.
+const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Serve the web UI over an EXISTING engine on the CALLER's thread, returning
 /// the engine when serving stops. This is the in-process TUI↔server flip's
@@ -98,6 +106,13 @@ pub fn serve_with_engine(
 ) -> Result<(Engine, ServerExit)> {
     let (handle, ends) = engine_actor::build_actor_channels(&engine);
     engine_actor::spawn_global_workers(&mut engine);
+
+    // Grab the teardown flag before the handle moves into the router. We trip it
+    // the instant the engine loop exits (before axum graceful shutdown) so any
+    // PTY forwarders parked on their blocking `recv_timeout` exit within one poll
+    // window — even on ReturnToTui, where the engine and its PtyClient senders
+    // stay alive and the forwarders' channels would otherwise never disconnect.
+    let shutdown_flag = handle.shutdown_flag();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -162,12 +177,25 @@ pub fn serve_with_engine(
         }
     });
 
+    // The engine loop has returned. Trip the teardown flag FIRST so any PTY
+    // forwarders parked on their blocking `recv_timeout` exit within one poll
+    // window — the engine (and its PtyClient senders) is still alive on
+    // ReturnToTui, so the forwarders' channels never disconnect on their own.
+    // Without this, `Runtime::shutdown_timeout` below would block until the flag
+    // window elapses (and an implicit drop would hang forever).
+    shutdown_flag.store(true, Ordering::SeqCst);
+
     // Trigger graceful axum shutdown and wait (bounded) for the server task to
-    // wind down. Dropping the runtime afterward aborts any straggler.
+    // wind down.
     let _ = shutdown_tx.send(true);
     runtime.block_on(async {
         let _ = tokio::time::timeout(SERVER_JOIN_TIMEOUT, server_task).await;
     });
+    // Tear the runtime down with a bounded timeout. An implicit `drop(runtime)`
+    // would block forever on any parked `spawn_blocking` task (drop cannot abort
+    // them); `shutdown_timeout` detaches stragglers instead, so the flip cannot
+    // wedge even if a forwarder were somehow still blocked.
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
 
     if matches!(exit, ServerExit::QuitProcess) {
         // Quit teardown: SIGTERM the children so CLIs can save state for a later
@@ -178,6 +206,23 @@ pub fn serve_with_engine(
     }
     // ReturnToTui intentionally leaves PTYs untouched so the resumed TUI finds
     // the same live agents.
+
+    if matches!(exit, ServerExit::ReturnToTui) {
+        // Restore default SIGINT/SIGTERM dispositions before handing control back
+        // to the TUI. tokio's unix signal support registers process-global
+        // handlers via signal-hook-registry that are NOT removed when the runtime
+        // is torn down: after one flip the dispositions stay non-default, so the
+        // resumed TUI would no longer die to an external `kill`/`kill -INT`.
+        // Resetting to SIG_DFL restores normal terminate-on-signal behavior.
+        // QuitProcess doesn't need this — the caller exits the process anyway.
+        //
+        // Unix-only by project policy (CLAUDE.md targets macOS + Linux), so no
+        // cfg gating is needed.
+        unsafe {
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            libc::signal(libc::SIGTERM, libc::SIG_DFL);
+        }
+    }
 
     Ok((engine, exit))
 }

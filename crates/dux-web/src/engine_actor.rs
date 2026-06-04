@@ -4,6 +4,8 @@
 //! a tick (so it also drains worker events and refreshes the ViewModel watch); replies
 //! over tokio oneshots; the latest ViewModel JSON over a tokio watch channel.
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -73,6 +75,10 @@ pub(crate) struct ActorLoopEnds {
     vm_tx: watch::Sender<String>,
     status_tx: broadcast::Sender<WireStatus>,
     commit_msg_tx: broadcast::Sender<String>,
+    /// Shared with the caller-facing [`EngineHandle`] and every PTY forwarder.
+    /// The inline `Shutdown` request trips this so forwarders exit promptly even
+    /// before the engine drop disconnects their channels.
+    shutdown_flag: Arc<AtomicBool>,
 }
 
 /// Build the actor channels and split them into the caller-facing
@@ -84,18 +90,21 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
     let (vm_tx, vm_rx) = watch::channel(view_model_json(engine));
     let (status_tx, _status_rx) = broadcast::channel::<WireStatus>(256);
     let (commit_msg_tx, _commit_msg_rx) = broadcast::channel::<String>(64);
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
     (
         EngineHandle {
             req_tx,
             view_model_rx: vm_rx,
             status_tx: status_tx.clone(),
             commit_msg_tx: commit_msg_tx.clone(),
+            shutdown_flag: Arc::clone(&shutdown_flag),
         },
         ActorLoopEnds {
             req_rx,
             vm_tx,
             status_tx,
             commit_msg_tx,
+            shutdown_flag,
         },
     )
 }
@@ -133,6 +142,13 @@ pub struct EngineHandle {
     view_model_rx: watch::Receiver<String>,
     status_tx: broadcast::Sender<WireStatus>,
     commit_msg_tx: broadcast::Sender<String>,
+    /// Tripped when the server is tearing down (ReturnToTui, QuitProcess, or a
+    /// `Shutdown` request). PTY forwarders poll it so their blocking
+    /// `recv_timeout` loop exits promptly even when the engine — and therefore
+    /// the std-mpsc `Sender` in the `PtyClient` reader thread — stays alive
+    /// across the flip. Without this, a forwarder parked on a never-disconnecting
+    /// channel would wedge the tokio blocking pool and hang the runtime teardown.
+    shutdown_flag: Arc<AtomicBool>,
 }
 
 // Axum state must be `Send + Sync`; prove the handle satisfies that here so a future
@@ -146,6 +162,16 @@ const _: fn() = || {
 impl EngineHandle {
     pub fn view_model_json(&self) -> String {
         self.view_model_rx.borrow().clone()
+    }
+
+    /// The teardown flag PTY forwarders poll. Cloned into each forwarder so a
+    /// blocking `recv_timeout` loop can break within one timeout window once the
+    /// server starts winding down, even though the underlying `PtyClient`'s
+    /// `Sender` outlives the flip (ReturnToTui keeps PTYs alive). The same flag
+    /// is held loop-side ([`ActorLoopEnds`]) and by `serve_with_engine`, which
+    /// trips it the instant the engine loop returns.
+    pub(crate) fn shutdown_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutdown_flag)
     }
 
     pub fn subscribe_view_model(&self) -> watch::Receiver<String> {
@@ -268,6 +294,7 @@ pub(crate) fn run_engine_loop(
         vm_tx,
         status_tx: thread_status_tx,
         commit_msg_tx: thread_commit_tx,
+        shutdown_flag,
     } = ends;
     // Subscribes waiting for their provider to come up via the worker-event drain.
     let mut pending: Vec<PendingSubscribe> = Vec::new();
@@ -408,6 +435,10 @@ pub(crate) fn run_engine_loop(
                     handle_subscribe(&mut engine, &mut pending, session_id, reply);
                 }
                 Ok(EngineRequest::Shutdown(reply)) => {
+                    // Trip the teardown flag first so any PTY forwarders exit
+                    // promptly (symmetry with the flip; harmless here since the
+                    // engine drop will also disconnect their channels).
+                    shutdown_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                     // SIGTERM children, wait briefly for them to flush state,
                     // then mark agent sessions Detached. Handled here (not in
                     // `handle_request`) because it must stop the loop.

@@ -14,7 +14,8 @@ use dux_core::engine::Engine;
 use dux_core::storage::SessionStore;
 use dux_web::bootstrap::bootstrap_engine;
 use dux_web::{ServerExit, ServerTick, serve_with_engine};
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::Message;
 
 fn sample_session(
     id: &str,
@@ -97,7 +98,7 @@ fn build_engine() -> (Engine, tempfile::TempDir) {
 /// A ws client connects and receives a `view_model` frame, then a programmatic
 /// `ReturnToTui` tick stops serving: the engine comes back (proved by the
 /// returned `ServerExit::ReturnToTui` and a surviving in-memory terminal), and
-/// a fresh connection to the port now fails (the server is actually down).
+/// the port can be re-bound (the server is actually down and released it).
 #[tokio::test]
 async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
     let (mut engine, _tmp) = build_engine();
@@ -185,7 +186,8 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
 
     serve_thread.join().expect("serve thread joined");
 
-    // The server is actually down: a fresh connection to the port must fail.
+    // The server is actually down: re-binding the same port must succeed (the
+    // listener was released when serving stopped).
     let reconnect = TcpListener::bind(addr);
     assert!(
         reconnect.is_ok(),
@@ -247,6 +249,108 @@ async fn serve_with_engine_quit_process_shuts_down_ptys() {
         "expected QuitProcess exit"
     );
     assert!(exited, "QuitProcess should have shut down the PTY child");
+
+    serve_thread.join().expect("serve thread joined");
+}
+
+/// Regression for the flip hang: a subscribed PTY forwarder must not wedge the
+/// runtime teardown on ReturnToTui. A ws client subscribes to a live `cat`
+/// companion terminal and gets an echoed binary frame (so the forwarder is live
+/// and parked on its blocking `recv_timeout`, with the engine — and thus the
+/// PtyClient `Sender` — still alive). Then a `ReturnToTui` tick stops serving,
+/// and the serve thread must JOIN within a tight bound. Before the fix the
+/// forwarder parked on `recv()` forever (the Sender never dropped on
+/// ReturnToTui), so dropping the multi-thread runtime hung indefinitely.
+#[tokio::test]
+async fn return_to_tui_does_not_hang_with_a_subscribed_pty() {
+    let (mut engine, _tmp) = build_engine();
+
+    // A live `cat`-backed companion terminal: writing to it echoes back, which
+    // gives us a forwarder binary frame to await.
+    let (terminal_id, _label) = engine
+        .create_companion_terminal("s1")
+        .expect("create terminal");
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_thread = Arc::clone(&stop);
+    let terminal_id_for_thread = terminal_id.clone();
+
+    let (result_tx, result_rx) = std::sync::mpsc::channel::<(ServerExit, bool)>();
+    let serve_thread = std::thread::spawn(move || {
+        let (returned_engine, exit) = serve_with_engine(engine, listener, || {
+            if stop_for_thread.load(Ordering::SeqCst) {
+                ServerTick::ReturnToTui
+            } else {
+                ServerTick::Continue
+            }
+        })
+        .expect("serve_with_engine");
+        // ReturnToTui keeps PTYs alive: the terminal must still be running.
+        let alive = returned_engine
+            .companion_terminals
+            .get(&terminal_id_for_thread)
+            .map(|t| !t.client.is_exited())
+            .unwrap_or(false);
+        result_tx.send((exit, alive)).unwrap();
+    });
+
+    // Subscribe to the companion terminal and prove the forwarder is live by
+    // writing input and awaiting the `cat` echo as a binary frame.
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .expect("connect");
+    let _ = ws.next().await; // initial view_model
+    ws.send(Message::Text(format!(
+        r#"{{"type":"subscribe_terminal","terminal_id":"{terminal_id}"}}"#
+    )))
+    .await
+    .expect("send subscribe_terminal");
+    ws.send(Message::Binary(b"dux-flip-marker\n".to_vec()))
+        .await
+        .expect("send pty input");
+
+    let mut acc = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
+            if let Message::Binary(b) = m {
+                acc.extend_from_slice(&b);
+            }
+            if String::from_utf8_lossy(&acc).contains("dux-flip-marker") {
+                break;
+            }
+        }
+    }
+    assert!(
+        String::from_utf8_lossy(&acc).contains("dux-flip-marker"),
+        "forwarder never streamed the echoed PTY bytes; got {} bytes",
+        acc.len()
+    );
+
+    // Flip back to the TUI. The serve thread must join PROMPTLY despite the
+    // parked forwarder. Measure the latency for the report; the outer recv
+    // timeout is the real guard against an infinite hang.
+    let flip_started = std::time::Instant::now();
+    stop.store(true, Ordering::SeqCst);
+
+    let (exit, alive) = result_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("serve thread must join (it hung before the interruptible-forwarder fix)");
+    let flip_latency = flip_started.elapsed();
+    eprintln!("ReturnToTui flip latency with a subscribed PTY: {flip_latency:?}");
+
+    assert!(
+        matches!(exit, ServerExit::ReturnToTui),
+        "expected ReturnToTui exit"
+    );
+    assert!(alive, "ReturnToTui must keep the companion terminal alive");
+    assert!(
+        flip_latency < Duration::from_secs(5),
+        "flip took too long ({flip_latency:?}); the forwarder likely wedged the runtime"
+    );
 
     serve_thread.join().expect("serve thread joined");
 }
