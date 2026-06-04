@@ -21,6 +21,7 @@ import type * as React from "react"
 
 import { StatusBadge } from "@/components/StatusBadge"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import {
   Empty,
   EmptyDescription,
@@ -120,7 +121,9 @@ function TerminalSubItem({
       <SidebarMenuAction
         title="Close terminal"
         aria-label="Close terminal"
-        className="md:opacity-0 group-focus-within/menu-sub-item:opacity-100 group-hover/menu-sub-item:opacity-100"
+        // top-1 vertically centers the 20px action in the 28px sub row; the
+        // component's default offsets are calibrated for the taller menu button.
+        className="top-1 md:opacity-0 group-focus-within/menu-sub-item:opacity-100 group-hover/menu-sub-item:opacity-100"
         onClick={(event) => {
           event.stopPropagation()
           deleteTerminal(terminal.id)
@@ -205,7 +208,9 @@ function SessionSubItem({
         <SidebarMenuAction
           render={<DropdownMenuTrigger />}
           aria-label="Session actions"
-          className="md:opacity-0 group-focus-within/menu-sub-item:opacity-100 group-hover/menu-sub-item:opacity-100 aria-expanded:opacity-100"
+          // top-1 vertically centers the 20px action in the 28px sub row; the
+          // component's default offsets are calibrated for the taller menu button.
+          className="top-1 md:opacity-0 group-focus-within/menu-sub-item:opacity-100 group-hover/menu-sub-item:opacity-100 aria-expanded:opacity-100"
         >
           <Ellipsis />
         </SidebarMenuAction>
@@ -284,7 +289,8 @@ function ProjectItem({
   selectedTarget: SelectedTarget | null
 }) {
   return (
-    <Collapsible defaultOpen className="group/collapsible">
+    // Agent-less projects start collapsed — there's nothing inside to show.
+    <Collapsible defaultOpen={sessions.length > 0} className="group/collapsible">
       <SidebarMenuItem>
         <CollapsibleTrigger render={<SidebarMenuButton />}>
           {/* The folder itself signals the expand state — open when the project
@@ -327,17 +333,19 @@ function ProjectItem({
           </DropdownMenuContent>
         </DropdownMenu>
         <CollapsibleContent>
-          {/* mr-0/pr-0 drop the nested list's right inset (the left side is the
-              tree indent) so agent rows use the sidebar's full width. */}
-          <SidebarMenuSub className="mr-0 pr-0">
-            {sessions.map((session) => (
-              <SessionSubItem
-                key={session.id}
-                session={session}
-                selectedTarget={selectedTarget}
-              />
-            ))}
-          </SidebarMenuSub>
+          {sessions.length > 0 ? (
+            // mr-0/pr-0 drop the nested list's right inset (the left side is the
+            // tree indent) so agent rows use the sidebar's full width.
+            <SidebarMenuSub className="mr-0 pr-0">
+              {sessions.map((session) => (
+                <SessionSubItem
+                  key={session.id}
+                  session={session}
+                  selectedTarget={selectedTarget}
+                />
+              ))}
+            </SidebarMenuSub>
+          ) : null}
         </CollapsibleContent>
       </SidebarMenuItem>
     </Collapsible>
@@ -510,18 +518,20 @@ export function AppSidebar() {
           </SidebarGroup>
         ) : null}
 
-        <SidebarGroup>
-          <SidebarMenu>
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                onClick={openAddProject}
-                className="text-sidebar-foreground/70"
-              >
-                <Plus />
-                Add project
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </SidebarMenu>
+        {/* A real button, not a fake list row. Hidden in icon-collapse mode
+            (a full-width labeled button can't shrink to the icon rail). */}
+        <SidebarGroup className="group-data-[collapsible=icon]:hidden">
+          <SidebarGroupContent className="px-1">
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full"
+              onClick={openAddProject}
+            >
+              <Plus />
+              Add project
+            </Button>
+          </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
 
