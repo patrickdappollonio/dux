@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
 import { Maximize2, Minimize2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { socket, useDux } from "@/lib/store"
+import { selectSession, socket, useDux } from "@/lib/store"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 
 interface TerminalPaneProps {
@@ -59,6 +59,18 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
   if (hasOutput && !everReady) {
     setEverReady(true)
   }
+
+  // Mirror the TUI's exit behavior: when the agent we were attached to stops
+  // running (it produced output in this pane, then its session left `active`
+  // — the exit prune marks it detached), reset the center pane back to the
+  // welcome screen. The "Agent exited" toast explains why. A fresh selection
+  // of the detached agent remounts this pane and relaunches it.
+  const sessionStatus = session?.status
+  useEffect(() => {
+    if (kind === "agent" && everReady && sessionStatus && sessionStatus !== "active") {
+      selectSession(null)
+    }
+  }, [kind, everReady, sessionStatus])
 
   useEffect(() => {
     const container = containerRef.current

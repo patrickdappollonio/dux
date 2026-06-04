@@ -12,6 +12,7 @@ import { ProjectSettingsDialog } from "@/components/ProjectSettingsDialog"
 import { RemoveProjectDialog } from "@/components/RemoveProjectDialog"
 import { StatusBar } from "@/components/StatusBar"
 import { TerminalPane } from "@/components/TerminalPane"
+import { Welcome } from "@/components/Welcome"
 import { Badge } from "@/components/ui/badge"
 import {
   Breadcrumb,
@@ -21,13 +22,6 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb"
 import { Button } from "@/components/ui/button"
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty"
 import {
   ResizableHandle,
   ResizablePanel,
@@ -42,7 +36,6 @@ import {
 import { Toaster } from "@/components/ui/sonner"
 import { setPaletteOpen, useDux } from "@/lib/store"
 import type { ConnState } from "@/lib/types"
-import { SquareTerminal } from "lucide-react"
 
 const CONN_BADGE: Record<
   ConnState,
@@ -120,21 +113,11 @@ function InsetHeader() {
 function TerminalArea() {
   const { selectedTarget } = useDux()
 
+  // Idle center pane: the duck + logo + a tip, exactly like the TUI's welcome
+  // screen. It vanishes the moment a target is selected (the loading state is
+  // the terminal pane's readiness spinner, not this).
   if (!selectedTarget) {
-    return (
-      <Empty className="h-full border-0">
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <SquareTerminal />
-          </EmptyMedia>
-          <EmptyTitle>Nothing selected</EmptyTitle>
-          <EmptyDescription>
-            Pick an agent session or a companion terminal from the sidebar to
-            attach it.
-          </EmptyDescription>
-        </EmptyHeader>
-      </Empty>
-    )
+    return <Welcome />
   }
 
   // For an agent the streamed id is the session id; for a terminal it is the
