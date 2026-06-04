@@ -1,5 +1,6 @@
 ---
 import "../styles/global.css";
+import DocsSearch from "../components/DocsSearch.astro";
 
 interface Props {
   title?: string;
@@ -13,7 +14,7 @@ interface Props {
 const {
   title = "dux: run multiple Claude Code, Codex & Gemini agents in parallel | getdux.app",
   description = "dux is a fast terminal UI that runs multiple AI coding agents (Claude Code, Codex, Gemini, OpenCode, or any CLI) in parallel across git worktrees. Real CLIs, real PTYs, no protocol layers. Maximum throughput, minimum context switching.",
-  ogImage = "/og.svg",
+  ogImage = "/og.png",
   noIndex = false,
   emitStructuredData = true,
 } = Astro.props;
@@ -132,7 +133,7 @@ const sd = {
     <meta property="og:site_name" content="dux" />
     <meta property="og:locale" content="en_US" />
     <meta property="og:image" content={ogImageURL} />
-    <meta property="og:image:type" content="image/svg+xml" />
+    <meta property="og:image:type" content="image/png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
     <meta property="og:image:alt" content="dux: a terminal UI for running multiple AI coding agents in parallel across git worktrees" />
@@ -180,6 +181,10 @@ const sd = {
   </head>
   <body class="text-[color:var(--color-text)]">
     <slot />
+
+    {/* Global docs search modal. Opened from the header button or Cmd/Ctrl-K;
+        the Pagefind engine is lazy-loaded only when first opened. */}
+    <DocsSearch />
 
     {/* Mark every off-site link: open in a new tab, harden rel, and (for
         inline links) append an external-link glyph. Runs once on load and

@@ -1,0 +1,59 @@
+name: Install script
+
+on:
+  pull_request:
+    paths:
+      - "install.sh"
+      - ".github/workflows/install-script-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "install.sh"
+      - ".github/workflows/install-script-ci.yml"
+
+concurrency:
+  group: install-script-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    name: Install ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: v0.1.0
+            version: v0.1.0
+          - name: latest
+            version: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run install.sh
+        env:
+          DUX_VERSION: ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+
+          install_dir="$RUNNER_TEMP/dux-${{ matrix.name }}/bin"
+          mkdir -p "$install_dir"
+
+          echo "$install_dir" >> "$GITHUB_PATH"
+          export PATH="$install_dir:$PATH"
+
+          DUX_INSTALL_DIR="$install_dir" bash ./install.sh
+
+          if ! command -v dux >/dev/null 2>&1; then
+            echo "::error::dux was not found on PATH after install"
+            exit 1
+          fi
+
+          if [ ! -x "$install_dir/dux" ]; then
+            echo "::error::install.sh did not create an executable dux binary"
+            exit 1
+          fi
