@@ -18,6 +18,7 @@ import {
 import { Suspense } from "react"
 
 import { ChangedFiles } from "@/components/ChangedFiles"
+import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
 import { StatusBadge } from "@/components/StatusBadge"
 import { Badge } from "@/components/ui/badge"
@@ -493,14 +494,18 @@ function TerminalScreen() {
 
       <div className="min-h-0 flex-1">
         {/* Suspense fallback null: the lazy chunk loads fast and TerminalPane
-            shows its own readiness spinner once mounted. */}
-        <Suspense fallback={null}>
-          <LazyTerminalPane
-            key={targetId}
-            kind={selectedTarget.kind}
-            id={targetId}
-          />
-        </Suspense>
+            shows its own readiness spinner once mounted. ChunkBoundary wraps
+            Suspense so a stale-bundle import failure recovers instead of
+            unmounting the tree. */}
+        <ChunkBoundary>
+          <Suspense fallback={null}>
+            <LazyTerminalPane
+              key={targetId}
+              kind={selectedTarget.kind}
+              id={targetId}
+            />
+          </Suspense>
+        </ChunkBoundary>
       </div>
     </div>
   )

@@ -4,6 +4,7 @@ import { Suspense } from "react"
 import { AddProjectDialog } from "@/components/AddProjectDialog"
 import { AppSidebar } from "@/components/Sidebar"
 import { ChangedFiles } from "@/components/ChangedFiles"
+import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { CommandPalette } from "@/components/CommandPalette"
 import { CommitDialog } from "@/components/CommitDialog"
 import { CreateAgentDialog } from "@/components/CreateAgentDialog"
@@ -126,15 +127,19 @@ function TerminalArea() {
   // Suspense fallback is null: the lazy chunk loads fast and TerminalPane shows
   // its own readiness spinner the moment it mounts, so a fallback spinner here
   // would just double up.
+  // ChunkBoundary wraps Suspense (not inside it) so a failed lazy import after a
+  // server redeploy is caught and recovered instead of unmounting the tree.
   return (
     <div className="h-full min-h-0">
-      <Suspense fallback={null}>
-        <LazyTerminalPane
-          key={targetId}
-          kind={selectedTarget.kind}
-          id={targetId}
-        />
-      </Suspense>
+      <ChunkBoundary>
+        <Suspense fallback={null}>
+          <LazyTerminalPane
+            key={targetId}
+            kind={selectedTarget.kind}
+            id={targetId}
+          />
+        </Suspense>
+      </ChunkBoundary>
     </div>
   )
 }

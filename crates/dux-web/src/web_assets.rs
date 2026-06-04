@@ -36,6 +36,15 @@ pub async fn static_handler(uri: Uri) -> Response {
         }
         return (headers, content.data.into_owned()).into_response();
     }
+    // The hashed bundle lives under `assets/`. A miss here means the browser is
+    // requesting a chunk URL from a stale `index.html` (the binary was rebuilt
+    // and restarted with a new content hash). Returning the SPA `index.html`
+    // would hand back HTML for a `*.js` import(), the browser rejects HTML as a
+    // module, and React.lazy unmounts the whole tree. A real 404 lets the
+    // client surface a "reload needed" error instead of silently white-screening.
+    if path.starts_with("assets/") {
+        return (StatusCode::NOT_FOUND, "asset not found").into_response();
+    }
     match WebAssets::get("index.html") {
         Some(content) => (
             [(header::CONTENT_TYPE, "text/html".to_string())],

@@ -14,10 +14,17 @@ const listeners = new Set<() => void>()
 // notifies every subscriber so they re-render highlighted.
 function loadHighlighter(): Promise<void> {
   if (loadPromise) return loadPromise
-  loadPromise = import("highlight.js/lib/common").then((m) => {
-    hljs = m.default
-    for (const listener of listeners) listener()
-  })
+  loadPromise = import("highlight.js/lib/common")
+    .then((m) => {
+      hljs = m.default
+      for (const listener of listeners) listener()
+    })
+    .catch(() => {
+      // The chunk failed to load (e.g. a stale tab requesting a hashed URL the
+      // restarted server no longer serves). Swallow it: `ready` stays false, so
+      // highlightLine() keeps rendering escaped plain text — the graceful
+      // fallback — and we avoid an unhandled rejection in the console.
+    })
   return loadPromise
 }
 

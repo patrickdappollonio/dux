@@ -109,6 +109,48 @@ async fn service_worker_served_no_cache_and_js_mime() {
 }
 
 #[tokio::test]
+async fn missing_hashed_asset_returns_404_not_spa_fallback() {
+    // A request for a hashed bundle chunk that does not exist must 404, NOT fall
+    // back to index.html. Serving HTML for a `*.js` import() makes the browser
+    // reject it as a module, which unmounts the React tree (white screen). This
+    // happens after a rebuild+restart while a stale tab is still open.
+    let (_tmp, app) = test_router();
+    let resp = get(app, "/assets/nonexistent-deadbeef.js").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "a missing hashed asset must 404 so the client can recover, not get the SPA shell"
+    );
+    let ctype = header(&resp, "content-type").unwrap_or_default();
+    assert!(
+        !ctype.contains("html"),
+        "a missing asset must not be served as text/html, got {ctype}"
+    );
+}
+
+#[tokio::test]
+async fn unknown_non_asset_path_still_serves_spa_shell() {
+    // Client-side routes (anything outside `assets/`) must keep falling back to
+    // the SPA index so deep links and the router keep working.
+    let (_tmp, app) = test_router();
+    let resp = get(app, "/some/client/route").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ctype = header(&resp, "content-type").unwrap_or_default();
+    assert!(
+        ctype.contains("html"),
+        "an unknown non-asset path must serve the SPA shell as text/html, got {ctype}"
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&bytes).to_lowercase();
+    assert!(
+        html.contains("<!doctype html") || html.contains("id=\"root\""),
+        "the SPA shell must be served for client routes"
+    );
+}
+
+#[tokio::test]
 async fn offline_page_reachable_and_not_shadowed_by_spa_fallback() {
     let (_tmp, app) = test_router();
     let resp = get(app, "/offline.html").await;
