@@ -156,6 +156,8 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
     fit.fit()
     sendSize()
 
+    // (Known edge: background tabs throttle rAF but not timers, so a resize
+    // while hidden can send pre-fit dims; the next foreground tick corrects it.)
     const ro = new ResizeObserver(() => {
       cancelAnimationFrame(fitFrame)
       fitFrame = requestAnimationFrame(() => fit.fit())
