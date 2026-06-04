@@ -299,8 +299,11 @@ function ProjectItem({
           <FolderOpen className="hidden group-data-[state=open]/collapsible:block" />
           {/* font-semibold makes project names visually distinct from agent rows. */}
           <span className="truncate font-semibold">{name}</span>
-          {/* Session count badge sits inline, right after the name. */}
-          <Badge variant="secondary" className="shrink-0">{sessions.length}</Badge>
+          {/* Session count badge sits inline, right after the name — omitted
+              for agent-less projects (their group heading already says so). */}
+          {sessions.length > 0 ? (
+            <Badge variant="secondary" className="shrink-0">{sessions.length}</Badge>
+          ) : null}
         </CollapsibleTrigger>
         {/* The dropdown trigger is a sibling of the CollapsibleTrigger so its
             click does not toggle the collapsible. */}
