@@ -9,7 +9,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
-import { isValidAgentName } from "@/lib/agentName"
+import { isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
 import {
   closeCreateAgent,
   createAgent,
@@ -30,14 +30,17 @@ export function CreateAgentDialog() {
     createAgentTarget,
     createAgentDraft,
     createAgentRandomize,
+    createAgentNamePending,
     viewModel,
   } = useDux()
   const open = createAgentTarget !== null
   const project = viewModel?.projects.find((p) => p.id === createAgentTarget)
   const projectName = project?.name ?? "project"
 
-  // Checked but no name yet = a generation request is in flight; show a spinner.
-  const generating = createAgentRandomize && createAgentDraft === ""
+  // A generation request is in flight: show the spinner and disable the input
+  // so a late reply can never clobber text typed in the meantime. Tracked
+  // explicitly in the store — manually clearing the input does NOT fake this.
+  const generating = createAgentNamePending
   // The Create button is gated only when there's a non-empty invalid name (e.g.
   // a trailing slash mid-typing). Empty is allowed: the server auto-generates,
   // the equivalent outcome to the TUI's generate-a-pet-name path.
@@ -67,7 +70,22 @@ export function CreateAgentDialog() {
         <div className="relative">
           <Input
             value={createAgentDraft}
-            onChange={(e) => setCreateAgentDraft(e.target.value)}
+            onChange={(e) => {
+              const el = e.target
+              const raw = el.value
+              const caret = el.selectionStart ?? raw.length
+              setCreateAgentDraft(raw)
+              // When sanitization changes the string (space→dash keeps the
+              // length; dropped chars shrink it), React re-renders the
+              // controlled value and the browser parks the caret at the end —
+              // a jump on every mid-string edit. Restore it adjusted for the
+              // length delta so typing in the middle of a name stays put.
+              const sanitized = sanitizeAgentName(raw)
+              if (sanitized !== raw) {
+                const next = Math.max(0, caret - (raw.length - sanitized.length))
+                requestAnimationFrame(() => el.setSelectionRange(next, next))
+              }
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault()

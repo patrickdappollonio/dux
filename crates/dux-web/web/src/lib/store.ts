@@ -66,6 +66,12 @@ export interface DuxState {
   createAgentDraft: string
   createAgentRandomize: boolean
   createAgentGeneratedName: string | null
+  //   - `createAgentNamePending`: a generate-name request is in flight. Drives
+  //     the dialog's spinner and disables the input so a late reply can never
+  //     clobber text the user typed in the meantime. Explicit rather than
+  //     inferred from an empty draft, so manually clearing the input doesn't
+  //     fake a phantom "generating" state.
+  createAgentNamePending: boolean
   paletteOpen: boolean
   // Which screen the mobile shell is showing. Always "home" on desktop, which
   // ignores it. Only the mobile UI advances it past "home".
@@ -116,6 +122,7 @@ let state: DuxState = {
   createAgentDraft: "",
   createAgentRandomize: false,
   createAgentGeneratedName: null,
+  createAgentNamePending: false,
   paletteOpen: false,
   mobileScreen: "home",
   pendingSessionOrder: null,
@@ -309,7 +316,11 @@ socket.onDirEntries = (path, entries, error) => {
 // unchecked the box before the reply landed (a stale reply must not refill).
 socket.onAgentName = (name) => {
   if (state.createAgentTarget !== null && state.createAgentRandomize) {
-    setState({ createAgentDraft: name, createAgentGeneratedName: name })
+    setState({
+      createAgentDraft: name,
+      createAgentGeneratedName: name,
+      createAgentNamePending: false,
+    })
   }
 }
 
@@ -502,6 +513,7 @@ export function openCreateAgent(projectId: string): void {
     createAgentDraft: "",
     createAgentRandomize: randomize,
     createAgentGeneratedName: null,
+    createAgentNamePending: randomize,
   })
   if (randomize) socket.generateAgentName()
 }
@@ -512,6 +524,7 @@ export function closeCreateAgent(): void {
     createAgentDraft: "",
     createAgentRandomize: false,
     createAgentGeneratedName: null,
+    createAgentNamePending: false,
   })
 }
 
@@ -531,7 +544,7 @@ export function setCreateAgentDraft(raw: string): void {
 //          keep the user's edits. Either way, forget the generated name.
 export function toggleCreateAgentRandomize(): void {
   if (!state.createAgentRandomize) {
-    setState({ createAgentRandomize: true })
+    setState({ createAgentRandomize: true, createAgentNamePending: true })
     socket.generateAgentName()
   } else {
     const keepText = state.createAgentDraft !== state.createAgentGeneratedName
@@ -539,6 +552,9 @@ export function toggleCreateAgentRandomize(): void {
       createAgentRandomize: false,
       createAgentDraft: keepText ? state.createAgentDraft : "",
       createAgentGeneratedName: null,
+      // Unchecking abandons any in-flight request; its reply is ignored by
+      // `onAgentName` (randomize is false by then), so stop the spinner now.
+      createAgentNamePending: false,
     })
   }
 }
