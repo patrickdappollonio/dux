@@ -1,6 +1,5 @@
 import {
   Bot,
-  ChevronRight,
   Download,
   Ellipsis,
   Folder,
@@ -288,12 +287,14 @@ function ProjectItem({
     <Collapsible defaultOpen className="group/collapsible">
       <SidebarMenuItem>
         <CollapsibleTrigger render={<SidebarMenuButton />}>
-          <Folder />
+          {/* The folder itself signals the expand state — open when the project
+              is expanded, closed when collapsed — instead of a chevron. */}
+          <Folder className="group-data-[state=open]/collapsible:hidden" />
+          <FolderOpen className="hidden group-data-[state=open]/collapsible:block" />
           {/* font-semibold makes project names visually distinct from agent rows. */}
           <span className="truncate font-semibold">{name}</span>
           {/* Session count badge sits inline, right after the name. */}
           <Badge variant="secondary" className="shrink-0">{sessions.length}</Badge>
-          <ChevronRight className="ml-auto shrink-0 transition-transform group-data-[state=open]/collapsible:rotate-90" />
         </CollapsibleTrigger>
         {/* The dropdown trigger is a sibling of the CollapsibleTrigger so its
             click does not toggle the collapsible. */}
