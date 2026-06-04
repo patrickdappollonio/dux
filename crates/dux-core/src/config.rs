@@ -138,6 +138,13 @@ pub struct EditorConfig {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerConfig {
+    pub bind: String,
+    pub insecure_allow_remote: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OneshotOutput {
     Stdout,
@@ -286,6 +293,15 @@ impl Default for EditorConfig {
     fn default() -> Self {
         Self {
             default: "cursor".to_string(),
+        }
+    }
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            bind: "127.0.0.1:8080".to_string(),
+            insecure_allow_remote: false,
         }
     }
 }
@@ -749,6 +765,8 @@ pub struct Config {
     pub projects: Vec<ProjectConfig>,
     pub ui: UiConfig,
     pub editor: EditorConfig,
+    #[serde(default)]
+    pub server: ServerConfig,
     pub keys: KeysConfig,
     pub macros: MacrosConfig,
 }
@@ -808,6 +826,7 @@ impl Default for Config {
                 theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
             },
             editor: EditorConfig::default(),
+            server: ServerConfig::default(),
             keys: KeysConfig::default(),
             macros: MacrosConfig::default(),
         }
@@ -1252,6 +1271,43 @@ github_integration = false
             config.providers.commands.contains_key("codex"),
             "codex provider should be present via defaults"
         );
+    }
+
+    #[test]
+    fn server_config_defaults_when_section_absent() {
+        // A config TOML with no [server] section must still parse and yield the
+        // safe loopback defaults.
+        let config: Config = toml::from_str("").expect("empty config should parse");
+        assert_eq!(config.server.bind, "127.0.0.1:8080");
+        assert!(!config.server.insecure_allow_remote);
+    }
+
+    #[test]
+    fn server_config_parses_full_section() {
+        let config: Config = toml::from_str(
+            r#"
+[server]
+bind = "0.0.0.0:9000"
+insecure_allow_remote = true
+"#,
+        )
+        .expect("config with full [server] should parse");
+        assert_eq!(config.server.bind, "0.0.0.0:9000");
+        assert!(config.server.insecure_allow_remote);
+    }
+
+    #[test]
+    fn server_config_partial_section_defaults_remaining_fields() {
+        // Only `bind` is provided; `insecure_allow_remote` must default to false.
+        let config: Config = toml::from_str(
+            r#"
+[server]
+bind = "0.0.0.0:9000"
+"#,
+        )
+        .expect("config with partial [server] should parse");
+        assert_eq!(config.server.bind, "0.0.0.0:9000");
+        assert!(!config.server.insecure_allow_remote);
     }
 
     #[test]

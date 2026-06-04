@@ -374,6 +374,29 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Str(c.editor.default.clone()),
         },
         ConfigEntry::Blank,
+        ConfigEntry::Section("server"),
+        ConfigEntry::Field {
+            key: "bind",
+            comment: Some(CommentSource::Static(
+                "# Address and port the `dux server` web UI listens on.\n\
+                 # Must be in IP:port form. The default 127.0.0.1:8080 is loopback,\n\
+                 # meaning the web UI is reachable only from this machine.\n\
+                 # Use 0.0.0.0:8080 to listen on every interface (see the warning below).",
+            )),
+            value_fn: |c| FieldValue::Str(c.server.bind.clone()),
+        },
+        ConfigEntry::Field {
+            key: "insecure_allow_remote",
+            comment: Some(CommentSource::Static(
+                "# Allow binding to a non-loopback address even though the web UI has\n\
+                 # NO authentication yet: anyone who can reach the port can fully control\n\
+                 # your agents and worktrees. Keep this false unless you understand the\n\
+                 # risk (for example, brief LAN testing on a trusted network).\n\
+                 # When false, `dux server` refuses to start on a non-loopback bind.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.server.insecure_allow_remote),
+        },
+        ConfigEntry::Blank,
         ConfigEntry::Keys,
         ConfigEntry::Blank,
         ConfigEntry::Macros,
@@ -890,6 +913,9 @@ mod tests {
         assert!(rendered.contains("commit_pane_height_pct = "));
         assert!(rendered.contains("[editor]"));
         assert!(rendered.contains("default = \"cursor\""));
+        assert!(rendered.contains("[server]"));
+        assert!(rendered.contains("bind = \"127.0.0.1:8080\""));
+        assert!(rendered.contains("insecure_allow_remote = false"));
         assert!(rendered.contains("[keys]"));
         assert!(rendered.contains("show_terminal_keys = true"));
         assert!(rendered.contains("move_down = "));

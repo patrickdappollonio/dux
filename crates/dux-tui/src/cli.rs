@@ -265,6 +265,20 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         &current.editor.default,
     );
 
+    // [server]
+    diff_str(
+        &mut changes,
+        "server.bind",
+        &defaults.server.bind,
+        &current.server.bind,
+    );
+    diff_bool(
+        &mut changes,
+        "server.insecure_allow_remote",
+        defaults.server.insecure_allow_remote,
+        current.server.insecure_allow_remote,
+    );
+
     // [terminal]
     diff_str(
         &mut changes,
