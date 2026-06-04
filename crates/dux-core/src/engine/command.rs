@@ -687,10 +687,11 @@ fn validate_reorder(current: &[String], requested: &[String], noun: &str) -> any
 
 /// Re-sort `items` so that elements for which `position` returns `Some(p)` are
 /// ordered by `p` among themselves, while elements returning `None` keep their
-/// original relative order. The slots a positioned item may occupy are exactly
-/// the slots its group already occupied, so out-of-group ("None") items never
-/// move. This is how a single project's sessions get reordered without
-/// disturbing any other project's rows in the shared Vec.
+/// original relative order. Note that absolute interleaving between the two
+/// groups MAY change (positioned items can compact toward the front of the
+/// range they sort into); what is guaranteed is each group's internal relative
+/// order. That is sufficient here because both surfaces group sessions by
+/// project before display, so only per-project relative order is observable.
 fn reorder_in_place<T>(items: &mut Vec<T>, position: impl Fn(&T) -> Option<usize>) {
     // Build the desired index order: a stable sort of the original indices by
     // (key, original_index), where the key is the new position for positioned

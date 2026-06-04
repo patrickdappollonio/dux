@@ -438,11 +438,50 @@ impl SessionStore {
     }
 
     pub fn upsert_session(&self, session: &AgentSession) -> Result<()> {
-        // A brand-new session lands at the TOP of its project's order:
-        // one position above the current minimum (negative values are fine —
-        // positions are relative, only their ordering matters). On UPDATE the
-        // `on conflict` set deliberately omits `sort_order` so re-upserting an
-        // existing session never disturbs the user's chosen order.
+        // UPDATE first: existing sessions are re-upserted constantly (status
+        // changes, provider starts), and that hot path must not pay the
+        // min(sort_order) placement query below. The SET list deliberately
+        // omits `sort_order` so re-upserting an existing session never
+        // disturbs the user's chosen order.
+        let updated = self.conn.execute(
+            r#"
+            update agent_sessions set
+                project_path=?2,
+                provider=?3,
+                source_branch=?4,
+                branch_name=?5,
+                worktree_path=?6,
+                title=?7,
+                started_providers=?8,
+                desired_running=?9,
+                auto_reopen_enabled=?10,
+                status=?11,
+                updated_at=?12
+            where id = ?1
+            "#,
+            params![
+                session.id,
+                session.project_path,
+                session.provider.as_str(),
+                session.source_branch,
+                session.branch_name,
+                session.worktree_path,
+                session.title,
+                serialize_started_providers(&session.started_providers),
+                session.desired_running,
+                session.auto_reopen_enabled,
+                session.status.as_str(),
+                session.updated_at.to_rfc3339(),
+            ],
+        )?;
+        if updated > 0 {
+            return Ok(());
+        }
+        // A brand-new session lands at the TOP of its project's order: one
+        // position above the current minimum (negative values are fine —
+        // positions are relative, only their ordering matters). The engine is
+        // single-threaded over this connection, so the UPDATE-miss → INSERT
+        // sequence cannot race.
         let new_sort_order = self
             .min_session_sort_order(&session.project_id)?
             .unwrap_or(1)
@@ -453,18 +492,6 @@ impl SessionStore {
                 (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, desired_running, auto_reopen_enabled, status, sort_order, created_at, updated_at)
             values
                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
-            on conflict(id) do update set
-                project_path=excluded.project_path,
-                provider=excluded.provider,
-                source_branch=excluded.source_branch,
-                branch_name=excluded.branch_name,
-                worktree_path=excluded.worktree_path,
-                title=excluded.title,
-                started_providers=excluded.started_providers,
-                desired_running=excluded.desired_running,
-                auto_reopen_enabled=excluded.auto_reopen_enabled,
-                status=excluded.status,
-                updated_at=excluded.updated_at
             "#,
             params![
                 session.id,
@@ -1155,6 +1182,48 @@ mod tests {
             .upsert_session(&test_session_in("b", "proj", now, now))
             .unwrap(); // sort_order -1
         assert_eq!(store.min_session_sort_order("proj").unwrap(), Some(-1));
+    }
+
+    #[test]
+    fn half_upgrade_all_zero_sort_orders_fall_back_to_legacy_order() {
+        // Simulates the crash window where the sort_order column was added but
+        // the one-time backfill never ran (on the next start `ensure_column`
+        // reports "already present", so the backfill is permanently skipped):
+        // every row ties at 0, and load_sessions must fall back to the legacy
+        // updated_at DESC order. New sessions must still land on top at -1,
+        // and the first explicit reorder self-heals positions to 0..n.
+        let store = test_store();
+        let now = Utc::now();
+        store
+            .upsert_session(&test_session_in(
+                "old",
+                "proj",
+                now - Duration::minutes(10),
+                now - Duration::minutes(10),
+            ))
+            .unwrap();
+        store
+            .upsert_session(&test_session_in("new", "proj", now, now))
+            .unwrap();
+        // Flatten every position to 0 — the half-upgraded state.
+        store
+            .conn
+            .execute("update agent_sessions set sort_order = 0", [])
+            .unwrap();
+
+        let ids: Vec<String> = store
+            .load_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(ids, ["new", "old"]); // updated_at DESC tie-break
+
+        store
+            .upsert_session(&test_session_in("fresh", "proj", now, now))
+            .unwrap();
+        let first = store.load_sessions().unwrap().remove(0);
+        assert_eq!(first.id, "fresh"); // -1 sorts above the zeros
     }
 }
 
