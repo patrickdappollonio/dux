@@ -129,8 +129,17 @@ function TerminalArea() {
   // would just double up.
   // ChunkBoundary wraps Suspense (not inside it) so a failed lazy import after a
   // server redeploy is caught and recovered instead of unmounting the tree.
+  //
+  // overflow-hidden is load-bearing: during a divider/window resize the
+  // terminal keeps its previous size until the next-rAF refit, so for one
+  // frame it overflows this box. The ResizablePanel's inner wrapper is
+  // `overflow: auto` — left unclipped, that one-frame overflow sprouts real
+  // div scrollbars whose width shrinks the content box, which retriggers the
+  // ResizeObserver, which refits, which toggles the scrollbar again: a
+  // visible jitter loop. Clipping here means the transient overflow is
+  // simply invisible and the loop can never start.
   return (
-    <div className="h-full min-h-0">
+    <div className="h-full min-h-0 overflow-hidden">
       <ChunkBoundary>
         <Suspense fallback={null}>
           <LazyTerminalPane

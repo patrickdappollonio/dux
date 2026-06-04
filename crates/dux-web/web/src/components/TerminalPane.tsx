@@ -289,13 +289,23 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
   // until the PTY emits its first output (latched via `everReady`). On mobile it
   // becomes the flex-1 child of a column root so the accessory bar can sit
   // beneath it; on desktop it stays the lone full-size element.
+  //
+  // overflow-hidden: the pane is its own clip boundary. Between a container
+  // resize and the next-rAF refit, xterm still holds its previous (possibly
+  // larger) size; if that one-frame overflow escapes to a scrollable ancestor
+  // it flashes scrollbars and oscillates the layout (scrollbar shrinks the box
+  // → ResizeObserver → refit → scrollbar gone → grow → repeat). Clipping at
+  // the pane covers every host: the desktop ResizablePanel, the mobile
+  // viewport-pinned root, and fullscreen. The overlays (fullscreen button,
+  // readiness card) are absolutely positioned inside these bounds, so
+  // clipping never affects them.
   const pane = (
     <div
       ref={wrapperRef}
       className={
         isMobile
-          ? "group relative min-h-0 w-full flex-1 bg-background"
-          : "group relative h-full w-full bg-background"
+          ? "group relative min-h-0 w-full flex-1 overflow-hidden bg-background"
+          : "group relative h-full w-full overflow-hidden bg-background"
       }
     >
       <div ref={containerRef} className="h-full w-full p-2" />
