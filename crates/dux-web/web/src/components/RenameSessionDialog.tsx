@@ -48,8 +48,8 @@ export function RenameSessionDialog() {
         <DialogHeader>
           <DialogTitle>Rename agent</DialogTitle>
           <DialogDescription>
-            Sets a custom display name for this agent. Clear the field to revert
-            to the branch name.
+            Sets a custom display name for this agent — the git branch keeps
+            its name. Clear the field to revert to showing the branch name.
           </DialogDescription>
         </DialogHeader>
         <Input
