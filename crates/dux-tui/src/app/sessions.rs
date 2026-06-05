@@ -348,7 +348,11 @@ impl App {
         ));
         let worker_tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
-            super::workers::run_add_project_checkout_job(action, target_branch, worker_tx);
+            dux_core::project_browser::run_add_project_checkout_job(
+                action,
+                target_branch,
+                worker_tx,
+            );
         });
     }
 

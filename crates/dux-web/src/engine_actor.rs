@@ -316,6 +316,13 @@ pub(crate) fn run_engine_loop(
             for status in engine.drive_delete_followup(&reaction) {
                 let _ = thread_status_tx.send(status);
             }
+            // The checkout-default-branch inspection (worker 1) just produced a
+            // Known-default reaction: spawn the switch (worker 2). Its completion
+            // posts NonDefaultBranchCheckoutCompleted, whose status flows through
+            // the wire_statuses_from_reaction drain above on the next iteration.
+            for status in engine.drive_checkout_followup(&reaction) {
+                let _ = thread_status_tx.send(status);
+            }
 
             // A project mutation just updated SQLite + in-memory projects; mirror
             // it into the portable config.toml so a later TUI start doesn't clobber it.

@@ -12,7 +12,9 @@ use std::sync::mpsc::Sender;
 use crate::config::{Config, DuxPaths, ProjectConfig, expand_path};
 use crate::git::{self, GitWorktree};
 use crate::model::{AgentSession, Project, ProjectBranchStatus, ProviderKind};
-use crate::worker::{BranchWarningKind, BrowserEntry, ProjectWorktreeEntry, WorkerEvent};
+use crate::worker::{
+    BranchWarningKind, BrowserEntry, NonDefaultBranchAction, ProjectWorktreeEntry, WorkerEvent,
+};
 
 pub fn browser_entries(dir: &Path) -> Vec<BrowserEntry> {
     let mut entries = fs::read_dir(dir)
@@ -230,6 +232,27 @@ pub fn run_checkout_project_default_branch_inspection_job(
         })
         .map_err(|err| format!("{err:#}"));
     let _ = worker_tx.send(WorkerEvent::CheckoutProjectDefaultBranchInspected { project, result });
+}
+
+/// Background job for the second phase of the non-default-branch checkout flow:
+/// runs `git switch <target_branch>` in the source repo and reports the outcome
+/// via `WorkerEvent::NonDefaultBranchCheckoutCompleted` so the caller can
+/// continue the selected action or surface the git error. Used by both the TUI
+/// (Add Project "switch first" and checkout-project-default-branch) and the web
+/// engine actor's `drive_checkout_followup`, so the worker-2 spawn logic is
+/// shared rather than duplicated per surface.
+pub fn run_add_project_checkout_job(
+    action: NonDefaultBranchAction,
+    target_branch: String,
+    worker_tx: Sender<WorkerEvent>,
+) {
+    let path = action.repo_path().to_string();
+    let result = git::switch_branch(Path::new(&path), &target_branch).map_err(|e| format!("{e:#}"));
+    let _ = worker_tx.send(WorkerEvent::NonDefaultBranchCheckoutCompleted {
+        action,
+        target_branch,
+        result,
+    });
 }
 
 #[cfg(test)]

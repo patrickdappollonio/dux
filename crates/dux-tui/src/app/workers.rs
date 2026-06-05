@@ -976,25 +976,6 @@ fn truncate_status_output(text: &str, max_chars: usize) -> TruncatedStatusOutput
     }
 }
 
-/// Background job for "Add Project" when the user opted to have dux switch to
-/// the default branch first. Runs `git switch <target_branch>` in the source
-/// repo and reports the outcome via
-/// `WorkerEvent::NonDefaultBranchCheckoutCompleted` so the main loop can
-/// continue the selected action or surface the error.
-pub(crate) fn run_add_project_checkout_job(
-    action: NonDefaultBranchAction,
-    target_branch: String,
-    worker_tx: Sender<WorkerEvent>,
-) {
-    let path = action.repo_path().to_string();
-    let result = git::switch_branch(Path::new(&path), &target_branch).map_err(|e| format!("{e:#}"));
-    let _ = worker_tx.send(WorkerEvent::NonDefaultBranchCheckoutCompleted {
-        action,
-        target_branch,
-        result,
-    });
-}
-
 pub(crate) fn run_create_agent_branch_inspection_job(
     project: Project,
     worker_tx: Sender<WorkerEvent>,

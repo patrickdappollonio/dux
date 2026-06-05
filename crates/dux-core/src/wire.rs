@@ -17,7 +17,8 @@ use crate::engine::{
 use crate::model::{Project, ProjectBranchStatus, ProviderKind};
 use crate::statusline::StatusTone;
 use crate::worker::{
-    AgentLaunchKind, BranchWarningKind, CreateAgentRequest, ProjectPersistenceAction, PullTarget,
+    AgentLaunchKind, CreateAgentRequest, NonDefaultBranchAction, ProjectPersistenceAction,
+    PullTarget,
 };
 
 /// A command as received from a generic transport (e.g. the web WebSocket).
@@ -563,17 +564,27 @@ impl Engine {
     }
 
     /// Switch a project's source checkout back to its default branch, mirroring
-    /// the TUI's `checkout_selected_project_default_branch` plus the engine's
-    /// `CheckoutProjectDefaultBranchInspected` / `NonDefaultBranchCheckoutCompleted`
-    /// handlers, collapsed into one synchronous call (see the wire variant's doc
-    /// for why the web does not use the TUI's two-worker chain).
+    /// the TUI's `checkout_selected_project_default_branch` (sessions.rs).
     ///
-    /// The inspection (`current_branch` + `branch_warning_kind`) prefers the
-    /// project's persisted `leading_branch` exactly like the core inspection job,
-    /// then branches on the four outcomes with the TUI's exact wording. Returns
-    /// the user-facing status; `Err` is reserved for the project lookup / missing
-    /// path guards (mirroring `PullProject`), so a normal "already on leading" or
-    /// "can't determine" outcome comes back as an info/error STATUS, not an error.
+    /// This kicks off the TUI's two-worker chain rather than doing the work
+    /// inline: `git switch` rewrites the working tree (seconds on large repos,
+    /// blocks indefinitely on a held `index.lock`), and the web engine loop
+    /// thread also drives every ViewModel push and PTY route, so a synchronous
+    /// checkout would freeze every connected browser. The CLAUDE.md workers
+    /// tenet forbids that.
+    ///
+    /// Worker 1 (`run_checkout_project_default_branch_inspection_job`) inspects
+    /// the branch off-thread and posts `CheckoutProjectDefaultBranchInspected`.
+    /// `process_worker_event` turns that into either a `Status` (heuristic /
+    /// already-leading / inspection-error — surfaced by the actor's existing
+    /// `wire_statuses_from_reaction` drain) or a
+    /// `DispatchProjectDefaultBranchCheckout` reaction for the Known case, which
+    /// `drive_checkout_followup` picks up to spawn worker 2 (the actual switch).
+    ///
+    /// Returns the busy status to surface synchronously (matching the TUI's
+    /// `set_busy`). `Err` is reserved for the cheap project lookup / missing
+    /// path guards (mirroring `PullProject`), so every real outcome comes back
+    /// later as an async status.
     fn checkout_project_default_branch(&mut self, project_id: &str) -> anyhow::Result<WireStatus> {
         // Mirror the TUI's `checkout_selected_project_default_branch` guards:
         // resolve the project and refuse when its checkout path is missing.
@@ -590,91 +601,51 @@ impl Engine {
             );
         }
 
-        let repo_path = PathBuf::from(&project.path);
-        // Inspection identical to `run_checkout_project_default_branch_inspection_job`:
-        // a persisted leading branch short-circuits the heuristic.
-        let current_branch = match crate::git::current_branch(&repo_path) {
-            Ok(branch) => branch,
-            Err(err) => {
-                return Ok(WireStatus::new(
-                    "error",
-                    format!(
-                        "Couldn't inspect the default branch for project \"{}\": {err:#}",
-                        project.name
-                    ),
-                ));
-            }
-        };
-        let warning_kind = if let Some(leading_branch) = project.leading_branch.as_deref() {
-            if current_branch == leading_branch {
-                None
-            } else {
-                Some(BranchWarningKind::Known {
-                    default_branch: leading_branch.to_string(),
-                })
-            }
-        } else {
-            crate::git::branch_warning_kind(&repo_path, &current_branch)
-        };
+        // Spawn worker 1 exactly as the TUI does, with the same busy message.
+        let busy = format!(
+            "Checking the default branch for project \"{}\"...",
+            project.name
+        );
+        let worker_tx = self.worker_tx.clone();
+        std::thread::spawn(move || {
+            crate::project_browser::run_checkout_project_default_branch_inspection_job(
+                project, worker_tx,
+            );
+        });
+        Ok(WireStatus::new("busy", busy))
+    }
 
-        match warning_kind {
-            // Known default branch that differs from HEAD: switch to it, then
-            // update the in-memory project state and report success.
-            Some(BranchWarningKind::Known { default_branch }) => {
-                match crate::git::switch_branch(&repo_path, &default_branch) {
-                    Ok(()) => {
-                        if let Some(existing) =
-                            self.projects.iter_mut().find(|p| p.id == project.id)
-                        {
-                            existing.current_branch = default_branch.clone();
-                            existing.branch_status = ProjectBranchStatus::Leading;
-                        }
-                        Ok(WireStatus::new(
-                            "info",
-                            format!(
-                                "Checked out \"{default_branch}\" for project \"{}\".",
-                                project.name
-                            ),
-                        ))
-                    }
-                    Err(err) => {
-                        crate::logger::error(&format!(
-                            "non-default branch checkout failed for {}: {err:#}",
-                            project.path
-                        ));
-                        Ok(WireStatus::new(
-                            "error",
-                            format!(
-                                "Couldn't check out \"{default_branch}\" in {} — resolve in your terminal and retry.",
-                                project.path
-                            ),
-                        ))
-                    }
-                }
+    /// Drive a checkout-related reaction to completion, returning user-facing
+    /// statuses. Called from the web engine actor's worker-event drain alongside
+    /// `drive_delete_followup`: when worker 1's inspection produces a
+    /// `DispatchProjectDefaultBranchCheckout` (the Known default-branch case),
+    /// spawn worker 2 (`run_add_project_checkout_job`) to run `git switch`
+    /// off-thread, mirroring the TUI's `dispatch_non_default_branch_checkout`.
+    /// Worker 2's completion posts `NonDefaultBranchCheckoutCompleted`, whose
+    /// `process_worker_event` arm returns the success/failure `Status` that the
+    /// actor's existing `wire_statuses_from_reaction` drain broadcasts. Other
+    /// reactions return `[]`.
+    pub fn drive_checkout_followup(&mut self, reaction: &EventReaction) -> Vec<WireStatus> {
+        match reaction {
+            EventReaction::DispatchProjectDefaultBranchCheckout {
+                project,
+                default_branch,
+            } => {
+                let action = NonDefaultBranchAction::CheckoutProjectDefault {
+                    project: project.clone(),
+                };
+                let target_branch = default_branch.clone();
+                let worker_tx = self.worker_tx.clone();
+                std::thread::spawn(move || {
+                    crate::project_browser::run_add_project_checkout_job(
+                        action,
+                        target_branch,
+                        worker_tx,
+                    );
+                });
+                vec![]
             }
-            // origin/HEAD is unavailable and HEAD is not a common default: the
-            // TUI refuses rather than guess.
-            Some(BranchWarningKind::Heuristic) => Ok(WireStatus::new(
-                "error",
-                format!(
-                    "Can't determine the default branch for project \"{}\" while it is on \"{current_branch}\". Resolve the default branch in your terminal and retry.",
-                    project.name
-                ),
-            )),
-            // Already on the leading branch: nothing to do, refresh state.
-            None => {
-                if let Some(existing) = self.projects.iter_mut().find(|p| p.id == project.id) {
-                    existing.current_branch = current_branch.clone();
-                    existing.branch_status = ProjectBranchStatus::Leading;
-                }
-                Ok(WireStatus::new(
-                    "info",
-                    format!(
-                        "Project \"{}\" is already on the leading branch \"{current_branch}\".",
-                        project.name
-                    ),
-                ))
-            }
+            _ => vec![],
         }
     }
 
@@ -1610,11 +1581,47 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    // Drive the checkout-default-branch worker chain the same way the web engine
+    // actor's drain does (engine_actor.rs): pull the inspection event (worker 1)
+    // off `worker_rx`, run `process_worker_event`, then feed the reaction through
+    // BOTH `wire_statuses_from_reaction` (the Status outcomes) and
+    // `drive_checkout_followup` (the Known case, which spawns worker 2). Returns
+    // every status the actor would broadcast across both phases, in order.
+    fn drive_checkout_chain(engine: &mut Engine) -> Vec<WireStatus> {
+        let mut statuses = Vec::new();
+        // Phase 1: the inspection worker. The Known case spawns worker 2; the
+        // other cases produce their final status here.
+        let event = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("inspection worker event");
+        let reaction = engine.process_worker_event(event);
+        statuses.extend(wire_statuses_from_reaction(&reaction));
+        let spawned_switch = matches!(
+            reaction,
+            EventReaction::DispatchProjectDefaultBranchCheckout { .. }
+        );
+        statuses.extend(engine.drive_checkout_followup(&reaction));
+        if spawned_switch {
+            // Phase 2: the switch worker's completion carries the success/failure
+            // status, surfaced by the actor's wire_statuses_from_reaction drain.
+            let event = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("switch worker event");
+            let reaction = engine.process_worker_event(event);
+            statuses.extend(wire_statuses_from_reaction(&reaction));
+        }
+        statuses
+    }
+
     #[test]
     fn apply_wire_checkout_project_default_branch_switches_from_feature() {
         // A project whose persisted leading branch ("trunk") differs from HEAD
         // ("feature") gets switched back, and the in-memory state updates to
-        // Leading — mirroring the TUI's Known-default-branch outcome.
+        // Leading — mirroring the TUI's Known-default-branch outcome. apply_wire
+        // now returns Busy and spawns the inspection worker; the switch happens
+        // off-thread, driven through the two-worker chain like the web actor.
         let repo = init_repo_on_feature_branch("trunk");
         let (mut engine, _tmp) = test_engine();
         let mut project = sample_project("p1", repo.path().to_string_lossy().as_ref());
@@ -1628,7 +1635,17 @@ mod tests {
                 project_id: "p1".to_string(),
             })
             .expect("checkout");
-        let status = outcome.status.expect("status");
+        let busy = outcome.status.expect("busy status");
+        assert_eq!(busy.tone, "busy");
+        assert!(
+            busy.message
+                .contains("Checking the default branch for project \"p1-name\""),
+            "unexpected busy message: {}",
+            busy.message
+        );
+
+        let statuses = drive_checkout_chain(&mut engine);
+        let status = statuses.last().expect("final status");
         assert_eq!(status.tone, "info");
         assert!(
             status
@@ -1637,10 +1654,83 @@ mod tests {
             "unexpected message: {}",
             status.message
         );
+        // HEAD actually moved in the temp repo.
         assert_eq!(current_git_branch(repo.path()), "trunk");
         let updated = &engine.projects[0];
         assert_eq!(updated.current_branch, "trunk");
         assert_eq!(updated.branch_status, ProjectBranchStatus::Leading);
+    }
+
+    #[test]
+    fn apply_wire_checkout_project_default_branch_switch_failure_reports_error() {
+        // Worker 2 fails: the persisted leading branch ("ghost") does not exist,
+        // so `git switch` errors. The inspection (which trusts the persisted
+        // leading branch) yields Known, worker 2 runs the switch and fails, and
+        // the completion arm surfaces the TUI's exact failure wording. HEAD stays
+        // on feature.
+        let repo = init_repo_on_feature_branch("trunk");
+        let (mut engine, _tmp) = test_engine();
+        let mut project = sample_project("p1", repo.path().to_string_lossy().as_ref());
+        project.leading_branch = Some("ghost".to_string());
+        project.current_branch = "feature".to_string();
+        project.branch_status = ProjectBranchStatus::NotLeading;
+        engine.projects.push(project);
+
+        let outcome = engine
+            .apply_wire(WireCommand::CheckoutProjectDefaultBranch {
+                project_id: "p1".to_string(),
+            })
+            .expect("checkout");
+        assert_eq!(outcome.status.expect("busy status").tone, "busy");
+
+        let statuses = drive_checkout_chain(&mut engine);
+        let status = statuses.last().expect("final status");
+        assert_eq!(status.tone, "error");
+        assert!(
+            status.message.contains("Couldn't check out \"ghost\" in")
+                && status
+                    .message
+                    .contains("resolve in your terminal and retry"),
+            "unexpected message: {}",
+            status.message
+        );
+        // The failed switch leaves HEAD where it was.
+        assert_eq!(current_git_branch(repo.path()), "feature");
+    }
+
+    #[test]
+    fn apply_wire_checkout_project_default_branch_inspection_error_reports_error() {
+        // Worker 1 fails: the project's path points at a directory that is not a
+        // git repo, so `git::current_branch` errors. (The `path_missing` guard is
+        // a stored flag, not a live filesystem check, so a non-repo path with
+        // `path_missing == false` reaches the inspection worker.) The inspection
+        // arm surfaces the "Couldn't inspect the default branch" wording and no
+        // switch is spawned.
+        let not_a_repo = tempfile::tempdir().expect("tempdir");
+        let (mut engine, _tmp) = test_engine();
+        let mut project = sample_project("p1", not_a_repo.path().to_string_lossy().as_ref());
+        project.leading_branch = None;
+        project.current_branch = "feature".to_string();
+        project.path_missing = false;
+        engine.projects.push(project);
+
+        let outcome = engine
+            .apply_wire(WireCommand::CheckoutProjectDefaultBranch {
+                project_id: "p1".to_string(),
+            })
+            .expect("checkout");
+        assert_eq!(outcome.status.expect("busy status").tone, "busy");
+
+        let statuses = drive_checkout_chain(&mut engine);
+        let status = statuses.last().expect("final status");
+        assert_eq!(status.tone, "error");
+        assert!(
+            status
+                .message
+                .contains("Couldn't inspect the default branch for project \"p1-name\""),
+            "unexpected message: {}",
+            status.message
+        );
     }
 
     #[test]
@@ -1660,7 +1750,10 @@ mod tests {
                 project_id: "p1".to_string(),
             })
             .expect("checkout");
-        let status = outcome.status.expect("status");
+        assert_eq!(outcome.status.expect("busy status").tone, "busy");
+
+        let statuses = drive_checkout_chain(&mut engine);
+        let status = statuses.last().expect("final status");
         assert_eq!(status.tone, "info");
         assert!(
             status
@@ -1694,7 +1787,10 @@ mod tests {
                 project_id: "p1".to_string(),
             })
             .expect("checkout");
-        let status = outcome.status.expect("status");
+        assert_eq!(outcome.status.expect("busy status").tone, "busy");
+
+        let statuses = drive_checkout_chain(&mut engine);
+        let status = statuses.last().expect("final status");
         assert_eq!(status.tone, "error");
         assert!(
             status
