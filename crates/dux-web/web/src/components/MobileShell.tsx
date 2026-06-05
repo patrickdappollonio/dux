@@ -59,6 +59,8 @@ import {
 } from "@/components/ui/empty"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { CONN_BADGE } from "@/lib/conn"
+import { projectBranchDisplay } from "@/lib/projectBranch"
+import type { ProjectBranchDisplay } from "@/lib/projectBranch"
 import { partitionProjects } from "@/lib/projects"
 import {
   applyPendingOrders,
@@ -77,6 +79,7 @@ import {
   openProjectSettings,
   openRemoveProject,
   openRename,
+  pullProject,
   reconnectSession,
   reorderProjects,
   reorderSessions,
@@ -331,11 +334,13 @@ function SessionRow({
 function ProjectBlock({
   id,
   name,
+  branch,
   sessions,
   selectedTarget,
 }: {
   id: string
   name: string
+  branch: ProjectBranchDisplay | null
   sessions: SessionView[]
   selectedTarget: SelectedTarget | null
 }) {
@@ -373,6 +378,19 @@ function ProjectBlock({
           className="flex min-h-11 flex-1 touch-manipulation items-center gap-2 px-2"
         >
           <span className="truncate font-semibold">{name}</span>
+          {/* Current branch as a muted, monospace secondary span; non-leading
+              branches are warning-tinted (amber) with an explanatory title.
+              Omitted entirely for empty/unknown branches (e.g. path_missing). */}
+          {branch ? (
+            <span
+              className={`truncate font-mono text-xs ${
+                branch.warn ? "text-amber-500" : "text-muted-foreground"
+              }`}
+              title={branch.tooltip ?? undefined}
+            >
+              {branch.branch}
+            </span>
+          ) : null}
           {sessions.length > 0 ? (
             <Badge variant="secondary" className="shrink-0">
               {sessions.length}
@@ -396,6 +414,10 @@ function ProjectBlock({
             <DropdownMenuItem onClick={() => openCreateAgent(id)}>
               <Bot />
               New agent…
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => pullProject(id)}>
+              <Download />
+              Pull project…
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => openProjectSettings(id)}>
@@ -446,12 +468,14 @@ function ProjectGroupList({
   fullOrder,
   grouped,
   projectName,
+  projectBranch,
   selectedTarget,
 }: {
   members: string[]
   fullOrder: string[]
   grouped: Map<string, SessionView[]>
   projectName: (id: string) => string
+  projectBranch: (id: string) => ProjectBranchDisplay | null
   selectedTarget: SelectedTarget | null
 }) {
   const sensors = useSensors(
@@ -485,6 +509,7 @@ function ProjectGroupList({
             key={projectId}
             id={projectId}
             name={projectName(projectId)}
+            branch={projectBranch(projectId)}
             sessions={grouped.get(projectId) ?? []}
             selectedTarget={selectedTarget}
           />
@@ -514,6 +539,13 @@ function HomeScreen() {
     projects,
     sessions,
   )
+  // Resolve a project id to its branch-row display (or null when there's
+  // nothing to render). Orphan ids (a session whose project is absent) resolve
+  // to null, so no stray branch span is emitted.
+  const projectBranch = (id: string): ProjectBranchDisplay | null => {
+    const project = projects.find((p) => p.id === id)
+    return project ? projectBranchDisplay(project) : null
+  }
   const fullOrder = [...withAgents, ...withoutAgents]
   const badge = CONN_BADGE[conn]
   const hasProjects = projects.length > 0 || sessions.length > 0
@@ -551,6 +583,7 @@ function HomeScreen() {
                   fullOrder={fullOrder}
                   grouped={grouped}
                   projectName={projectName}
+                  projectBranch={projectBranch}
                   selectedTarget={selectedTarget}
                 />
               ) : null}
@@ -566,6 +599,7 @@ function HomeScreen() {
                   fullOrder={fullOrder}
                   grouped={grouped}
                   projectName={projectName}
+                  projectBranch={projectBranch}
                   selectedTarget={selectedTarget}
                 />
               </div>

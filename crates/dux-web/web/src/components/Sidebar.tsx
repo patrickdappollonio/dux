@@ -78,6 +78,8 @@ import {
   SidebarRail,
 } from "@/components/ui/sidebar"
 import { useSidebar } from "@/components/ui/sidebar"
+import { projectBranchDisplay } from "@/lib/projectBranch"
+import type { ProjectBranchDisplay } from "@/lib/projectBranch"
 import { partitionProjects } from "@/lib/projects"
 import {
   applyPendingOrders,
@@ -95,6 +97,7 @@ import {
   openProjectSettings,
   openRemoveProject,
   openRename,
+  pullProject,
   reconnectSession,
   reorderProjects,
   reorderSessions,
@@ -405,11 +408,13 @@ function SessionList({
 function ProjectItem({
   id,
   name,
+  branch,
   sessions,
   selectedTarget,
 }: {
   id: string
   name: string
+  branch: ProjectBranchDisplay | null
   sessions: SessionView[]
   selectedTarget: SelectedTarget | null
 }) {
@@ -439,6 +444,21 @@ function ProjectItem({
           <FolderOpen className="hidden group-data-[state=open]/collapsible:block" />
           {/* font-semibold makes project names visually distinct from agent rows. */}
           <span className="truncate font-semibold">{name}</span>
+          {/* Current branch as a muted, monospace secondary span after the name.
+              The name stays primary (it can shrink-truncate first); the branch is
+              shrink-0 so it stays readable. A non-leading branch is tinted with
+              the warning token and explains itself via the title tooltip.
+              Omitted entirely for empty/unknown branches (e.g. path_missing). */}
+          {branch ? (
+            <span
+              className={`truncate font-mono text-xs ${
+                branch.warn ? "text-amber-500" : "text-muted-foreground"
+              }`}
+              title={branch.tooltip ?? undefined}
+            >
+              {branch.branch}
+            </span>
+          ) : null}
           {/* Session count badge sits inline, right after the name — omitted
               for agent-less projects (their group heading already says so). */}
           {sessions.length > 0 ? (
@@ -459,6 +479,10 @@ function ProjectItem({
             <DropdownMenuItem onClick={() => openCreateAgent(id)}>
               <Bot />
               New agent…
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => pullProject(id)}>
+              <Download />
+              Pull project…
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => openProjectSettings(id)}>
@@ -570,12 +594,14 @@ function ProjectGroup({
   fullOrder,
   grouped,
   projectName,
+  projectBranch,
   selectedTarget,
 }: {
   members: string[]
   fullOrder: string[]
   grouped: Map<string, SessionView[]>
   projectName: (id: string) => string
+  projectBranch: (id: string) => ProjectBranchDisplay | null
   selectedTarget: SelectedTarget | null
 }) {
   const sensors = useSensors(
@@ -600,6 +626,7 @@ function ProjectGroup({
       key={projectId}
       id={projectId}
       name={projectName(projectId)}
+      branch={projectBranch(projectId)}
       sessions={grouped.get(projectId) ?? []}
       selectedTarget={selectedTarget}
     />
@@ -642,6 +669,13 @@ export function AppSidebar() {
     projects,
     sessions,
   )
+  // Resolve a project id to its branch-row display (or null when there's
+  // nothing to render — empty/unknown branch). Orphan ids (a session whose
+  // project is absent) resolve to null, so no stray branch span is emitted.
+  const projectBranch = (id: string): ProjectBranchDisplay | null => {
+    const project = projects.find((p) => p.id === id)
+    return project ? projectBranchDisplay(project) : null
+  }
   // The complete ordered project set the server demands for `reorder_projects`:
   // with-agents first, then no-agents, matching the display order.
   const fullOrder = [...withAgents, ...withoutAgents]
@@ -687,6 +721,7 @@ export function AppSidebar() {
               fullOrder={fullOrder}
               grouped={grouped}
               projectName={projectName}
+              projectBranch={projectBranch}
               selectedTarget={selectedTarget}
             />
           )}
@@ -702,6 +737,7 @@ export function AppSidebar() {
               fullOrder={fullOrder}
               grouped={grouped}
               projectName={projectName}
+              projectBranch={projectBranch}
               selectedTarget={selectedTarget}
             />
           </SidebarGroup>

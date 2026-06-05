@@ -51,6 +51,15 @@ pub enum WireCommand {
     Pull {
         session_id: String,
     },
+    /// Pull (refresh) a PROJECT's source checkout from remote, mirroring the
+    /// TUI's `refresh_selected_project`. Unlike [`WireCommand::Pull`] (which
+    /// targets a session's worktree), this resolves the project by id and runs
+    /// `Command::Pull` against the project's source checkout path with
+    /// `PullTarget::Project`. The busy/already-running copy and the leading
+    /// branch source match the TUI byte-for-byte.
+    PullProject {
+        project_id: String,
+    },
     GenerateCommitMessage {
         session_id: String,
     },
@@ -631,6 +640,38 @@ impl Engine {
                     "Pull already in progress for this worktree. Wait for the current pull to finish."
                         .to_string(),
             },
+            WireCommand::PullProject { project_id } => {
+                // Mirror the TUI's `refresh_selected_project`: resolve the
+                // project, refuse when its checkout path is missing, then build
+                // `Command::Pull` with `PullTarget::Project` from the project's
+                // SOURCE checkout path (not a worktree) and the persisted leading
+                // branch — byte-for-byte the same payload and message strings.
+                let project = self
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project_id)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("unknown project: {project_id}"))?;
+                if project.path_missing {
+                    anyhow::bail!("Cannot refresh: path not found for \"{}\"", project.name);
+                }
+                Command::Pull {
+                    repo_path: PathBuf::from(&project.path),
+                    target: PullTarget::Project {
+                        project_id: project.id,
+                        project_name: project.name.clone(),
+                        leading_branch: project.leading_branch.clone(),
+                    },
+                    busy_message: format!(
+                        "Refreshing project \"{}\" from remote\u{2026}",
+                        project.name
+                    ),
+                    already_running_message: format!(
+                        "Project refresh already in progress for \"{}\". Wait for the current pull to finish.",
+                        project.name,
+                    ),
+                }
+            }
             WireCommand::GenerateCommitMessage { session_id } => {
                 Command::GenerateCommitMessage { session_id }
             }
@@ -898,8 +939,8 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::DeleteTerminalView;
     use crate::engine::test_support::{sample_project, sample_session, test_engine};
+    use crate::engine::{DeleteTerminalView, InFlightKey};
     use crate::model::AgentSession;
     use std::path::Path;
 
@@ -1111,6 +1152,130 @@ mod tests {
             }
             _ => panic!("expected Command::Pull variant with Session target"),
         }
+    }
+
+    #[test]
+    fn wire_pull_project_deserializes() {
+        let json = r#"{"command":"pull_project","args":{"project_id":"p1"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::PullProject {
+                project_id: "p1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn wire_to_command_pull_project_mirrors_tui_refresh() {
+        // sample_project("p1", "/repo") has leading_branch Some("main") and
+        // name "p1-name"; the constructed Pull must target the project's source
+        // checkout path with PullTarget::Project and the TUI's exact messages.
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        let cmd = engine
+            .wire_to_command(WireCommand::PullProject {
+                project_id: "p1".to_string(),
+            })
+            .expect("reconstruct");
+        match cmd {
+            Command::Pull {
+                repo_path,
+                target,
+                busy_message,
+                already_running_message,
+            } => {
+                assert_eq!(repo_path, Path::new("/repo"));
+                match target {
+                    PullTarget::Project {
+                        project_id,
+                        project_name,
+                        leading_branch,
+                    } => {
+                        assert_eq!(project_id, "p1");
+                        assert_eq!(project_name, "p1-name");
+                        assert_eq!(leading_branch.as_deref(), Some("main"));
+                    }
+                    PullTarget::Session => panic!("expected PullTarget::Project"),
+                }
+                assert_eq!(
+                    busy_message,
+                    "Refreshing project \"p1-name\" from remote\u{2026}"
+                );
+                assert_eq!(
+                    already_running_message,
+                    "Project refresh already in progress for \"p1-name\". Wait for the current pull to finish."
+                );
+            }
+            _ => panic!("expected Command::Pull variant with Project target"),
+        }
+    }
+
+    #[test]
+    fn wire_to_command_pull_project_unknown_project_errors() {
+        let (engine, _tmp) = test_engine();
+        let err = engine
+            .wire_to_command(WireCommand::PullProject {
+                project_id: "ghost".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown project"), "err: {err}");
+    }
+
+    #[test]
+    fn wire_to_command_pull_project_path_missing_errors() {
+        let (mut engine, _tmp) = test_engine();
+        let mut project = sample_project("p1", "/repo");
+        project.path_missing = true;
+        engine.projects.push(project);
+        let err = engine
+            .wire_to_command(WireCommand::PullProject {
+                project_id: "p1".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        // Mirrors the TUI's `refresh_selected_project` path_missing warning.
+        assert!(
+            err.to_string()
+                .contains("Cannot refresh: path not found for \"p1-name\""),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_wire_pull_project_blocks_repeat_while_running() {
+        // First dispatch spawns the pull worker (busy arrives on the async
+        // status stream, so the synchronous outcome is empty); the second
+        // dispatch hits the in-flight guard and surfaces the TUI's
+        // already-running warning synchronously.
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+
+        let first = engine
+            .apply_wire(WireCommand::PullProject {
+                project_id: "p1".to_string(),
+            })
+            .expect("first project pull");
+        assert!(
+            first.status.is_none(),
+            "first pull busy is async, not a synchronous outcome: {:?}",
+            first.status
+        );
+        assert!(engine.is_in_flight(&InFlightKey::Pull("/repo".to_string())));
+
+        let second = engine
+            .apply_wire(WireCommand::PullProject {
+                project_id: "p1".to_string(),
+            })
+            .expect("repeat project pull should not error");
+        let status = second.status.expect("in-flight warning status");
+        assert_eq!(status.tone, "warning");
+        assert!(
+            status.message.contains("already in progress"),
+            "unexpected message: {}",
+            status.message
+        );
     }
 
     #[test]

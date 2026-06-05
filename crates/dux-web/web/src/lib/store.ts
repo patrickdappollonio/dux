@@ -620,6 +620,14 @@ export function removeProject(projectId: string): void {
   socket.sendCommand("remove_project", { project_id: projectId })
 }
 
+// Refresh a project's source checkout from remote (the TUI's
+// `refresh_selected_project`). The server resolves the project, runs the pull
+// against its source checkout, and reports busy/success/failure on the status
+// stream — nothing to do here but fire the command.
+export function pullProject(projectId: string): void {
+  socket.sendCommand("pull_project", { project_id: projectId })
+}
+
 // Open the new-agent dialog. The checkbox starts checked when
 // `randomize_agent_names_by_default` is set (mirroring the TUI prompt, which
 // pre-checks when opened with no initial name); in that case we request a name

@@ -15,6 +15,7 @@ import {
   openForkAgent,
   openGlobalEnv,
   openRename,
+  pullProject,
   reconnectSession,
   selectSession,
   setPaletteOpen,
@@ -139,6 +140,15 @@ export function CommandPalette() {
                 }}
               >
                 New agent in this project…
+              </CommandItem>
+              <CommandItem
+                className="cursor-pointer"
+                onSelect={() => {
+                  pullProject(selectedSession.project_id)
+                  close()
+                }}
+              >
+                Pull this project…
               </CommandItem>
             </CommandGroup>
             <CommandSeparator />
