@@ -855,12 +855,18 @@ export function openCreateAgentFromPr(projectId: string): void {
   openNameDialog({ kind: "pr", projectId })
 }
 
-// Shared opener for both modes of the name dialog. Pre-checks the randomize
+// Shared opener for all modes of the name dialog. Pre-checks the randomize
 // default and requests a name right away so the input previews it, exactly like
-// the TUI prompt. Runs in the click handler that opens the dialog — never an
-// effect — so there is no set-state-in-effect.
+// the TUI prompt — EXCEPT in PR mode: the TUI seeds the PR's head branch as the
+// name and never randomizes there (a pet name would become the branch the PR
+// head is fetched into). The web doesn't know the head branch until after the
+// lookup, so PR mode opens blank and the server's head-branch fallback applies.
+// Runs in the click handler that opens the dialog — never an effect — so there
+// is no set-state-in-effect.
 function openNameDialog(target: CreateAgentTarget): void {
-  const randomize = state.viewModel?.randomize_agent_names_by_default ?? false
+  const randomize =
+    target.kind !== "pr" &&
+    (state.viewModel?.randomize_agent_names_by_default ?? false)
   setState({
     createAgentTarget: target,
     createAgentDraft: "",
