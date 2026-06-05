@@ -143,6 +143,18 @@ export interface ViewModel {
    * the PR banner lane above the terminal when "top" and below when "bottom".
    * Mobile ignores this and always renders the banner on top. */
   pr_banner_position: "top" | "bottom"
+  /** Surface-aware command-palette commands the web renders as a global
+   * "Commands" group, in canonical registry order. Derived from the Rust
+   * `dux_core::palette` (the Web/Both subset). Each `id` is the dashed command
+   * name; `paletteRegistry` maps it to a store handler. */
+  palette_commands: PaletteCommandView[]
+}
+
+export interface PaletteCommandView {
+  /** Dashed command id (e.g. "sort-agents-by-updated"). */
+  id: string
+  /** One-line description shown alongside the id. */
+  description: string
 }
 
 export interface CommandStatus {

@@ -75,22 +75,18 @@ pub struct HelpEntry {
     pub description: &'static str,
 }
 
-pub struct PaletteEntry {
-    pub name: &'static str,
-    pub description: &'static str,
-}
-
 /// Static definition of a binding. Used as the template for generating default
-/// config and for carrying metadata (scopes, help sections, palette entries,
-/// hint contexts). Key combos and display labels are resolved at runtime from
-/// the config file via [`RuntimeBindings`].
+/// config and for carrying metadata (scopes, help sections, hint contexts). Key
+/// combos and display labels are resolved at runtime from the config file via
+/// [`RuntimeBindings`]. Palette command names and descriptions live in the
+/// surface-aware core registry ([`dux_core::palette`]); the runtime palette
+/// listing joins them to bindings by [`Action`].
 pub struct BindingDef {
     pub action: Action,
     pub default_keys: &'static [KeyCombination],
     pub scopes: &'static [BindingScope],
     pub help: Option<HelpEntry>,
     pub hint_contexts: &'static [(HintContext, &'static str)],
-    pub palette: Option<PaletteEntry>,
 }
 
 // ── Keybinding resolution semantics ──────────────────────────────────────
@@ -147,7 +143,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             (HintContext::LeftTerminal, "Move"),
             (HintContext::Files, "Move"),
         ],
-        palette: None,
     },
     BindingDef {
         action: Action::MoveUp,
@@ -163,7 +158,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         ],
         help: None, // covered by MoveDown's combined label
         hint_contexts: &[],
-        palette: None,
     },
     // ── Projects pane ─────────────────────────────────────────────
     BindingDef {
@@ -175,10 +169,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Collapse/expand project",
         }),
         hint_contexts: &[(HintContext::LeftProject, "Toggle")],
-        palette: Some(PaletteEntry {
-            name: "toggle-project",
-            description: "Collapse or expand the selected project's agents",
-        }),
     },
     BindingDef {
         action: Action::NewAgent,
@@ -189,10 +179,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "New agent session (creates worktree)",
         }),
         hint_contexts: &[(HintContext::LeftProject, "New agent")],
-        palette: Some(PaletteEntry {
-            name: "new-agent",
-            description: "Create a new agent for the selected project",
-        }),
     },
     BindingDef {
         action: Action::NewAgentFromPr,
@@ -200,10 +186,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "new-agent-from-pr",
-            description: "Create a new agent from a GitHub pull request",
-        }),
     },
     BindingDef {
         action: Action::NewAgentFromWorktree,
@@ -211,10 +193,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "new-agent-from-worktree",
-            description: "Create a new agent from an existing git worktree",
-        }),
     },
     BindingDef {
         action: Action::ForkAgent,
@@ -225,10 +203,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Fork selected agent into a fresh worktree",
         }),
         hint_contexts: &[(HintContext::LeftSession, "Fork")],
-        palette: Some(PaletteEntry {
-            name: "fork-agent",
-            description: "Fork the selected agent into a fresh worktree and session",
-        }),
     },
     BindingDef {
         action: Action::ChangeAgentProvider,
@@ -236,10 +210,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "change-agent-provider",
-            description: "Swap this worktree's provider",
-        }),
     },
     BindingDef {
         action: Action::ChangeDefaultProvider,
@@ -247,10 +217,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "change-default-provider",
-            description: "Change the global default provider for new agents in projects without a project-specific override",
-        }),
     },
     BindingDef {
         action: Action::ChangeProjectDefaultProvider,
@@ -258,10 +224,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "change-project-default-provider",
-            description: "Change the selected project's default provider for future agents in that project only",
-        }),
     },
     BindingDef {
         action: Action::ChangeTheme,
@@ -269,10 +231,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "change-theme",
-            description: "Switch the dux color theme",
-        }),
     },
     BindingDef {
         action: Action::ReloadConfig,
@@ -280,10 +238,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "reload-config",
-            description: "Reload config.toml after validating it",
-        }),
     },
     BindingDef {
         action: Action::StartWebServer,
@@ -291,10 +245,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "start-web-server",
-            description: "Stop the TUI and serve the dux web UI over your running agents",
-        }),
     },
     BindingDef {
         action: Action::ToggleProjectAutoReopenAgents,
@@ -302,10 +252,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "toggle-project-auto-reopen-agents",
-            description: "Opt the selected project in or out of startup agent reopening",
-        }),
     },
     BindingDef {
         action: Action::ToggleAgentAutoReopen,
@@ -313,10 +259,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "toggle-agent-auto-reopen",
-            description: "Opt the selected agent in or out of startup reopening",
-        }),
     },
     BindingDef {
         action: Action::ConfigureStartupCommand,
@@ -324,10 +266,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "configure-startup-command",
-            description: "Configure the selected project's startup command",
-        }),
     },
     BindingDef {
         action: Action::ConfigureGlobalEnv,
@@ -335,10 +273,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "configure-global-env",
-            description: "Configure environment variables inherited by every project",
-        }),
     },
     BindingDef {
         action: Action::ConfigureProjectEnv,
@@ -346,10 +280,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "configure-project-env",
-            description: "Configure environment variables for the selected project's agents and terminals",
-        }),
     },
     BindingDef {
         action: Action::RerunStartupCommandOnAgent,
@@ -357,10 +287,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "rerun-startup-command-on-agent",
-            description: "Rerun the selected agent's startup command",
-        }),
     },
     BindingDef {
         action: Action::ReadStartupCommandLogs,
@@ -368,10 +294,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "read-startup-command-logs",
-            description: "Read startup command logs for the selected agent or project",
-        }),
     },
     BindingDef {
         action: Action::FocusAgent,
@@ -386,10 +308,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             (HintContext::LeftTerminal, "Focus"),
             (HintContext::Center, "Interact"),
         ],
-        palette: Some(PaletteEntry {
-            name: "show-agent",
-            description: "Show and focus the selected agent",
-        }),
     },
     BindingDef {
         action: Action::OpenProjectBrowser,
@@ -403,10 +321,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             (HintContext::LeftProject, "Add project"),
             (HintContext::LeftSession, "Add project"),
         ],
-        palette: Some(PaletteEntry {
-            name: "add-project",
-            description: "Open the project browser",
-        }),
     },
     BindingDef {
         action: Action::CopyPath,
@@ -420,10 +334,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             (HintContext::LeftProject, "Copy path"),
             (HintContext::LeftSession, "Copy path"),
         ],
-        palette: Some(PaletteEntry {
-            name: "copy-path",
-            description: "Copy the selected agent's worktree path",
-        }),
     },
     BindingDef {
         action: Action::OpenWorktreeInEditor,
@@ -434,10 +344,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Open selected agent worktree in the default editor",
         }),
         hint_contexts: &[(HintContext::LeftSession, "Open")],
-        palette: Some(PaletteEntry {
-            name: "open-worktree",
-            description: "Open the selected agent worktree in the configured editor",
-        }),
     },
     BindingDef {
         action: Action::ChooseWorktreeEditor,
@@ -448,10 +354,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Choose an editor and open the selected agent worktree",
         }),
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "open-worktree-with",
-            description: "Choose which editor should open the selected agent worktree",
-        }),
     },
     BindingDef {
         action: Action::RefreshProject,
@@ -462,10 +364,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Refresh checkout (git pull --ff-only)",
         }),
         hint_contexts: &[(HintContext::LeftProject, "Pull")],
-        palette: Some(PaletteEntry {
-            name: "pull-project",
-            description: "Git pull the selected project checkout",
-        }),
     },
     BindingDef {
         action: Action::CheckoutProjectDefaultBranch,
@@ -473,10 +371,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "checkout-project-default-branch",
-            description: "Check out the selected project's default branch",
-        }),
     },
     BindingDef {
         action: Action::ReconnectAgent,
@@ -487,10 +381,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Restart agent CLI",
         }),
         hint_contexts: &[(HintContext::Center, "Reconnect")],
-        palette: Some(PaletteEntry {
-            name: "reconnect-agent",
-            description: "Restart the CLI for the selected agent",
-        }),
     },
     BindingDef {
         action: Action::ShowTerminal,
@@ -504,10 +394,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             (HintContext::LeftSession, "Terminal"),
             (HintContext::Center, "Terminal"),
         ],
-        palette: Some(PaletteEntry {
-            name: "show-terminal",
-            description: "Open the first companion terminal, or launch a new one",
-        }),
     },
     BindingDef {
         action: Action::DeleteSession,
@@ -522,10 +408,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             (HintContext::LeftTerminal, "Delete"),
             (HintContext::Center, "Delete"),
         ],
-        palette: Some(PaletteEntry {
-            name: "delete-agent",
-            description: "Delete the selected agent session",
-        }),
     },
     BindingDef {
         action: Action::DeleteTerminal,
@@ -533,10 +415,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "delete-terminal",
-            description: "Delete the selected companion terminal",
-        }),
     },
     // ── Agent pane ────────────────────────────────────────────────
     BindingDef {
@@ -548,7 +426,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Enter interactive mode for the selected agent",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::ExitInteractive,
@@ -563,7 +440,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Exit interactive mode",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::OpenMacroBar,
@@ -574,7 +450,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Open the macro command bar to send text macros",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::OpenCurrentPullRequest,
@@ -585,10 +460,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Open current pull request in the default browser",
         }),
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "open-current-pr",
-            description: "Open the selected agent's current pull request in the default browser",
-        }),
     },
     BindingDef {
         action: Action::ToggleFullscreen,
@@ -596,7 +467,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::ScrollPageUp,
@@ -611,7 +481,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Scroll up one page",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::ScrollPageDown,
@@ -626,7 +495,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Scroll down one page",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::ScrollLineUp,
@@ -637,7 +505,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Scroll up one line",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::ScrollLineDown,
@@ -648,7 +515,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Scroll down one line",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::ScrollToBottom,
@@ -663,7 +529,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Exit scroll mode and jump to latest output",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::ScrollToTop,
@@ -678,7 +543,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Jump to top of scrollback",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     // ── Files pane (git staging) ──────────────────────────────────
     BindingDef {
@@ -690,7 +554,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Open selected file diff",
         }),
         hint_contexts: &[(HintContext::Files, "Diff")],
-        palette: None,
     },
     BindingDef {
         action: Action::StageUnstage,
@@ -701,7 +564,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Stage or unstage selected file",
         }),
         hint_contexts: &[(HintContext::Files, "Stage/Unstage")],
-        palette: None,
     },
     BindingDef {
         action: Action::CommitChanges,
@@ -712,7 +574,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Commit staged changes",
         }),
         hint_contexts: &[(HintContext::Files, "Commit")],
-        palette: None,
     },
     BindingDef {
         action: Action::GenerateCommitMessage,
@@ -723,7 +584,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Generate AI commit message",
         }),
         hint_contexts: &[(HintContext::Files, "AI msg")],
-        palette: None,
     },
     BindingDef {
         action: Action::DiscardChanges,
@@ -734,7 +594,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Discard changes to selected file",
         }),
         hint_contexts: &[(HintContext::Files, "Discard")],
-        palette: None,
     },
     BindingDef {
         action: Action::EngageCommitInput,
@@ -745,7 +604,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Write a commit message",
         }),
         hint_contexts: &[(HintContext::Files, "Commit msg")],
-        palette: None,
     },
     BindingDef {
         action: Action::PushToRemote,
@@ -756,7 +614,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Push to remote",
         }),
         hint_contexts: &[(HintContext::Files, "Push")],
-        palette: None,
     },
     BindingDef {
         action: Action::PullFromRemote,
@@ -767,7 +624,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Pull from remote",
         }),
         hint_contexts: &[(HintContext::Files, "Pull")],
-        palette: None,
     },
     BindingDef {
         action: Action::SearchFiles,
@@ -781,7 +637,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Search changed files",
         }),
         hint_contexts: &[(HintContext::Files, "Search")],
-        palette: None,
     },
     BindingDef {
         action: Action::SearchNext,
@@ -792,7 +647,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Jump to next search match",
         }),
         hint_contexts: &[(HintContext::Files, "Next match")],
-        palette: None,
     },
     // ── Commit message editor ─────────────────────────────────────
     BindingDef {
@@ -804,7 +658,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Exit commit input",
         }),
         hint_contexts: &[(HintContext::CommitInput, "Exit")],
-        palette: None,
     },
     // ── Global ────────────────────────────────────────────────────
     // (placed after pane bindings so palette / help appear last in hints)
@@ -817,7 +670,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Focus next pane",
         }),
         hint_contexts: &[(HintContext::Center, "Next"), (HintContext::Files, "Next")],
-        palette: None,
     },
     BindingDef {
         action: Action::FocusPrev,
@@ -828,7 +680,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Focus previous pane",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::OpenPalette,
@@ -845,7 +696,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             (HintContext::Center, "Palette"),
             (HintContext::Files, "Palette"),
         ],
-        palette: None,
     },
     BindingDef {
         action: Action::ToggleResizeMode,
@@ -856,7 +706,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Resize mode (h/l side panes)",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::ToggleSidebar,
@@ -870,10 +719,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Toggle sidebar",
         }),
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "toggle-sidebar",
-            description: "Collapse or expand the projects sidebar",
-        }),
     },
     BindingDef {
         action: Action::ToggleGitPane,
@@ -887,10 +732,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Toggle git pane",
         }),
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "toggle-git-pane",
-            description: "Collapse or expand the git pane",
-        }),
     },
     BindingDef {
         action: Action::ToggleHelp,
@@ -910,10 +751,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             (HintContext::Center, "Help"),
             (HintContext::Files, "Help"),
         ],
-        palette: Some(PaletteEntry {
-            name: "help",
-            description: "Open the help overlay",
-        }),
     },
     BindingDef {
         action: Action::ForceRedraw,
@@ -924,10 +761,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Force a full terminal redraw",
         }),
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "force-redraw",
-            description: "Force a full terminal redraw (clears rendering artifacts)",
-        }),
     },
     BindingDef {
         action: Action::Quit,
@@ -938,7 +771,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Quit",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::CloseOverlay,
@@ -955,7 +787,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Close the current overlay or dialog",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     // ── Resize mode ───────────────────────────────────────────────
     BindingDef {
@@ -967,7 +798,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Grow the left pane width",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::ResizeShrink,
@@ -978,7 +808,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Shrink the left pane width",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     // ── Overlays and dialogs ──────────────────────────────────────
     BindingDef {
@@ -997,7 +826,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Toggle search mode",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::GoToPath,
@@ -1008,7 +836,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Open path editor in the project browser",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::ExitPathEditorOnProjectAdd,
@@ -1019,7 +846,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Exit typed-path mode in the project browser",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::OpenEntry,
@@ -1030,7 +856,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Open or navigate into the selected entry",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::AddCurrentDir,
@@ -1041,7 +866,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Add the current directory as a project",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::OpenStartupCommandLogFile,
@@ -1052,7 +876,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Open selected startup command log file",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::OpenStartupCommandLogFolder,
@@ -1066,7 +889,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Open selected startup command log folder",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::Confirm,
@@ -1081,7 +903,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Confirm the selected action",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::ToggleSelection,
@@ -1099,7 +920,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Toggle between options in a confirmation dialog",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     BindingDef {
         action: Action::ToggleMarked,
@@ -1110,7 +930,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Toggle the hovered runtime selection",
         }),
         hint_contexts: &[],
-        palette: None,
     },
     // ── Palette-only (no direct keybinding) ────────────────────────
     BindingDef {
@@ -1119,10 +938,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "kill-running",
-            description: "Open a modal to kill running agents and companion terminals",
-        }),
     },
     BindingDef {
         action: Action::NewTerminal,
@@ -1130,10 +945,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "new-terminal",
-            description: "Spawn a new companion terminal for the selected agent",
-        }),
     },
     BindingDef {
         action: Action::RenameSession,
@@ -1147,10 +958,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             (HintContext::LeftSession, "Rename"),
             (HintContext::Center, "Rename"),
         ],
-        palette: Some(PaletteEntry {
-            name: "rename-agent",
-            description: "Rename the selected agent session",
-        }),
     },
     BindingDef {
         action: Action::DeleteProject,
@@ -1158,10 +965,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "delete-project",
-            description: "Remove the selected project and its sessions",
-        }),
     },
     BindingDef {
         action: Action::RemoveProject,
@@ -1169,10 +972,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "remove-project",
-            description: "Remove project from app (keeps files on disk)",
-        }),
     },
     BindingDef {
         action: Action::SortAgentsByUpdated,
@@ -1180,10 +979,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "sort-agents-by-updated",
-            description: "Sort agents by most recently updated",
-        }),
     },
     BindingDef {
         action: Action::SortAgentsByCreated,
@@ -1191,10 +986,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "sort-agents-by-created",
-            description: "Sort agents by creation date (newest first)",
-        }),
     },
     BindingDef {
         action: Action::SortAgentsByName,
@@ -1202,10 +993,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "sort-agents-by-name",
-            description: "Sort agents alphabetically by name",
-        }),
     },
     BindingDef {
         action: Action::RemoveGitPane,
@@ -1216,10 +1003,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             description: "Remove or restore git pane",
         }),
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "toggle-remove-git-pane",
-            description: "Remove or restore the git pane entirely",
-        }),
     },
     BindingDef {
         action: Action::EditMacros,
@@ -1227,10 +1010,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "edit-macros",
-            description: "Edit text macros for interactive mode",
-        }),
     },
     BindingDef {
         action: Action::DebugInput,
@@ -1238,10 +1017,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "input-debugging",
-            description: "Open input event debugger to inspect keyboard and mouse events",
-        }),
     },
     BindingDef {
         action: Action::ToggleDiffLineNumbers,
@@ -1249,10 +1024,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "toggle-diff-line-numbers",
-            description: "Toggle line numbers in diff view",
-        }),
     },
     BindingDef {
         action: Action::ResourceMonitor,
@@ -1260,10 +1031,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "resource-monitor",
-            description: "Show CPU and memory usage for dux and all running agents",
-        }),
     },
     BindingDef {
         action: Action::ToggleGithubIntegration,
@@ -1271,10 +1038,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "toggle-github-integration",
-            description: "Toggle GitHub PR integration",
-        }),
     },
     BindingDef {
         action: Action::ToggleRandomizedPetNameDefault,
@@ -1282,10 +1045,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "toggle-randomized-pet-name-default",
-            description: "Toggle whether new agent prompts start with a random pet name",
-        }),
     },
     BindingDef {
         action: Action::TogglePrBannerPosition,
@@ -1293,10 +1052,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "toggle-pr-banner-position",
-            description: "Move PR banner between top and bottom of agent pane",
-        }),
     },
     BindingDef {
         action: Action::ForceReconnectAgent,
@@ -1304,10 +1059,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[],
         help: None,
         hint_contexts: &[],
-        palette: Some(PaletteEntry {
-            name: "force-reconnect-agent",
-            description: "Force-reconnect the agent with a fresh session (no --continue)",
-        }),
     },
 ];
 
@@ -1444,6 +1195,14 @@ impl RuntimeBindings {
             .iter()
             .map(|def| {
                 let keys = keys_for(def.action);
+                // The palette name/description come from the surface-aware core
+                // registry (`dux_core::palette`), the single source of truth, so
+                // the TUI and web cannot drift. Only commands surfaced to the TUI
+                // (`Tui` or `Both`) carry a palette name here; the exhaustiveness
+                // test guarantees every `BINDING_DEFS` palette entry has a
+                // matching core row.
+                let core_palette =
+                    dux_core::palette::find_by_action(def.action).filter(|c| c.surface.in_tui());
                 RuntimeBinding {
                     action: def.action,
                     keys,
@@ -1451,8 +1210,8 @@ impl RuntimeBindings {
                     help_section: def.help.as_ref().map(|h| h.section),
                     help_description: def.help.as_ref().map(|h| h.description),
                     hint_contexts: def.hint_contexts,
-                    palette_name: def.palette.as_ref().map(|p| p.name),
-                    palette_description: def.palette.as_ref().map(|p| p.description),
+                    palette_name: core_palette.map(|c| c.name),
+                    palette_description: core_palette.map(|c| c.description),
                 }
             })
             .collect();
@@ -2229,6 +1988,70 @@ mod tests {
         assert_eq!(Action::ResourceMonitor.config_name(), "resource_monitor");
     }
 
+    // EXHAUSTIVENESS PIN: the surface-aware core registry
+    // (`dux_core::palette::PALETTE_COMMANDS`) is the single source of truth for
+    // palette command names and descriptions. Every TUI-surfaced core command
+    // (Tui | Both) must:
+    //   1. join to a BINDING_DEFS entry by Action (so the TUI can attach
+    //      keybindings and dispatch), and
+    //   2. surface in the runtime palette listing with byte-identical name and
+    //      description.
+    // Conversely, the runtime palette listing must contain exactly the
+    // TUI-surfaced core commands — no more, no less. This makes name/description
+    // parity true by construction: adding or renaming a palette command in the
+    // core registry without a matching action fails this gate.
+    #[test]
+    fn palette_listing_matches_core_registry() {
+        use dux_core::palette::{self, PaletteSurface};
+
+        let bindings = default_bindings();
+        let listed: std::collections::HashMap<&str, &str> = bindings
+            .bindings
+            .iter()
+            .filter_map(|b| Some((b.palette_name?, b.palette_description?)))
+            .collect();
+
+        // Every TUI-surfaced core command appears in the listing, with matching
+        // name + description, and has a BINDING_DEFS action entry.
+        let mut tui_count = 0usize;
+        for cmd in palette::PALETTE_COMMANDS {
+            assert!(
+                matches!(cmd.surface, PaletteSurface::Tui | PaletteSurface::Both),
+                "unexpected Web-only palette command \"{}\": today every web \
+                 palette command also surfaces in the TUI",
+                cmd.name
+            );
+            assert!(
+                BINDING_DEFS.iter().any(|d| d.action == cmd.action),
+                "core palette command \"{}\" has no BINDING_DEFS entry to join on",
+                cmd.name
+            );
+            if cmd.surface.in_tui() {
+                tui_count += 1;
+                let desc = listed.get(cmd.name).unwrap_or_else(|| {
+                    panic!(
+                        "TUI-surfaced core palette command \"{}\" is missing from \
+                         the runtime palette listing",
+                        cmd.name
+                    )
+                });
+                assert_eq!(
+                    *desc, cmd.description,
+                    "palette description drift for \"{}\"",
+                    cmd.name
+                );
+            }
+        }
+
+        // The listing contains nothing the core registry didn't surface.
+        assert_eq!(
+            listed.len(),
+            tui_count,
+            "the runtime palette listing has entries not present (TUI-surfaced) \
+             in the core registry"
+        );
+    }
+
     #[test]
     fn left_scope_resolves_t_to_show_terminal() {
         let bindings = default_bindings();
@@ -2264,11 +2087,9 @@ mod tests {
             .find(|d| d.action == Action::StartWebServer)
             .expect("StartWebServer must be registered in BINDING_DEFS");
 
-        // It is a palette command with a name…
-        let palette = def
-            .palette
-            .as_ref()
-            .expect("StartWebServer must expose a palette entry");
+        // It is a palette command with a name in the core registry…
+        let palette = dux_core::palette::find_by_action(Action::StartWebServer)
+            .expect("StartWebServer must expose a core palette entry");
         assert_eq!(palette.name, "start-web-server");
         assert!(!palette.description.is_empty());
 

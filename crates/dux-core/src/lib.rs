@@ -17,6 +17,7 @@ pub mod io_retry;
 pub mod lockfile;
 pub mod logger;
 pub mod model;
+pub mod palette;
 pub mod project_browser;
 pub mod provider;
 pub mod pty;

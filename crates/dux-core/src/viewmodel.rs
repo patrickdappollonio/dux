@@ -40,6 +40,24 @@ pub struct ViewModel {
     /// "bottom", matching the TUI's `pr_banner_at_bottom` semantics. Mobile
     /// ignores this and always renders the banner on top.
     pub pr_banner_position: String,
+    /// Surface-aware command-palette commands that the web should render as a
+    /// global "Commands" group, in canonical registry order. Derived from
+    /// `dux_core::palette` (the `Web`/`Both` subset). Each entry's `id` is the
+    /// dashed command name; the web's `paletteRegistry` maps it to a store
+    /// handler. Static for a given build — the watch channel coalesces identical
+    /// frames, so this does not cause churn.
+    pub palette_commands: Vec<PaletteCommandView>,
+}
+
+/// A single global palette command surfaced to the web, projected from
+/// `dux_core::palette::PaletteCommand`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PaletteCommandView {
+    /// The dashed command name (e.g. `sort-agents-by-updated`). Stable id used
+    /// to look up the web handler in `paletteRegistry`.
+    pub id: &'static str,
+    /// One-line description shown alongside the id in the palette.
+    pub description: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -291,6 +309,12 @@ impl Engine {
                 .enable_randomized_pet_name_by_default,
             gh_available: self.pr_agent_command_available(),
             pr_banner_position: self.config.ui.pr_banner_position.clone(),
+            palette_commands: crate::palette::web_palette_commands()
+                .map(|c| PaletteCommandView {
+                    id: c.name,
+                    description: c.description,
+                })
+                .collect(),
         }
     }
 }
@@ -331,6 +355,37 @@ mod tests {
             !vm.welcome_tips.is_empty(),
             "welcome_tips should carry the shared web tips"
         );
+    }
+
+    #[test]
+    fn palette_commands_project_web_subset_in_registry_order() {
+        let (engine, _tmp) = test_engine();
+        let vm = engine.view_model();
+
+        // The projected ids equal the Web/Both subset of the core registry, in
+        // canonical registry order.
+        let expected: Vec<&str> = crate::palette::web_palette_commands()
+            .map(|c| c.name)
+            .collect();
+        let actual: Vec<&str> = vm.palette_commands.iter().map(|c| c.id).collect();
+        assert_eq!(actual, expected);
+
+        // Descriptions are carried verbatim from the registry.
+        for (view, cmd) in vm
+            .palette_commands
+            .iter()
+            .zip(crate::palette::web_palette_commands())
+        {
+            assert_eq!(view.id, cmd.name);
+            assert_eq!(view.description, cmd.description);
+        }
+
+        // Spot-check that a known web command is present and a known TUI-only
+        // command is absent.
+        assert!(actual.contains(&"add-project"));
+        assert!(actual.contains(&"toggle-diff-line-numbers"));
+        assert!(!actual.contains(&"start-web-server"));
+        assert!(!actual.contains(&"change-theme"));
     }
 
     #[test]

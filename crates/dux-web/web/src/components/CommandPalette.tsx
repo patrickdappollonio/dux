@@ -9,23 +9,20 @@ import {
   CommandSeparator,
 } from "@/components/ui/command"
 import {
-  openAddProject,
   openCheckoutDefaultBranch,
   openCommit,
   openCreateAgent,
   openCreateAgentFromPr,
   openForkAgent,
-  openGlobalEnv,
   openRename,
   pullProject,
   reconnectSession,
   selectSession,
   setPaletteOpen,
   socket,
-  sortAgents,
   useDux,
 } from "@/lib/store"
-import type { SortKey } from "@/lib/sortSessions"
+import { PALETTE_HANDLERS } from "@/lib/paletteRegistry"
 
 export function CommandPalette() {
   const { paletteOpen, viewModel, selectedSessionId } = useDux()
@@ -76,13 +73,27 @@ export function CommandPalette() {
     close()
   }
 
-  function handleSort(by: SortKey) {
-    sortAgents(by)
+  // Run a registry command by its core id. Entries whose id lacks a handler are
+  // never rendered (filtered below), but guard here too so a stale ViewModel id
+  // surfaces as a dev warning rather than a silent no-op.
+  function runPaletteCommand(id: string) {
+    const handler = PALETTE_HANDLERS[id]
+    if (!handler) {
+      console.warn(`No web handler registered for palette command "${id}"`)
+      return
+    }
+    handler()
     close()
   }
 
   const sessions = viewModel?.sessions ?? []
   const projects = viewModel?.projects ?? []
+  // The "Commands" group is driven by the surface-aware core registry: the
+  // ViewModel projects the Web/Both subset (name + description, canonical
+  // order); we render each entry whose id has a web handler.
+  const paletteCommands = (viewModel?.palette_commands ?? []).filter(
+    (cmd) => cmd.id in PALETTE_HANDLERS
+  )
   // The "New agent from PR" entries are gated on GitHub/`gh` availability,
   // mirroring the TUI, which hides its `new-agent-from-pr` command in that state.
   const ghAvailable = viewModel?.gh_available ?? false
@@ -209,34 +220,33 @@ export function CommandPalette() {
           </>
         )}
 
-        <CommandGroup heading="Workspace">
-          <CommandItem
-            className="cursor-pointer"
-            onSelect={() => {
-              openAddProject()
-              close()
-            }}
-          >
-            Add project…
-          </CommandItem>
-          <CommandItem
-            className="cursor-pointer"
-            onSelect={() => {
-              openGlobalEnv()
-              close()
-            }}
-          >
-            Global environment…
-          </CommandItem>
-          <CommandItem
-            className="cursor-pointer"
-            onSelect={() => {
-              socket.sendCommand("reload_config", {})
-              close()
-            }}
-          >
-            Reload config from disk
-          </CommandItem>
+        {/* Registry-driven global commands (the surface-aware core registry's
+            Web/Both subset). Name + description mirror the TUI palette's
+            presentation. Replaces the former hand-written Workspace and Sort
+            groups so there is exactly one source of truth and no duplicates. */}
+        {paletteCommands.length > 0 && (
+          <>
+            <CommandGroup heading="Commands">
+              {paletteCommands.map((cmd) => (
+                <CommandItem
+                  key={cmd.id}
+                  value={`${cmd.id} ${cmd.description}`}
+                  className="cursor-pointer"
+                  onSelect={() => runPaletteCommand(cmd.id)}
+                >
+                  <span className="font-medium">{cmd.id}</span>
+                  <span className="text-muted-foreground">{cmd.description}</span>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+            <CommandSeparator />
+          </>
+        )}
+
+        {/* Web-only: not a TUI palette command (no BINDING_DEFS/core entry), so
+            it stays hand-written. Overwrites config.toml from the running
+            config — paired with the registry's reload-config. */}
+        <CommandGroup heading="Config">
           <CommandItem
             className="cursor-pointer"
             onSelect={() => {
@@ -248,32 +258,6 @@ export function CommandPalette() {
           </CommandItem>
         </CommandGroup>
         <CommandSeparator />
-
-        {sessions.length >= 2 && (
-          <>
-            <CommandGroup heading="Sort agents">
-              <CommandItem
-                className="cursor-pointer"
-                onSelect={() => handleSort("updated")}
-              >
-                Sort agents by most recently updated
-              </CommandItem>
-              <CommandItem
-                className="cursor-pointer"
-                onSelect={() => handleSort("created")}
-              >
-                Sort agents by creation date (newest first)
-              </CommandItem>
-              <CommandItem
-                className="cursor-pointer"
-                onSelect={() => handleSort("name")}
-              >
-                Sort agents alphabetically by name
-              </CommandItem>
-            </CommandGroup>
-            <CommandSeparator />
-          </>
-        )}
 
         <CommandGroup heading="Switch session">
           {sessions.map((s) => (
