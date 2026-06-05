@@ -182,12 +182,10 @@ impl App {
             self.clamp_terminal_cursor();
         }
 
-        // Poll foreground process names every ~2 seconds (every 20 ticks).
-        if self.tick_count.is_multiple_of(20) {
-            for terminal in self.engine.companion_terminals.values_mut() {
-                terminal.foreground_cmd = terminal.client.foreground_process_name();
-            }
-        }
+        // Refresh companion-terminal foreground commands. The engine throttles
+        // this by wall-clock (~2s), so calling it on every ~100ms tick keeps the
+        // cadence without coupling the refresh to the tick count.
+        self.engine.refresh_terminal_foregrounds();
 
         // Spawn a background worker to refresh resource monitor stats when
         // the overlay is open and enough wall-clock time has elapsed (~2s).

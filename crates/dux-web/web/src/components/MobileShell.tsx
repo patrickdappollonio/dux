@@ -63,12 +63,12 @@ import {
 } from "@/lib/reorder"
 import {
   createTerminal,
-  deleteTerminal,
   mobileNavigate,
   openAddProject,
   openCommit,
   openCreateAgent,
   openDelete,
+  openDeleteTerminal,
   openProjectSettings,
   openRemoveProject,
   reorderProjects,
@@ -80,6 +80,7 @@ import {
   useDux,
 } from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
+import { terminalTitle } from "@/lib/terminals"
 import type { PrView, SessionView } from "@/lib/types"
 
 // Mirror the sidebar's PR badge coloring (the one intentional semantic-color
@@ -173,6 +174,8 @@ function TerminalRow({
   sessionId: string
   active: boolean
 }) {
+  // Title follows the TUI precedence: foreground command if running, else label.
+  const title = terminalTitle(terminal)
   return (
     <div className="flex items-center gap-1 pl-6">
       <Button
@@ -181,14 +184,16 @@ function TerminalRow({
         onClick={() => selectTerminalAndOpen(terminal.id, sessionId)}
       >
         <SquareTerminal />
-        <span className="flex-1 truncate text-left">{terminal.label}</span>
+        <span className="flex-1 truncate text-left" title={terminal.label}>
+          {title}
+        </span>
       </Button>
       <Button
         variant="ghost"
         size="icon"
         className="size-11 shrink-0"
         aria-label="Close terminal"
-        onClick={() => deleteTerminal(terminal.id)}
+        onClick={() => openDeleteTerminal(terminal.id)}
       >
         <X />
       </Button>

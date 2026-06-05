@@ -32,6 +32,11 @@ export interface TerminalView {
   id: string
   label: string
   has_output: boolean
+  /** The command running in the terminal's foreground, or null when the shell
+   * itself is idle. Refreshed by the engine at most every ~2s. The displayed
+   * terminal title follows this when present, falling back to `label` (see
+   * `terminalTitle`). */
+  foreground_cmd: string | null
 }
 
 export interface SessionView {

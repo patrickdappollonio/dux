@@ -379,6 +379,11 @@ pub(crate) fn run_engine_loop(
         // single poll site for the other surface; the two never run at once).
         engine.poll_pty_activity();
 
+        // Refresh companion-terminal foreground commands so the ViewModel's
+        // `foreground_cmd` tracks what's running. The engine throttles this by
+        // wall-clock (~2s), so calling it every tick is cheap.
+        engine.refresh_terminal_foregrounds();
+
         // Reap agent/terminal PTYs whose child process exited so they stop
         // lingering in `providers`/`companion_terminals` and disappear from
         // the ViewModel, broadcasting a status for each so web clients learn.

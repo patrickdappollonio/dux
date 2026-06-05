@@ -136,6 +136,12 @@ pub struct Engine {
     /// and the in-process flip carries this map across automatically with the
     /// engine.
     pub pty_activity: HashMap<String, Instant>,
+    /// Wall-clock timestamp of the last companion-terminal foreground refresh.
+    /// [`Engine::refresh_terminal_foregrounds`] throttles itself against this so
+    /// callers can invoke it every tick while the actual `tcgetpgrp` probe runs
+    /// at most once per [`FOREGROUND_REFRESH_INTERVAL`]. `None` until the first
+    /// refresh runs. Wall-clock (not tick counts) per the design tenet.
+    pub last_foreground_refresh: Option<Instant>,
 }
 
 /// How recently an agent must have emitted PTY output to count as actively
@@ -147,6 +153,13 @@ pub struct Engine {
 /// change-only ViewModel watch channel only pushes on transitions (idle→working
 /// and working→idle), never on every byte. See [`crate::viewmodel::SessionView`].
 pub const AGENT_STREAMING_WINDOW: Duration = Duration::from_secs(1);
+
+/// How often [`Engine::refresh_terminal_foregrounds`] actually probes companion
+/// terminals for their foreground command. Calls more frequent than this are
+/// no-ops, so every surface can invoke the refresh once per (sub-second) tick
+/// and still get the same ~2s cadence. Wall-clock, not tick counts, per the
+/// "periodic refreshes use wall-clock time" design tenet.
+pub const FOREGROUND_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Map a runtime [`Project`] to a portable [`ProjectConfig`] for config.toml.
 /// Uses the same field mapping as the persistence worker's `Add` arm so the
@@ -191,6 +204,27 @@ impl Engine {
             if provider.take_received_data() {
                 self.pty_activity.insert(session_id.clone(), now);
             }
+        }
+    }
+
+    /// Refresh the `foreground_cmd` of every companion terminal by probing its
+    /// PTY for the currently-running foreground process (`tcgetpgrp` vs the
+    /// shell PID — see [`crate::pty::PtyClient::foreground_process_name`]).
+    /// Throttled internally by wall-clock: the probe runs at most once per
+    /// [`FOREGROUND_REFRESH_INTERVAL`], so callers may invoke this every tick
+    /// and any extra calls within the interval are cheap no-ops. Both the TUI
+    /// run loop and the web engine actor call this once per tick; they never run
+    /// at the same time.
+    pub fn refresh_terminal_foregrounds(&mut self) {
+        let now = Instant::now();
+        if let Some(last) = self.last_foreground_refresh
+            && now.duration_since(last) < FOREGROUND_REFRESH_INTERVAL
+        {
+            return;
+        }
+        self.last_foreground_refresh = Some(now);
+        for terminal in self.companion_terminals.values_mut() {
+            terminal.foreground_cmd = terminal.client.foreground_process_name();
         }
     }
 
@@ -1021,7 +1055,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::test_support::{sample_project, test_engine};
+    use crate::engine::test_support::{sample_project, sample_session, test_engine};
 
     #[test]
     fn is_agent_streaming_honors_the_hysteresis_window() {
@@ -1042,6 +1076,78 @@ mod tests {
 
         // No entry at all → not streaming.
         assert!(!engine.is_agent_streaming("absent"));
+    }
+
+    #[test]
+    fn refresh_terminal_foregrounds_is_a_noop_without_terminals() {
+        let (mut engine, _tmp) = test_engine();
+        assert!(engine.last_foreground_refresh.is_none());
+
+        // First call stamps the timestamp even with nothing to probe, so the
+        // throttle starts ticking from the first invocation.
+        engine.refresh_terminal_foregrounds();
+        let first = engine
+            .last_foreground_refresh
+            .expect("first refresh stamps the timestamp");
+
+        // An immediate second call is throttled: the timestamp does not advance.
+        engine.refresh_terminal_foregrounds();
+        assert_eq!(
+            engine.last_foreground_refresh,
+            Some(first),
+            "a second immediate refresh must be a throttled no-op"
+        );
+    }
+
+    #[test]
+    fn refresh_terminal_foregrounds_throttles_by_wall_clock() {
+        let (mut engine, _tmp) = test_engine();
+
+        // Spawn a real `cat` companion terminal: `foreground_process_name`
+        // requires a live PTY master fd to call `tcgetpgrp`. `cat` is spawned
+        // directly (no shell), so tcgetpgrp == the child pid and the foreground
+        // probe returns None (shell-is-foreground). We assert on the THROTTLE,
+        // not on the probe's value — faking tcgetpgrp is out of scope.
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feature");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        engine
+            .create_companion_terminal("s1")
+            .expect("create companion terminal");
+
+        // First refresh runs and stamps the timestamp.
+        engine.refresh_terminal_foregrounds();
+        let first = engine
+            .last_foreground_refresh
+            .expect("first refresh stamps the timestamp");
+
+        // Within the interval the refresh is skipped (timestamp unchanged).
+        engine.refresh_terminal_foregrounds();
+        assert_eq!(
+            engine.last_foreground_refresh,
+            Some(first),
+            "a refresh within the interval must not run"
+        );
+
+        // Rewind the timestamp past the interval to simulate elapsed wall-clock
+        // time, then the next call runs again and re-stamps.
+        engine.last_foreground_refresh =
+            Some(first - (FOREGROUND_REFRESH_INTERVAL + Duration::from_millis(50)));
+        engine.refresh_terminal_foregrounds();
+        let second = engine
+            .last_foreground_refresh
+            .expect("refresh after the interval re-stamps");
+        assert!(
+            second > first,
+            "a refresh after the interval lapses must run and advance the timestamp"
+        );
     }
 
     #[test]

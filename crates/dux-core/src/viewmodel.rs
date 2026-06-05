@@ -83,6 +83,14 @@ pub struct TerminalView {
     pub label: String,
     /// Whether the terminal's PTY has emitted any output yet.
     pub has_output: bool,
+    /// The command currently running in the foreground of this terminal, or
+    /// `None` when the shell itself is idle in the foreground. Projected verbatim
+    /// from [`crate::model::CompanionTerminal::foreground_cmd`], which the engine
+    /// refreshes at most every ~2s
+    /// ([`crate::engine::FOREGROUND_REFRESH_INTERVAL`]) — so this field changes
+    /// slowly and the coalesced ViewModel watch stays calm. The web UI shows
+    /// this as the terminal's title when present, falling back to `label`.
+    pub foreground_cmd: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -212,6 +220,7 @@ impl Engine {
                             id: id.clone(),
                             label: t.label.clone(),
                             has_output: t.client.has_output(),
+                            foreground_cmd: t.foreground_cmd.clone(),
                         })
                         .collect();
                     terminals.sort_by(|a, b| a.id.cmp(&b.id));
@@ -425,6 +434,56 @@ mod tests {
         assert_eq!(terminals.len(), 1);
         assert_eq!(terminals[0].id, terminal_id);
         assert_eq!(terminals[0].label, label);
+        // A freshly-created terminal has no foreground command yet.
+        assert_eq!(terminals[0].foreground_cmd, None);
+    }
+
+    #[test]
+    fn terminal_foreground_cmd_is_projected_verbatim() {
+        let (mut engine, _tmp) = test_engine();
+
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feature");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+
+        let (terminal_id, _label) = engine
+            .create_companion_terminal("s1")
+            .expect("create companion terminal");
+
+        // Set the model field directly (the engine's wall-clock-throttled probe
+        // is exercised separately; here we just prove the projection copies it).
+        engine
+            .companion_terminals
+            .get_mut(&terminal_id)
+            .expect("terminal exists")
+            .foreground_cmd = Some("npm".to_string());
+
+        let vm = engine.view_model();
+        assert_eq!(
+            vm.sessions[0].terminals[0].foreground_cmd.as_deref(),
+            Some("npm"),
+            "a Some foreground_cmd must project verbatim"
+        );
+
+        // Clearing the model field projects back to null.
+        engine
+            .companion_terminals
+            .get_mut(&terminal_id)
+            .expect("terminal exists")
+            .foreground_cmd = None;
+
+        let vm = engine.view_model();
+        assert_eq!(
+            vm.sessions[0].terminals[0].foreground_cmd, None,
+            "a None foreground_cmd must project as null"
+        );
     }
 
     #[test]

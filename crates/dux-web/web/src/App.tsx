@@ -7,6 +7,7 @@ import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { CommandPalette } from "@/components/CommandPalette"
 import { CommitDialog } from "@/components/CommitDialog"
+import { ConfirmDeleteTerminalDialog } from "@/components/ConfirmDeleteTerminalDialog"
 import { CreateAgentDialog } from "@/components/CreateAgentDialog"
 import { DeleteSessionDialog } from "@/components/DeleteSessionDialog"
 import { GlobalEnvDialog } from "@/components/GlobalEnvDialog"
@@ -41,6 +42,7 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import { CONN_BADGE } from "@/lib/conn"
 import { setPaletteOpen, useDux } from "@/lib/store"
+import { terminalTitle } from "@/lib/terminals"
 
 function InsetHeader() {
   const { viewModel, selectedSessionId, selectedTarget, conn } = useDux()
@@ -48,12 +50,13 @@ function InsetHeader() {
   const project = session
     ? viewModel?.projects.find((p) => p.id === session.project_id)
     : undefined
-  // When a companion terminal is focused, surface its label as a third crumb.
-  const terminalLabel =
+  // When a companion terminal is focused, surface it as a third crumb. The crumb
+  // text follows the TUI precedence (foreground command if running, else label).
+  const terminal =
     selectedTarget?.kind === "terminal"
       ? session?.terminals.find((t) => t.id === selectedTarget.terminalId)
-          ?.label
       : undefined
+  const terminalLabel = terminal ? terminalTitle(terminal) : undefined
   const badge = CONN_BADGE[conn]
 
   return (
@@ -162,6 +165,7 @@ function GlobalOverlays() {
       <CommitDialog />
       <CreateAgentDialog />
       <DeleteSessionDialog />
+      <ConfirmDeleteTerminalDialog />
       <GlobalEnvDialog />
       <ProjectSettingsDialog />
       <AddProjectDialog />

@@ -2617,6 +2617,7 @@ mod tests {
             changed_files_poller_started: AtomicBool::new(false),
             branch_sync_worker_started: AtomicBool::new(false),
             pty_activity: std::collections::HashMap::new(),
+            last_foreground_refresh: None,
         };
         let mut app = App {
             engine,
@@ -2775,6 +2776,7 @@ mod tests {
             changed_files_poller_started: AtomicBool::new(false),
             branch_sync_worker_started: AtomicBool::new(false),
             pty_activity: std::collections::HashMap::new(),
+            last_foreground_refresh: None,
         }
     }
 

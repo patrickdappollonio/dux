@@ -47,6 +47,9 @@ export interface DuxState {
   commitTarget: string | null
   commitDraft: string
   deleteTarget: string | null
+  // The companion terminal id pending close confirmation, or null. Mirrors the
+  // TUI, which ALWAYS confirms terminal deletion (the running process is killed).
+  deleteTerminalTarget: string | null
   globalEnvOpen: boolean
   projectSettingsTarget: string | null
   addProjectOpen: boolean
@@ -111,6 +114,7 @@ let state: DuxState = {
   commitTarget: null,
   commitDraft: "",
   deleteTarget: null,
+  deleteTerminalTarget: null,
   globalEnvOpen: false,
   projectSettingsTarget: null,
   addProjectOpen: false,
@@ -400,6 +404,17 @@ export function selectTerminal(terminalId: string, sessionId: string): void {
 // replies with `terminal_created`, which auto-focuses it via `onTerminalCreated`.
 export function createTerminal(sessionId: string): void {
   socket.createTerminal(sessionId)
+}
+
+// Open the close-terminal confirmation dialog for a companion terminal. The TUI
+// always confirms before killing a terminal's running process, so the web does
+// too (the ✕ no longer deletes on a single click).
+export function openDeleteTerminal(terminalId: string): void {
+  setState({ deleteTerminalTarget: terminalId })
+}
+
+export function closeDeleteTerminal(): void {
+  setState({ deleteTerminalTarget: null })
 }
 
 // Ask the server to close (delete) a companion terminal. It is removed from the

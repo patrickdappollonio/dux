@@ -82,11 +82,11 @@ import {
 } from "@/lib/reorder"
 import {
   createTerminal,
-  deleteTerminal,
   openAddProject,
   openCommit,
   openCreateAgent,
   openDelete,
+  openDeleteTerminal,
   openProjectSettings,
   openRemoveProject,
   reorderProjects,
@@ -97,6 +97,7 @@ import {
   socket,
   useDux,
 } from "@/lib/store"
+import { terminalTitle } from "@/lib/terminals"
 import type { SelectedTarget } from "@/lib/store"
 import type {
   ConnState,
@@ -126,6 +127,10 @@ function TerminalSubItem({
   sessionId: string
   active: boolean
 }) {
+  // Title follows the TUI precedence: the foreground command if one is running,
+  // otherwise the static label. The static label rides along as the `title`
+  // tooltip so "Terminal 1" stays discoverable when a command is shown.
+  const title = terminalTitle(terminal)
   return (
     <SidebarMenuSubItem>
       {/* The close button's slot only exists while THIS row is hovered/focused
@@ -138,7 +143,9 @@ function TerminalSubItem({
         onClick={() => selectTerminal(terminal.id, sessionId)}
       >
         <SquareTerminal />
-        <span className="flex-1 truncate">{terminal.label}</span>
+        <span className="flex-1 truncate" title={terminal.label}>
+          {title}
+        </span>
       </SidebarMenuSubButton>
       <SidebarMenuAction
         title="Close terminal"
@@ -148,7 +155,7 @@ function TerminalSubItem({
         className="top-1 md:opacity-0 group-focus-within/menu-sub-item:opacity-100 group-hover/menu-sub-item:opacity-100"
         onClick={(event) => {
           event.stopPropagation()
-          deleteTerminal(terminal.id)
+          openDeleteTerminal(terminal.id)
         }}
       >
         <X />

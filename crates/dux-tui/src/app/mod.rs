@@ -1274,6 +1274,7 @@ impl App {
             changed_files_poller_started: AtomicBool::new(false),
             branch_sync_worker_started: AtomicBool::new(false),
             pty_activity: HashMap::new(),
+            last_foreground_refresh: None,
         };
         Self::assemble(
             engine,
