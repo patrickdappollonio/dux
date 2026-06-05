@@ -72,6 +72,15 @@ export interface ProjectWorktreeEntryView {
   reason: string | null
 }
 
+// The branch-warning classification for a candidate project path, mirroring
+// the server's `BranchWarningView` / `dux_core::worker::BranchWarningKind`.
+// `known` names the resolved default branch; `heuristic` means dux can't
+// confidently identify the default. Absence (null on the reply) means the repo
+// is already on its default branch — no warning.
+export type BranchWarningView =
+  | { kind: "known"; default_branch: string }
+  | { kind: "heuristic" }
+
 export interface ChangedFileView {
   status: string
   path: string
@@ -152,6 +161,13 @@ export type ServerMessage =
       entries: ProjectWorktreeEntryView[]
       error: string | null
     }
+  | {
+      type: "project_path_inspection"
+      path: string
+      current_branch: string | null
+      warning: BranchWarningView | null
+      error: string | null
+    }
 
 // Client -> server JSON text frames, tagged by `type`.
 export type ClientMessage =
@@ -164,5 +180,6 @@ export type ClientMessage =
   | { type: "browse_dir"; path: string | null }
   | { type: "generate_agent_name" }
   | { type: "list_project_worktrees"; project_id: string }
+  | { type: "inspect_project_path"; path: string }
 
 export type ConnState = "connecting" | "open" | "closed" | "failed"

@@ -5,6 +5,7 @@ import { sanitizeAgentName } from "./agentName"
 import { ordersMatch } from "./reorder"
 import { DuxSocket } from "./ws"
 import type {
+  BranchWarningView,
   ConnState,
   DirEntryView,
   FileDiff,
@@ -89,6 +90,20 @@ export interface DuxState {
   browsePath: string
   browseEntries: DirEntryView[]
   browseLoading: boolean
+  // Branch pre-flight for the add-project flow, mirroring the TUI's
+  // `ConfirmNonDefaultBranch` prompt. When the user selects a git repo the
+  // dialog fires `inspectProjectPath`; the reply lands here keyed by `path` so a
+  // stale reply for a previously-selected repo is ignored. `loading` drives the
+  // dialog's spinner; `warning` null (with a resolved `path`) means the repo is
+  // on its default branch — no warning step. `null` overall means no inspection
+  // is pending or resolved (nothing selected).
+  projectPathInspection: {
+    path: string
+    currentBranch: string | null
+    warning: BranchWarningView | null
+    error: string | null
+    loading: boolean
+  } | null
   removeProjectTarget: string | null
   // The project pending a default-branch checkout confirmation, or null. The
   // checkout moves the source checkout's HEAD, so the web confirms first (the
@@ -192,6 +207,7 @@ let state: DuxState = {
   browsePath: "",
   browseEntries: [],
   browseLoading: false,
+  projectPathInspection: null,
   removeProjectTarget: null,
   checkoutDefaultBranchTarget: null,
   attachWorktreeTarget: null,
@@ -414,6 +430,23 @@ socket.onAgentName = (name) => {
       createAgentNamePending: false,
     })
   }
+}
+
+// The add-project branch pre-flight reply. Ignore a stale reply whose path no
+// longer matches the pending inspection (the user picked a different repo, or
+// the dialog closed) so a late frame can never repopulate a closed/changed
+// selection — same staleness guard as `onProjectWorktrees`.
+socket.onProjectPathInspection = (path, currentBranch, warning, error) => {
+  if (state.projectPathInspection?.path !== path) return
+  setState({
+    projectPathInspection: {
+      path,
+      currentBranch,
+      warning,
+      error,
+      loading: false,
+    },
+  })
 }
 
 socket.connect()
@@ -668,16 +701,49 @@ export function openAddProject(): void {
 }
 
 export function closeAddProject(): void {
-  setState({ addProjectOpen: false })
+  setState({ addProjectOpen: false, projectPathInspection: null })
 }
 
 export function browseDir(path: string | null): void {
-  setState({ browseLoading: true })
+  // Navigating away abandons any pending/resolved branch inspection so a late
+  // reply for the old selection can't resurface in the new directory.
+  setState({ browseLoading: true, projectPathInspection: null })
   socket.browseDir(path)
+}
+
+// Fire the branch pre-flight for a selected git repo, mirroring the TUI's
+// `add_project`, which inspects the current branch before adding. The reply
+// fills `projectPathInspection` via `onProjectPathInspection`; the dialog shows
+// a warning step when it carries one. Runs in the click handler that selects the
+// repo — never an effect — like `openAttachWorktree` kicks off its listing.
+export function inspectProjectPath(path: string): void {
+  setState({
+    projectPathInspection: {
+      path,
+      currentBranch: null,
+      warning: null,
+      error: null,
+      loading: true,
+    },
+  })
+  socket.inspectProjectPath(path)
+}
+
+// Drop any pending/resolved inspection (e.g. the user deselected the repo).
+export function clearProjectInspection(): void {
+  setState({ projectPathInspection: null })
 }
 
 export function addProject(path: string, name: string): void {
   socket.sendCommand("add_project", { path, name })
+}
+
+// Check out the repo's default branch first, then add it — the TUI's
+// "Check Out & Add" path. Only offered for the Known warning (the server
+// re-validates and rejects otherwise). The switch + add run server-side through
+// the worker chain; the status stream reports the outcome.
+export function addProjectCheckoutDefault(path: string, name: string): void {
+  socket.sendCommand("add_project_checkout_default", { path, name })
 }
 
 export function openRemoveProject(projectId: string): void {

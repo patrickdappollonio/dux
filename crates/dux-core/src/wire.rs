@@ -113,6 +113,26 @@ pub enum WireCommand {
         path: String,
         name: String,
     },
+    /// Check the repo's default branch out FIRST, then register it as a project,
+    /// mirroring the TUI's "Check Out & Add" button in the
+    /// `ConfirmNonDefaultBranch` dialog (the default action for the confident
+    /// "Known" warning). Only valid when the repo's `origin/HEAD` resolves to a
+    /// known default that differs from the current branch — the wire layer
+    /// re-runs `branch_warning_kind` server-side and rejects the command
+    /// otherwise (defense against a stale/forged path; the heuristic path never
+    /// offers this option, matching the TUI).
+    ///
+    /// `git switch` rewrites the working tree, so this follows the L4 worker
+    /// chain rather than running inline (CLAUDE.md workers tenet): it spawns
+    /// `run_add_project_checkout_job` and returns a busy status. Worker
+    /// completion posts `NonDefaultBranchCheckoutCompleted`, whose
+    /// `AddProjectAfterBranchCheckout` reaction is driven to the actual project
+    /// add by the web actor's `drive_add_project_followup` (the TUI drives the
+    /// identical reaction from its `workers.rs` drain).
+    AddProjectCheckoutDefault {
+        path: String,
+        name: String,
+    },
     /// Remove a project from the workspace by id (does not touch its checkout).
     RemoveProject {
         project_id: String,
@@ -383,6 +403,12 @@ impl Engine {
             }
             WireCommand::CheckoutProjectDefaultBranch { project_id } => {
                 let status = self.checkout_project_default_branch(&project_id)?;
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
+                });
+            }
+            WireCommand::AddProjectCheckoutDefault { path, name } => {
+                let status = self.add_project_checkout_default(&path, name)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
                 });
@@ -738,6 +764,121 @@ impl Engine {
             );
         });
         Ok(WireStatus::new("busy", busy))
+    }
+
+    /// Check out the repo's default branch first, then add it as a project,
+    /// mirroring the TUI's "Check Out & Add" path
+    /// (`dispatch_non_default_branch_checkout` with a `NonDefaultBranchAction::AddProject`).
+    ///
+    /// Re-validates server-side rather than trusting the client: the path must be
+    /// a git repo whose `branch_warning_kind` is `Known` (a confidently-resolved
+    /// default branch that differs from the current one). The heuristic case
+    /// never offers this option in the TUI, and an already-on-default repo has no
+    /// warning at all, so both are rejected here.
+    ///
+    /// `git switch` rewrites the working tree, so the actual work runs in
+    /// `run_add_project_checkout_job` off-thread (L4 worker chain); this returns
+    /// the busy status synchronously, byte-identical to the TUI's `set_busy`.
+    fn add_project_checkout_default(
+        &mut self,
+        path: &str,
+        name: String,
+    ) -> anyhow::Result<WireStatus> {
+        let validated = self
+            .validate_project_add_path(path)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let branch = crate::git::current_branch(&validated)?;
+        let default_branch = match crate::git::branch_warning_kind(&validated, &branch) {
+            Some(crate::worker::BranchWarningKind::Known { default_branch }) => default_branch,
+            _ => anyhow::bail!(
+                "Cannot determine a default branch to check out for \"{}\". Switch branches in your terminal and retry.",
+                validated.display()
+            ),
+        };
+        let leading_branch =
+            crate::project_browser::leading_branch_for_project(&validated, &branch);
+        let path_str = validated.to_string_lossy().to_string();
+        let action = NonDefaultBranchAction::AddProject {
+            path: path_str.clone(),
+            name,
+            leading_branch,
+        };
+        // Mirror the TUI's `dispatch_non_default_branch_checkout` busy copy
+        // (reason "before adding the project").
+        let busy =
+            format!("Checking out \"{default_branch}\" in {path_str} before adding the project...");
+        let worker_tx = self.worker_tx.clone();
+        std::thread::spawn(move || {
+            crate::project_browser::run_add_project_checkout_job(action, default_branch, worker_tx);
+        });
+        Ok(WireStatus::new("busy", busy))
+    }
+
+    /// Drive an add-project follow-up to completion, returning user-facing
+    /// statuses. Called from the web engine actor's worker-event drain alongside
+    /// `drive_checkout_followup`: when worker 2's `git switch` for an
+    /// `AddProjectCheckoutDefault` completes successfully,
+    /// `process_worker_event` produces `AddProjectAfterBranchCheckout` (the TUI
+    /// drives the same reaction from `workers.rs`). This spawns the project-add
+    /// persistence (so the new project shows up in the next ViewModel push) and
+    /// returns the combined "Checked out X and added project Y" status, mirroring
+    /// the TUI's `finish_add_project_with_status` message. A switch FAILURE
+    /// instead produces an error `Status` reaction, surfaced by the actor's
+    /// `wire_statuses_from_reaction` drain. Other reactions return `[]`.
+    pub fn drive_add_project_followup(&mut self, reaction: &EventReaction) -> Vec<WireStatus> {
+        match reaction {
+            EventReaction::AddProjectAfterBranchCheckout {
+                path,
+                name,
+                target_branch,
+                leading_branch,
+            } => {
+                let display_name = if name.trim().is_empty() {
+                    PathBuf::from(path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("project")
+                        .to_string()
+                } else {
+                    name.trim().to_string()
+                };
+                let status_message = format!(
+                    "Checked out \"{target_branch}\" and added project \"{display_name}\" to the workspace."
+                );
+                let project = Project {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: display_name,
+                    path: path.clone(),
+                    explicit_default_provider: None,
+                    default_provider: self.config.default_provider(),
+                    leading_branch: Some(leading_branch.clone()),
+                    auto_reopen_agents: None,
+                    startup_command: None,
+                    env: std::collections::BTreeMap::new(),
+                    current_branch: target_branch.clone(),
+                    branch_status: ProjectBranchStatus::Unknown,
+                    path_missing: false,
+                };
+                match self.apply(Command::PersistProject(Box::new(
+                    ProjectPersistenceAction::Add {
+                        project,
+                        status_message: status_message.clone(),
+                    },
+                ))) {
+                    // The persistence worker confirms the add asynchronously;
+                    // surface the busy/info status now so the user isn't left
+                    // staring at the stale checkout busy message.
+                    Ok(_) => vec![WireStatus::new("info", status_message)],
+                    Err(e) => vec![WireStatus::new(
+                        "error",
+                        format!(
+                            "Checked out \"{target_branch}\" but couldn't add the project: {e:#}"
+                        ),
+                    )],
+                }
+            }
+            _ => vec![],
+        }
     }
 
     /// Drive a checkout-related reaction to completion, returning user-facing
@@ -1220,9 +1361,10 @@ impl Engine {
             WireCommand::RenameSession { .. }
             | WireCommand::ReconnectSession { .. }
             | WireCommand::CheckoutProjectDefaultBranch { .. }
+            | WireCommand::AddProjectCheckoutDefault { .. }
             | WireCommand::ChangeAgentProvider { .. } => {
                 unreachable!(
-                    "rename/reconnect/checkout-default-branch/change-provider are handled in apply_wire before wire_to_command"
+                    "rename/reconnect/checkout-default-branch/add-project-checkout-default/change-provider are handled in apply_wire before wire_to_command"
                 )
             }
             WireCommand::ReorderSessions {
@@ -2052,6 +2194,167 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("Cannot check out default branch: path not found for \"p1-name\""),
+            "err: {err}"
+        );
+    }
+
+    // Clone `origin` (init'd on `default_branch`) into a fresh working tree and
+    // check out `feature/x`, so HEAD sits off the KNOWN default — `git clone`
+    // sets refs/remotes/origin/HEAD, so `branch_warning_kind` resolves Known.
+    // Returns (origin tempdir, clone tempdir, clone working-tree path).
+    fn clone_repo_on_feature_branch(
+        default_branch: &str,
+    ) -> (tempfile::TempDir, tempfile::TempDir, std::path::PathBuf) {
+        let origin = init_repo_on_feature_branch(default_branch);
+        // The helper leaves origin on `feature`; put it back on the default so
+        // the clone's origin/HEAD points there.
+        let run_in = |dir: &std::path::Path, args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .expect("spawn git")
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        run_in(origin.path(), &["switch", "-q", default_branch]);
+
+        let clone_dir = tempfile::tempdir().expect("clone tempdir");
+        let work = clone_dir.path().join("work");
+        run_in(
+            clone_dir.path(),
+            &[
+                "clone",
+                "-q",
+                origin.path().to_string_lossy().as_ref(),
+                work.to_string_lossy().as_ref(),
+            ],
+        );
+        run_in(&work, &["switch", "-q", "-c", "feature/x"]);
+        (origin, clone_dir, work)
+    }
+
+    // Drive the add-project "Check Out & Add" worker chain the way the web actor
+    // does: pull worker 2's switch-completion off `worker_rx`, run
+    // `process_worker_event`, feed the reaction through both
+    // `wire_statuses_from_reaction` (switch FAILURE error) and
+    // `drive_add_project_followup` (switch SUCCESS → spawn the persistence add),
+    // then drain the persistence worker so `engine.projects` actually updates.
+    fn drive_add_project_chain(engine: &mut Engine) -> Vec<WireStatus> {
+        let mut statuses = Vec::new();
+        let event = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("switch worker event");
+        let reaction = engine.process_worker_event(event);
+        let added = matches!(
+            reaction,
+            EventReaction::AddProjectAfterBranchCheckout { .. }
+        );
+        statuses.extend(wire_statuses_from_reaction(&reaction));
+        statuses.extend(engine.drive_add_project_followup(&reaction));
+        if added {
+            // The follow-up spawned the persistence worker; drain it so the
+            // project lands in `engine.projects` (mirrors the actor loop).
+            let event = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("persistence worker event");
+            let _ = engine.process_worker_event(event);
+        }
+        statuses
+    }
+
+    #[test]
+    fn wire_add_project_checkout_default_deserializes() {
+        let json = r#"{"command":"add_project_checkout_default","args":{"path":"/repo","name":"My Project"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::AddProjectCheckoutDefault {
+                path: "/repo".to_string(),
+                name: "My Project".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn apply_wire_add_project_checkout_default_switches_then_adds() {
+        // Known default ("main") differs from HEAD ("feature/x"): the wire spawns
+        // the switch worker (busy status), the switch moves HEAD to main, and the
+        // follow-up registers the project — mirroring the TUI's "Check Out & Add".
+        let (_origin, _clone, work) = clone_repo_on_feature_branch("main");
+        let (mut engine, _tmp) = test_engine();
+
+        let outcome = engine
+            .apply_wire(WireCommand::AddProjectCheckoutDefault {
+                path: work.to_string_lossy().into_owned(),
+                name: "Demo".to_string(),
+            })
+            .expect("add-checkout");
+        let busy = outcome.status.expect("busy status");
+        assert_eq!(busy.tone, "busy");
+        assert!(
+            busy.message.contains("Checking out \"main\" in")
+                && busy.message.contains("before adding the project"),
+            "unexpected busy message: {}",
+            busy.message
+        );
+
+        let statuses = drive_add_project_chain(&mut engine);
+        let status = statuses.last().expect("final status");
+        assert_eq!(status.tone, "info");
+        assert!(
+            status
+                .message
+                .contains("Checked out \"main\" and added project \"Demo\" to the workspace."),
+            "unexpected message: {}",
+            status.message
+        );
+        // HEAD actually moved, and the project landed.
+        assert_eq!(current_git_branch(&work), "main");
+        assert_eq!(engine.projects.len(), 1);
+        assert_eq!(engine.projects[0].name, "Demo");
+        assert_eq!(engine.projects[0].current_branch, "main");
+    }
+
+    #[test]
+    fn apply_wire_add_project_checkout_default_rejects_heuristic() {
+        // `git init` repo (no origin/HEAD) on a non-main branch yields the
+        // Heuristic warning, which never offers "Check Out & Add". The wire
+        // refuses synchronously rather than guessing a default branch.
+        let repo = init_repo_on_feature_branch("trunk");
+        let (mut engine, _tmp) = test_engine();
+        let err = engine
+            .apply_wire(WireCommand::AddProjectCheckoutDefault {
+                path: repo.path().to_string_lossy().into_owned(),
+                name: String::new(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Cannot determine a default branch to check out"),
+            "err: {err}"
+        );
+        // HEAD untouched; no project added.
+        assert_eq!(current_git_branch(repo.path()), "feature");
+        assert!(engine.projects.is_empty());
+    }
+
+    #[test]
+    fn apply_wire_add_project_checkout_default_rejects_non_repo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut engine, _tmp) = test_engine();
+        let err = engine
+            .apply_wire(WireCommand::AddProjectCheckoutDefault {
+                path: dir.path().to_string_lossy().into_owned(),
+                name: String::new(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not a git repository"),
             "err: {err}"
         );
     }

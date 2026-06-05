@@ -362,6 +362,13 @@ pub(crate) fn run_engine_loop(
             for status in engine.drive_checkout_followup(&reaction) {
                 let _ = thread_status_tx.send(status);
             }
+            // The add-project "Check Out & Add" switch (worker 2) just succeeded:
+            // AddProjectAfterBranchCheckout drives the actual project add here
+            // (the TUI does this in workers.rs). A switch FAILURE instead produced
+            // an error Status, already surfaced by the wire_statuses drain above.
+            for status in engine.drive_add_project_followup(&reaction) {
+                let _ = thread_status_tx.send(status);
+            }
 
             // A project mutation just updated SQLite + in-memory projects; mirror
             // it into the portable config.toml so a later TUI start doesn't clobber it.

@@ -10,7 +10,7 @@ use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 
 use crate::engine_actor::EngineHandle;
-use crate::protocol::{ClientMessage, ServerMessage};
+use crate::protocol::{BranchWarningView, ClientMessage, ServerMessage};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -320,6 +320,18 @@ async fn handle_socket(socket: WebSocket, engine: EngineHandle) {
                         )
                         .await;
                     }
+                    ClientMessage::InspectProjectPath { path } => {
+                        // Pre-flight branch inspection mirroring the TUI's
+                        // add_project: it runs `current_branch` +
+                        // `branch_warning_kind` before showing the
+                        // ConfirmNonDefaultBranch prompt. Both are bounded
+                        // path-based git plumbing reads (no working-tree writes,
+                        // no engine state — the path isn't a project yet), so
+                        // run them directly off the reactor in spawn_blocking,
+                        // following the browse_dir precedent.
+                        let msg = inspect_project_path(path).await;
+                        let _ = send_json(&sink, &msg).await;
+                    }
                 }
             }
             Message::Close(_) => break,
@@ -430,4 +442,176 @@ fn classify_managed_worktrees(
             })
             .collect();
     Ok(entries)
+}
+
+/// Pre-flight branch inspection for a candidate project path, mirroring the
+/// TUI's `add_project`: it runs `current_branch` then `branch_warning_kind`
+/// before deciding whether to show the non-default-branch warning. Both are
+/// bounded git plumbing reads with no working-tree writes, so this runs off the
+/// async reactor in `spawn_blocking` (the `browse_dir` precedent). `branch_warning_kind`
+/// is a pure path-based read, so no engine state is needed — the path isn't a
+/// registered project yet.
+async fn inspect_project_path(path: String) -> ServerMessage {
+    let echo = path.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let repo = std::path::Path::new(&path);
+        let branch = dux_core::git::current_branch(repo).map_err(|e| format!("{e:#}"))?;
+        let warning = dux_core::git::branch_warning_kind(repo, &branch).map(|kind| match kind {
+            dux_core::worker::BranchWarningKind::Known { default_branch } => {
+                BranchWarningView::Known { default_branch }
+            }
+            dux_core::worker::BranchWarningKind::Heuristic => BranchWarningView::Heuristic,
+        });
+        Ok::<_, String>((branch, warning))
+    })
+    .await;
+    match result {
+        Ok(Ok((branch, warning))) => ServerMessage::ProjectPathInspection {
+            path: echo,
+            current_branch: Some(branch),
+            warning,
+            error: None,
+        },
+        Ok(Err(e)) => ServerMessage::ProjectPathInspection {
+            path: echo,
+            current_branch: None,
+            warning: None,
+            error: Some(e),
+        },
+        Err(e) => ServerMessage::ProjectPathInspection {
+            path: echo,
+            current_branch: None,
+            warning: None,
+            error: Some(format!("inspection task failed: {e}")),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_git(cwd: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn init_repo(dir: &std::path::Path, branch: &str) {
+        run_git(dir, &["init", "-b", branch]);
+        run_git(dir, &["config", "user.name", "test"]);
+        run_git(dir, &["config", "user.email", "t@t"]);
+        run_git(dir, &["commit", "--allow-empty", "-m", "init"]);
+    }
+
+    #[tokio::test]
+    async fn inspect_project_path_on_default_branch_has_no_warning() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path(), "main");
+
+        let msg = inspect_project_path(repo.path().to_string_lossy().into_owned()).await;
+        match msg {
+            ServerMessage::ProjectPathInspection {
+                current_branch,
+                warning,
+                error,
+                ..
+            } => {
+                assert_eq!(error, None);
+                assert_eq!(current_branch.as_deref(), Some("main"));
+                assert_eq!(warning, None);
+            }
+            other => panic!("expected ProjectPathInspection, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inspect_project_path_heuristic_when_no_origin_head() {
+        // `git init` repos lack refs/remotes/origin/HEAD, so a non-main/master
+        // branch yields the Heuristic warning.
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path(), "develop");
+
+        let msg = inspect_project_path(repo.path().to_string_lossy().into_owned()).await;
+        match msg {
+            ServerMessage::ProjectPathInspection {
+                current_branch,
+                warning,
+                error,
+                ..
+            } => {
+                assert_eq!(error, None);
+                assert_eq!(current_branch.as_deref(), Some("develop"));
+                assert_eq!(warning, Some(BranchWarningView::Heuristic));
+            }
+            other => panic!("expected ProjectPathInspection, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inspect_project_path_known_default_when_origin_head_resolves() {
+        // A clone gets refs/remotes/origin/HEAD pointing at the origin default,
+        // so checking out a different branch yields the Known warning naming it.
+        let origin = tempfile::tempdir().unwrap();
+        init_repo(origin.path(), "main");
+
+        let clone_dir = tempfile::tempdir().unwrap();
+        let clone_path = clone_dir.path().join("work");
+        run_git(
+            clone_dir.path(),
+            &[
+                "clone",
+                origin.path().to_string_lossy().as_ref(),
+                clone_path.to_string_lossy().as_ref(),
+            ],
+        );
+        run_git(&clone_path, &["switch", "-c", "feature/x"]);
+
+        let msg = inspect_project_path(clone_path.to_string_lossy().into_owned()).await;
+        match msg {
+            ServerMessage::ProjectPathInspection {
+                current_branch,
+                warning,
+                error,
+                ..
+            } => {
+                assert_eq!(error, None);
+                assert_eq!(current_branch.as_deref(), Some("feature/x"));
+                assert_eq!(
+                    warning,
+                    Some(BranchWarningView::Known {
+                        default_branch: "main".to_string(),
+                    })
+                );
+            }
+            other => panic!("expected ProjectPathInspection, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inspect_project_path_non_repo_reports_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let msg = inspect_project_path(dir.path().to_string_lossy().into_owned()).await;
+        match msg {
+            ServerMessage::ProjectPathInspection {
+                current_branch,
+                warning,
+                error,
+                ..
+            } => {
+                assert!(error.is_some(), "expected an error for a non-repo path");
+                assert_eq!(current_branch, None);
+                assert_eq!(warning, None);
+            }
+            other => panic!("expected ProjectPathInspection, got {other:?}"),
+        }
+    }
 }

@@ -45,6 +45,26 @@ pub enum ClientMessage {
     /// the engine (a cheap lookup) then classifies the worktrees in
     /// `spawn_blocking` (it shells to git), following the `get_diff` precedent.
     ListProjectWorktrees { project_id: String },
+    /// Inspect a candidate project path's branch BEFORE it is added, mirroring
+    /// the TUI add flow's pre-flight (`add_project` runs `current_branch` +
+    /// `branch_warning_kind` and shows the `ConfirmNonDefaultBranch` prompt when
+    /// the repo is on a non-default branch). The reply is a
+    /// `ProjectPathInspection` frame. The path is not a registered project yet,
+    /// so no engine state is needed: the server runs the bounded plumbing reads
+    /// directly in `spawn_blocking` (the `browse_dir` precedent).
+    InspectProjectPath { path: String },
+}
+
+/// The branch-warning classification for a candidate project path, in
+/// serializable form. Mirrors `dux_core::worker::BranchWarningKind`:
+/// `Known` carries the resolved default branch; `Heuristic` means dux can't
+/// confidently identify the default branch. Absence (`None` on the reply)
+/// means the repo is already on its default branch — no warning.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BranchWarningView {
+    Known { default_branch: String },
+    Heuristic,
 }
 
 /// A single managed-worktree candidate in serializable form, derived from
@@ -120,6 +140,17 @@ pub enum ServerMessage {
     ProjectWorktrees {
         project_id: String,
         entries: Vec<ProjectWorktreeEntryView>,
+        error: Option<String>,
+    },
+    /// Response to `InspectProjectPath`: the candidate repo's current branch and
+    /// its branch warning (`None` when already on the default branch), or an
+    /// error string when the inspection failed (not a git repo, detached HEAD,
+    /// etc.). `path` echoes the request so a late reply can be matched to (or
+    /// discarded for) the currently selected repo.
+    ProjectPathInspection {
+        path: String,
+        current_branch: Option<String>,
+        warning: Option<BranchWarningView>,
         error: Option<String>,
     },
 }
@@ -248,6 +279,62 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""type":"project_worktrees""#), "{json}");
         assert!(json.contains(r#""adoptable":true"#), "{json}");
+    }
+
+    #[test]
+    fn inspect_project_path_message_parses() {
+        let json = r#"{"type":"inspect_project_path","path":"/repo"}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            msg,
+            ClientMessage::InspectProjectPath {
+                path: "/repo".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn project_path_inspection_known_serializes() {
+        let msg = ServerMessage::ProjectPathInspection {
+            path: "/repo".to_string(),
+            current_branch: Some("feature/x".to_string()),
+            warning: Some(BranchWarningView::Known {
+                default_branch: "main".to_string(),
+            }),
+            error: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(
+            json.contains(r#""type":"project_path_inspection""#),
+            "{json}"
+        );
+        assert!(json.contains(r#""kind":"known""#), "{json}");
+        assert!(json.contains(r#""default_branch":"main""#), "{json}");
+        assert!(json.contains(r#""current_branch":"feature/x""#), "{json}");
+    }
+
+    #[test]
+    fn project_path_inspection_heuristic_serializes() {
+        let msg = ServerMessage::ProjectPathInspection {
+            path: "/repo".to_string(),
+            current_branch: Some("dev".to_string()),
+            warning: Some(BranchWarningView::Heuristic),
+            error: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""kind":"heuristic""#), "{json}");
+    }
+
+    #[test]
+    fn project_path_inspection_no_warning_serializes_null() {
+        let msg = ServerMessage::ProjectPathInspection {
+            path: "/repo".to_string(),
+            current_branch: Some("main".to_string()),
+            warning: None,
+            error: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""warning":null"#), "{json}");
     }
 
     #[test]

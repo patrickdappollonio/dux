@@ -1,4 +1,5 @@
 import type {
+  BranchWarningView,
   ClientMessage,
   CommandStatus,
   ConnState,
@@ -50,6 +51,12 @@ export class DuxSocket {
   onProjectWorktrees: (
     projectId: string,
     entries: ProjectWorktreeEntryView[],
+    error: string | null,
+  ) => void = () => {}
+  onProjectPathInspection: (
+    path: string,
+    currentBranch: string | null,
+    warning: BranchWarningView | null,
     error: string | null,
   ) => void = () => {}
 
@@ -138,6 +145,14 @@ export class DuxSocket {
           message.error,
         )
         break
+      case "project_path_inspection":
+        this.onProjectPathInspection(
+          message.path,
+          message.current_branch,
+          message.warning,
+          message.error,
+        )
+        break
     }
   }
 
@@ -208,6 +223,10 @@ export class DuxSocket {
 
   listProjectWorktrees(projectId: string): void {
     this.sendJson({ type: "list_project_worktrees", project_id: projectId })
+  }
+
+  inspectProjectPath(path: string): void {
+    this.sendJson({ type: "inspect_project_path", path })
   }
 
   sendInput(bytes: Uint8Array): void {
