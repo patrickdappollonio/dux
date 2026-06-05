@@ -73,6 +73,7 @@ export function CommandPalette() {
   }
 
   const sessions = viewModel?.sessions ?? []
+  const projects = viewModel?.projects ?? []
 
   return (
     <CommandDialog open={paletteOpen} onOpenChange={setPaletteOpen}>
@@ -141,15 +142,29 @@ export function CommandPalette() {
               >
                 New agent in this project…
               </CommandItem>
-              <CommandItem
-                className="cursor-pointer"
-                onSelect={() => {
-                  pullProject(selectedSession.project_id)
-                  close()
-                }}
-              >
-                Pull this project…
-              </CommandItem>
+            </CommandGroup>
+            <CommandSeparator />
+          </>
+        )}
+
+        {/* Project-scoped actions live OUTSIDE the session group so agent-less
+            projects stay reachable from the palette (the TUI's project refresh
+            works off the selected project, no session required). */}
+        {projects.length > 0 && (
+          <>
+            <CommandGroup heading="Projects">
+              {projects.map((p) => (
+                <CommandItem
+                  key={p.id}
+                  className="cursor-pointer"
+                  onSelect={() => {
+                    pullProject(p.id)
+                    close()
+                  }}
+                >
+                  Pull {p.name}…
+                </CommandItem>
+              ))}
             </CommandGroup>
             <CommandSeparator />
           </>

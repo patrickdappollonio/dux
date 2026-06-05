@@ -443,15 +443,16 @@ function ProjectItem({
           <Folder className="group-data-[state=open]/collapsible:hidden" />
           <FolderOpen className="hidden group-data-[state=open]/collapsible:block" />
           {/* font-semibold makes project names visually distinct from agent rows. */}
-          <span className="truncate font-semibold">{name}</span>
+          <span className="min-w-0 truncate font-semibold">{name}</span>
           {/* Current branch as a muted, monospace secondary span after the name.
-              The name stays primary (it can shrink-truncate first); the branch is
-              shrink-0 so it stays readable. A non-leading branch is tinted with
-              the warning token and explains itself via the title tooltip.
+              Both spans are min-w-0 so flex can actually shrink-truncate them
+              (flex items default to min-width:auto) and the count badge never
+              gets pushed out. A non-leading branch is tinted with the web's
+              warning convention and explains itself via the title tooltip.
               Omitted entirely for empty/unknown branches (e.g. path_missing). */}
           {branch ? (
             <span
-              className={`truncate font-mono text-xs ${
+              className={`min-w-0 truncate font-mono text-xs ${
                 branch.warn ? "text-amber-500" : "text-muted-foreground"
               }`}
               title={branch.tooltip ?? undefined}

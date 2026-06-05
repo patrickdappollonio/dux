@@ -377,13 +377,13 @@ function ProjectBlock({
           {...listeners}
           className="flex min-h-11 flex-1 touch-manipulation items-center gap-2 px-2"
         >
-          <span className="truncate font-semibold">{name}</span>
+          <span className="min-w-0 truncate font-semibold">{name}</span>
           {/* Current branch as a muted, monospace secondary span; non-leading
               branches are warning-tinted (amber) with an explanatory title.
               Omitted entirely for empty/unknown branches (e.g. path_missing). */}
           {branch ? (
             <span
-              className={`truncate font-mono text-xs ${
+              className={`min-w-0 truncate font-mono text-xs ${
                 branch.warn ? "text-amber-500" : "text-muted-foreground"
               }`}
               title={branch.tooltip ?? undefined}
