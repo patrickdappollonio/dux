@@ -11,6 +11,7 @@ import { ConfirmDeleteTerminalDialog } from "@/components/ConfirmDeleteTerminalD
 import { ConfirmDiscardFileDialog } from "@/components/ConfirmDiscardFileDialog"
 import { CreateAgentDialog } from "@/components/CreateAgentDialog"
 import { RenameSessionDialog } from "@/components/RenameSessionDialog"
+import { CheckoutDefaultBranchDialog } from "@/components/CheckoutDefaultBranchDialog"
 import { DeleteSessionDialog } from "@/components/DeleteSessionDialog"
 import { GlobalEnvDialog } from "@/components/GlobalEnvDialog"
 import { MobileShell } from "@/components/MobileShell"
@@ -179,6 +180,7 @@ function GlobalOverlays() {
       <ProjectSettingsDialog />
       <AddProjectDialog />
       <RemoveProjectDialog />
+      <CheckoutDefaultBranchDialog />
       <Toaster />
     </>
   )

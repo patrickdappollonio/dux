@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/command"
 import {
   openAddProject,
+  openCheckoutDefaultBranch,
   openCommit,
   openCreateAgent,
   openForkAgent,
@@ -163,6 +164,20 @@ export function CommandPalette() {
                   }}
                 >
                   Pull {p.name}…
+                </CommandItem>
+              ))}
+              {projects.map((p) => (
+                <CommandItem
+                  key={`checkout-default-${p.id}`}
+                  className="cursor-pointer"
+                  onSelect={() => {
+                    // Route through the confirm dialog — the checkout moves HEAD
+                    // in the shared source checkout, so it is gated like the menu.
+                    openCheckoutDefaultBranch(p.id)
+                    close()
+                  }}
+                >
+                  Checkout default branch for {p.name}…
                 </CommandItem>
               ))}
             </CommandGroup>

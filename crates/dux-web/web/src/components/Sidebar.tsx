@@ -18,6 +18,7 @@ import {
   Ellipsis,
   Folder,
   FolderOpen,
+  GitBranch,
   GitCommitHorizontal,
   GitFork,
   GitPullRequest,
@@ -89,6 +90,7 @@ import {
 import {
   createTerminal,
   openAddProject,
+  openCheckoutDefaultBranch,
   openCommit,
   openCreateAgent,
   openDelete,
@@ -484,6 +486,10 @@ function ProjectItem({
             <DropdownMenuItem onClick={() => pullProject(id)}>
               <Download />
               Pull project…
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => openCheckoutDefaultBranch(id)}>
+              <GitBranch />
+              Checkout default branch…
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => openProjectSettings(id)}>

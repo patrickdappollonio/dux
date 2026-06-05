@@ -84,6 +84,10 @@ export interface DuxState {
   browseEntries: DirEntryView[]
   browseLoading: boolean
   removeProjectTarget: string | null
+  // The project pending a default-branch checkout confirmation, or null. The
+  // checkout moves the source checkout's HEAD, so the web confirms first (the
+  // TUI runs it straight from a deliberate palette/keybinding action).
+  checkoutDefaultBranchTarget: string | null
   // The name-input dialog target: a fresh agent in a project, a fork of an
   // existing session, or null (closed). One dialog component switches on `kind`.
   createAgentTarget: CreateAgentTarget | null
@@ -119,6 +123,10 @@ export interface DuxState {
   pendingSessionOrder: PendingSessionOrder | null
   pendingProjectOrder: string[] | null
   sidebarWidth: string
+  // Whether the diff viewer shows the old/new line-number gutters. Mirrors the
+  // TUI's `toggle-diff-line-numbers` (config `ui.show_diff_line_numbers`),
+  // defaulting ON; persisted in localStorage like the sidebar width.
+  showDiffLineNumbers: boolean
   currentDiff: {
     sessionId: string
     path: string
@@ -136,6 +144,15 @@ const DEFAULT_SIDEBAR_WIDTH = "18rem"
 
 function loadSidebarWidth(): string {
   return localStorage.getItem(SIDEBAR_WIDTH_KEY) || DEFAULT_SIDEBAR_WIDTH
+}
+
+// Diff line-number gutters default ON (matching the TUI default and the prior
+// web behavior). Only an explicit persisted "false" turns them off, so a
+// missing key keeps the gutters visible.
+const SHOW_DIFF_LINE_NUMBERS_KEY = "dux:show-diff-line-numbers"
+
+function loadShowDiffLineNumbers(): boolean {
+  return localStorage.getItem(SHOW_DIFF_LINE_NUMBERS_KEY) !== "false"
 }
 
 let state: DuxState = {
@@ -157,6 +174,7 @@ let state: DuxState = {
   browseEntries: [],
   browseLoading: false,
   removeProjectTarget: null,
+  checkoutDefaultBranchTarget: null,
   createAgentTarget: null,
   renameTarget: null,
   renameDraft: "",
@@ -169,6 +187,7 @@ let state: DuxState = {
   pendingSessionOrder: null,
   pendingProjectOrder: null,
   sidebarWidth: loadSidebarWidth(),
+  showDiffLineNumbers: loadShowDiffLineNumbers(),
   currentDiff: null,
 }
 
@@ -628,6 +647,25 @@ export function pullProject(projectId: string): void {
   socket.sendCommand("pull_project", { project_id: projectId })
 }
 
+// Open the confirm dialog for switching a project's source checkout back to its
+// default branch. The actual git work happens server-side after the user
+// confirms (the checkout moves HEAD, so it is gated behind a confirmation the
+// TUI's deliberate palette action does not need).
+export function openCheckoutDefaultBranch(projectId: string): void {
+  setState({ checkoutDefaultBranchTarget: projectId })
+}
+
+export function closeCheckoutDefaultBranch(): void {
+  setState({ checkoutDefaultBranchTarget: null })
+}
+
+// Tell the server to inspect and check out the project's default branch. The
+// server reports the outcome (switched / already on it / can't determine) on
+// the command result, so there is nothing to do here but fire the command.
+export function checkoutDefaultBranch(projectId: string): void {
+  socket.sendCommand("checkout_project_default_branch", { project_id: projectId })
+}
+
 // Open the new-agent dialog. The checkbox starts checked when
 // `randomize_agent_names_by_default` is set (mirroring the TUI prompt, which
 // pre-checks when opened with no initial name); in that case we request a name
@@ -787,4 +825,12 @@ export function setSidebarWidth(width: string, persist = false): void {
   if (persist) {
     localStorage.setItem(SIDEBAR_WIDTH_KEY, width)
   }
+}
+
+// Flip the diff line-number gutters and persist the choice (the TUI's
+// `toggle-diff-line-numbers`). Both the old and new gutters hide together.
+export function toggleDiffLineNumbers(): void {
+  const next = !state.showDiffLineNumbers
+  setState({ showDiffLineNumbers: next })
+  localStorage.setItem(SHOW_DIFF_LINE_NUMBERS_KEY, String(next))
 }

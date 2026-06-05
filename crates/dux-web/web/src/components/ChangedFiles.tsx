@@ -1,5 +1,5 @@
 import { useMemo, useState, useSyncExternalStore } from "react"
-import { Check, MousePointerClick, Search, Undo2 } from "lucide-react"
+import { Check, Hash, MousePointerClick, Search, Undo2 } from "lucide-react"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -38,7 +38,15 @@ import {
   subscribeHighlighter,
 } from "@/lib/highlight"
 import { filterChangedFiles } from "@/lib/changedFiles"
-import { closeDiff, openCommit, openDiscard, requestDiff, socket, useDux } from "@/lib/store"
+import {
+  closeDiff,
+  openCommit,
+  openDiscard,
+  requestDiff,
+  socket,
+  toggleDiffLineNumbers,
+  useDux,
+} from "@/lib/store"
 import type { DuxState } from "@/lib/store"
 import type { ChangedFileView, DiffLine, FileDiff } from "@/lib/types"
 
@@ -181,7 +189,8 @@ function FileGroup({ heading, files, total, filtering, action, sessionId, onOpen
 }
 
 export function ChangedFiles() {
-  const { viewModel, selectedSessionId, currentDiff } = useDux()
+  const { viewModel, selectedSessionId, currentDiff, showDiffLineNumbers } =
+    useDux()
 
   // Changed-files search filter (frontend-only). The query is stored alongside
   // the session id it belongs to, so switching sessions yields an empty filter
@@ -337,16 +346,29 @@ export function ChangedFiles() {
           side="right"
           className="data-[side=right]:w-[92vw] data-[side=right]:sm:max-w-3xl"
         >
-          <SheetHeader>
+          <SheetHeader className="flex-row items-center justify-between gap-2 pr-14">
             <SheetTitle
               className="truncate font-mono text-sm"
               title={currentDiff?.path ?? ""}
             >
               {currentDiff?.path ?? ""}
             </SheetTitle>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className={
+                showDiffLineNumbers ? "shrink-0 text-primary" : "shrink-0 text-muted-foreground"
+              }
+              aria-label="Toggle line numbers"
+              aria-pressed={showDiffLineNumbers}
+              title={showDiffLineNumbers ? "Hide line numbers" : "Show line numbers"}
+              onClick={toggleDiffLineNumbers}
+            >
+              <Hash />
+            </Button>
           </SheetHeader>
           <div className="min-h-0 flex-1 overflow-auto px-4 pb-4">
-            <DiffBody state={currentDiff} />
+            <DiffBody state={currentDiff} showLineNumbers={showDiffLineNumbers} />
           </div>
         </SheetContent>
       </Sheet>
@@ -356,7 +378,13 @@ export function ChangedFiles() {
 
 type DiffState = DuxState["currentDiff"]
 
-function DiffBody({ state }: { state: DiffState }) {
+function DiffBody({
+  state,
+  showLineNumbers,
+}: {
+  state: DiffState
+  showLineNumbers: boolean
+}) {
   if (!state) return null
   if (state.loading) {
     return (
@@ -380,13 +408,19 @@ function DiffBody({ state }: { state: DiffState }) {
   if (diff.unchanged || diff.hunks.length === 0) {
     return <div className="py-6 text-sm text-muted-foreground">No changes.</div>
   }
-  return <DiffHunks diff={diff} />
+  return <DiffHunks diff={diff} showLineNumbers={showLineNumbers} />
 }
 
 // Renders the hunk rows for a real (non-binary, non-empty) diff. Lives in its
 // own component so its hooks always run in a stable order — DiffBody's early
 // returns must not gate the `useMemo`s below (React rules-of-hooks).
-function DiffHunks({ diff }: { diff: FileDiff }) {
+function DiffHunks({
+  diff,
+  showLineNumbers,
+}: {
+  diff: FileDiff
+  showLineNumbers: boolean
+}) {
   const language = useMemo(() => languageForPath(diff.path), [diff.path])
   // The highlighter (highlight.js) loads lazily in its own async chunk. Subscribe
   // so this component re-renders the moment it's ready; until then highlightLine
@@ -416,7 +450,12 @@ function DiffHunks({ diff }: { diff: FileDiff }) {
             {hunk.header}
           </div>
           {hunk.lines.map(({ line, html }, li) => (
-            <DiffRow key={li} line={line} html={html} />
+            <DiffRow
+              key={li}
+              line={line}
+              html={html}
+              showLineNumbers={showLineNumbers}
+            />
           ))}
         </div>
       ))}
@@ -424,7 +463,15 @@ function DiffHunks({ diff }: { diff: FileDiff }) {
   )
 }
 
-function DiffRow({ line, html }: { line: DiffLine; html: string }) {
+function DiffRow({
+  line,
+  html,
+  showLineNumbers,
+}: {
+  line: DiffLine
+  html: string
+  showLineNumbers: boolean
+}) {
   const sign = line.kind === "insert" ? "+" : line.kind === "delete" ? "-" : " "
   const rowClass =
     line.kind === "insert"
@@ -440,12 +487,18 @@ function DiffRow({ line, html }: { line: DiffLine; html: string }) {
         : "text-muted-foreground"
   return (
     <div className={`flex ${rowClass}`}>
-      <span className="w-10 shrink-0 select-none px-1 text-right text-muted-foreground">
-        {line.old_line ?? ""}
-      </span>
-      <span className="w-10 shrink-0 select-none px-1 text-right text-muted-foreground">
-        {line.new_line ?? ""}
-      </span>
+      {/* Old/new line-number gutters hide together when the toggle is off. The
+          sign column always stays, so add/delete coloring reads without them. */}
+      {showLineNumbers ? (
+        <>
+          <span className="w-10 shrink-0 select-none px-1 text-right text-muted-foreground">
+            {line.old_line ?? ""}
+          </span>
+          <span className="w-10 shrink-0 select-none px-1 text-right text-muted-foreground">
+            {line.new_line ?? ""}
+          </span>
+        </>
+      ) : null}
       <span className={`w-4 shrink-0 select-none text-center ${signClass}`}>
         {sign}
       </span>

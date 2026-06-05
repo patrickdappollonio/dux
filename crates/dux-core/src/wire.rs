@@ -16,7 +16,9 @@ use crate::engine::{
 };
 use crate::model::{Project, ProjectBranchStatus, ProviderKind};
 use crate::statusline::StatusTone;
-use crate::worker::{AgentLaunchKind, CreateAgentRequest, ProjectPersistenceAction, PullTarget};
+use crate::worker::{
+    AgentLaunchKind, BranchWarningKind, CreateAgentRequest, ProjectPersistenceAction, PullTarget,
+};
 
 /// A command as received from a generic transport (e.g. the web WebSocket).
 /// `#[serde(tag = "command", content = "args")]` matches the `{ "command": "...",
@@ -160,6 +162,26 @@ pub enum WireCommand {
     /// `project_ids` must list exactly the known projects.
     ReorderProjects {
         project_ids: Vec<String>,
+    },
+    /// Switch a project's SOURCE checkout back to its default branch, mirroring
+    /// the TUI's `checkout-project-default-branch`.
+    ///
+    /// The TUI runs this in two worker hops (an inspection job, then — only for
+    /// the `Known` default-branch case — a `git switch` job), chained by an
+    /// engine reaction the web loop does not act on. So the web does the
+    /// inspection AND the checkout SYNCHRONOUSLY here (the engine loop already
+    /// shells out to git synchronously for `PullProject`/discard), reproducing
+    /// the TUI's four inspection outcomes byte-for-byte:
+    ///   - default branch known and differs → `git switch`, then info.
+    ///   - heuristic (origin/HEAD missing, on a non-main/master branch) → error.
+    ///   - already on the leading branch → info, no checkout.
+    ///   - inspection failed → error.
+    ///
+    /// The TUI does not confirm (it is a deliberate palette/keybinding action);
+    /// the web confirms in the frontend dialog before sending this, since a ⋯
+    /// menu click is a lighter gesture and the checkout moves HEAD.
+    CheckoutProjectDefaultBranch {
+        project_id: String,
     },
 }
 
@@ -322,6 +344,12 @@ impl Engine {
             WireCommand::ReconnectSession { session_id, force } => {
                 let status = self.reconnect_session(&session_id, force)?;
                 return Ok(WireCommandOutcome { status });
+            }
+            WireCommand::CheckoutProjectDefaultBranch { project_id } => {
+                let status = self.checkout_project_default_branch(&project_id)?;
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
+                });
             }
             _ => {}
         }
@@ -531,6 +559,122 @@ impl Engine {
                 }
             }
             other => Ok(wire_status_from_reaction(&other)),
+        }
+    }
+
+    /// Switch a project's source checkout back to its default branch, mirroring
+    /// the TUI's `checkout_selected_project_default_branch` plus the engine's
+    /// `CheckoutProjectDefaultBranchInspected` / `NonDefaultBranchCheckoutCompleted`
+    /// handlers, collapsed into one synchronous call (see the wire variant's doc
+    /// for why the web does not use the TUI's two-worker chain).
+    ///
+    /// The inspection (`current_branch` + `branch_warning_kind`) prefers the
+    /// project's persisted `leading_branch` exactly like the core inspection job,
+    /// then branches on the four outcomes with the TUI's exact wording. Returns
+    /// the user-facing status; `Err` is reserved for the project lookup / missing
+    /// path guards (mirroring `PullProject`), so a normal "already on leading" or
+    /// "can't determine" outcome comes back as an info/error STATUS, not an error.
+    fn checkout_project_default_branch(&mut self, project_id: &str) -> anyhow::Result<WireStatus> {
+        // Mirror the TUI's `checkout_selected_project_default_branch` guards:
+        // resolve the project and refuse when its checkout path is missing.
+        let project = self
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown project: {project_id}"))?;
+        if project.path_missing {
+            anyhow::bail!(
+                "Cannot check out default branch: path not found for \"{}\"",
+                project.name
+            );
+        }
+
+        let repo_path = PathBuf::from(&project.path);
+        // Inspection identical to `run_checkout_project_default_branch_inspection_job`:
+        // a persisted leading branch short-circuits the heuristic.
+        let current_branch = match crate::git::current_branch(&repo_path) {
+            Ok(branch) => branch,
+            Err(err) => {
+                return Ok(WireStatus::new(
+                    "error",
+                    format!(
+                        "Couldn't inspect the default branch for project \"{}\": {err:#}",
+                        project.name
+                    ),
+                ));
+            }
+        };
+        let warning_kind = if let Some(leading_branch) = project.leading_branch.as_deref() {
+            if current_branch == leading_branch {
+                None
+            } else {
+                Some(BranchWarningKind::Known {
+                    default_branch: leading_branch.to_string(),
+                })
+            }
+        } else {
+            crate::git::branch_warning_kind(&repo_path, &current_branch)
+        };
+
+        match warning_kind {
+            // Known default branch that differs from HEAD: switch to it, then
+            // update the in-memory project state and report success.
+            Some(BranchWarningKind::Known { default_branch }) => {
+                match crate::git::switch_branch(&repo_path, &default_branch) {
+                    Ok(()) => {
+                        if let Some(existing) =
+                            self.projects.iter_mut().find(|p| p.id == project.id)
+                        {
+                            existing.current_branch = default_branch.clone();
+                            existing.branch_status = ProjectBranchStatus::Leading;
+                        }
+                        Ok(WireStatus::new(
+                            "info",
+                            format!(
+                                "Checked out \"{default_branch}\" for project \"{}\".",
+                                project.name
+                            ),
+                        ))
+                    }
+                    Err(err) => {
+                        crate::logger::error(&format!(
+                            "non-default branch checkout failed for {}: {err:#}",
+                            project.path
+                        ));
+                        Ok(WireStatus::new(
+                            "error",
+                            format!(
+                                "Couldn't check out \"{default_branch}\" in {} — resolve in your terminal and retry.",
+                                project.path
+                            ),
+                        ))
+                    }
+                }
+            }
+            // origin/HEAD is unavailable and HEAD is not a common default: the
+            // TUI refuses rather than guess.
+            Some(BranchWarningKind::Heuristic) => Ok(WireStatus::new(
+                "error",
+                format!(
+                    "Can't determine the default branch for project \"{}\" while it is on \"{current_branch}\". Resolve the default branch in your terminal and retry.",
+                    project.name
+                ),
+            )),
+            // Already on the leading branch: nothing to do, refresh state.
+            None => {
+                if let Some(existing) = self.projects.iter_mut().find(|p| p.id == project.id) {
+                    existing.current_branch = current_branch.clone();
+                    existing.branch_status = ProjectBranchStatus::Leading;
+                }
+                Ok(WireStatus::new(
+                    "info",
+                    format!(
+                        "Project \"{}\" is already on the leading branch \"{current_branch}\".",
+                        project.name
+                    ),
+                ))
+            }
         }
     }
 
@@ -897,13 +1041,19 @@ impl Engine {
                     term_size: (80, 24),
                 }
             }
-            // Rename and Reconnect are NOT reconstructible into a single
-            // `Command` — both need `&mut self` (rename persists in place;
-            // reconnect tears down provider state and surfaces a launch view's
-            // status synchronously). `apply_wire` intercepts them before this
-            // immutable mapping; reaching here means that interception broke.
-            WireCommand::RenameSession { .. } | WireCommand::ReconnectSession { .. } => {
-                unreachable!("rename/reconnect are handled in apply_wire before wire_to_command")
+            // Rename, Reconnect, and CheckoutProjectDefaultBranch are NOT
+            // reconstructible into a single `Command` — all need `&mut self`
+            // (rename persists in place; reconnect tears down provider state and
+            // surfaces a launch view's status synchronously; checkout inspects
+            // and switches branches synchronously). `apply_wire` intercepts them
+            // before this immutable mapping; reaching here means that
+            // interception broke.
+            WireCommand::RenameSession { .. }
+            | WireCommand::ReconnectSession { .. }
+            | WireCommand::CheckoutProjectDefaultBranch { .. } => {
+                unreachable!(
+                    "rename/reconnect/checkout-default-branch are handled in apply_wire before wire_to_command"
+                )
             }
             WireCommand::ReorderSessions {
                 project_id,
@@ -1411,6 +1561,181 @@ mod tests {
         let json = r#"{"command":"recover_config","args":{}}"#;
         let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
         assert_eq!(cmd, WireCommand::RecoverConfig {});
+    }
+
+    #[test]
+    fn wire_checkout_project_default_branch_deserializes() {
+        let json = r#"{"command":"checkout_project_default_branch","args":{"project_id":"p1"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::CheckoutProjectDefaultBranch {
+                project_id: "p1".to_string(),
+            }
+        );
+    }
+
+    // Initialize a repo on `default_branch` with one commit, then create and
+    // check out `feature` so HEAD sits off the default. Returns the temp dir.
+    fn init_repo_on_feature_branch(default_branch: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let run = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .expect("spawn git")
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        run(&["init", "-q", "-b", default_branch]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "t"]);
+        run(&["commit", "--allow-empty", "-q", "-m", "init"]);
+        run(&["switch", "-q", "-c", "feature"]);
+        dir
+    }
+
+    fn current_git_branch(repo: &std::path::Path) -> String {
+        let out = std::process::Command::new("git")
+            .args([
+                "-C",
+                repo.to_string_lossy().as_ref(),
+                "symbolic-ref",
+                "--short",
+                "HEAD",
+            ])
+            .output()
+            .expect("spawn git");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn apply_wire_checkout_project_default_branch_switches_from_feature() {
+        // A project whose persisted leading branch ("trunk") differs from HEAD
+        // ("feature") gets switched back, and the in-memory state updates to
+        // Leading — mirroring the TUI's Known-default-branch outcome.
+        let repo = init_repo_on_feature_branch("trunk");
+        let (mut engine, _tmp) = test_engine();
+        let mut project = sample_project("p1", repo.path().to_string_lossy().as_ref());
+        project.leading_branch = Some("trunk".to_string());
+        project.current_branch = "feature".to_string();
+        project.branch_status = ProjectBranchStatus::NotLeading;
+        engine.projects.push(project);
+
+        let outcome = engine
+            .apply_wire(WireCommand::CheckoutProjectDefaultBranch {
+                project_id: "p1".to_string(),
+            })
+            .expect("checkout");
+        let status = outcome.status.expect("status");
+        assert_eq!(status.tone, "info");
+        assert!(
+            status
+                .message
+                .contains("Checked out \"trunk\" for project \"p1-name\""),
+            "unexpected message: {}",
+            status.message
+        );
+        assert_eq!(current_git_branch(repo.path()), "trunk");
+        let updated = &engine.projects[0];
+        assert_eq!(updated.current_branch, "trunk");
+        assert_eq!(updated.branch_status, ProjectBranchStatus::Leading);
+    }
+
+    #[test]
+    fn apply_wire_checkout_project_default_branch_already_on_leading_is_noop() {
+        // HEAD already equals the persisted leading branch: no switch, an info
+        // status, and the branch is left untouched (the TUI's None outcome).
+        let repo = init_repo_on_feature_branch("trunk");
+        let (mut engine, _tmp) = test_engine();
+        let mut project = sample_project("p1", repo.path().to_string_lossy().as_ref());
+        // Pin the leading branch to the branch HEAD is on so it is already leading.
+        project.leading_branch = Some("feature".to_string());
+        project.current_branch = "feature".to_string();
+        engine.projects.push(project);
+
+        let outcome = engine
+            .apply_wire(WireCommand::CheckoutProjectDefaultBranch {
+                project_id: "p1".to_string(),
+            })
+            .expect("checkout");
+        let status = outcome.status.expect("status");
+        assert_eq!(status.tone, "info");
+        assert!(
+            status
+                .message
+                .contains("already on the leading branch \"feature\""),
+            "unexpected message: {}",
+            status.message
+        );
+        assert_eq!(current_git_branch(repo.path()), "feature");
+        assert_eq!(
+            engine.projects[0].branch_status,
+            ProjectBranchStatus::Leading
+        );
+    }
+
+    #[test]
+    fn apply_wire_checkout_project_default_branch_heuristic_errors() {
+        // No origin/HEAD and HEAD is neither main nor master, so the default
+        // branch can't be determined: the TUI refuses with an error status
+        // rather than guessing. No leading_branch is persisted here so the
+        // heuristic path runs.
+        let repo = init_repo_on_feature_branch("trunk");
+        let (mut engine, _tmp) = test_engine();
+        let mut project = sample_project("p1", repo.path().to_string_lossy().as_ref());
+        project.leading_branch = None;
+        project.current_branch = "feature".to_string();
+        engine.projects.push(project);
+
+        let outcome = engine
+            .apply_wire(WireCommand::CheckoutProjectDefaultBranch {
+                project_id: "p1".to_string(),
+            })
+            .expect("checkout");
+        let status = outcome.status.expect("status");
+        assert_eq!(status.tone, "error");
+        assert!(
+            status
+                .message
+                .contains("Can't determine the default branch"),
+            "unexpected message: {}",
+            status.message
+        );
+        // Heuristic refusal leaves HEAD where it was.
+        assert_eq!(current_git_branch(repo.path()), "feature");
+    }
+
+    #[test]
+    fn apply_wire_checkout_project_default_branch_unknown_project_errors() {
+        let (mut engine, _tmp) = test_engine();
+        let err = engine
+            .apply_wire(WireCommand::CheckoutProjectDefaultBranch {
+                project_id: "ghost".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown project"), "err: {err}");
+    }
+
+    #[test]
+    fn apply_wire_checkout_project_default_branch_path_missing_errors() {
+        let (mut engine, _tmp) = test_engine();
+        let mut project = sample_project("p1", "/repo");
+        project.path_missing = true;
+        engine.projects.push(project);
+        let err = engine
+            .apply_wire(WireCommand::CheckoutProjectDefaultBranch {
+                project_id: "p1".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Cannot check out default branch: path not found for \"p1-name\""),
+            "err: {err}"
+        );
     }
 
     #[test]
