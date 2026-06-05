@@ -62,6 +62,16 @@ export interface DirEntryView {
   is_git_repo: boolean
 }
 
+// A managed-worktree candidate for the "Attach worktree" flow. Only worktrees
+// managed by dux are listed; `adoptable` is false (with a `reason`) when the
+// worktree already has an agent and can't be attached again.
+export interface ProjectWorktreeEntryView {
+  worktree_path: string
+  branch_name: string
+  adoptable: boolean
+  reason: string | null
+}
+
 export interface ChangedFileView {
   status: string
   path: string
@@ -136,6 +146,12 @@ export type ServerMessage =
       error: string | null
     }
   | { type: "agent_name"; name: string }
+  | {
+      type: "project_worktrees"
+      project_id: string
+      entries: ProjectWorktreeEntryView[]
+      error: string | null
+    }
 
 // Client -> server JSON text frames, tagged by `type`.
 export type ClientMessage =
@@ -147,5 +163,6 @@ export type ClientMessage =
   | { type: "get_diff"; session_id: string; path: string }
   | { type: "browse_dir"; path: string | null }
   | { type: "generate_agent_name" }
+  | { type: "list_project_worktrees"; project_id: string }
 
 export type ConnState = "connecting" | "open" | "closed" | "failed"

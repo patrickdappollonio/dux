@@ -37,6 +37,22 @@ pub enum EngineRequest {
     /// Resolve a session's worktree path (instant lookup; diff I/O happens
     /// off-thread in the server handler).
     SessionWorktree(String, oneshot::Sender<Option<String>>),
+    /// Snapshot the inputs needed to classify a project's managed worktrees:
+    /// the project, the dux paths, and the current sessions. Instant clones off
+    /// engine state; the git work (`list_worktrees` + classification) runs
+    /// off-thread in the server handler (it shells to git), mirroring how
+    /// `SessionWorktree` feeds the off-thread diff. `None` when the project id is
+    /// unknown.
+    ProjectWorktreeInputs(
+        String,
+        oneshot::Sender<
+            Option<(
+                dux_core::model::Project,
+                dux_core::config::DuxPaths,
+                Vec<dux_core::model::AgentSession>,
+            )>,
+        >,
+    ),
     /// Gracefully wind down every running PTY (SIGTERM the children so CLIs can
     /// save state for a later resume), then stop the engine thread. Replies once
     /// the wind-down completes so the server can finish exiting.
@@ -244,6 +260,29 @@ impl EngineHandle {
         if self
             .req_tx
             .send(EngineRequest::SessionWorktree(session_id, tx))
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
+    /// Snapshot the inputs to classify a project's managed worktrees (project,
+    /// paths, sessions). Instant — the git classification runs off-thread in the
+    /// caller. `None` when the project id is unknown.
+    #[allow(clippy::type_complexity)]
+    pub async fn project_worktree_inputs(
+        &self,
+        project_id: String,
+    ) -> Option<(
+        dux_core::model::Project,
+        dux_core::config::DuxPaths,
+        Vec<dux_core::model::AgentSession>,
+    )> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::ProjectWorktreeInputs(project_id, tx))
             .is_err()
         {
             return None;
@@ -526,6 +565,15 @@ fn handle_request(engine: &mut Engine, req: EngineRequest) {
                 .find(|s| s.id == session_id)
                 .map(|s| s.worktree_path.clone());
             let _ = reply.send(worktree);
+        }
+        EngineRequest::ProjectWorktreeInputs(project_id, reply) => {
+            let inputs = engine
+                .projects
+                .iter()
+                .find(|p| p.id == project_id)
+                .cloned()
+                .map(|project| (project, engine.paths.clone(), engine.sessions.clone()));
+            let _ = reply.send(inputs);
         }
     }
 }

@@ -39,6 +39,26 @@ pub enum ClientMessage {
     /// `AgentName` frame. Generation is pure, so the server answers directly
     /// without touching the engine thread.
     GenerateAgentName,
+    /// List a project's managed git worktrees so the client can adopt an
+    /// orphaned one as a new agent (the TUI's `new-agent-from-worktree`). The
+    /// reply is a `ProjectWorktrees` frame. The server resolves the project from
+    /// the engine (a cheap lookup) then classifies the worktrees in
+    /// `spawn_blocking` (it shells to git), following the `get_diff` precedent.
+    ListProjectWorktrees { project_id: String },
+}
+
+/// A single managed-worktree candidate in serializable form, derived from
+/// `dux_core::project_browser::classify_project_worktrees`. Only worktrees
+/// managed by dux are listed (external worktrees are the TUI's separate fork
+/// flow). `adoptable` is true when the worktree has no live agent and can be
+/// attached; when false, `reason` explains why (currently: it already has an
+/// agent), so the client can show it disabled rather than hiding it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProjectWorktreeEntryView {
+    pub worktree_path: String,
+    pub branch_name: String,
+    pub adoptable: bool,
+    pub reason: Option<String>,
 }
 
 /// A single directory-browser entry in serializable form (the engine's
@@ -94,6 +114,14 @@ pub enum ServerMessage {
     /// Response to `GenerateAgentName`: a freshly generated two-word pet name the
     /// client fills into the new-agent dialog's input.
     AgentName { name: String },
+    /// Response to `ListProjectWorktrees`: the project's managed worktree
+    /// candidates, or an error string when the listing failed (unknown project
+    /// or a git failure).
+    ProjectWorktrees {
+        project_id: String,
+        entries: Vec<ProjectWorktreeEntryView>,
+        error: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -191,6 +219,35 @@ mod tests {
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(json, r#"{"type":"agent_name","name":"happy-otter"}"#);
+    }
+
+    #[test]
+    fn list_project_worktrees_message_parses() {
+        let json = r#"{"type":"list_project_worktrees","project_id":"p1"}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            msg,
+            ClientMessage::ListProjectWorktrees {
+                project_id: "p1".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn project_worktrees_message_serializes() {
+        let msg = ServerMessage::ProjectWorktrees {
+            project_id: "p1".to_string(),
+            entries: vec![ProjectWorktreeEntryView {
+                worktree_path: "/wt/feat".to_string(),
+                branch_name: "feat".to_string(),
+                adoptable: true,
+                reason: None,
+            }],
+            error: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""type":"project_worktrees""#), "{json}");
+        assert!(json.contains(r#""adoptable":true"#), "{json}");
     }
 
     #[test]

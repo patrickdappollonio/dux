@@ -4,7 +4,13 @@ import { toast } from "sonner"
 import { sanitizeAgentName } from "./agentName"
 import { ordersMatch } from "./reorder"
 import { DuxSocket } from "./ws"
-import type { ConnState, DirEntryView, FileDiff, ViewModel } from "./types"
+import type {
+  ConnState,
+  DirEntryView,
+  FileDiff,
+  ProjectWorktreeEntryView,
+  ViewModel,
+} from "./types"
 
 // The currently-streamed target: either an agent session or one of its
 // companion terminals. Both carry a `sessionId` so session-scoped UI (the
@@ -88,6 +94,14 @@ export interface DuxState {
   // checkout moves the source checkout's HEAD, so the web confirms first (the
   // TUI runs it straight from a deliberate palette/keybinding action).
   checkoutDefaultBranchTarget: string | null
+  // The project whose managed worktrees are being browsed for adoption, or null
+  // (closed). The dialog requests the listing on open; `attachWorktreeEntries`
+  // holds the server's classification and `attachWorktreeLoading` drives the
+  // spinner until the `project_worktrees` reply lands. Mirrors the TUI's
+  // `new-agent-from-worktree` picker.
+  attachWorktreeTarget: string | null
+  attachWorktreeEntries: ProjectWorktreeEntryView[]
+  attachWorktreeLoading: boolean
   // The name-input dialog target: a fresh agent in a project, a fork of an
   // existing session, or null (closed). One dialog component switches on `kind`.
   createAgentTarget: CreateAgentTarget | null
@@ -180,6 +194,9 @@ let state: DuxState = {
   browseLoading: false,
   removeProjectTarget: null,
   checkoutDefaultBranchTarget: null,
+  attachWorktreeTarget: null,
+  attachWorktreeEntries: [],
+  attachWorktreeLoading: false,
   createAgentTarget: null,
   renameTarget: null,
   renameDraft: "",
@@ -372,6 +389,15 @@ socket.onDiff = (sessionId, path, diff, error) => {
 
 socket.onDirEntries = (path, entries, error) => {
   setState({ browsePath: path, browseEntries: error ? [] : entries, browseLoading: false })
+  if (error) toast.error(error)
+}
+
+// The managed-worktree listing reply for the attach dialog. Ignore a stale
+// reply if the dialog closed (or switched projects) before it arrived, so a
+// late frame can never repopulate a closed dialog.
+socket.onProjectWorktrees = (projectId, entries, error) => {
+  if (state.attachWorktreeTarget !== projectId) return
+  setState({ attachWorktreeEntries: error ? [] : entries, attachWorktreeLoading: false })
   if (error) toast.error(error)
 }
 
@@ -691,6 +717,44 @@ export function closeCheckoutDefaultBranch(): void {
 // the command result, so there is nothing to do here but fire the command.
 export function checkoutDefaultBranch(projectId: string): void {
   socket.sendCommand("checkout_project_default_branch", { project_id: projectId })
+}
+
+// Open the attach-worktree dialog for a project and immediately request its
+// managed-worktree listing (the server classifies in spawn_blocking). The
+// listing reply fills `attachWorktreeEntries` via `onProjectWorktrees`. Runs in
+// the click handler that opens the dialog — never an effect — mirroring how
+// `openAddProject` kicks off its browse.
+export function openAttachWorktree(projectId: string): void {
+  setState({
+    attachWorktreeTarget: projectId,
+    attachWorktreeEntries: [],
+    attachWorktreeLoading: true,
+  })
+  socket.listProjectWorktrees(projectId)
+}
+
+export function closeAttachWorktree(): void {
+  setState({
+    attachWorktreeTarget: null,
+    attachWorktreeEntries: [],
+    attachWorktreeLoading: false,
+  })
+}
+
+// Ask the server to adopt a managed worktree as a new agent. The server
+// re-validates the path against a fresh classification (never trusting this
+// list) and validates `name` as a display name, then dispatches the create
+// worker — the outcome (busy/success/failure) arrives on the status stream.
+export function attachWorktree(
+  projectId: string,
+  worktreePath: string,
+  name: string,
+): void {
+  socket.sendCommand("create_agent_from_worktree", {
+    project_id: projectId,
+    worktree_path: worktreePath,
+    name,
+  })
 }
 
 // Open the new-agent dialog. The checkbox starts checked when

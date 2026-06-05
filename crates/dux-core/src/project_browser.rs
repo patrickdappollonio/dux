@@ -61,7 +61,7 @@ pub fn browser_entries(dir: &Path) -> Vec<BrowserEntry> {
     entries
 }
 
-fn canonical_or_original(path: &Path) -> PathBuf {
+pub(crate) fn canonical_or_original(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 

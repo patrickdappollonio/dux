@@ -4,6 +4,7 @@ import type {
   ConnState,
   DirEntryView,
   FileDiff,
+  ProjectWorktreeEntryView,
   ServerMessage,
   ViewModel,
 } from "./types"
@@ -46,6 +47,11 @@ export class DuxSocket {
     error: string | null,
   ) => void = () => {}
   onAgentName: (name: string) => void = () => {}
+  onProjectWorktrees: (
+    projectId: string,
+    entries: ProjectWorktreeEntryView[],
+    error: string | null,
+  ) => void = () => {}
 
   constructor(url: string) {
     this.url = url
@@ -125,6 +131,13 @@ export class DuxSocket {
       case "agent_name":
         this.onAgentName(message.name)
         break
+      case "project_worktrees":
+        this.onProjectWorktrees(
+          message.project_id,
+          message.entries,
+          message.error,
+        )
+        break
     }
   }
 
@@ -191,6 +204,10 @@ export class DuxSocket {
 
   generateAgentName(): void {
     this.sendJson({ type: "generate_agent_name" })
+  }
+
+  listProjectWorktrees(projectId: string): void {
+    this.sendJson({ type: "list_project_worktrees", project_id: projectId })
   }
 
   sendInput(bytes: Uint8Array): void {

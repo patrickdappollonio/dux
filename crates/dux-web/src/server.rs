@@ -288,6 +288,38 @@ async fn handle_socket(socket: WebSocket, engine: EngineHandle) {
                         let name = dux_core::git::docker_style_name();
                         let _ = send_json(&sink, &ServerMessage::AgentName { name }).await;
                     }
+                    ClientMessage::ListProjectWorktrees { project_id } => {
+                        // Resolve the project + classification inputs from the
+                        // engine (an instant lookup), then classify off-thread:
+                        // classification shells to git, so it must not run on the
+                        // engine loop or the async reactor (the get_diff pattern).
+                        let (entries, error) =
+                            match engine.project_worktree_inputs(project_id.clone()).await {
+                                None => (vec![], Some("unknown project".to_string())),
+                                Some((project, paths, sessions)) => {
+                                    match tokio::task::spawn_blocking(move || {
+                                        classify_managed_worktrees(&project, &paths, &sessions)
+                                    })
+                                    .await
+                                    {
+                                        Ok(Ok(entries)) => (entries, None),
+                                        Ok(Err(e)) => (vec![], Some(e)),
+                                        Err(e) => {
+                                            (vec![], Some(format!("worktree listing failed: {e}")))
+                                        }
+                                    }
+                                }
+                            };
+                        let _ = send_json(
+                            &sink,
+                            &ServerMessage::ProjectWorktrees {
+                                project_id,
+                                entries,
+                                error,
+                            },
+                        )
+                        .await;
+                    }
                 }
             }
             Message::Close(_) => break,
@@ -364,4 +396,38 @@ async fn send_json(sink: &SharedSink, msg: &ServerMessage) -> Result<(), ()> {
 async fn send_binary(sink: &SharedSink, bytes: Vec<u8>) {
     let mut guard = sink.lock().await;
     let _ = guard.send(Message::Binary(bytes.into())).await;
+}
+
+/// Classify a project's git worktrees and project the MANAGED ones (under dux's
+/// worktrees root) into wire-safe entries. External worktrees and the project
+/// checkout are excluded — they are not part of the managed-adoption flow (the
+/// TUI offers external worktrees through its separate fork path). Each managed
+/// entry is marked adoptable when it has no live agent; otherwise the reason
+/// ("Already has an agent.") is surfaced so the client can show it disabled.
+///
+/// Runs in `spawn_blocking`: `list_worktrees` shells to git. Returns a
+/// user-facing error string when the git listing fails.
+fn classify_managed_worktrees(
+    project: &dux_core::model::Project,
+    paths: &dux_core::config::DuxPaths,
+    sessions: &[dux_core::model::AgentSession],
+) -> Result<Vec<crate::protocol::ProjectWorktreeEntryView>, String> {
+    let worktrees = dux_core::git::list_worktrees(std::path::Path::new(&project.path))
+        .map_err(|e| format!("{e:#}"))?;
+    let entries =
+        dux_core::project_browser::classify_project_worktrees(project, paths, sessions, worktrees)
+            .into_iter()
+            .filter(|entry| entry.is_managed_by_dux && !entry.is_project_checkout)
+            .map(|entry| crate::protocol::ProjectWorktreeEntryView {
+                worktree_path: entry.path.to_string_lossy().to_string(),
+                branch_name: entry.branch_name,
+                adoptable: entry.is_selectable,
+                reason: if entry.is_selectable {
+                    None
+                } else {
+                    Some("Already has an agent.".to_string())
+                },
+            })
+            .collect();
+    Ok(entries)
 }

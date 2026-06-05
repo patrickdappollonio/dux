@@ -198,6 +198,27 @@ pub enum WireCommand {
     CheckoutProjectDefaultBranch {
         project_id: String,
     },
+    /// Adopt an orphaned managed worktree (created by dux, no live session) as a
+    /// new agent, mirroring the TUI's `new-agent-from-worktree`
+    /// (`CreateAgentRequest::ExistingManagedWorktree`). `worktree_path` is the
+    /// canonical path the listing returned; `name` is a DISPLAY name (the branch
+    /// already exists, so this never becomes a branch — see the TUI's
+    /// display-name prompt variant).
+    ///
+    /// The path is NEVER trusted from the client: `wire_to_command` re-runs the
+    /// `classify_project_worktrees` classification for the project and rejects a
+    /// path that isn't a currently-adoptable managed worktree (stale, foreign, or
+    /// already attached). Classification is a `git worktree list` + branch lookups
+    /// — bounded plumbing reads with no working-tree writes — so it runs inline in
+    /// `wire_to_command` like `AddProject`'s `current_branch`/`leading_branch`
+    /// inspection and `discard_classify`'s `git status` already do. (Contrast
+    /// `CheckoutProjectDefaultBranch`, which `git switch`es the working tree and
+    /// therefore goes through workers per the CLAUDE.md tenet.)
+    CreateAgentFromWorktree {
+        project_id: String,
+        worktree_path: String,
+        name: String,
+    },
 }
 
 /// A status-line update in wire-safe form.
@@ -1116,6 +1137,78 @@ impl Engine {
                     term_size: (80, 24),
                 }
             }
+            WireCommand::CreateAgentFromWorktree {
+                project_id,
+                worktree_path,
+                name,
+            } => {
+                let project = self
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project_id)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("unknown project: {project_id}"))?;
+
+                // Re-validate the path server-side: never trust the client's
+                // list. Re-run classification for this project and require the
+                // requested path to come back as a currently-adoptable MANAGED
+                // worktree. This rejects stale paths (a session was created on it
+                // since the listing), foreign paths (outside the project), the
+                // project checkout itself, and external worktrees (those are the
+                // TUI's separate `ForkExternalWorktree` flow, not L2's
+                // managed-adoption path).
+                let requested = crate::project_browser::canonical_or_original(
+                    std::path::Path::new(&worktree_path),
+                );
+                let entry = self
+                    .adoptable_managed_worktrees(&project)?
+                    .into_iter()
+                    .find(|entry| entry.path == requested)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Worktree \"{worktree_path}\" is not an adoptable managed worktree for \
+                             project \"{}\". Refresh the list and pick a worktree that has no agent yet.",
+                            project.name
+                        )
+                    })?;
+
+                // Mirror the TUI's display-name prompt for ExistingManagedWorktree:
+                // the name cannot be empty and is validated with the SAME
+                // `is_valid_agent_name` rules the prompt enforces (input.rs
+                // NameNewAgent confirm). The branch already exists, so this is a
+                // display name only — it never becomes a git ref.
+                let trimmed = name.trim();
+                if trimmed.is_empty() {
+                    anyhow::bail!("Agent name cannot be empty.");
+                }
+                if !crate::git::is_valid_agent_name(trimmed) {
+                    anyhow::bail!(
+                        "Invalid agent name \"{trimmed}\". Use only letters, digits, dashes, \
+                         underscores and slashes; it must start with a letter or digit, must \
+                         not contain \"//\", and must not end with \"/\"."
+                    );
+                }
+                let display_name = trimmed.to_string();
+
+                // Busy copy mirrors the TUI's ExistingManagedWorktree message
+                // (input.rs NameNewAgent confirm).
+                let busy_message = format!(
+                    "Starting agent \"{display_name}\" in existing worktree {} for project \"{}\"...",
+                    entry.path.display(),
+                    project.name
+                );
+                let request = CreateAgentRequest::ExistingManagedWorktree {
+                    project,
+                    worktree_path: entry.path.clone(),
+                    branch_name: entry.branch_name.clone(),
+                    custom_name: Some(display_name),
+                };
+                Command::DispatchCreateAgentRequest {
+                    request: Box::new(request),
+                    busy_message,
+                    term_size: (80, 24),
+                }
+            }
             // Rename, Reconnect, CheckoutProjectDefaultBranch, and
             // ChangeAgentProvider are NOT reconstructible into a single
             // `Command` — all need `&mut self` (rename persists in place;
@@ -1160,6 +1253,29 @@ impl Engine {
             .find(|s| s.id == session_id)
             .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
         Ok(PathBuf::from(&session.worktree_path))
+    }
+
+    /// List the project's managed worktrees that are currently adoptable as a
+    /// new agent: managed by dux (under the worktrees root) and selectable (no
+    /// live session, not the project checkout). Shells to git via
+    /// `list_worktrees` + `classify_project_worktrees` — bounded plumbing reads,
+    /// no working-tree writes — and is the single source of truth shared by the
+    /// listing handler and the wire re-validation, so the client's path is always
+    /// checked against a fresh classification rather than a stale snapshot.
+    pub fn adoptable_managed_worktrees(
+        &self,
+        project: &Project,
+    ) -> anyhow::Result<Vec<crate::worker::ProjectWorktreeEntry>> {
+        let worktrees = crate::git::list_worktrees(std::path::Path::new(&project.path))?;
+        Ok(crate::project_browser::classify_project_worktrees(
+            project,
+            &self.paths,
+            &self.sessions,
+            worktrees,
+        )
+        .into_iter()
+        .filter(|entry| entry.is_selectable && entry.is_managed_by_dux)
+        .collect())
     }
 }
 
@@ -3122,5 +3238,275 @@ mod tests {
 
         // Clean up so the PTY doesn't outlive the test.
         engine.providers.remove("s1");
+    }
+
+    // ---- L2: attach existing managed worktree -----------------------------
+
+    /// Build a real repo (init + one commit) at `<root>/repo`, then add a managed
+    /// worktree on a new branch under the engine's managed root
+    /// (`<worktrees_root>/<project_name>/<branch>`) so `list_worktrees` +
+    /// `classify_project_worktrees` see a genuine adoptable managed entry.
+    /// Returns the project (path -> repo) and the canonical managed-worktree path.
+    fn engine_with_managed_worktree(
+        engine: &crate::engine::Engine,
+        branch: &str,
+    ) -> (Project, PathBuf) {
+        let project = sample_project("p1", "");
+        let repo = engine.paths.root.join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let run = |cwd: &Path, args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .status()
+                .expect("spawn git")
+                .success();
+            assert!(ok, "git {args:?} failed in {}", cwd.display());
+        };
+        run(&repo, &["init", "-q"]);
+        run(&repo, &["config", "user.email", "t@example.com"]);
+        run(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("a.txt"), "hello\n").expect("write");
+        run(&repo, &["add", "a.txt"]);
+        run(&repo, &["commit", "-q", "-m", "init"]);
+
+        // Managed worktree under <worktrees_root>/<project.name>/<branch>.
+        let managed_root = engine.paths.worktrees_root.join(&project.name);
+        std::fs::create_dir_all(&managed_root).expect("managed root");
+        let worktree_path = managed_root.join(branch);
+        run(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                worktree_path.to_string_lossy().as_ref(),
+            ],
+        );
+
+        let mut project = project;
+        project.path = repo.to_string_lossy().to_string();
+        let canonical = worktree_path.canonicalize().expect("canonicalize worktree");
+        (project, canonical)
+    }
+
+    #[test]
+    fn wire_create_agent_from_worktree_deserializes() {
+        let json = r#"{"command":"create_agent_from_worktree","args":{"project_id":"p1","worktree_path":"/wt/feat","name":"my-agent"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::CreateAgentFromWorktree {
+                project_id: "p1".to_string(),
+                worktree_path: "/wt/feat".to_string(),
+                name: "my-agent".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn wire_to_command_create_agent_from_worktree_builds_request() {
+        let (mut engine, _tmp) = test_engine();
+        let (project, worktree_path) = engine_with_managed_worktree(&engine, "orphan");
+        engine.projects.push(project);
+
+        let cmd = engine
+            .wire_to_command(WireCommand::CreateAgentFromWorktree {
+                project_id: "p1".to_string(),
+                worktree_path: worktree_path.to_string_lossy().to_string(),
+                name: "Display Name".replace(' ', "-"),
+            })
+            .expect("reconstruct");
+        match cmd {
+            Command::DispatchCreateAgentRequest {
+                request,
+                busy_message,
+                term_size,
+            } => {
+                assert_eq!(term_size, (80, 24));
+                assert!(
+                    busy_message.contains("Starting agent \"Display-Name\" in existing worktree"),
+                    "busy: {busy_message}"
+                );
+                match *request {
+                    CreateAgentRequest::ExistingManagedWorktree {
+                        project,
+                        worktree_path: req_path,
+                        branch_name,
+                        custom_name,
+                    } => {
+                        assert_eq!(project.id, "p1");
+                        assert_eq!(req_path, worktree_path);
+                        assert_eq!(branch_name, "orphan");
+                        assert_eq!(custom_name.as_deref(), Some("Display-Name"));
+                    }
+                    other => panic!("expected ExistingManagedWorktree, got {other:?}"),
+                }
+            }
+            _ => panic!("expected Command::DispatchCreateAgentRequest variant"),
+        }
+    }
+
+    #[test]
+    fn wire_to_command_create_agent_from_worktree_unknown_project_errors() {
+        let (engine, _tmp) = test_engine();
+        let err = engine
+            .wire_to_command(WireCommand::CreateAgentFromWorktree {
+                project_id: "ghost".to_string(),
+                worktree_path: "/wt/feat".to_string(),
+                name: "my-agent".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown project"), "err: {err}");
+    }
+
+    #[test]
+    fn wire_to_command_create_agent_from_worktree_rejects_foreign_path() {
+        // A path that is not an adoptable managed worktree (here: the project's
+        // own repo checkout, which classification excludes) must be rejected —
+        // the server never trusts the client's path.
+        let (mut engine, _tmp) = test_engine();
+        let (project, _managed) = engine_with_managed_worktree(&engine, "orphan");
+        let repo_path = project.path.clone();
+        engine.projects.push(project);
+
+        let err = engine
+            .wire_to_command(WireCommand::CreateAgentFromWorktree {
+                project_id: "p1".to_string(),
+                worktree_path: repo_path,
+                name: "my-agent".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("not an adoptable managed worktree"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn wire_to_command_create_agent_from_worktree_rejects_already_attached() {
+        // A managed worktree that already has a live agent session is no longer
+        // adoptable; the path must be rejected even though it IS managed.
+        let (mut engine, _tmp) = test_engine();
+        let (project, managed) = engine_with_managed_worktree(&engine, "orphan");
+        engine.projects.push(project);
+        // Seed a session on the managed worktree so classification marks it
+        // not-selectable.
+        let mut session = sample_session("s1", "p1", "orphan");
+        session.worktree_path = managed.to_string_lossy().to_string();
+        engine.sessions.push(session);
+
+        let err = engine
+            .wire_to_command(WireCommand::CreateAgentFromWorktree {
+                project_id: "p1".to_string(),
+                worktree_path: managed.to_string_lossy().to_string(),
+                name: "my-agent".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("not an adoptable managed worktree"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn wire_to_command_create_agent_from_worktree_rejects_empty_and_invalid_names() {
+        let (mut engine, _tmp) = test_engine();
+        let (project, managed) = engine_with_managed_worktree(&engine, "orphan");
+        engine.projects.push(project);
+        let path = managed.to_string_lossy().to_string();
+
+        // The display-name prompt rejects an empty name (mirroring the TUI's
+        // NameNewAgent confirm: "Agent name cannot be empty.").
+        for blank in ["", "   "] {
+            let err = engine
+                .wire_to_command(WireCommand::CreateAgentFromWorktree {
+                    project_id: "p1".to_string(),
+                    worktree_path: path.clone(),
+                    name: blank.to_string(),
+                })
+                .map(|_| ())
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("cannot be empty"),
+                "blank {blank:?} err: {err}"
+            );
+        }
+
+        // And rejects names git's agent-name rules refuse, same as the prompt.
+        for bad in ["-leading", "a//b", "trailing/", "with.dot"] {
+            let err = engine
+                .wire_to_command(WireCommand::CreateAgentFromWorktree {
+                    project_id: "p1".to_string(),
+                    worktree_path: path.clone(),
+                    name: bad.to_string(),
+                })
+                .map(|_| ())
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("Invalid agent name"),
+                "bad {bad:?} err: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_wire_create_agent_from_worktree_dispatches_and_guards_repeat() {
+        // Happy path: the first apply_wire dispatches the create worker (busy is
+        // async, so the synchronous outcome is empty and the create is in flight);
+        // a repeat hits the in-flight guard like the create/fork flows.
+        let (mut engine, _tmp) = test_engine();
+        let (project, managed) = engine_with_managed_worktree(&engine, "orphan");
+        engine.projects.push(project);
+        // Make the provider runnable so the create worker doesn't fail spawning.
+        engine.config.providers.commands.insert(
+            "claude".to_string(),
+            crate::config::ProviderCommandConfig {
+                command: "cat".to_string(),
+                args: vec![],
+                resume_args: None,
+                ..Default::default()
+            },
+        );
+        let path = managed.to_string_lossy().to_string();
+
+        let first = engine
+            .apply_wire(WireCommand::CreateAgentFromWorktree {
+                project_id: "p1".to_string(),
+                worktree_path: path.clone(),
+                name: "adopted".to_string(),
+            })
+            .expect("first attach");
+        assert!(
+            first.status.is_none(),
+            "create busy is async, not a synchronous outcome: {:?}",
+            first.status
+        );
+        assert!(
+            engine.is_in_flight(&InFlightKey::CreateAgent),
+            "the create worker should be in flight after dispatch"
+        );
+
+        let second = engine
+            .apply_wire(WireCommand::CreateAgentFromWorktree {
+                project_id: "p1".to_string(),
+                worktree_path: path,
+                name: "adopted-again".to_string(),
+            })
+            .expect("second attach");
+        let status = second.status.expect("repeat surfaces the in-flight guard");
+        assert_eq!(status.tone, "error");
+        assert!(
+            status.message.contains("already being created or forked"),
+            "msg: {}",
+            status.message
+        );
     }
 }

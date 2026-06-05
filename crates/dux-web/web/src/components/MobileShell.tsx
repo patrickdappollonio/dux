@@ -18,6 +18,7 @@ import {
   Cpu,
   Download,
   Ellipsis,
+  FolderGit2,
   FolderOpen,
   GitBranch,
   GitCommitHorizontal,
@@ -73,6 +74,7 @@ import {
   createTerminal,
   mobileNavigate,
   openAddProject,
+  openAttachWorktree,
   openChangeProvider,
   openCheckoutDefaultBranch,
   openCommit,
@@ -422,6 +424,10 @@ function ProjectBlock({
             <DropdownMenuItem onClick={() => openCreateAgent(id)}>
               <Bot />
               New agent…
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => openAttachWorktree(id)}>
+              <FolderGit2 />
+              Attach worktree…
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => pullProject(id)}>
               <Download />

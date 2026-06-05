@@ -1377,3 +1377,133 @@ async fn create_agent_adds_a_session() {
         "view_model never contained a new p1 session with branch 'webagent'"
     );
 }
+
+/// Like `boot()`, but project `p1`'s path is a REAL git repo with a committed
+/// branch, and a managed worktree is added under the dux worktrees root
+/// (`<root>/worktrees/<project_name>/orphan`) so `classify_project_worktrees`
+/// returns a genuine adoptable managed entry. No session is seeded, so the
+/// worktree is orphaned (adoptable).
+async fn boot_for_worktree_listing() -> (SocketAddr, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+
+    let run = |cwd: &std::path::Path, args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .expect("spawn git")
+            .success();
+        assert!(ok, "git {args:?} failed in {}", cwd.display());
+    };
+    run(&repo, &["init", "-q"]);
+    run(&repo, &["config", "user.email", "t@example.com"]);
+    run(&repo, &["config", "user.name", "t"]);
+    std::fs::write(repo.join("f.txt"), "line1\n").expect("write file");
+    run(&repo, &["add", "f.txt"]);
+    run(&repo, &["commit", "-q", "-m", "init"]);
+
+    let paths = DuxPaths {
+        root: root.clone(),
+        config_path: root.join("config.toml"),
+        sessions_db_path: root.join("sessions.sqlite3"),
+        worktrees_root: root.join("worktrees"),
+        lock_path: root.join("dux.lock"),
+    };
+    // Managed worktree under <worktrees_root>/<project name "p1-name">/orphan.
+    let managed_root = paths.worktrees_root.join("p1-name");
+    std::fs::create_dir_all(&managed_root).unwrap();
+    let worktree_path = managed_root.join("orphan");
+    run(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "orphan",
+            worktree_path.to_string_lossy().as_ref(),
+        ],
+    );
+    {
+        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        store
+            .upsert_project(&ProjectConfig {
+                id: "p1".to_string(),
+                path: repo.to_string_lossy().into_owned(),
+                name: Some("p1-name".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: Default::default(),
+            })
+            .unwrap();
+    }
+    let mut engine = bootstrap_engine(&paths).unwrap();
+    engine.config.providers.commands.insert(
+        "claude".to_string(),
+        ProviderCommandConfig {
+            command: "cat".to_string(),
+            args: vec![],
+            resume_args: None,
+            ..Default::default()
+        },
+    );
+    let (handle, _join) = spawn_engine_thread(engine);
+    let app = router(handle);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, tmp)
+}
+
+/// A web client can list a project's managed worktrees with
+/// `list_project_worktrees`. The server resolves the project, classifies the
+/// worktrees in spawn_blocking (real `git worktree list`), and replies with a
+/// `project_worktrees` frame carrying the orphaned managed worktree as an
+/// adoptable entry (branch "orphan", no agent yet).
+#[tokio::test]
+async fn list_project_worktrees_returns_adoptable_entry() {
+    let (addr, _tmp) = boot_for_worktree_listing().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let _ = ws.next().await; // initial view_model
+
+    ws.send(Message::Text(
+        r#"{"type":"list_project_worktrees","project_id":"p1"}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    let mut frame = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    while tokio::time::Instant::now() < deadline && frame.is_empty() {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"type\":\"project_worktrees\"")
+        {
+            frame = t.to_string();
+        }
+    }
+    assert!(
+        !frame.is_empty(),
+        "never received a project_worktrees frame"
+    );
+
+    let v: serde_json::Value = serde_json::from_str(&frame).expect("parse project_worktrees frame");
+    assert!(v["error"].is_null(), "unexpected error: {frame}");
+    assert_eq!(v["project_id"].as_str(), Some("p1"));
+    let entries = v["entries"].as_array().expect("entries array");
+    let orphan = entries
+        .iter()
+        .find(|e| e["branch_name"].as_str() == Some("orphan"))
+        .unwrap_or_else(|| panic!("missing orphan worktree entry: {frame}"));
+    assert_eq!(orphan["adoptable"].as_bool(), Some(true), "{frame}");
+    assert!(orphan["reason"].is_null(), "{frame}");
+}

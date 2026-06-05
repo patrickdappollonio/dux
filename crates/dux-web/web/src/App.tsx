@@ -2,6 +2,7 @@ import type * as React from "react"
 import { Suspense } from "react"
 
 import { AddProjectDialog } from "@/components/AddProjectDialog"
+import { AttachWorktreeDialog } from "@/components/AttachWorktreeDialog"
 import { AppSidebar } from "@/components/Sidebar"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
@@ -181,6 +182,7 @@ function GlobalOverlays() {
       <GlobalEnvDialog />
       <ProjectSettingsDialog />
       <AddProjectDialog />
+      <AttachWorktreeDialog />
       <RemoveProjectDialog />
       <CheckoutDefaultBranchDialog />
       <Toaster />
