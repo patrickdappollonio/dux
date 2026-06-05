@@ -17,6 +17,7 @@ import { CheckoutDefaultBranchDialog } from "@/components/CheckoutDefaultBranchD
 import { DeleteSessionDialog } from "@/components/DeleteSessionDialog"
 import { GlobalEnvDialog } from "@/components/GlobalEnvDialog"
 import { MobileShell } from "@/components/MobileShell"
+import { PrBanner } from "@/components/PrBanner"
 import { ProjectInfoDialog } from "@/components/ProjectInfoDialog"
 import { ProjectSettingsDialog } from "@/components/ProjectSettingsDialog"
 import { RemoveProjectDialog } from "@/components/RemoveProjectDialog"
@@ -111,7 +112,8 @@ function InsetHeader() {
 }
 
 function TerminalArea() {
-  const { selectedTarget, terminalEpoch } = useDux()
+  const { viewModel, selectedSessionId, selectedTarget, terminalEpoch } =
+    useDux()
 
   // Idle center pane: the duck + logo + a tip, exactly like the TUI's welcome
   // screen. It vanishes the moment a target is selected (the loading state is
@@ -119,6 +121,14 @@ function TerminalArea() {
   if (!selectedTarget) {
     return <Welcome />
   }
+
+  // The PR belongs to the owning session, so it shows whether the agent or one
+  // of its companion terminals is focused (mirroring the TUI, which shares the
+  // session's PR across surfaces). Placement honours the same config the TUI
+  // does: "bottom" puts the lane below the terminal, anything else above.
+  const pr =
+    viewModel?.sessions.find((s) => s.id === selectedSessionId)?.pr ?? null
+  const bannerAtBottom = viewModel?.pr_banner_position === "bottom"
 
   // For an agent the streamed id is the session id; for a terminal it is the
   // terminal id. Key by that id so switching remounts the terminal cleanly.
@@ -149,16 +159,20 @@ function TerminalArea() {
   // visible jitter loop. Clipping here means the transient overflow is
   // simply invisible and the loop can never start.
   return (
-    <div className="h-full min-h-0 overflow-hidden">
-      <ChunkBoundary>
-        <Suspense fallback={null}>
-          <LazyTerminalPane
-            key={paneKey}
-            kind={selectedTarget.kind}
-            id={targetId}
-          />
-        </Suspense>
-      </ChunkBoundary>
+    <div className="flex h-full min-h-0 flex-col">
+      {pr && !bannerAtBottom ? <PrBanner pr={pr} /> : null}
+      <div className="min-h-0 flex-1 overflow-hidden">
+        <ChunkBoundary>
+          <Suspense fallback={null}>
+            <LazyTerminalPane
+              key={paneKey}
+              kind={selectedTarget.kind}
+              id={targetId}
+            />
+          </Suspense>
+        </ChunkBoundary>
+      </div>
+      {pr && bannerAtBottom ? <PrBanner pr={pr} /> : null}
     </div>
   )
 }

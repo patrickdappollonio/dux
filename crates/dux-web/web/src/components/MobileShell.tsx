@@ -43,6 +43,7 @@ import { Suspense } from "react"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
+import { PrBanner } from "@/components/PrBanner"
 import { StatusBadge } from "@/components/StatusBadge"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -97,17 +98,11 @@ import {
   socket,
   useDux,
 } from "@/lib/store"
+import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
 import type { SelectedTarget } from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
-import type { PrView, SessionView } from "@/lib/types"
-
-// Mirror the sidebar's PR badge coloring (the one intentional semantic-color
-// exception: GitHub PR states carry real-world green/purple/red meaning).
-function prBadgeClass(state: PrView["state"]): string {
-  if (state === "open") return "border-transparent bg-green-600/15 text-green-500"
-  if (state === "merged") return "border-transparent bg-purple-600/15 text-purple-400"
-  return "border-transparent bg-red-600/15 text-red-400"
-}
+import type { SessionView } from "@/lib/types"
+import { cn } from "@/lib/utils"
 
 // The set of actions the sidebar's ⋯ menu offers for a session, reused verbatim
 // here so the mobile menu and the desktop menu never drift.
@@ -279,24 +274,26 @@ function SessionRow({
           <span className="flex-1 truncate text-left">{label}</span>
           <span className="flex shrink-0 items-center gap-1">
             {session.pr ? (
-              <Badge
-                className={prBadgeClass(session.pr.state)}
-                title={session.pr.title}
-                render={
-                  <a
-                    href={session.pr.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      window.open(session.pr!.url, "_blank", "noopener")
-                    }}
-                  >
-                    <GitPullRequest data-icon="inline-start" />#
-                    {session.pr.number}
-                  </a>
-                }
-              />
+              // Icon-only PR link (no tooltip on touch — the banner on the
+              // terminal screen carries the full detail). State-tinted glyph
+              // with an explicit, readable hover.
+              <a
+                href={session.pr.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label={`PR #${session.pr.number} (${prStateLabel(session.pr.state)})`}
+                className={cn(
+                  "inline-flex items-center rounded p-0.5 transition-colors",
+                  prIconClass(session.pr.state),
+                  prIconHoverClass(session.pr.state)
+                )}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  window.open(session.pr!.url, "_blank", "noopener")
+                }}
+              >
+                <GitPullRequest className="size-4" />
+              </a>
             ) : null}
             <StatusBadge
               status={session.status}
@@ -752,6 +749,12 @@ function TerminalScreen() {
           </DropdownMenuContent>
         </DropdownMenu>
       </header>
+
+      {/* Mobile always pins the PR banner to the top (the config's bottom
+          placement would fight the accessory bar + soft keyboard). It is part
+          of the flex column, so its fixed height shrinks the terminal naturally
+          and the pane's ResizeObserver refits. */}
+      {session.pr ? <PrBanner pr={session.pr} /> : null}
 
       <div className="min-h-0 flex-1">
         {/* Suspense fallback null: the lazy chunk loads fast and TerminalPane

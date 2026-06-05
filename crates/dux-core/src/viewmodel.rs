@@ -35,6 +35,11 @@ pub struct ViewModel {
     /// The web dialog hides/disables its "From PR" mode with a quiet explanation
     /// when false, matching the TUI's gating of the `new-agent-from-pr` command.
     pub gh_available: bool,
+    /// Mirrors `config.ui.pr_banner_position` ("top" | "bottom"). Desktop web
+    /// places the PR banner lane above the terminal when "top" and below it when
+    /// "bottom", matching the TUI's `pr_banner_at_bottom` semantics. Mobile
+    /// ignores this and always renders the banner on top.
+    pub pr_banner_position: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -285,6 +290,7 @@ impl Engine {
                 .defaults
                 .enable_randomized_pet_name_by_default,
             gh_available: self.pr_agent_command_available(),
+            pr_banner_position: self.config.ui.pr_banner_position.clone(),
         }
     }
 }
@@ -689,6 +695,19 @@ mod tests {
         let mut sorted = vm.available_providers.clone();
         sorted.sort();
         assert_eq!(vm.available_providers, sorted);
+    }
+
+    #[test]
+    fn pr_banner_position_is_projected_from_config() {
+        let (mut engine, _tmp) = test_engine();
+
+        // The default config ships with the banner at the bottom.
+        assert_eq!(engine.view_model().pr_banner_position, "bottom");
+
+        // An explicit "top" preference projects verbatim so the web client can
+        // mirror the TUI's placement.
+        engine.config.ui.pr_banner_position = "top".to_string();
+        assert_eq!(engine.view_model().pr_banner_position, "top");
     }
 
     #[test]

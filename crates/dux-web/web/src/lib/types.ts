@@ -139,6 +139,10 @@ export interface ViewModel {
    * `gh` installed and authenticated). The "From PR" mode is disabled with a
    * quiet explanation when false. */
   gh_available: boolean
+  /** Mirrors `config.ui.pr_banner_position` ("top" | "bottom"). Desktop places
+   * the PR banner lane above the terminal when "top" and below when "bottom".
+   * Mobile ignores this and always renders the banner on top. */
+  pr_banner_position: "top" | "bottom"
 }
 
 export interface CommandStatus {

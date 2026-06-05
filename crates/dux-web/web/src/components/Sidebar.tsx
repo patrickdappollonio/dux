@@ -79,6 +79,13 @@ import {
   SidebarRail,
 } from "@/components/ui/sidebar"
 import { useSidebar } from "@/components/ui/sidebar"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
+import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
 import { projectBranchDisplay } from "@/lib/projectBranch"
 import type { ProjectBranchDisplay } from "@/lib/projectBranch"
 import { partitionProjects } from "@/lib/projects"
@@ -115,16 +122,8 @@ import {
 } from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
 import type { SelectedTarget } from "@/lib/store"
-import type { PrView, SessionView, TerminalView } from "@/lib/types"
-
-// Return a className for PR badge coloring. This is the ONE intentional
-// semantic-color exception: GitHub PR states carry real-world meaning that
-// maps directly to green/purple/red (matching the dux TUI colors).
-function prBadgeClass(state: PrView["state"]): string {
-  if (state === "open") return "border-transparent bg-green-600/15 text-green-500"
-  if (state === "merged") return "border-transparent bg-purple-600/15 text-purple-400"
-  return "border-transparent bg-red-600/15 text-red-400"
-}
+import { cn } from "@/lib/utils"
+import type { SessionView, TerminalView } from "@/lib/types"
 
 // A single companion terminal nested beneath its owning agent session. The
 // terminal glyph is reserved for companion terminals; agents use a consistent
@@ -230,28 +229,43 @@ function SessionSubItem({
         <span className="truncate">{label}</span>
         <span className="ml-auto flex shrink-0 items-center gap-1">
           {session.pr ? (
-            <Badge
-              className={prBadgeClass(session.pr.state)}
-              title={session.pr.title}
-              render={
-                <a
-                  href={session.pr.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    window.open(
-                      session.pr!.url,
-                      "_blank",
-                      "noopener",
-                    )
-                  }}
+            // Icon-only PR link: just the state-tinted glyph, with the full
+            // "#N · title" revealed on hover so long PR numbers no longer eat
+            // the row. The explicit hover classes fix the washed-out
+            // (near-white-on-light-green) hover the old badge had.
+            <TooltipProvider delay={300}>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <a
+                      href={session.pr.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-label={`PR #${session.pr.number} (${prStateLabel(session.pr.state)})`}
+                      className={cn(
+                        "inline-flex items-center rounded p-0.5 transition-colors",
+                        prIconClass(session.pr.state),
+                        prIconHoverClass(session.pr.state)
+                      )}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        window.open(
+                          session.pr!.url,
+                          "_blank",
+                          "noopener",
+                        )
+                      }}
+                    />
+                  }
                 >
-                  <GitPullRequest data-icon="inline-start" />#
-                  {session.pr.number}
-                </a>
-              }
-            />
+                  <GitPullRequest className="size-3.5" />
+                </TooltipTrigger>
+                <TooltipContent side="right">
+                  #{session.pr.number} · {session.pr.title} (
+                  {prStateLabel(session.pr.state)})
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
           ) : null}
           <StatusBadge
             status={session.status}
