@@ -6309,8 +6309,8 @@ mod tests {
         MouseClickTarget, MouseLayoutState, NameNewAgentFocus, NonDefaultBranchAction,
         OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout, OverlayMouseLayoutState,
         PickProjectWorktreePrompt, ProcessInfo, ProjectWorktreeEntry, PromptState, PullTarget,
-        ResolvedPullRequest, ResourceStats, RightSection, RuntimeTargetId, StartupCommandLogPrompt,
-        TextInput, WorkerEvent,
+        ResourceStats, RightSection, RuntimeTargetId, StartupCommandLogPrompt, TextInput,
+        WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, DuxPaths, ProjectConfig};
@@ -6328,6 +6328,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     use dux_core::engine::InFlightKey;
+    use dux_core::worker::ResolvedPullRequest;
     use ratatui::layout::Rect;
     use ratatui::text::Line;
     use std::process::Command;
@@ -9689,6 +9690,7 @@ not_a_real_action = ["x"]
                     title: "Fix issue".to_string(),
                     state: "OPEN".to_string(),
                     head_ref_name: "feature/pr-42".to_string(),
+                    custom_name: None,
                 }),
             })
             .expect("send PR resolution");

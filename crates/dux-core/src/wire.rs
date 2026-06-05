@@ -239,6 +239,28 @@ pub enum WireCommand {
         worktree_path: String,
         name: String,
     },
+    /// Create a new agent checked out on a GitHub PR's head branch, mirroring
+    /// the TUI's `new-agent-from-pr` palette command
+    /// (`CreateAgentRequest::PullRequest`). `pr` is the user-typed reference: a
+    /// full PR URL, `#123`, or a bare `123` (parsed server-side by
+    /// `gh::parse_pull_request_lookup` against the project's GitHub remote).
+    /// `name` is the agent/branch name; empty falls back to the PR head branch,
+    /// matching the TUI prompt's default seed.
+    ///
+    /// The lookup shells out to `gh pr view`, so — like the TUI — this does NOT
+    /// run inline: `apply_wire` validates the synchronous guards (gh available,
+    /// known project, parseable input, valid name), spawns
+    /// `gh::run_pull_request_lookup_job` off-thread, and returns a busy status.
+    /// On success the worker posts `PullRequestResolved`, whose
+    /// `OpenNewAgentPromptForPr` reaction the web actor's `drive_pr_lookup_followup`
+    /// turns into a `CreateAgentRequest::PullRequest` dispatch (where the TUI
+    /// would instead open a name prompt — the web already has the name). A
+    /// lookup failure surfaces on the async status stream.
+    CreateAgentFromPr {
+        project_id: String,
+        pr: String,
+        name: String,
+    },
 }
 
 /// A status-line update in wire-safe form.
@@ -418,6 +440,16 @@ impl Engine {
                 provider,
             } => {
                 let status = self.change_agent_provider_wire(&session_id, &provider)?;
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
+                });
+            }
+            WireCommand::CreateAgentFromPr {
+                project_id,
+                pr,
+                name,
+            } => {
+                let status = self.create_agent_from_pr(&project_id, &pr, name)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
                 });
@@ -812,6 +844,151 @@ impl Engine {
             crate::project_browser::run_add_project_checkout_job(action, default_branch, worker_tx);
         });
         Ok(WireStatus::new("busy", busy))
+    }
+
+    /// Resolve a GitHub PR and create an agent on its head branch, mirroring the
+    /// TUI's `open_new_agent_from_pr_prompt` + `dispatch_pull_request_lookup`.
+    ///
+    /// The TUI does this in two steps: a `gh pr view` lookup worker, then a name
+    /// prompt before dispatching the create. The web sends the name UPFRONT, so
+    /// this validates the synchronous guards here, carries the name through the
+    /// SAME shared lookup worker (`gh::run_pull_request_lookup_job`), and returns
+    /// a busy status. On resolution the worker posts `PullRequestResolved`, whose
+    /// `OpenNewAgentPromptForPr` reaction the actor's `drive_pr_lookup_followup`
+    /// turns into the actual `CreateAgentRequest::PullRequest` dispatch — where
+    /// the TUI would open its name prompt instead.
+    ///
+    /// `git fetch`/`worktree add` (the write) happen later in the create worker,
+    /// so nothing here touches the working tree; the only inline work is cheap
+    /// validation, matching the CLAUDE.md workers tenet.
+    fn create_agent_from_pr(
+        &mut self,
+        project_id: &str,
+        pr: &str,
+        name: String,
+    ) -> anyhow::Result<WireStatus> {
+        // Mirror the TUI's `open_new_agent_from_pr_prompt` gating: the PR flow is
+        // unavailable unless GitHub integration is on AND `gh` is installed and
+        // authenticated. The web dialog already hides the mode via the ViewModel's
+        // `gh_available`, but a raw/stale client must still be rejected.
+        if !self.pr_agent_command_available() {
+            anyhow::bail!(
+                "GitHub PR agent creation requires GitHub integration and an authenticated gh CLI."
+            );
+        }
+        let project = self
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown project: {project_id}"))?;
+        // Mirror the TUI's path-missing guard before dispatching the lookup.
+        if project.path_missing {
+            anyhow::bail!(
+                "Cannot create an agent from a PR: path not found for \"{}\"",
+                project.name
+            );
+        }
+
+        // Parse the PR reference up front so a garbage input fails synchronously
+        // with an actionable message (the TUI's lookup worker would otherwise
+        // surface it asynchronously, but the web has the project remote available
+        // here only via the worker — so we validate the NAME synchronously and let
+        // the shared worker re-parse the PR against the live remote, which is the
+        // single source of host/owner_repo truth). An empty `pr` is caught here.
+        if pr.trim().is_empty() {
+            anyhow::bail!("Enter a GitHub PR URL or PR number.");
+        }
+
+        // Validate the name with the SAME backstop as `CreateAgent`/`ForkSession`:
+        // a non-empty name must be a valid agent/branch ref. An empty name is
+        // allowed and falls back to the PR head branch (the TUI prompt seeds the
+        // head branch as its default), so it travels as `None`.
+        let trimmed = name.trim();
+        let custom_name = if trimmed.is_empty() {
+            None
+        } else {
+            if !crate::git::is_valid_agent_name(trimmed) {
+                anyhow::bail!(
+                    "Invalid agent name \"{trimmed}\". Use only letters, digits, dashes, \
+                     underscores and slashes; it must start with a letter or digit, must \
+                     not contain \"//\", and must not end with \"/\"."
+                );
+            }
+            Some(trimmed.to_string())
+        };
+
+        // Spawn the shared lookup worker (the TUI's `dispatch_pull_request_lookup`
+        // does the same with `None` for the name). Busy copy mirrors the TUI's
+        // `set_busy` in `dispatch_pull_request_lookup`.
+        let busy = format!("Resolving PR for project \"{}\"...", project.name);
+        let raw_input = pr.to_string();
+        let worker_tx = self.worker_tx.clone();
+        std::thread::spawn(move || {
+            crate::gh::run_pull_request_lookup_job(project, raw_input, custom_name, worker_tx);
+        });
+        Ok(WireStatus::new("busy", busy))
+    }
+
+    /// Drive a PR-lookup follow-up to completion, returning user-facing statuses.
+    /// Called from the web engine actor's worker-event drain alongside the other
+    /// `drive_*_followup`s: when `gh::run_pull_request_lookup_job` resolves a PR,
+    /// `process_worker_event` produces `OpenNewAgentPromptForPr` (the TUI opens a
+    /// name prompt for that reaction). The web already has the name (carried
+    /// through the lookup as `ResolvedPullRequest::custom_name`), so this builds
+    /// the `CreateAgentRequest::PullRequest` and dispatches the create directly,
+    /// mirroring the TUI's `OpenNewAgentPromptForPr` arm but without the prompt.
+    ///
+    /// `use_existing_branch` is `false`, exactly as the TUI's PR path sets it: the
+    /// create worker (`agent_job.rs`'s `PullRequest` arm) does its own last-mile
+    /// `use_existing_branch || branch_exists(...)` check, so a head branch that
+    /// already exists locally is attached rather than re-fetched without any
+    /// pre-computation here. A lookup FAILURE instead produced an error `Status`,
+    /// surfaced by the actor's `wire_statuses_from_reaction` drain. Other
+    /// reactions return `[]`.
+    pub fn drive_pr_lookup_followup(&mut self, reaction: &EventReaction) -> Vec<WireStatus> {
+        match reaction {
+            EventReaction::OpenNewAgentPromptForPr(pr) => {
+                let pr = pr.as_ref();
+                // Seed the head branch as the name when no custom name was sent,
+                // matching the TUI prompt's default (`Some(head_ref_name)`).
+                let custom_name = Some(
+                    pr.custom_name
+                        .clone()
+                        .unwrap_or_else(|| pr.head_ref_name.clone()),
+                );
+                let resolved_name = custom_name.clone().unwrap_or_default();
+                // Busy copy mirrors the TUI's PR create message (input.rs
+                // NameNewAgent confirm, PullRequest arm).
+                let busy_message = format!(
+                    "Creating a new agent worktree \"{resolved_name}\" from PR #{} for project \"{}\" and launching a fresh session...",
+                    pr.number, pr.project.name
+                );
+                let request = CreateAgentRequest::PullRequest {
+                    project: pr.project.clone(),
+                    host: pr.host.clone(),
+                    owner_repo: pr.owner_repo.clone(),
+                    number: pr.number,
+                    title: pr.title.clone(),
+                    state: pr.state.clone(),
+                    head_branch: pr.head_ref_name.clone(),
+                    custom_name,
+                    use_existing_branch: false,
+                };
+                match self.apply(Command::DispatchCreateAgentRequest {
+                    request: Box::new(request),
+                    busy_message: busy_message.clone(),
+                    term_size: (80, 24),
+                }) {
+                    Ok(reaction) => wire_statuses_from_reaction(&reaction),
+                    Err(e) => vec![WireStatus::new(
+                        "error",
+                        format!("Failed to create an agent from PR #{}: {e:#}", pr.number),
+                    )],
+                }
+            }
+            _ => vec![],
+        }
     }
 
     /// Drive an add-project follow-up to completion, returning user-facing
@@ -1362,9 +1539,10 @@ impl Engine {
             | WireCommand::ReconnectSession { .. }
             | WireCommand::CheckoutProjectDefaultBranch { .. }
             | WireCommand::AddProjectCheckoutDefault { .. }
-            | WireCommand::ChangeAgentProvider { .. } => {
+            | WireCommand::ChangeAgentProvider { .. }
+            | WireCommand::CreateAgentFromPr { .. } => {
                 unreachable!(
-                    "rename/reconnect/checkout-default-branch/add-project-checkout-default/change-provider are handled in apply_wire before wire_to_command"
+                    "rename/reconnect/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr are handled in apply_wire before wire_to_command"
                 )
             }
             WireCommand::ReorderSessions {
@@ -1427,6 +1605,7 @@ mod tests {
     use crate::engine::test_support::{sample_project, sample_session, test_engine};
     use crate::engine::{DeleteTerminalView, InFlightKey};
     use crate::model::AgentSession;
+    use crate::worker::WorkerEvent;
     use std::path::Path;
 
     #[test]
@@ -3811,5 +3990,241 @@ mod tests {
             "msg: {}",
             status.message
         );
+    }
+
+    // --- CreateAgentFromPr (L1) ---------------------------------------------
+
+    /// Flip the engine into the gh-available state so the PR flow's guard passes.
+    fn enable_gh(engine: &mut Engine) {
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
+    }
+
+    #[test]
+    fn wire_create_agent_from_pr_deserializes() {
+        let json = r##"{"command":"create_agent_from_pr","args":{"project_id":"p1","pr":"#42","name":"fix"}}"##;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::CreateAgentFromPr {
+                project_id: "p1".to_string(),
+                pr: "#42".to_string(),
+                name: "fix".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn wire_create_agent_from_pr_rejected_when_gh_unavailable() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        // gh_status defaults to Unknown and github_integration_enabled to false,
+        // so the PR flow is unavailable — the dialog hides it, but a raw client
+        // must still be rejected (and must NOT error/panic — graceful refusal).
+        let err = engine
+            .apply_wire(WireCommand::CreateAgentFromPr {
+                project_id: "p1".to_string(),
+                pr: "#42".to_string(),
+                name: String::new(),
+            })
+            .expect_err("gh unavailable");
+        assert!(
+            err.to_string().contains("requires GitHub integration"),
+            "msg: {err}"
+        );
+    }
+
+    #[test]
+    fn wire_create_agent_from_pr_rejects_unknown_project() {
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        let err = engine
+            .apply_wire(WireCommand::CreateAgentFromPr {
+                project_id: "missing".to_string(),
+                pr: "#42".to_string(),
+                name: String::new(),
+            })
+            .expect_err("unknown project");
+        assert!(err.to_string().contains("unknown project"), "msg: {err}");
+    }
+
+    #[test]
+    fn wire_create_agent_from_pr_rejects_empty_pr() {
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        engine.projects.push(sample_project("p1", "/repo"));
+        let err = engine
+            .apply_wire(WireCommand::CreateAgentFromPr {
+                project_id: "p1".to_string(),
+                pr: "   ".to_string(),
+                name: String::new(),
+            })
+            .expect_err("empty pr");
+        assert!(
+            err.to_string()
+                .contains("Enter a GitHub PR URL or PR number"),
+            "msg: {err}"
+        );
+    }
+
+    #[test]
+    fn wire_create_agent_from_pr_rejects_invalid_name() {
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        engine.projects.push(sample_project("p1", "/repo"));
+        let err = engine
+            .apply_wire(WireCommand::CreateAgentFromPr {
+                project_id: "p1".to_string(),
+                pr: "#42".to_string(),
+                name: "/bad//name".to_string(),
+            })
+            .expect_err("invalid name");
+        assert!(err.to_string().contains("Invalid agent name"), "msg: {err}");
+    }
+
+    #[test]
+    fn wire_create_agent_from_pr_returns_busy_and_spawns_lookup() {
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        // A real repo with a GitHub origin so the lookup worker can parse the
+        // remote and reach the parse stage. The worker shells out to `gh`, which
+        // may be absent in CI — the test only asserts the SYNCHRONOUS busy status
+        // and that the worker channel receives a PullRequestResolved event
+        // (success or failure), mirroring the GenerateCommitMessage test pattern.
+        let repo = init_repo_with_commit();
+        let run = |args: &[&str]| {
+            let _ = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status();
+        };
+        run(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/octocat/Hello-World.git",
+        ]);
+        let mut project = sample_project("p1", &repo.path().to_string_lossy());
+        project.path_missing = false;
+        engine.projects.push(project);
+
+        let outcome = engine
+            .apply_wire(WireCommand::CreateAgentFromPr {
+                project_id: "p1".to_string(),
+                pr: "#42".to_string(),
+                name: "my-agent".to_string(),
+            })
+            .expect("dispatch lookup");
+        let status = outcome.status.expect("synchronous busy status");
+        assert_eq!(status.tone, "busy");
+        assert!(
+            status.message.contains("Resolving PR for project"),
+            "msg: {}",
+            status.message
+        );
+
+        // The lookup worker posts exactly one PullRequestResolved (Ok if gh is
+        // installed and the PR resolves, Err otherwise — either way the channel
+        // delivers it). Block briefly for the spawned thread.
+        let event = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("lookup worker posts a PullRequestResolved event");
+        assert!(
+            matches!(event, WorkerEvent::PullRequestResolved { .. }),
+            "expected PullRequestResolved"
+        );
+    }
+
+    /// Drain the worker channel and return the message of the first
+    /// `CommandWorkerStarted` (busy) event. `spawn_command_worker` posts the
+    /// busy status onto the worker channel (not the returned reaction), so the
+    /// create dispatch's busy copy surfaces there.
+    fn first_command_busy_message(engine: &Engine) -> String {
+        while let Ok(event) = engine.worker_rx.try_recv() {
+            if let WorkerEvent::CommandWorkerStarted(status) = event {
+                return status.message;
+            }
+        }
+        panic!("expected a CommandWorkerStarted busy event on the worker channel");
+    }
+
+    /// A resolved PR with a `custom_name` drives the create dispatch directly
+    /// (no name prompt), building a `CreateAgentRequest::PullRequest` with
+    /// `use_existing_branch: false` and the carried name.
+    #[test]
+    fn drive_pr_lookup_followup_dispatches_create_with_carried_name() {
+        let repo = init_repo_with_commit();
+        let (mut engine, _tmp) = test_engine();
+        let mut project = sample_project("p1", &repo.path().to_string_lossy());
+        project.path_missing = false;
+        engine.projects.push(project.clone());
+
+        let reaction =
+            EventReaction::OpenNewAgentPromptForPr(Box::new(crate::worker::ResolvedPullRequest {
+                project,
+                host: "github.com".to_string(),
+                owner_repo: "octocat/Hello-World".to_string(),
+                number: 42,
+                title: "Fix bug".to_string(),
+                state: "OPEN".to_string(),
+                head_ref_name: "feature/pr-42".to_string(),
+                custom_name: Some("my-agent".to_string()),
+            }));
+        // The followup dispatches the create worker; the busy status is posted on
+        // the worker channel (CommandWorkerStarted), so the followup itself
+        // returns no synchronous status on the happy path.
+        let statuses = engine.drive_pr_lookup_followup(&reaction);
+        assert!(
+            statuses.is_empty(),
+            "create dispatch busy flows via the worker channel, not the return: {statuses:?}"
+        );
+        assert!(
+            engine.is_in_flight(&InFlightKey::CreateAgent),
+            "the create worker should be in flight after the followup dispatch"
+        );
+        let busy = first_command_busy_message(&engine);
+        assert!(
+            busy.contains("my-agent")
+                && busy.contains("from PR #42")
+                && busy.contains("launching a fresh session"),
+            "msg: {busy}"
+        );
+    }
+
+    /// When the resolved PR carries no custom name (the TUI path), the follow-up
+    /// seeds the head branch as the name, matching the TUI prompt default.
+    #[test]
+    fn drive_pr_lookup_followup_seeds_head_branch_when_name_absent() {
+        let repo = init_repo_with_commit();
+        let (mut engine, _tmp) = test_engine();
+        let mut project = sample_project("p1", &repo.path().to_string_lossy());
+        project.path_missing = false;
+        engine.projects.push(project.clone());
+
+        let reaction =
+            EventReaction::OpenNewAgentPromptForPr(Box::new(crate::worker::ResolvedPullRequest {
+                project,
+                host: "github.com".to_string(),
+                owner_repo: "octocat/Hello-World".to_string(),
+                number: 7,
+                title: "Add feature".to_string(),
+                state: "OPEN".to_string(),
+                head_ref_name: "feature/head".to_string(),
+                custom_name: None,
+            }));
+        let _ = engine.drive_pr_lookup_followup(&reaction);
+        let busy = first_command_busy_message(&engine);
+        assert!(
+            busy.contains("feature/head"),
+            "head branch should seed the name: {busy}"
+        );
+    }
+
+    #[test]
+    fn drive_pr_lookup_followup_ignores_unrelated_reactions() {
+        let (mut engine, _tmp) = test_engine();
+        let statuses = engine.drive_pr_lookup_followup(&EventReaction::Nothing);
+        assert!(statuses.is_empty());
     }
 }

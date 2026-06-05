@@ -369,6 +369,14 @@ pub(crate) fn run_engine_loop(
             for status in engine.drive_add_project_followup(&reaction) {
                 let _ = thread_status_tx.send(status);
             }
+            // A new-agent-from-PR lookup (gh pr view) just resolved: the TUI would
+            // open a name prompt here, but the web already sent the name, so
+            // OpenNewAgentPromptForPr drives the actual CreateAgentRequest::PullRequest
+            // dispatch. A lookup FAILURE instead produced an error Status, already
+            // surfaced by the wire_statuses drain above.
+            for status in engine.drive_pr_lookup_followup(&reaction) {
+                let _ = thread_status_tx.send(status);
+            }
 
             // A project mutation just updated SQLite + in-memory projects; mirror
             // it into the portable config.toml so a later TUI start doesn't clobber it.

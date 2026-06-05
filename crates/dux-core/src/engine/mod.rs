@@ -548,6 +548,16 @@ impl Engine {
         }
     }
 
+    /// Whether the new-agent-from-PR flow is available: GitHub integration is
+    /// enabled in config AND the `gh` CLI is installed and authenticated. Mirrors
+    /// the TUI's `github_pr_agent_command_available`. Surfaced on the ViewModel
+    /// (`gh_available`) so the web dialog can hide/disable the PR mode rather
+    /// than letting the user submit a command that the server will reject.
+    pub fn pr_agent_command_available(&self) -> bool {
+        self.github_integration_enabled
+            && matches!(self.gh_status, crate::model::GhStatus::Available)
+    }
+
     pub fn spawn_gh_status_check(&mut self) {
         // Not guarded against re-spawn: this is a one-shot job (check PATH +
         // auth, post one `GhStatusChecked` event, exit). Re-running it on a

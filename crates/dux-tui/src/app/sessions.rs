@@ -271,7 +271,10 @@ impl App {
         self.set_busy(format!("Resolving PR for project \"{}\"...", project.name));
         let worker_tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
-            super::workers::run_pull_request_lookup_job(project, raw_input, worker_tx);
+            // The TUI resolves the PR first and then prompts for a name, so it
+            // carries no custom name through the lookup (the prompt seeds the
+            // head branch as the default).
+            dux_core::gh::run_pull_request_lookup_job(project, raw_input, None, worker_tx);
         });
         Ok(())
     }
@@ -2465,68 +2468,6 @@ impl App {
     }
 }
 
-pub(crate) fn parse_pull_request_lookup(
-    raw_input: &str,
-    selected_host: &str,
-    selected_owner_repo: &str,
-) -> Result<PullRequestLookup, String> {
-    let input = raw_input.trim();
-    if input.is_empty() {
-        return Err("Enter a GitHub PR URL or PR number.".to_string());
-    }
-
-    if let Ok(number) = input.strip_prefix('#').unwrap_or(input).parse::<u64>() {
-        return Ok(PullRequestLookup {
-            host: selected_host.to_string(),
-            owner_repo: selected_owner_repo.to_string(),
-            number,
-        });
-    }
-
-    let Some((host, rest)) = parse_github_pull_url_parts(input) else {
-        return Err("Enter a PR number, #number, or a GitHub PR URL.".to_string());
-    };
-    let parts: Vec<&str> = rest.split('/').collect();
-    if parts.len() < 4 || parts[2] != "pull" {
-        return Err(
-            "GitHub PR URLs must look like https://github.com/owner/repo/pull/123.".to_string(),
-        );
-    }
-    let owner_repo = format!("{}/{}", parts[0], parts[1]);
-    if !host.eq_ignore_ascii_case(selected_host)
-        || !owner_repo.eq_ignore_ascii_case(selected_owner_repo)
-    {
-        return Err(format!(
-            "PR belongs to {host}/{owner_repo}, but the selected project uses {selected_host}/{selected_owner_repo}."
-        ));
-    }
-    let number = parts[3]
-        .parse::<u64>()
-        .map_err(|_| "GitHub PR URL does not contain a valid PR number.".to_string())?;
-    Ok(PullRequestLookup {
-        host,
-        owner_repo,
-        number,
-    })
-}
-
-fn parse_github_pull_url_parts(input: &str) -> Option<(String, String)> {
-    let without_scheme = input
-        .strip_prefix("https://")
-        .or_else(|| input.strip_prefix("http://"))?;
-    let (host, rest) = without_scheme.split_once('/')?;
-    if host != "github.com" && !host.starts_with("github.") {
-        return None;
-    }
-    let rest = rest
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(rest)
-        .trim_end_matches('/')
-        .to_string();
-    Some((host.to_string(), rest))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3642,59 +3583,6 @@ mod tests {
             msg.contains("not a git repository"),
             "error should include the git error, got: {msg}",
         );
-    }
-
-    #[test]
-    fn parse_pull_request_lookup_accepts_number_and_hash_number() {
-        let plain = super::parse_pull_request_lookup("123", "github.com", "octocat/Hello-World")
-            .expect("plain number");
-        assert_eq!(plain.host, "github.com");
-        assert_eq!(plain.owner_repo, "octocat/Hello-World");
-        assert_eq!(plain.number, 123);
-
-        let hashed =
-            super::parse_pull_request_lookup("#456", "github.example.com", "octocat/Hello-World")
-                .expect("hash number");
-        assert_eq!(hashed.host, "github.example.com");
-        assert_eq!(hashed.owner_repo, "octocat/Hello-World");
-        assert_eq!(hashed.number, 456);
-    }
-
-    #[test]
-    fn parse_pull_request_lookup_accepts_matching_github_url() {
-        let lookup = super::parse_pull_request_lookup(
-            "https://github.com/octocat/Hello-World/pull/789?foo=bar",
-            "github.com",
-            "octocat/Hello-World",
-        )
-        .expect("matching URL");
-        assert_eq!(lookup.host, "github.com");
-        assert_eq!(lookup.owner_repo, "octocat/Hello-World");
-        assert_eq!(lookup.number, 789);
-    }
-
-    #[test]
-    fn parse_pull_request_lookup_accepts_matching_enterprise_url() {
-        let lookup = super::parse_pull_request_lookup(
-            "https://github.example.com/octocat/Hello-World/pull/789",
-            "github.example.com",
-            "octocat/Hello-World",
-        )
-        .expect("matching enterprise URL");
-        assert_eq!(lookup.host, "github.example.com");
-        assert_eq!(lookup.owner_repo, "octocat/Hello-World");
-        assert_eq!(lookup.number, 789);
-    }
-
-    #[test]
-    fn parse_pull_request_lookup_rejects_mismatched_github_url() {
-        let err = super::parse_pull_request_lookup(
-            "https://github.com/other/repo/pull/12",
-            "github.com",
-            "octocat/Hello-World",
-        )
-        .expect_err("mismatched repo");
-        assert!(err.contains("selected project uses github.com/octocat/Hello-World"));
     }
 
     #[test]

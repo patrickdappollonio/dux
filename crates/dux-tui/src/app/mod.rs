@@ -55,8 +55,7 @@ use text_input::TextInput;
 pub(crate) use dux_core::worker::{
     AgentLaunchKind, AgentLaunchRequest, BranchWarningKind, BrowserEntry,
     CreateAgentBranchInspection, CreateAgentRequest, NonDefaultBranchAction,
-    ProjectPersistenceAction, ProjectWorktreeEntry, PullTarget, ResolvedPullRequest, ResourceStats,
-    WorkerEvent,
+    ProjectPersistenceAction, ProjectWorktreeEntry, PullTarget, ResourceStats, WorkerEvent,
 };
 #[cfg(test)]
 pub(crate) use dux_core::worker::{AgentLaunchReadyData, ProcessInfo};
@@ -529,13 +528,6 @@ pub(crate) enum ConfirmNonDefaultBranchFocus {
 pub(crate) enum NameNewAgentFocus {
     Input,
     RandomizedNameCheckbox,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PullRequestLookup {
-    pub(crate) host: String,
-    pub(crate) owner_repo: String,
-    pub(crate) number: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -1839,8 +1831,7 @@ impl App {
     }
 
     pub(crate) fn github_pr_agent_command_available(&self) -> bool {
-        self.engine.github_integration_enabled
-            && matches!(self.engine.gh_status, crate::model::GhStatus::Available)
+        self.engine.pr_agent_command_available()
     }
 
     pub(crate) fn persist_config_projects_from_runtime(&mut self) -> Result<()> {

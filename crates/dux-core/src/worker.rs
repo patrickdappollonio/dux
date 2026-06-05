@@ -41,6 +41,23 @@ pub struct ResolvedPullRequest {
     pub title: String,
     pub state: String,
     pub head_ref_name: String,
+    /// Caller-supplied display name to carry through the resolution. The TUI
+    /// resolves the PR first and then prompts for a name, so it passes `None`
+    /// and the prompt seeds the head branch as the default. The web sends the
+    /// name UPFRONT (no post-resolution prompt), so its lookup carries
+    /// `Some(name)` here and the web follow-up dispatches the create directly.
+    pub custom_name: Option<String>,
+}
+
+/// A parsed PR-lookup target: the host/owner_repo the PR belongs to and its
+/// number. Produced by [`crate::gh::parse_pull_request_lookup`] from a raw URL
+/// or `#N`/`N` string and consumed by the `gh pr view` lookup. Shared by the
+/// TUI's new-agent-from-pr prompt and the web's `CreateAgentFromPr` wire flow.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRequestLookup {
+    pub host: String,
+    pub owner_repo: String,
+    pub number: u64,
 }
 
 #[derive(Clone, Debug)]

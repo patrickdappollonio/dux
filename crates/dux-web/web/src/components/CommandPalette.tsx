@@ -13,6 +13,7 @@ import {
   openCheckoutDefaultBranch,
   openCommit,
   openCreateAgent,
+  openCreateAgentFromPr,
   openForkAgent,
   openGlobalEnv,
   openRename,
@@ -75,6 +76,9 @@ export function CommandPalette() {
 
   const sessions = viewModel?.sessions ?? []
   const projects = viewModel?.projects ?? []
+  // The "New agent from PR" entries are gated on GitHub/`gh` availability,
+  // mirroring the TUI, which hides its `new-agent-from-pr` command in that state.
+  const ghAvailable = viewModel?.gh_available ?? false
 
   return (
     <CommandDialog open={paletteOpen} onOpenChange={setPaletteOpen}>
@@ -180,6 +184,19 @@ export function CommandPalette() {
                   Checkout default branch for {p.name}…
                 </CommandItem>
               ))}
+              {ghAvailable &&
+                projects.map((p) => (
+                  <CommandItem
+                    key={`new-agent-from-pr-${p.id}`}
+                    className="cursor-pointer"
+                    onSelect={() => {
+                      openCreateAgentFromPr(p.id)
+                      close()
+                    }}
+                  >
+                    New agent from PR in {p.name}…
+                  </CommandItem>
+                ))}
             </CommandGroup>
             <CommandSeparator />
           </>

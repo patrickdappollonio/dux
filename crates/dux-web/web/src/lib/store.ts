@@ -31,6 +31,7 @@ export type MobileScreen = "home" | "terminal" | "changes"
 export type CreateAgentTarget =
   | { kind: "new"; projectId: string }
   | { kind: "fork"; sessionId: string }
+  | { kind: "pr"; projectId: string }
 
 // The file pending discard-confirmation, or null. `untracked` drives the
 // dialog's warning copy (a tracked file is restored from HEAD; an untracked
@@ -140,6 +141,10 @@ export interface DuxState {
   createAgentDraft: string
   createAgentRandomize: boolean
   createAgentGeneratedName: string | null
+  //   - `createAgentPrInput`: the raw PR reference (URL, `#123`, or `123`) for
+  //     the "From PR" mode. Free text (NOT agent-name-sanitized); the server
+  //     parses it against the project's GitHub remote. Empty in the other modes.
+  createAgentPrInput: string
   //   - `createAgentNamePending`: a generate-name request is in flight. Drives
   //     the dialog's spinner and disables the input so a late reply can never
   //     clobber text the user typed in the meantime. Explicit rather than
@@ -221,6 +226,7 @@ let state: DuxState = {
   createAgentRandomize: false,
   createAgentGeneratedName: null,
   createAgentNamePending: false,
+  createAgentPrInput: "",
   paletteOpen: false,
   mobileScreen: "home",
   pendingSessionOrder: null,
@@ -841,6 +847,14 @@ export function openForkAgent(sessionId: string): void {
   openNameDialog({ kind: "fork", sessionId })
 }
 
+// Open the name dialog in "from PR" mode for a project. Reuses the new-agent
+// name UX (sanitized input, pet-name checkbox, generated-name plumbing) and adds
+// a PR-reference field; on submit it dispatches `create_agent_from_pr`. Mirrors
+// the TUI's `new-agent-from-pr` flow, which resolves the PR then names the agent.
+export function openCreateAgentFromPr(projectId: string): void {
+  openNameDialog({ kind: "pr", projectId })
+}
+
 // Shared opener for both modes of the name dialog. Pre-checks the randomize
 // default and requests a name right away so the input previews it, exactly like
 // the TUI prompt. Runs in the click handler that opens the dialog — never an
@@ -853,6 +867,7 @@ function openNameDialog(target: CreateAgentTarget): void {
     createAgentRandomize: randomize,
     createAgentGeneratedName: null,
     createAgentNamePending: randomize,
+    createAgentPrInput: "",
   })
   if (randomize) socket.generateAgentName()
 }
@@ -864,7 +879,14 @@ export function closeCreateAgent(): void {
     createAgentRandomize: false,
     createAgentGeneratedName: null,
     createAgentNamePending: false,
+    createAgentPrInput: "",
   })
+}
+
+// Update the PR-reference field. Free text — unlike the agent name, this is NOT
+// sanitized (a PR URL contains slashes, colons, etc.); the server parses it.
+export function setCreateAgentPrInput(raw: string): void {
+  setState({ createAgentPrInput: raw })
 }
 
 // Update the input as the user types, sanitizing live (space -> dash, drop
@@ -912,15 +934,31 @@ export function forkAgent(sessionId: string, name: string): void {
   socket.sendCommand("fork_session", { session_id: sessionId, name })
 }
 
-// Submit the name dialog: dispatch create or fork based on the current target,
-// then close. Mirrors the TUI, where the same name prompt drives both flows.
+// Ask the server to create an agent checked out on a GitHub PR's head branch.
+// `pr` is the raw reference (URL, `#123`, or `123`); the server resolves it via
+// `gh pr view`. An empty `name` falls back to the PR head branch, matching the
+// TUI prompt default. The lookup+create runs asynchronously: the command returns
+// a busy status synchronously and the outcome arrives on the status stream.
+export function createAgentFromPr(projectId: string, pr: string, name: string): void {
+  socket.sendCommand("create_agent_from_pr", {
+    project_id: projectId,
+    pr,
+    name,
+  })
+}
+
+// Submit the name dialog: dispatch create, fork, or create-from-PR based on the
+// current target, then close. Mirrors the TUI, where the same name prompt drives
+// these flows.
 export function submitNameDialog(name: string): void {
   const target = state.createAgentTarget
   if (!target) return
   if (target.kind === "new") {
     createAgent(target.projectId, name)
-  } else {
+  } else if (target.kind === "fork") {
     forkAgent(target.sessionId, name)
+  } else {
+    createAgentFromPr(target.projectId, state.createAgentPrInput.trim(), name)
   }
   closeCreateAgent()
 }

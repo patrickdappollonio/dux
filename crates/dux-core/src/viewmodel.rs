@@ -30,6 +30,11 @@ pub struct ViewModel {
     /// web new-agent dialog pre-checks its "Use randomized pet name" box (and
     /// requests a generated name on open), matching the TUI's prompt default.
     pub randomize_agent_names_by_default: bool,
+    /// Whether the new-agent-from-PR flow is available (GitHub integration on +
+    /// `gh` installed and authenticated; see `Engine::pr_agent_command_available`).
+    /// The web dialog hides/disables its "From PR" mode with a quiet explanation
+    /// when false, matching the TUI's gating of the `new-agent-from-pr` command.
+    pub gh_available: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -258,6 +263,7 @@ impl Engine {
                 .config
                 .defaults
                 .enable_randomized_pet_name_by_default,
+            gh_available: self.pr_agent_command_available(),
         }
     }
 }
@@ -571,6 +577,26 @@ mod tests {
 
         engine.config.defaults.enable_randomized_pet_name_by_default = true;
         assert!(engine.view_model().randomize_agent_names_by_default);
+    }
+
+    #[test]
+    fn gh_available_reflects_integration_and_gh_status() {
+        let (mut engine, _tmp) = test_engine();
+
+        // Out of the box: integration off, gh status unknown -> unavailable.
+        assert!(!engine.view_model().gh_available);
+
+        // Integration on but gh not yet confirmed available -> still false.
+        engine.github_integration_enabled = true;
+        assert!(!engine.view_model().gh_available);
+
+        // Integration on AND gh available -> true.
+        engine.gh_status = crate::model::GhStatus::Available;
+        assert!(engine.view_model().gh_available);
+
+        // gh present but integration disabled -> false (the TUI gating).
+        engine.github_integration_enabled = false;
+        assert!(!engine.view_model().gh_available);
     }
 
     #[test]

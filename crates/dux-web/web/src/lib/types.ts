@@ -125,6 +125,10 @@ export interface ViewModel {
   available_providers: string[]
   welcome_tips: string[]
   randomize_agent_names_by_default: boolean
+  /** Whether the new-agent-from-PR flow is available (GitHub integration on +
+   * `gh` installed and authenticated). The "From PR" mode is disabled with a
+   * quiet explanation when false. */
+  gh_available: boolean
 }
 
 export interface CommandStatus {

@@ -97,6 +97,7 @@ import {
   openCheckoutDefaultBranch,
   openCommit,
   openCreateAgent,
+  openCreateAgentFromPr,
   openDelete,
   openDeleteTerminal,
   openForkAgent,
@@ -428,6 +429,11 @@ function ProjectItem({
   sessions: SessionView[]
   selectedTarget: SelectedTarget | null
 }) {
+  // The "New agent from PR…" item is hidden when GitHub integration / `gh` is
+  // unavailable, mirroring the TUI, which gates its `new-agent-from-pr` command
+  // on the same condition. The server also rejects the command in that state.
+  const { viewModel } = useDux()
+  const ghAvailable = viewModel?.gh_available ?? false
   // Only the project HEADER row is the project drag handle (not the whole
   // block, whose body hosts the sessions' own SortableContext). `isDragging`
   // dims the lifted project for a clear affordance.
@@ -491,6 +497,12 @@ function ProjectItem({
               <Bot />
               New agent…
             </DropdownMenuItem>
+            {ghAvailable && (
+              <DropdownMenuItem onClick={() => openCreateAgentFromPr(id)}>
+                <GitPullRequest />
+                New agent from PR…
+              </DropdownMenuItem>
+            )}
             <DropdownMenuItem onClick={() => openAttachWorktree(id)}>
               <FolderGit2 />
               Attach worktree…
