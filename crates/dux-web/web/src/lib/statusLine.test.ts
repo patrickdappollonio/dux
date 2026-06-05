@@ -10,10 +10,10 @@ describe("statusPresentation", () => {
     })
   })
 
-  it("maps busy to the braille spinner with muted text", () => {
+  it("maps busy to the braille spinner with the TUI warning yellow", () => {
     expect(statusPresentation("busy")).toEqual({
       icon: "spinner",
-      className: "text-muted-foreground",
+      className: "text-amber-500",
     })
   })
 

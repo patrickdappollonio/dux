@@ -36,7 +36,10 @@ export interface StatusPresentation {
 export function statusPresentation(tone: string): StatusPresentation {
   switch (tone) {
     case "busy":
-      return { icon: "spinner", className: "text-muted-foreground" }
+      // TUI-literal: dux_dark renders Busy in the warning yellow (Busy and
+      // Warning share a color there; the spinner vs triangle disambiguates).
+      // User-confirmed choice over a muted busy.
+      return { icon: "spinner", className: "text-amber-500" }
     case "warning":
       return { icon: "warning", className: "text-amber-500" }
     case "error":

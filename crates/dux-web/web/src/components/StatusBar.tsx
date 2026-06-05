@@ -8,12 +8,14 @@ import type { ConnState } from "@/lib/types"
 
 // The ONE connection indicator, bottom-left of the statusline bar. A small
 // colored dot gives the at-a-glance state; a short label spells it out. Colors
-// follow the app's soft-color convention: green=open, amber=connecting,
-// red=closed/failed (matching the status-badge tints elsewhere).
+// follow the app's soft-color convention: green=open, amber=in-progress,
+// red=failed. "closed" is amber, not red: the socket auto-retries (up to 4×
+// with backoff) before declaring failure, so a normal blip reads as
+// recovering — red is reserved for "gave up, needs your action".
 const CONN: Record<ConnState, { dot: string; label: string }> = {
   open: { dot: "bg-green-500", label: "Connected" },
   connecting: { dot: "bg-amber-500", label: "Connecting" },
-  closed: { dot: "bg-red-500", label: "Offline" },
+  closed: { dot: "bg-amber-500", label: "Reconnecting…" },
   failed: { dot: "bg-red-500", label: "Connection failed" },
 }
 
