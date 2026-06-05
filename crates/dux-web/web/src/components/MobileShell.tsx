@@ -590,19 +590,21 @@ function HomeScreen() {
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
-        <span className="font-semibold">dux</span>
-        <div className="ml-auto flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="icon"
-            className="size-11"
-            aria-label="Search"
-            onClick={() => setPaletteOpen(true)}
-          >
-            <Search />
-          </Button>
+      <header className="flex shrink-0 items-center gap-2 border-b px-3 py-3">
+        <img src="/dux-logo.png" alt="dux" className="size-8 rounded-lg" />
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5 leading-none">
+          <span className="font-semibold">dux</span>
+          <span className="text-xs text-muted-foreground">agent sessions</span>
         </div>
+        <Button
+          variant="outline"
+          size="icon"
+          className="size-11 shrink-0"
+          aria-label="Search"
+          onClick={() => setPaletteOpen(true)}
+        >
+          <Search />
+        </Button>
       </header>
 
       {hasProjects ? (
