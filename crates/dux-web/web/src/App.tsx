@@ -46,6 +46,7 @@ import {
 import { Toaster } from "@/components/ui/sonner"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
+import { paletteShortcutLabel } from "@/lib/platform"
 import { setPaletteOpen, useDux } from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
 
@@ -103,7 +104,7 @@ function InsetHeader() {
           size="sm"
           onClick={() => setPaletteOpen(true)}
         >
-          <span className="font-mono text-xs">⌘K</span>
+          <span className="font-mono text-xs">{paletteShortcutLabel()}</span>
           Search…
         </Button>
       </div>

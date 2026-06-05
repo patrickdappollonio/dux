@@ -1,5 +1,6 @@
 import { useState } from "react"
 
+import { paletteShortcutLabel } from "@/lib/platform"
 import { useDux } from "@/lib/store"
 
 // The dux welcome screen, mirroring the TUI's idle agent pane: the braille
@@ -35,7 +36,11 @@ const TEXT_LOGO = `       ░██
 // Render a tip, highlighting `backticked` spans in the foreground accent
 // (the backticks themselves are not shown) — same convention as the TUI.
 function TipText({ tip }: { tip: string }) {
-  const parts = tip.split("`")
+  // Server tips reference the palette as ⌘K (the canonical strings live in
+  // dux-core and can't know the client's platform); swap in the label for the
+  // key this machine actually has (Ctrl K outside Apple platforms).
+  const localized = tip.replaceAll("\u2318K", paletteShortcutLabel())
+  const parts = localized.split("`")
   return (
     <>
       {parts.map((part, i) =>
