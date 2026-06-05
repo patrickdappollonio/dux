@@ -506,4 +506,37 @@ mod tests {
              update BOTH this list and EXPECTED_WEB_COMMANDS in paletteRegistry.test.ts."
         );
     }
+
+    /// The CROSS-LANGUAGE half of the pin: parse EXPECTED_WEB_COMMANDS out of
+    /// the vitest file and assert it equals the registry's web-surfaced set.
+    /// Without this, the Rust and TS pins were two hand-mirrored lists that
+    /// merely happened to agree — a Rust-side addition with only the Rust pin
+    /// updated would ship a ViewModel id with no web handler and degrade
+    /// SILENTLY (the palette hides handler-less entries). Now that desync
+    /// fails `cargo test`. Skips (rather than fails) when the web tree isn't
+    /// present, e.g. a published crate build outside the workspace.
+    #[test]
+    fn web_pin_matches_the_typescript_pin() {
+        let ts_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../dux-web/web/src/lib/paletteRegistry.test.ts");
+        let Ok(source) = std::fs::read_to_string(&ts_path) else {
+            eprintln!("skipping: {} not present", ts_path.display());
+            return;
+        };
+        let array = source
+            .split("const EXPECTED_WEB_COMMANDS = [")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("EXPECTED_WEB_COMMANDS array not found in paletteRegistry.test.ts");
+        let mut ts_ids: Vec<&str> = array.split('"').skip(1).step_by(2).collect();
+        ts_ids.sort_unstable();
+        let mut rust_ids: Vec<&str> = web_palette_commands().map(|c| c.name).collect();
+        rust_ids.sort_unstable();
+        assert_eq!(
+            rust_ids, ts_ids,
+            "the Rust registry's web-surfaced ids and the TS EXPECTED_WEB_COMMANDS \
+             pin have drifted apart — update paletteRegistry.ts (handlers) and its \
+             test alongside the dux_core::palette surface change."
+        );
+    }
 }
