@@ -8,15 +8,22 @@
     "start": "astro dev",
     "build": "node scripts/copy-install.mjs && astro build",
     "preview": "astro preview",
-    "astro": "astro"
+    "astro": "astro",
+    "test": "vitest run",
+    "test:search": "node scripts/verify-search-index.mjs"
   },
   "dependencies": {
-    "@astrojs/mdx": "^5.0.6",
-    "@astrojs/sitemap": "^3.7.2",
+    "@astrojs/mdx": "^6.0.1",
+    "@astrojs/sitemap": "^3.7.3",
     "@tailwindcss/postcss": "^4.3.0",
-    "astro": "^6.3.7",
+    "astro": "^6.4.3",
+    "astro-pagefind": "^2.0.0",
+    "pagefind": "^1.5.2",
     "rehype-autolink-headings": "^7.1.0",
     "rehype-slug": "^6.0.0",
     "tailwindcss": "^4.3.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.8"
   }
 }

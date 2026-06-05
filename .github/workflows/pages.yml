@@ -104,6 +104,14 @@ jobs:
             echo "::error::index.html missing from build output."
             exit 1
           fi
+          if [ ! -f website/dist/pagefind/pagefind.js ]; then
+            echo "::error::pagefind search index missing from build output."
+            exit 1
+          fi
+
+      - name: Verify search index (docs-only scope)
+        working-directory: website
+        run: npm run test:search
 
       - uses: actions/configure-pages@v5
 

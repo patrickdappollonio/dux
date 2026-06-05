@@ -108,7 +108,12 @@ const gridClass =
           </div>
         </details>
 
-        <article>
+        {/* `data-pagefind-body` scopes the search index to docs pages only:
+            Pagefind indexes nothing on pages that lack this attribute, so the
+            marketing homepage stays out of results. The page <h1> becomes the
+            result title and heading ids (from rehype-slug) become deep-linkable
+            sub-results. */}
+        <article data-pagefind-body>
           <header class="mb-8 border-b border-[color:var(--color-border-soft)] pb-6">
             <h1 class="text-3xl font-bold tracking-tight text-[color:var(--color-text)] sm:text-4xl">
               {title}
@@ -124,7 +129,7 @@ const gridClass =
 
           {
             editUrl && (
-              <div class="mt-12 border-t border-[color:var(--color-border-soft)] pt-6 text-sm">
+              <div data-pagefind-ignore class="mt-12 border-t border-[color:var(--color-border-soft)] pt-6 text-sm">
                 <a
                   href={editUrl}
                   target="_blank"

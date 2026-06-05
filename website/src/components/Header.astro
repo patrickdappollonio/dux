@@ -9,26 +9,129 @@ const nav = [
 ---
 
 <header class="sticky top-0 z-50 border-b border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)]/70 backdrop-blur-xl">
-  <div class="container-app flex h-14 items-center justify-between">
-    <a href="/" class="flex items-center gap-2.5 group">
+  <div class="container-app flex h-14 items-center justify-between gap-3">
+    <a href="/" class="flex items-center gap-2.5 group min-w-0">
       <img
         src="/dux-logo.png"
         alt="dux"
         width="28"
         height="28"
-        class="h-7 w-7 object-contain transition-transform group-hover:-rotate-6"
+        class="h-7 w-7 shrink-0 object-contain transition-transform group-hover:-rotate-6"
       />
-      <span class="heading text-[15px] font-semibold tracking-tight">
+      <span class="heading truncate text-[15px] font-semibold tracking-tight">
         dux<span class="text-[color:var(--color-dim)]"> · getdux.app</span>
       </span>
     </a>
 
-    <nav class="hidden items-center gap-1 sm:flex">
+    <div class="flex items-center gap-1.5">
+      {/* Opens the global docs search modal (see DocsSearch.astro). Also bound
+          to Cmd/Ctrl-K and "/". Icon-only on small screens; the label and
+          shortcut hint appear at lg, where the inline nav also has room. */}
+      <button
+        type="button"
+        data-open-search
+        aria-label="Search the documentation"
+        aria-keyshortcuts="Meta+K Control+K"
+        class="inline-flex h-9 w-9 items-center justify-center gap-2 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-panel)]/60 text-sm text-[color:var(--color-muted)] transition-colors hover:border-[color:var(--color-accent)]/50 hover:text-[color:var(--color-text)] lg:w-auto lg:justify-start lg:px-2.5"
+      >
+        <svg
+          class="h-4 w-4 shrink-0"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="11" cy="11" r="8"></circle>
+          <path d="m21 21-4.3-4.3"></path>
+        </svg>
+        <span class="hidden lg:inline">Search docs</span>
+        <kbd
+          class="mono hidden rounded border border-[color:var(--color-border)] bg-[color:var(--color-panel-2)] px-1.5 py-0.5 text-[10px] text-[color:var(--color-dim)] lg:inline"
+          aria-hidden="true">⌘K</kbd
+        >
+      </button>
+
+      {/* Full inline nav — desktop only. Below lg it collapses into the
+          hamburger menu so the bar never crowds or wraps. */}
+      <nav class="hidden items-center gap-1 lg:flex">
+        {
+          nav.map((n) => (
+            <a
+              href={n.href}
+              class="rounded-md px-3 py-1.5 text-sm text-[color:var(--color-muted)] hover:text-[color:var(--color-text)] hover:bg-[color:var(--color-panel-2)] transition-colors"
+              {...(n.external ? { target: "_blank", rel: "noopener" } : {})}
+            >
+              {n.label}
+            </a>
+          ))
+        }
+        <a
+          href="/#install"
+          class="ml-2 inline-flex items-center gap-1.5 rounded-md border border-[color:var(--color-accent)]/50 bg-[color:var(--color-accent)]/10 px-3 py-1.5 text-sm font-medium text-[color:var(--color-accent)] hover:bg-[color:var(--color-accent)]/20 transition-colors"
+        >
+          <span class="mono">$</span> install
+        </a>
+      </nav>
+
+      {/* Hamburger — small/medium screens only. Toggles the panel below. */}
+      <button
+        type="button"
+        data-menu-toggle
+        aria-label="Toggle navigation menu"
+        aria-expanded="false"
+        aria-controls="mobile-nav"
+        class="inline-flex h-9 w-9 items-center justify-center rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-panel)]/60 text-[color:var(--color-muted)] hover:border-[color:var(--color-accent)]/50 hover:text-[color:var(--color-text)] transition-colors lg:hidden"
+      >
+        <svg
+          data-menu-icon-open
+          class="h-5 w-5"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <line x1="3" y1="6" x2="21" y2="6"></line>
+          <line x1="3" y1="12" x2="21" y2="12"></line>
+          <line x1="3" y1="18" x2="21" y2="18"></line>
+        </svg>
+        <svg
+          data-menu-icon-close
+          class="hidden h-5 w-5"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  {/* Collapsible nav panel for small/medium screens. Hidden at lg where the
+      inline nav takes over. */}
+  <nav
+    id="mobile-nav"
+    aria-label="Site navigation"
+    hidden
+    class="lg:hidden border-t border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)]/95 backdrop-blur-xl"
+  >
+    <div class="container-app flex flex-col gap-1 py-3">
       {
         nav.map((n) => (
           <a
             href={n.href}
-            class="rounded-md px-3 py-1.5 text-sm text-[color:var(--color-muted)] hover:text-[color:var(--color-text)] hover:bg-[color:var(--color-panel-2)] transition-colors"
+            class="rounded-md px-3 py-2.5 text-sm text-[color:var(--color-muted)] hover:bg-[color:var(--color-panel-2)] hover:text-[color:var(--color-text)] transition-colors"
             {...(n.external ? { target: "_blank", rel: "noopener" } : {})}
           >
             {n.label}
@@ -37,10 +140,62 @@ const nav = [
       }
       <a
         href="/#install"
-        class="ml-2 inline-flex items-center gap-1.5 rounded-md border border-[color:var(--color-accent)]/50 bg-[color:var(--color-accent)]/10 px-3 py-1.5 text-sm font-medium text-[color:var(--color-accent)] hover:bg-[color:var(--color-accent)]/20 transition-colors"
+        class="mt-1 inline-flex items-center justify-center gap-1.5 rounded-md border border-[color:var(--color-accent)]/50 bg-[color:var(--color-accent)]/10 px-3 py-2.5 text-sm font-medium text-[color:var(--color-accent)] hover:bg-[color:var(--color-accent)]/20 transition-colors"
       >
         <span class="mono">$</span> install
       </a>
-    </nav>
-  </div>
+    </div>
+  </nav>
 </header>
+
+<script>
+  // Hamburger menu toggle for small/medium screens. The panel is plain markup
+  // (works without JS for crawlers); this only manages open/close state,
+  // accessibility, and dismissal.
+  const toggle = document.querySelector<HTMLButtonElement>("[data-menu-toggle]");
+  const panel = document.getElementById("mobile-nav");
+  const iconOpen = document.querySelector<SVGElement>("[data-menu-icon-open]");
+  const iconClose = document.querySelector<SVGElement>("[data-menu-icon-close]");
+
+  if (toggle && panel && iconOpen && iconClose) {
+    const setOpen = (open: boolean) => {
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      panel.hidden = !open;
+      iconOpen.classList.toggle("hidden", open);
+      iconClose.classList.toggle("hidden", !open);
+    };
+
+    toggle.addEventListener("click", () => {
+      setOpen(toggle.getAttribute("aria-expanded") !== "true");
+    });
+
+    // Close after picking a destination (covers same-page anchor links that
+    // don't trigger a full navigation).
+    panel.addEventListener("click", (event) => {
+      if ((event.target as HTMLElement).closest("a")) setOpen(false);
+    });
+
+    // Dismiss on Escape or a click outside the header.
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && toggle.getAttribute("aria-expanded") === "true") {
+        setOpen(false);
+        toggle.focus();
+      }
+    });
+    document.addEventListener("click", (event) => {
+      if (
+        toggle.getAttribute("aria-expanded") === "true" &&
+        !(event.target as HTMLElement).closest("header")
+      ) {
+        setOpen(false);
+      }
+    });
+
+    // If the viewport grows to the desktop breakpoint, drop the open state so
+    // the panel never lingers behind the inline nav.
+    const desktop = window.matchMedia("(min-width: 1024px)");
+    desktop.addEventListener("change", (event) => {
+      if (event.matches) setOpen(false);
+    });
+  }
+</script>

@@ -57,6 +57,10 @@ jobs:
         working-directory: website
         run: npm ci
 
+      - name: Unit tests
+        working-directory: website
+        run: npm test
+
       - name: Build
         working-directory: website
         env:
@@ -65,10 +69,14 @@ jobs:
 
       - name: Verify build output
         run: |
-          for f in index.html CNAME install.sh dux-logo.png dux-screenshot.svg; do
+          for f in index.html CNAME install.sh dux-logo.png dux-screenshot.svg pagefind/pagefind.js; do
             if [ ! -f "website/dist/$f" ]; then
               echo "::error::website/dist/$f missing from build output."
               exit 1
             fi
           done
           echo "Site built successfully."
+
+      - name: Verify search index (docs-only scope)
+        working-directory: website
+        run: npm run test:search
