@@ -845,6 +845,12 @@ mod tests {
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
 
+        // The web delete path must also drop the activity stamp — this is the
+        // engine-side cleanup; no TUI App caller exists on this path to do it.
+        engine
+            .pty_activity
+            .insert("s1".to_string(), std::time::Instant::now());
+
         let outcome = engine
             .apply_wire(WireCommand::DeleteSession {
                 session_id: "s1".to_string(),
@@ -858,6 +864,10 @@ mod tests {
             status.message
         );
         assert!(!engine.sessions.iter().any(|s| s.id == "s1"));
+        assert!(
+            !engine.pty_activity.contains_key("s1"),
+            "deleting a session over the wire must clear its activity stamp"
+        );
     }
 
     #[test]

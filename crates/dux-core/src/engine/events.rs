@@ -695,9 +695,9 @@ impl Engine {
     ///
     /// **Ordering invariant for engine-side helpers**: this method performs
     /// all engine-state cleanup (providers, running_provider_pins,
-    /// resume_fallback_candidates, sessions.retain, update_branch_sync_sessions)
-    /// before returning. The caller is then responsible for view-side cleanup
-    /// (e.g. `engine.pty_activity.remove(session_id)`, companion-terminal
+    /// resume_fallback_candidates, pty_activity, sessions.retain,
+    /// update_branch_sync_sessions) before returning. The caller is then
+    /// responsible for view-side cleanup (e.g. companion-terminal view
     /// teardown). During the gap between this method returning and the
     /// App-side applier running, those view-only maps still hold stale
     /// entries for the deleted session_id. Engine helpers invoked from inside
@@ -736,6 +736,7 @@ impl Engine {
         self.providers.remove(&session.id);
         self.running_provider_pins.remove(&session.id);
         self.resume_fallback_candidates.remove(&session.id);
+        self.pty_activity.remove(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
         self.companion_terminals
             .retain(|_, t| t.session_id != session.id);
