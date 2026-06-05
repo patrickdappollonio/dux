@@ -793,7 +793,7 @@ impl App {
         } = outcome;
 
         // View-side cleanup the engine couldn't do.
-        self.last_pty_activity.remove(session_id);
+        self.engine.pty_activity.remove(session_id);
         self.clear_companion_terminals_for_session(session_id);
 
         // Derived view state.
@@ -1832,7 +1832,7 @@ impl App {
         // Kill existing PTY if the agent is still active.
         self.engine.providers.remove(&session.id);
         self.engine.running_provider_pins.remove(&session.id);
-        self.last_pty_activity.remove(&session.id);
+        self.engine.pty_activity.remove(&session.id);
         self.engine.resume_fallback_candidates.remove(&session.id);
 
         let detached_label =
@@ -2379,7 +2379,7 @@ impl App {
                 RuntimeTargetId::Agent(session_id) => {
                     if self.engine.providers.remove(session_id).is_some() {
                         self.engine.running_provider_pins.remove(session_id);
-                        self.last_pty_activity.remove(session_id);
+                        self.engine.pty_activity.remove(session_id);
                         self.engine
                             .mark_session_status(session_id, SessionStatus::Detached);
                         killed_agents += 1;
@@ -2440,8 +2440,8 @@ impl App {
     ///
     /// Thin view wrapper over `Engine::detach_conflicting_worktree_session`:
     /// the engine performs the domain-state mutation and returns the detached
-    /// session's id + label; the App clears `last_pty_activity` for the id
-    /// and surfaces the label for status messages.
+    /// session's id + label; the App clears the engine's `pty_activity` entry
+    /// for the id and surfaces the label for status messages.
     pub(crate) fn detach_conflicting_worktree_session(
         &mut self,
         worktree_path: &str,
@@ -2450,7 +2450,7 @@ impl App {
         let detached = self
             .engine
             .detach_conflicting_worktree_session(worktree_path, exclude_id)?;
-        self.last_pty_activity.remove(&detached.id);
+        self.engine.pty_activity.remove(&detached.id);
         Some(detached.label)
     }
 
@@ -2616,6 +2616,7 @@ mod tests {
             pr_last_checked: std::collections::HashMap::new(),
             changed_files_poller_started: AtomicBool::new(false),
             branch_sync_worker_started: AtomicBool::new(false),
+            pty_activity: std::collections::HashMap::new(),
         };
         let mut app = App {
             engine,
@@ -2655,7 +2656,6 @@ mod tests {
             active_terminal_id: None,
             terminal_return_to_list: false,
             last_pty_size: (0, 0),
-            last_pty_activity: std::collections::HashMap::new(),
             prev_scrollback_offset: 0,
             last_diff_height: 0,
             last_diff_visual_lines: 0,
@@ -2774,6 +2774,7 @@ mod tests {
             pr_last_checked: std::collections::HashMap::new(),
             changed_files_poller_started: AtomicBool::new(false),
             branch_sync_worker_started: AtomicBool::new(false),
+            pty_activity: std::collections::HashMap::new(),
         }
     }
 
@@ -3340,6 +3341,29 @@ mod tests {
         // Second call must not panic or return Err even though session is gone.
         app.finish_delete_session("s1", WorktreeRemoval::PreservedOrphan, true)
             .expect("second finish is a no-op");
+    }
+
+    /// Deleting a session must clear its PTY-activity entry (now owned by the
+    /// engine) so a stale timestamp can't keep a deleted agent "working".
+    #[test]
+    fn finish_delete_session_clears_pty_activity_entry() {
+        let mut s1 = make_session("s1", "claude", "/tmp/wt/a");
+        s1.project_id = "project-1".to_string();
+        let project = make_project("project-1", "claude");
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+
+        app.engine
+            .pty_activity
+            .insert("s1".to_string(), std::time::Instant::now());
+        assert!(app.engine.pty_activity.contains_key("s1"));
+
+        app.finish_delete_session("s1", WorktreeRemoval::PreservedOrphan, true)
+            .expect("finish succeeds");
+
+        assert!(
+            !app.engine.pty_activity.contains_key("s1"),
+            "deleting a session must drop its pty_activity entry",
+        );
     }
 
     /// Kicking off the async delete path should mark the session as

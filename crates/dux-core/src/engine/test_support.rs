@@ -67,6 +67,7 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         pr_last_checked: HashMap::new(),
         changed_files_poller_started: AtomicBool::new(false),
         branch_sync_worker_started: AtomicBool::new(false),
+        pty_activity: HashMap::new(),
     };
     (engine, tmp)
 }

@@ -35,7 +35,9 @@ export function StatusBar() {
             <span className="truncate font-mono">
               {session.provider} · {session.branch_name}
             </span>
-            {session ? <StatusBadge status={session.status} /> : null}
+            {session ? (
+              <StatusBadge status={session.status} working={session.working} />
+            ) : null}
             {session.pr ? (
               <Badge
                 className={prBadgeClass(session.pr.state)}

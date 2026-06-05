@@ -123,6 +123,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         pr_last_checked: HashMap::new(),
         changed_files_poller_started: AtomicBool::new(false),
         branch_sync_worker_started: AtomicBool::new(false),
+        pty_activity: HashMap::new(),
     };
 
     engine.normalize_restored_sessions();

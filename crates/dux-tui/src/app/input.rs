@@ -6516,6 +6516,7 @@ mod tests {
             pr_last_checked: std::collections::HashMap::new(),
             changed_files_poller_started: AtomicBool::new(false),
             branch_sync_worker_started: AtomicBool::new(false),
+            pty_activity: std::collections::HashMap::new(),
         };
         let mut app = App {
             engine,
@@ -6555,7 +6556,6 @@ mod tests {
             active_terminal_id: None,
             terminal_return_to_list: false,
             last_pty_size: (0, 0),
-            last_pty_activity: std::collections::HashMap::new(),
             prev_scrollback_offset: 0,
             last_diff_height: 0,
             last_diff_visual_lines: 0,

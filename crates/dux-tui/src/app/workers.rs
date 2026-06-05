@@ -82,7 +82,7 @@ impl App {
                 .retry_resume_fallback(session_id, pty_size, status_message)
             {
                 ResumeFallbackOutcome::Retried { reaction } => {
-                    self.last_pty_activity.remove(session_id);
+                    self.engine.pty_activity.remove(session_id);
                     self.apply_reaction(*reaction);
                     handled.insert(session_id.clone());
                 }
@@ -104,7 +104,7 @@ impl App {
             }
             self.engine.providers.remove(session_id);
             self.engine.running_provider_pins.remove(session_id);
-            self.last_pty_activity.remove(session_id);
+            self.engine.pty_activity.remove(session_id);
             if *exit_success == Some(true) {
                 self.engine.mark_session_desired_running(session_id, false);
             }
@@ -761,7 +761,7 @@ impl App {
     fn apply_agent_launch_ready_view(&mut self, outcome: AgentLaunchReadyOutcome) {
         self.last_pty_size = outcome.pty_size;
         if let Some(id) = outcome.detached_session_id {
-            self.last_pty_activity.remove(&id);
+            self.engine.pty_activity.remove(&id);
         }
         match outcome.view {
             AgentLaunchReadyView::CreatePersistFailed { error } => {
@@ -900,7 +900,7 @@ impl App {
                 .retry_resume_fallback(&session_id, pty_size, status_message)
             {
                 ResumeFallbackOutcome::Retried { reaction } => {
-                    self.last_pty_activity.remove(&session_id);
+                    self.engine.pty_activity.remove(&session_id);
                     self.apply_reaction(*reaction);
                 }
                 // InFlight: a launch is already in progress — leave it alone.

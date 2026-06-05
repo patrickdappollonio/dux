@@ -171,7 +171,8 @@ pub enum EventReaction {
 }
 
 /// Result of `Engine::detach_conflicting_worktree_session` — the App caller
-/// uses `id` to clear `last_pty_activity` and `label` for status messages.
+/// uses `id` to clear the engine's `pty_activity` entry and `label` for status
+/// messages.
 #[derive(Clone, Debug)]
 pub struct DetachedSession {
     pub id: String,
@@ -183,7 +184,7 @@ pub struct DetachedSession {
 /// sessions, providers, session_store, mark_session_* helpers,
 /// resume_fallback_*, update_branch_sync_sessions, and the pure-engine
 /// portion of detach_conflicting_worktree_session). The App applies
-/// `last_pty_size`, clears `last_pty_activity` for any
+/// `last_pty_size`, clears the engine's `pty_activity` entry for any
 /// `detached_session_id`, runs view rebuilds, sets surfaces/overlays/status.
 pub struct AgentLaunchReadyOutcome {
     pub session: AgentSession,
@@ -333,7 +334,7 @@ impl WorktreeRemoval {
 
 /// Result of `Engine::finish_delete_session`. Carries the deleted session
 /// and project context the App needs to apply view follow-up
-/// (`last_pty_activity` clear, `clear_companion_terminals_for_session`,
+/// (`pty_activity` clear, `clear_companion_terminals_for_session`,
 /// `rebuild_left_items`, `selected_left` adjustment, `reload_changed_files`)
 /// and to format the 4-branch status message.
 pub struct FinishDeleteSessionOutcome {
@@ -437,10 +438,10 @@ impl Engine {
     /// Find any other session that owns `worktree_path` and currently has a
     /// running provider, and detach it so the incoming launch can take over.
     /// Returns the detached session's id + label so the App caller can clear
-    /// `last_pty_activity` and surface the label in status messages.
+    /// the engine's `pty_activity` entry and surface the label in status messages.
     ///
     /// The App's `detach_conflicting_worktree_session` is a thin wrapper that
-    /// also drops `last_pty_activity` for the returned id.
+    /// also drops the `pty_activity` entry for the returned id.
     pub fn detach_conflicting_worktree_session(
         &mut self,
         worktree_path: &str,
@@ -696,7 +697,7 @@ impl Engine {
     /// all engine-state cleanup (providers, running_provider_pins,
     /// resume_fallback_candidates, sessions.retain, update_branch_sync_sessions)
     /// before returning. The caller is then responsible for view-side cleanup
-    /// (e.g. `App::last_pty_activity.remove(session_id)`, companion-terminal
+    /// (e.g. `engine.pty_activity.remove(session_id)`, companion-terminal
     /// teardown). During the gap between this method returning and the
     /// App-side applier running, those view-only maps still hold stale
     /// entries for the deleted session_id. Engine helpers invoked from inside

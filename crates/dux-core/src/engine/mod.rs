@@ -125,7 +125,28 @@ pub struct Engine {
     /// Guard so the long-lived `branch-sync` poller is spawned at most once.
     /// Same rationale as `changed_files_poller_started`.
     pub branch_sync_worker_started: AtomicBool,
+    /// Tracks when each agent's PTY last received data. A single poller
+    /// ([`Engine::poll_pty_activity`]) consumes each provider's
+    /// `take_received_data` flag once per tick and stamps `now` here; the
+    /// streaming/"working" predicate ([`Engine::is_agent_streaming`]) reads it.
+    /// Owned by the engine (not a surface) so both the TUI and the web actor
+    /// project the same activity state, and because `take_received_data` is a
+    /// consuming read that may have exactly one poller. The TUI and web actor
+    /// never run simultaneously by construction, so single ownership is safe,
+    /// and the in-process flip carries this map across automatically with the
+    /// engine.
+    pub pty_activity: HashMap<String, Instant>,
 }
+
+/// How recently an agent must have emitted PTY output to count as actively
+/// streaming ("working"). Shared by the TUI spinner and the web ViewModel so
+/// both surfaces use an identical window.
+///
+/// This is a *hysteresis* window, not a precise timestamp exposure: the
+/// `working` boolean stays stable while an agent streams steadily, so the
+/// change-only ViewModel watch channel only pushes on transitions (idle→working
+/// and working→idle), never on every byte. See [`crate::viewmodel::SessionView`].
+pub const AGENT_STREAMING_WINDOW: Duration = Duration::from_secs(1);
 
 /// Map a runtime [`Project`] to a portable [`ProjectConfig`] for config.toml.
 /// Uses the same field mapping as the persistence worker's `Add` arm so the
@@ -156,6 +177,29 @@ impl Engine {
     /// Clear an in-flight key after a worker's completion event arrives.
     pub fn clear_in_flight(&mut self, key: &InFlightKey) {
         self.in_flight.remove(key);
+    }
+
+    /// Poll each PTY provider for recent data and update the per-agent activity
+    /// timestamp used by the streaming/"working" indicator. `take_received_data`
+    /// is a consuming read (and suppresses the post-resize redraw burst), so
+    /// this must be the only poll site — both the TUI run loop and the web
+    /// engine actor call this exactly once per tick, and they never run at the
+    /// same time.
+    pub fn poll_pty_activity(&mut self) {
+        let now = Instant::now();
+        for (session_id, provider) in &self.providers {
+            if provider.take_received_data() {
+                self.pty_activity.insert(session_id.clone(), now);
+            }
+        }
+    }
+
+    /// Returns `true` if the given agent received PTY data within
+    /// [`AGENT_STREAMING_WINDOW`], indicating it is actively streaming output.
+    pub fn is_agent_streaming(&self, session_id: &str) -> bool {
+        self.pty_activity
+            .get(session_id)
+            .is_some_and(|t| t.elapsed() < AGENT_STREAMING_WINDOW)
     }
 
     /// True if the given key is currently marked in-flight.
@@ -978,6 +1022,27 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::engine::test_support::{sample_project, test_engine};
+
+    #[test]
+    fn is_agent_streaming_honors_the_hysteresis_window() {
+        let (mut engine, _tmp) = test_engine();
+
+        // Fresh activity → streaming.
+        engine
+            .pty_activity
+            .insert("fresh".to_string(), Instant::now());
+        assert!(engine.is_agent_streaming("fresh"));
+
+        // Stamped past the window → not streaming.
+        engine.pty_activity.insert(
+            "stale".to_string(),
+            Instant::now() - (AGENT_STREAMING_WINDOW + Duration::from_millis(50)),
+        );
+        assert!(!engine.is_agent_streaming("stale"));
+
+        // No entry at all → not streaming.
+        assert!(!engine.is_agent_streaming("absent"));
+    }
 
     #[test]
     fn persist_projects_to_config_round_trips_runtime_projects() {

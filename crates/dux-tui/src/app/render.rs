@@ -581,7 +581,7 @@ impl App {
                         .unwrap_or_else(|| session.branch_name.clone());
                     let (dot, dot_color) =
                         if matches!(session.status, crate::model::SessionStatus::Active)
-                            && self.is_agent_streaming(&session.id)
+                            && self.engine.is_agent_streaming(&session.id)
                         {
                             let idx = self.spinner_frame_index();
                             (

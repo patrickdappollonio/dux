@@ -46,6 +46,9 @@ export interface SessionView {
   pr?: PrView
   terminals: TerminalView[]
   has_output: boolean
+  /** Hysteresis boolean: the agent emitted PTY output within the last second.
+   * Drives the "working" ping-ring animation on the active status badge. */
+  working: boolean
 }
 
 export interface DirEntryView {

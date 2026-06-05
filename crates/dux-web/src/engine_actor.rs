@@ -372,6 +372,13 @@ pub(crate) fn run_engine_loop(
             }
         }
 
+        // Consume each provider's received-data flag once per tick and stamp
+        // the engine's activity map, so bytes that arrived this tick count
+        // toward the `working` projection in the ViewModel refresh below. This
+        // is the single poll site for the web surface (the TUI run loop is the
+        // single poll site for the other surface; the two never run at once).
+        engine.poll_pty_activity();
+
         // Reap agent/terminal PTYs whose child process exited so they stop
         // lingering in `providers`/`companion_terminals` and disappear from
         // the ViewModel, broadcasting a status for each so web clients learn.

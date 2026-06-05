@@ -67,6 +67,14 @@ pub struct SessionView {
     /// Whether the session's PTY has emitted any output yet. The web UI shows a
     /// readiness spinner until this is true.
     pub has_output: bool,
+    /// Whether the agent is actively streaming output right now (PTY data within
+    /// [`crate::engine::AGENT_STREAMING_WINDOW`]). This is a *hysteresis boolean*,
+    /// not a timestamp: it stays `true` for the whole window after the latest
+    /// byte and flips back to `false` only once the window lapses. Because the
+    /// ViewModel watch channel coalesces identical frames (`send_if_modified`),
+    /// a steadily streaming agent produces a stable `working: true` and pushes
+    /// nothing until a transition (idle→working or working→idle) occurs.
+    pub working: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -133,6 +141,7 @@ impl SessionView {
         pr: Option<&PrInfo>,
         terminals: Vec<TerminalView>,
         has_output: bool,
+        working: bool,
     ) -> Self {
         Self {
             id: s.id.clone(),
@@ -146,6 +155,7 @@ impl SessionView {
             pr: pr.map(PrView::from_pr),
             terminals,
             has_output,
+            working,
         }
     }
 }
@@ -210,7 +220,14 @@ impl Engine {
                         .get(&s.id)
                         .map(|p| p.has_output())
                         .unwrap_or(false);
-                    SessionView::from_session(s, self.pr_statuses.get(&s.id), terminals, has_output)
+                    let working = self.is_agent_streaming(&s.id);
+                    SessionView::from_session(
+                        s,
+                        self.pr_statuses.get(&s.id),
+                        terminals,
+                        has_output,
+                        working,
+                    )
                 })
                 .collect(),
             changed_files: ChangedFilesView {
@@ -347,6 +364,41 @@ mod tests {
         let vm = engine.view_model();
 
         assert!(vm.sessions[0].pr.is_none());
+    }
+
+    #[test]
+    fn session_without_provider_is_not_working() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        engine.sessions.push(sample_session("s1", "p1", "feature"));
+
+        let vm = engine.view_model();
+
+        assert!(
+            !vm.sessions[0].working,
+            "a session with no PTY activity should project working=false"
+        );
+    }
+
+    #[test]
+    fn session_with_recent_activity_is_working() {
+        use std::time::Instant;
+
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        engine.sessions.push(sample_session("s1", "p1", "feature"));
+        // Stamp the activity map directly rather than spinning up a real
+        // PtyClient: the projection only reads `is_agent_streaming`, which keys
+        // off this map, so a fresh timestamp is sufficient and avoids spawning
+        // a child process in a unit test.
+        engine.pty_activity.insert("s1".to_string(), Instant::now());
+
+        let vm = engine.view_model();
+
+        assert!(
+            vm.sessions[0].working,
+            "a session stamped with fresh PTY activity should project working=true"
+        );
     }
 
     #[test]

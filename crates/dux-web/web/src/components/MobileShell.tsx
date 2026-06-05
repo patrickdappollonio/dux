@@ -254,7 +254,11 @@ function SessionRow({
                 }
               />
             ) : null}
-            <StatusBadge status={session.status} iconOnly />
+            <StatusBadge
+              status={session.status}
+              working={session.working}
+              iconOnly
+            />
           </span>
         </Button>
         <DropdownMenu>

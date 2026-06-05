@@ -96,9 +96,6 @@ pub struct App {
     pub(crate) active_terminal_id: Option<String>,
     pub(crate) terminal_return_to_list: bool,
     pub(crate) last_pty_size: (u16, u16),
-    /// Tracks when each agent last received PTY data, for the streaming
-    /// activity spinner in the left pane.
-    pub(crate) last_pty_activity: HashMap<String, Instant>,
     pub(crate) prev_scrollback_offset: usize,
     pub(crate) show_diff_line_numbers: bool,
     pub(crate) last_diff_height: u16,
@@ -1276,6 +1273,7 @@ impl App {
             pr_last_checked: HashMap::new(),
             changed_files_poller_started: AtomicBool::new(false),
             branch_sync_worker_started: AtomicBool::new(false),
+            pty_activity: HashMap::new(),
         };
         Self::assemble(
             engine,
@@ -1353,7 +1351,6 @@ impl App {
             active_terminal_id: None,
             terminal_return_to_list: false,
             last_pty_size: (0, 0),
-            last_pty_activity: HashMap::new(),
             prev_scrollback_offset: 0,
             last_diff_height: 0,
             last_diff_visual_lines: 0,
@@ -1445,6 +1442,8 @@ impl App {
     /// the providers (PTYs) and the single-instance lock live in the engine and
     /// must survive the flip, so the engine is moved out wholesale. Neither
     /// `App` nor `Engine` implements `Drop`, so nothing is torn down here.
+    /// PTY-activity tracking now lives on the engine (`pty_activity`), so the
+    /// streaming/"working" state carries across the flip automatically with it.
     pub fn into_engine(self) -> Engine {
         // Unregister this App's SIGWINCH handler so repeated flip cycles don't
         // pile up orphaned registrations (each resume registers a fresh flag;
@@ -1466,7 +1465,7 @@ impl App {
         let result: RunExit = {
             'main: loop {
                 self.drain_events();
-                self.poll_pty_activity();
+                self.engine.poll_pty_activity();
                 self.tick_count = self.tick_count.wrapping_add(1);
 
                 // Check SIGWINCH — needed when bypassing crossterm's event
@@ -1765,25 +1764,6 @@ impl App {
     /// regardless of event loop frequency.
     pub(crate) fn spinner_frame_index(&self) -> usize {
         ((self.start_time.elapsed().as_millis() / 80) as usize) % crate::theme::SPINNER_FRAMES.len()
-    }
-
-    /// Poll each PTY provider for recent data and update the per-agent
-    /// activity timestamp used by the left-pane streaming indicator.
-    fn poll_pty_activity(&mut self) {
-        let now = Instant::now();
-        for (session_id, provider) in &self.engine.providers {
-            if provider.take_received_data() {
-                self.last_pty_activity.insert(session_id.clone(), now);
-            }
-        }
-    }
-
-    /// Returns `true` if the given agent received PTY data within the last
-    /// second, indicating it is actively streaming output.
-    pub(crate) fn is_agent_streaming(&self, session_id: &str) -> bool {
-        self.last_pty_activity
-            .get(session_id)
-            .is_some_and(|t| t.elapsed() < Duration::from_secs(1))
     }
 
     pub(crate) fn set_info(&mut self, message: impl Into<String>) {
