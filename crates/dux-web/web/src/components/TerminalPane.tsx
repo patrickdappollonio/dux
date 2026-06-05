@@ -39,6 +39,17 @@ function unlockKeyboard(): void {
 }
 
 export function TerminalPane({ kind, id }: TerminalPaneProps) {
+  // The padded, background-painted host. Padding must live HERE — one layer
+  // OUTSIDE the element xterm opens into — because FitAddon measures the open
+  // target's parent via getComputedStyle().height, which under Tailwind's
+  // global box-sizing: border-box INCLUDES padding. Padding on the measured
+  // element inflates availableHeight by 16px and mints a phantom terminal row
+  // (~16 of every 17 window heights) that renders clipped under the status
+  // bar — and the PTY is told about it, so bottom-anchored TUIs (codex's
+  // input box) draw into an invisible row.
+  const hostRef = useRef<HTMLDivElement>(null)
+  // The unpadded element xterm opens into; its border-box equals its content
+  // box, so FitAddon's measurement is exact.
   const containerRef = useRef<HTMLDivElement>(null)
   const wrapperRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
@@ -94,8 +105,9 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
   }, [kind, everReady, sessionStatus])
 
   useEffect(() => {
+    const host = hostRef.current
     const container = containerRef.current
-    if (!container) return
+    if (!host || !container) return
 
     // Resolve the app's background token so the terminal canvas matches the
     // shadcn palette rather than using a hardcoded hex color.
@@ -120,10 +132,10 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
       // Fallback silently — resolvedBg stays black.
     }
 
-    // Apply the resolved bg to the host so the padding area matches the canvas,
-    // making the padding feel like it belongs to the terminal rather than being
-    // an external border.
-    container.style.background = resolvedBg
+    // Apply the resolved bg to the padded host so the padding area matches the
+    // canvas, making the padding feel like it belongs to the terminal rather
+    // than being an external border.
+    host.style.background = resolvedBg
 
     const term = new Terminal({
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
@@ -308,7 +320,12 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
           : "group relative h-full w-full overflow-hidden bg-background"
       }
     >
-      <div ref={containerRef} className="h-full w-full p-2" />
+      {/* Padding lives on the host, NOT the measured element below — see the
+          hostRef comment: border-box computed heights include padding, and
+          FitAddon would mint a phantom row/column from it. */}
+      <div ref={hostRef} className="h-full w-full p-2">
+        <div ref={containerRef} className="h-full w-full" />
+      </div>
       {/* Fullscreen toggle: embedded mode already forwards every key the
           browser will give a page; fullscreen + keyboard lock additionally
           captures reserved shortcuts (Ctrl+T, Ctrl+W, …) on Chromium. */}
