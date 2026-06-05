@@ -999,6 +999,10 @@ export function reorderSessions(projectId: string, orderedIds: string[]): void {
 export function sortAgents(by: SortKey): void {
   const sessions = state.viewModel?.sessions ?? []
   const projects = state.viewModel?.projects ?? []
+  // A sort supersedes any in-flight drag: drop its overlay up front, or a
+  // superseded drag order would linger on screen until something else clears
+  // it (the overlay only retires on match/error/disconnect).
+  setState(clearPendingOrders())
   for (const project of projects) {
     const projectSessions = sessions.filter((s) => s.project_id === project.id)
     if (projectSessions.length < 2) continue

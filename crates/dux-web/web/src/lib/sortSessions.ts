@@ -45,11 +45,20 @@ export function sortedSessionIds(
       break
     case "name":
       sorted.sort((a, b) => {
-        const ka = nameKey(a)
-        const kb = nameKey(b)
-        if (ka < kb) return -1
-        if (ka > kb) return 1
-        return 0
+        // Compare by Unicode CODE POINTS, not UTF-16 code units: plain JS
+        // string comparison orders an astral-plane char (emoji, U+10000+) by
+        // its surrogate halves, flipping the order Rust's String::cmp (code
+        // points) produces — the two surfaces would disagree for such titles.
+        // Spreading iterates code points, matching Rust exactly.
+        const ka = [...nameKey(a)]
+        const kb = [...nameKey(b)]
+        const len = Math.min(ka.length, kb.length)
+        for (let i = 0; i < len; i++) {
+          const ca = ka[i].codePointAt(0) ?? 0
+          const cb = kb[i].codePointAt(0) ?? 0
+          if (ca !== cb) return ca - cb
+        }
+        return ka.length - kb.length
       })
       break
   }
