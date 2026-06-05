@@ -60,7 +60,12 @@ function CommandDialog({
         )}
         showCloseButton={showCloseButton}
       >
-        {children}
+        {/* The cmdk ROOT. Every Command* primitive below (Input/List/Item/
+            Group/Empty) reads cmdk's context; without this wrapper they throw
+            on open and take the whole React tree down with them — the
+            generated template shipped without it, so the palette crashed the
+            app from day one. */}
+        <Command>{children}</Command>
       </DialogContent>
     </Dialog>
   )
