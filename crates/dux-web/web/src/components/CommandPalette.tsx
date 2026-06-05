@@ -22,8 +22,10 @@ import {
   selectSession,
   setPaletteOpen,
   socket,
+  sortAgents,
   useDux,
 } from "@/lib/store"
+import type { SortKey } from "@/lib/sortSessions"
 
 export function CommandPalette() {
   const { paletteOpen, viewModel, selectedSessionId } = useDux()
@@ -71,6 +73,11 @@ export function CommandPalette() {
 
   function handleSelectSession(id: string) {
     selectSession(id)
+    close()
+  }
+
+  function handleSort(by: SortKey) {
+    sortAgents(by)
     close()
   }
 
@@ -241,6 +248,32 @@ export function CommandPalette() {
           </CommandItem>
         </CommandGroup>
         <CommandSeparator />
+
+        {sessions.length >= 2 && (
+          <>
+            <CommandGroup heading="Sort agents">
+              <CommandItem
+                className="cursor-pointer"
+                onSelect={() => handleSort("updated")}
+              >
+                Sort agents by most recently updated
+              </CommandItem>
+              <CommandItem
+                className="cursor-pointer"
+                onSelect={() => handleSort("created")}
+              >
+                Sort agents by creation date (newest first)
+              </CommandItem>
+              <CommandItem
+                className="cursor-pointer"
+                onSelect={() => handleSort("name")}
+              >
+                Sort agents alphabetically by name
+              </CommandItem>
+            </CommandGroup>
+            <CommandSeparator />
+          </>
+        )}
 
         <CommandGroup heading="Switch session">
           {sessions.map((s) => (

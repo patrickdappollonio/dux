@@ -3,6 +3,7 @@ import { toast } from "sonner"
 
 import { sanitizeAgentName } from "./agentName"
 import { ordersMatch } from "./reorder"
+import { sortedSessionIds, type SortKey } from "./sortSessions"
 import { DuxSocket } from "./ws"
 import type {
   BranchWarningView,
@@ -979,6 +980,34 @@ export function reorderSessions(projectId: string, orderedIds: string[]): void {
     project_id: projectId,
     session_ids: orderedIds,
   })
+}
+
+// Sort every project's sessions by the chosen key, mirroring the TUI palette
+// commands sort-agents-by-{updated,created,name}. There's no dedicated web sort
+// state: for each project we compute the sorted id order (sortedSessionIds, which
+// mirrors the TUI comparators exactly) and send the EXISTING `reorder_sessions`
+// command, which the server persists into the same shared order the TUI uses —
+// so the two surfaces stay in sync by construction.
+//
+// We deliberately DON'T set the optimistic `pendingSessionOrder` overlay here.
+// That overlay holds a single project; a sort touches N projects, so an overlay
+// could only cover one of them and would leave the rest snapping anyway. The
+// ViewModel echo arrives within tens of milliseconds, so the brief reflow is
+// acceptable and keeps the single-project drag overlay invariant untouched.
+// Projects with fewer than two sessions are skipped — sorting them is a no-op
+// that would only churn the wire.
+export function sortAgents(by: SortKey): void {
+  const sessions = state.viewModel?.sessions ?? []
+  const projects = state.viewModel?.projects ?? []
+  for (const project of projects) {
+    const projectSessions = sessions.filter((s) => s.project_id === project.id)
+    if (projectSessions.length < 2) continue
+    const orderedIds = sortedSessionIds(projectSessions, by)
+    socket.sendCommand("reorder_sessions", {
+      project_id: project.id,
+      session_ids: orderedIds,
+    })
+  }
 }
 
 // Optimistically reorder the projects, then tell the server. `orderedIds` MUST

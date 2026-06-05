@@ -54,6 +54,11 @@ export interface SessionView {
   /** Hysteresis boolean: the agent emitted PTY output within the last second.
    * Drives the "working" ping-ring animation on the active status badge. */
   working: boolean
+  /** RFC 3339 / ISO 8601 creation time. Backs the client-side sort-by commands
+   * (sort agents by creation time) that mirror the TUI's palette parity. */
+  created_at: string
+  /** RFC 3339 / ISO 8601 last-update time. Backs the sort-by-last-update command. */
+  updated_at: string
 }
 
 export interface DirEntryView {

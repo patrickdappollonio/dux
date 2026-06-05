@@ -80,6 +80,15 @@ pub struct SessionView {
     /// a steadily streaming agent produces a stable `working: true` and pushes
     /// nothing until a transition (idle→working or working→idle) occurs.
     pub working: bool,
+    /// Session creation time as an RFC 3339 / ISO 8601 string. Exposed so the
+    /// web client can compute the same sort orders the TUI offers
+    /// (`sort-agents-by-created`) and feed the result back through
+    /// `reorder_sessions`. Both surfaces persist into the shared order, so a
+    /// sort on either stays in sync by construction.
+    pub created_at: String,
+    /// Session last-update time as an RFC 3339 / ISO 8601 string. Mirror of
+    /// `created_at`; backs the web's `sort-agents-by-updated` parity command.
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -169,6 +178,8 @@ impl SessionView {
             terminals,
             has_output,
             working,
+            created_at: s.created_at.to_rfc3339(),
+            updated_at: s.updated_at.to_rfc3339(),
         }
     }
 }
@@ -379,6 +390,27 @@ mod tests {
         let vm = engine.view_model();
 
         assert!(vm.sessions[0].pr.is_none());
+    }
+
+    #[test]
+    fn session_timestamps_are_projected_as_rfc3339() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        let mut session = sample_session("s1", "p1", "feature");
+        let created = chrono::DateTime::parse_from_rfc3339("2026-01-02T03:04:05+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let updated = chrono::DateTime::parse_from_rfc3339("2026-03-04T05:06:07+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        session.created_at = created;
+        session.updated_at = updated;
+        engine.sessions.push(session);
+
+        let vm = engine.view_model();
+
+        assert_eq!(vm.sessions[0].created_at, created.to_rfc3339());
+        assert_eq!(vm.sessions[0].updated_at, updated.to_rfc3339());
     }
 
     #[test]
