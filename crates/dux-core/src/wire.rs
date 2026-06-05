@@ -164,6 +164,20 @@ pub enum WireCommand {
     ReorderProjects {
         project_ids: Vec<String>,
     },
+    /// Swap which CLI a session uses, mirroring the TUI palette's
+    /// `change-agent-provider`. `provider` is validated server-side against the
+    /// engine's configured provider list (the same source as the ViewModel's
+    /// `available_providers`) — the client's choice is never trusted.
+    ///
+    /// Like the TUI, this does NOT kill or relaunch a running agent: it persists
+    /// the new provider for the NEXT launch and, when a provider is still
+    /// running on the session's PTY, pins the previously-running one so labels
+    /// stay truthful until the user reconnects. Selecting the current provider
+    /// is a no-op.
+    ChangeAgentProvider {
+        session_id: String,
+        provider: String,
+    },
     /// Switch a project's SOURCE checkout back to its default branch, mirroring
     /// the TUI's `checkout-project-default-branch`.
     ///
@@ -352,6 +366,15 @@ impl Engine {
                     status: Some(status),
                 });
             }
+            WireCommand::ChangeAgentProvider {
+                session_id,
+                provider,
+            } => {
+                let status = self.change_agent_provider_wire(&session_id, &provider)?;
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
+                });
+            }
             _ => {}
         }
         let core = self.wire_to_command(command)?;
@@ -412,6 +435,87 @@ impl Engine {
             }
         };
         Ok(WireStatus::new("info", message))
+    }
+
+    /// Swap which provider a session uses, mirroring the TUI's
+    /// `apply_change_agent_provider`. The engine half (persist + pin) lives in
+    /// [`Engine::change_agent_provider`]; this wire wrapper validates the
+    /// provider against the configured provider list (the ViewModel's
+    /// `available_providers` source — never trusting the client), handles the
+    /// no-op "already uses this provider" case, and formats the status message.
+    ///
+    /// Deliberate substitution: the TUI's messages reference the rebindable
+    /// `reconnect-agent` keybinding label ("press {key} to relaunch"); the web
+    /// has no keybindings, so it points the user at the agent's Reconnect action
+    /// instead, while keeping the rest of the wording byte-identical.
+    fn change_agent_provider_wire(
+        &mut self,
+        session_id: &str,
+        provider: &str,
+    ) -> anyhow::Result<WireStatus> {
+        let session = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
+        let label = session
+            .title
+            .clone()
+            .unwrap_or_else(|| session.branch_name.clone());
+        let current = session.provider.clone();
+
+        // Validate against the configured provider list — the same source the
+        // ViewModel's `available_providers` is built from — so a forged or
+        // stale provider name from the client is rejected with actionable copy.
+        if !self.config.providers.commands.contains_key(provider) {
+            anyhow::bail!(
+                "Provider \"{provider}\" is not configured. Pick one of the configured providers."
+            );
+        }
+        let provider = ProviderKind::new(provider);
+
+        // No-op when the session already uses the chosen provider (mirrors the
+        // TUI's `is_current` short-circuit, which knows the display label).
+        if provider == current {
+            return Ok(WireStatus::new(
+                "info",
+                format!(
+                    "Agent \"{}\" already uses {}. Pick another provider to swap.",
+                    label,
+                    provider.as_str(),
+                ),
+            ));
+        }
+
+        let outcome = self.change_agent_provider(session_id, provider.clone())?;
+
+        if outcome.running {
+            Ok(WireStatus::new(
+                "warning",
+                format!(
+                    "Worktree \"{}\" is set to {}, but the {} agent is still running. Exit it and reconnect the agent to relaunch with {}.",
+                    label,
+                    provider.as_str(),
+                    outcome.previous.as_str(),
+                    provider.as_str(),
+                ),
+            ))
+        } else {
+            let resume_note = if outcome.resume_available {
+                " dux will resume its prior session on this worktree."
+            } else {
+                " This provider hasn't run on this worktree yet, so it'll start a fresh session."
+            };
+            Ok(WireStatus::new(
+                "info",
+                format!(
+                    "Worktree \"{}\" will use {} next launch. Reconnect the agent to start it.{}",
+                    label,
+                    provider.as_str(),
+                    resume_note,
+                ),
+            ))
+        }
     }
 
     /// Reconnect (relaunch) an agent session's provider. Mirrors the TUI's
@@ -1012,18 +1116,20 @@ impl Engine {
                     term_size: (80, 24),
                 }
             }
-            // Rename, Reconnect, and CheckoutProjectDefaultBranch are NOT
-            // reconstructible into a single `Command` — all need `&mut self`
-            // (rename persists in place; reconnect tears down provider state and
-            // surfaces a launch view's status synchronously; checkout inspects
-            // and switches branches synchronously). `apply_wire` intercepts them
-            // before this immutable mapping; reaching here means that
-            // interception broke.
+            // Rename, Reconnect, CheckoutProjectDefaultBranch, and
+            // ChangeAgentProvider are NOT reconstructible into a single
+            // `Command` — all need `&mut self` (rename persists in place;
+            // reconnect tears down provider state and surfaces a launch view's
+            // status synchronously; checkout inspects and switches branches
+            // synchronously; change-provider persists + pins in place).
+            // `apply_wire` intercepts them before this immutable mapping;
+            // reaching here means that interception broke.
             WireCommand::RenameSession { .. }
             | WireCommand::ReconnectSession { .. }
-            | WireCommand::CheckoutProjectDefaultBranch { .. } => {
+            | WireCommand::CheckoutProjectDefaultBranch { .. }
+            | WireCommand::ChangeAgentProvider { .. } => {
                 unreachable!(
-                    "rename/reconnect/checkout-default-branch are handled in apply_wire before wire_to_command"
+                    "rename/reconnect/checkout-default-branch/change-provider are handled in apply_wire before wire_to_command"
                 )
             }
             WireCommand::ReorderSessions {
@@ -2858,5 +2964,163 @@ mod tests {
             "msg: {}",
             status.message
         );
+    }
+
+    // ---- L3: change agent provider -----------------------------------------
+
+    #[test]
+    fn wire_change_agent_provider_deserializes() {
+        let json =
+            r#"{"command":"change_agent_provider","args":{"session_id":"s1","provider":"codex"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::ChangeAgentProvider {
+                session_id: "s1".to_string(),
+                provider: "codex".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn apply_wire_change_agent_provider_swaps_and_persists_when_stopped() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat"); // provider "claude"
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let outcome = engine
+            .apply_wire(WireCommand::ChangeAgentProvider {
+                session_id: "s1".to_string(),
+                provider: "codex".to_string(),
+            })
+            .expect("apply_wire");
+        assert_eq!(engine.sessions[0].provider.as_str(), "codex");
+        let status = outcome.status.expect("swap surfaces a status");
+        assert_eq!(status.tone, "info");
+        assert!(
+            status.message.contains("will use codex next launch"),
+            "msg: {}",
+            status.message
+        );
+        // Not-running + provider never launched here → "fresh session" note.
+        assert!(
+            status.message.contains("start a fresh session"),
+            "msg: {}",
+            status.message
+        );
+
+        // Persisted: a fresh load from the same SQLite file sees the new provider.
+        let reloaded = engine.session_store.load_sessions().expect("reload");
+        let s = reloaded.iter().find(|s| s.id == "s1").expect("row");
+        assert_eq!(s.provider.as_str(), "codex");
+    }
+
+    #[test]
+    fn apply_wire_change_agent_provider_same_provider_is_noop() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat"); // provider "claude"
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let outcome = engine
+            .apply_wire(WireCommand::ChangeAgentProvider {
+                session_id: "s1".to_string(),
+                provider: "claude".to_string(),
+            })
+            .expect("apply_wire");
+        let status = outcome.status.expect("no-op still surfaces a status");
+        assert_eq!(status.tone, "info");
+        assert!(
+            status.message.contains("already uses claude"),
+            "msg: {}",
+            status.message
+        );
+        // Still claude; no spurious updated_at-driven persistence concerns here.
+        assert_eq!(engine.sessions[0].provider.as_str(), "claude");
+    }
+
+    #[test]
+    fn apply_wire_change_agent_provider_unknown_session_errors() {
+        let (mut engine, _tmp) = test_engine();
+        let err = engine
+            .apply_wire(WireCommand::ChangeAgentProvider {
+                session_id: "ghost".to_string(),
+                provider: "codex".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown session"), "err: {err}");
+    }
+
+    #[test]
+    fn apply_wire_change_agent_provider_rejects_unconfigured_provider() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        // "frobnicate" is not in the configured provider list — the server must
+        // reject it rather than trusting the client.
+        let err = engine
+            .apply_wire(WireCommand::ChangeAgentProvider {
+                session_id: "s1".to_string(),
+                provider: "frobnicate".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("not configured"), "err: {err}");
+        // The session's provider is unchanged after a rejected swap.
+        assert_eq!(engine.sessions[0].provider.as_str(), "claude");
+    }
+
+    #[test]
+    fn apply_wire_change_agent_provider_warns_when_running() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat"); // provider "claude"
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        // Spawn a real `cat` PTY so the session counts as running.
+        let client = crate::pty::PtyClient::spawn_with_env(
+            "cat",
+            &[],
+            worktree.path(),
+            24,
+            80,
+            engine.config.ui.agent_scrollback_lines,
+            &[],
+        )
+        .expect("spawn cat provider");
+        engine.providers.insert("s1".to_string(), client);
+
+        let outcome = engine
+            .apply_wire(WireCommand::ChangeAgentProvider {
+                session_id: "s1".to_string(),
+                provider: "codex".to_string(),
+            })
+            .expect("apply_wire");
+        let status = outcome.status.expect("running swap surfaces a status");
+        assert_eq!(status.tone, "warning");
+        assert!(
+            status.message.contains("still running") && status.message.contains("codex"),
+            "msg: {}",
+            status.message
+        );
+        // Provider is persisted to the new one; the pin keeps the old one for labels.
+        assert_eq!(engine.sessions[0].provider.as_str(), "codex");
+        assert_eq!(
+            engine.running_provider_pins.get("s1").map(|p| p.as_str()),
+            Some("claude")
+        );
+
+        // Clean up so the PTY doesn't outlive the test.
+        engine.providers.remove("s1");
     }
 }

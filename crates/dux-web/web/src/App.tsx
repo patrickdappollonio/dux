@@ -6,6 +6,7 @@ import { AppSidebar } from "@/components/Sidebar"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { CommandPalette } from "@/components/CommandPalette"
+import { ChangeProviderDialog } from "@/components/ChangeProviderDialog"
 import { CommitDialog } from "@/components/CommitDialog"
 import { ConfirmDeleteTerminalDialog } from "@/components/ConfirmDeleteTerminalDialog"
 import { ConfirmDiscardFileDialog } from "@/components/ConfirmDiscardFileDialog"
@@ -173,6 +174,7 @@ function GlobalOverlays() {
       <CommitDialog />
       <CreateAgentDialog />
       <RenameSessionDialog />
+      <ChangeProviderDialog />
       <DeleteSessionDialog />
       <ConfirmDeleteTerminalDialog />
       <ConfirmDiscardFileDialog />

@@ -14,6 +14,7 @@ import {
 import { CSS } from "@dnd-kit/utilities"
 import {
   Bot,
+  Cpu,
   Download,
   Ellipsis,
   Folder,
@@ -90,6 +91,7 @@ import {
 import {
   createTerminal,
   openAddProject,
+  openChangeProvider,
   openCheckoutDefaultBranch,
   openCommit,
   openCreateAgent,
@@ -294,6 +296,10 @@ function SessionSubItem({
             <DropdownMenuItem onClick={() => openForkAgent(session.id)}>
               <GitFork />
               Fork agent…
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => openChangeProvider(session.id)}>
+              <Cpu />
+              Change provider…
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={handleToggleAutoReopen}>

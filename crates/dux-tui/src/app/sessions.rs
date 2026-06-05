@@ -971,38 +971,23 @@ impl App {
         self.prompt = PromptState::None;
 
         let session_id = self.engine.sessions[session_index].id.clone();
-        let running = self.engine.providers.contains_key(&session_id);
-        let previous_provider = self.engine.sessions[session_index].provider.clone();
-
-        let session = &mut self.engine.sessions[session_index];
-        session.provider = selected.provider.clone();
-        session.updated_at = Utc::now();
-        let updated = session.clone();
-        self.engine.session_store.upsert_session(&updated)?;
-
-        // Pin the still-running provider so UI labels stay truthful until
-        // the user exits and relaunches the agent. Only set on the first
-        // swap-while-running — later swaps don't change what's spawned.
-        if running {
-            self.engine
-                .running_provider_pins
-                .entry(session_id.clone())
-                .or_insert(previous_provider.clone());
-        }
+        let outcome = self
+            .engine
+            .change_agent_provider(&session_id, selected.provider.clone())?;
         self.rebuild_left_items();
 
         let reconnect_key = self.bindings.label_for(Action::ReconnectAgent);
-        if running {
+        if outcome.running {
             self.set_warning(format!(
                 "Worktree \"{}\" is set to {}, but the {} agent is still running. Exit it and press {} to relaunch with {}.",
                 prompt.session_label,
                 selected.provider.as_str(),
-                previous_provider.as_str(),
+                outcome.previous.as_str(),
                 reconnect_key,
                 selected.provider.as_str(),
             ));
         } else {
-            let resume_note = if selected.resume_available {
+            let resume_note = if outcome.resume_available {
                 " dux will resume its prior session on this worktree."
             } else {
                 " This provider hasn't run on this worktree yet, so it'll start a fresh session."

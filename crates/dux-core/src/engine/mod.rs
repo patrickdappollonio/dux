@@ -1050,6 +1050,71 @@ impl Engine {
         let cfg = crate::config::provider_config(&self.config, &session.provider);
         cfg.supports_session_resume() && session.has_started_provider(&session.provider)
     }
+
+    /// Swap which provider (CLI) an agent session uses on its NEXT launch.
+    ///
+    /// This is the engine half of the TUI's `apply_change_agent_provider`. It
+    /// does NOT kill or relaunch a running agent: it changes the persisted
+    /// provider so the next launch (reconnect) uses it, and, when a provider is
+    /// still running on the session's PTY, pins the previously-running provider
+    /// so UI labels keep telling the truth until the user exits and relaunches.
+    ///
+    /// Returns the data each surface needs to format its own status message
+    /// (the TUI references a rebindable keybinding label; the web does not), so
+    /// message wording stays surface-side. An unknown session is an error; the
+    /// caller is responsible for the no-op "already uses this provider" case,
+    /// since only the surface knows the session's display label for that copy.
+    pub fn change_agent_provider(
+        &mut self,
+        session_id: &str,
+        provider: ProviderKind,
+    ) -> anyhow::Result<ChangeAgentProviderOutcome> {
+        let index = self
+            .sessions
+            .iter()
+            .position(|session| session.id == session_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
+
+        let running = self.providers.contains_key(session_id);
+        let previous = self.sessions[index].provider.clone();
+
+        let session = &mut self.sessions[index];
+        session.provider = provider.clone();
+        session.updated_at = Utc::now();
+        let updated = session.clone();
+        self.session_store.upsert_session(&updated)?;
+
+        // Pin the still-running provider so UI labels stay truthful until the
+        // user exits and relaunches the agent. Only set on the first
+        // swap-while-running — later swaps don't change what's spawned.
+        if running {
+            self.running_provider_pins
+                .entry(session_id.to_string())
+                .or_insert_with(|| previous.clone());
+        }
+
+        let resume_available = self.should_resume_session(&updated);
+
+        Ok(ChangeAgentProviderOutcome {
+            previous,
+            running,
+            resume_available,
+        })
+    }
+}
+
+/// Result of [`Engine::change_agent_provider`]: the data a surface needs to
+/// craft its own user-facing status message after a successful swap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeAgentProviderOutcome {
+    /// The provider the session used before the swap.
+    pub previous: ProviderKind,
+    /// Whether a provider was still running on the session's PTY at swap time.
+    /// When true, the swap takes effect only after the user exits and relaunches.
+    pub running: bool,
+    /// Whether the newly-selected provider can resume a prior conversation on
+    /// this worktree (it supports resume and has been launched here before).
+    pub resume_available: bool,
 }
 
 #[cfg(test)]
@@ -1267,5 +1332,120 @@ mod tests {
             !engine.branch_sync_worker_started.load(Ordering::Relaxed),
             "disabled config spawns nothing, so the guard means 'thread live' and stays false"
         );
+    }
+
+    // -- change_agent_provider (the extracted engine half of the TUI's
+    //    apply_change_agent_provider) ----------------------------------------
+
+    #[test]
+    fn change_agent_provider_swaps_and_persists_when_stopped() {
+        let (mut engine, _tmp) = test_engine();
+        // sample_session ships with provider "claude"; swap to "codex".
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let outcome = engine
+            .change_agent_provider("s1", ProviderKind::new("codex"))
+            .expect("swap provider");
+
+        assert!(!outcome.running, "no PTY is running for this session");
+        assert_eq!(outcome.previous.as_str(), "claude");
+        // codex was never launched here, so resume is unavailable.
+        assert!(!outcome.resume_available);
+        assert_eq!(engine.sessions[0].provider.as_str(), "codex");
+        // No pin is created when nothing is running.
+        assert!(engine.running_provider_pins.is_empty());
+
+        // Persisted: a fresh load from the same SQLite file sees the new provider.
+        let reloaded = engine.session_store.load_sessions().expect("reload");
+        let s = reloaded.iter().find(|s| s.id == "s1").expect("row");
+        assert_eq!(s.provider.as_str(), "codex");
+    }
+
+    #[test]
+    fn change_agent_provider_reports_resume_for_previously_started_provider() {
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat");
+        // codex was launched here before; codex supports resume_args, so the
+        // swap back should advertise resume.
+        session.provider = ProviderKind::new("claude");
+        session.started_providers = vec!["codex".to_string()];
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let outcome = engine
+            .change_agent_provider("s1", ProviderKind::new("codex"))
+            .expect("swap provider");
+        assert!(
+            outcome.resume_available,
+            "codex ran here earlier and supports resume"
+        );
+    }
+
+    #[test]
+    fn change_agent_provider_pins_previous_when_running() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.provider = ProviderKind::new("claude");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        // Spawn a real `cat` PTY so the session counts as running.
+        let client = crate::pty::PtyClient::spawn_with_env(
+            "cat",
+            &[],
+            worktree.path(),
+            24,
+            80,
+            engine.config.ui.agent_scrollback_lines,
+            &[],
+        )
+        .expect("spawn cat provider");
+        engine.providers.insert("s1".to_string(), client);
+
+        let outcome = engine
+            .change_agent_provider("s1", ProviderKind::new("codex"))
+            .expect("swap provider while running");
+
+        assert!(outcome.running, "a PTY is live for this session");
+        assert_eq!(outcome.previous.as_str(), "claude");
+        // The persisted provider is the new one...
+        assert_eq!(engine.sessions[0].provider.as_str(), "codex");
+        // ...but the previously-running provider is pinned so labels stay true.
+        assert_eq!(
+            engine.running_provider_pins.get("s1").map(|p| p.as_str()),
+            Some("claude")
+        );
+
+        // A second swap while still running must NOT overwrite the pin: the PTY
+        // is still the original provider until the user relaunches.
+        engine
+            .change_agent_provider("s1", ProviderKind::new("gemini"))
+            .expect("second swap while running");
+        assert_eq!(
+            engine.running_provider_pins.get("s1").map(|p| p.as_str()),
+            Some("claude"),
+            "the pin records what's actually spawned, not the latest selection"
+        );
+
+        // Clean up so the PTY doesn't outlive the test.
+        engine.providers.remove("s1");
+    }
+
+    #[test]
+    fn change_agent_provider_unknown_session_errors() {
+        let (mut engine, _tmp) = test_engine();
+        let err = engine
+            .change_agent_provider("ghost", ProviderKind::new("codex"))
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown session"), "err: {err}");
     }
 }

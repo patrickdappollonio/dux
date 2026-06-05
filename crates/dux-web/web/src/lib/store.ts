@@ -95,6 +95,11 @@ export interface DuxState {
   // title (or empty, so the placeholder shows the branch name).
   renameTarget: string | null
   renameDraft: string
+  // The session pending a provider swap, or null. The dialog pre-selects the
+  // session's current provider; the swap takes effect on the next launch
+  // (mirroring the TUI's `change-agent-provider`, which never kills a running
+  // agent — it changes the provider for the next reconnect).
+  changeProviderTarget: string | null
   // New-agent dialog state lives in the store (like `commitDraft`) so the input
   // is fully store-controlled: the server's generated-name reply fills it via an
   // event-driven callback, never a set-state-in-effect. Mirrors the TUI prompt.
@@ -178,6 +183,7 @@ let state: DuxState = {
   createAgentTarget: null,
   renameTarget: null,
   renameDraft: "",
+  changeProviderTarget: null,
   createAgentDraft: "",
   createAgentRandomize: false,
   createAgentGeneratedName: null,
@@ -571,6 +577,27 @@ export function submitRename(): void {
   if (!id) return
   renameSession(id, state.renameDraft.trim())
   closeRename()
+}
+
+// Open the change-provider dialog for a session. The dialog pre-selects the
+// session's current provider from the ViewModel.
+export function openChangeProvider(sessionId: string): void {
+  setState({ changeProviderTarget: sessionId })
+}
+
+export function closeChangeProvider(): void {
+  setState({ changeProviderTarget: null })
+}
+
+// Ask the server to swap which provider a session uses. The server validates
+// the provider against the configured list, persists it for the next launch,
+// and reports the outcome (swapped / already-uses-it / still-running) on the
+// status stream — nothing to do here but fire the command.
+export function changeAgentProvider(sessionId: string, provider: string): void {
+  socket.sendCommand("change_agent_provider", {
+    session_id: sessionId,
+    provider,
+  })
 }
 
 // Ask the server to reconnect (relaunch) an agent. `force` starts a fresh
