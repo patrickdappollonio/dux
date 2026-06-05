@@ -13,7 +13,7 @@ import {
   deleteTerminal,
   useDux,
 } from "@/lib/store"
-import { terminalTitle } from "@/lib/terminals"
+import { terminalForeground } from "@/lib/terminals"
 import type { TerminalView } from "@/lib/types"
 
 // Confirmation before closing a companion terminal. The TUI ALWAYS confirms
@@ -47,8 +47,11 @@ export function ConfirmDeleteTerminalDialog() {
   }, [deleteTerminalTarget, terminal])
 
   const isOpen = deleteTerminalTarget !== null && terminal !== undefined
-  const title = terminal ? terminalTitle(terminal) : ""
-  const foreground = terminal?.foreground_cmd?.trim()
+  // The title names the STATIC label like the TUI's prompt does ("delete
+  // Terminal 1?"); the running command appears in the warning body instead —
+  // avoiding the redundant "Close vim?" + "vim is running…" phrasing.
+  const title = terminal?.label ?? ""
+  const foreground = terminal ? terminalForeground(terminal) : null
 
   function handleConfirm() {
     if (!deleteTerminalTarget) return

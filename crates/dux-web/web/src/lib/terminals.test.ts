@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { terminalTitle } from "./terminals"
+import { terminalForeground, terminalTitle } from "./terminals"
 import type { TerminalView } from "./types"
 
 function term(overrides: Partial<TerminalView>): TerminalView {
@@ -13,50 +13,70 @@ function term(overrides: Partial<TerminalView>): TerminalView {
   }
 }
 
-describe("terminalTitle", () => {
-  it("falls back to the label when no foreground command is running", () => {
-    expect(terminalTitle(term({ foreground_cmd: null }))).toBe("Terminal 1")
+describe("terminalForeground", () => {
+  it("is null when no foreground command is running", () => {
+    expect(terminalForeground(term({ foreground_cmd: null }))).toBeNull()
   })
 
-  it("shows the foreground command when one is running", () => {
-    expect(terminalTitle(term({ foreground_cmd: "vim" }))).toBe("vim")
+  it("returns the running command", () => {
+    expect(terminalForeground(term({ foreground_cmd: "vim" }))).toBe("vim")
   })
 
-  it("foreground command takes precedence over the label", () => {
-    expect(
-      terminalTitle(term({ label: "Terminal 1", foreground_cmd: "htop" })),
-    ).toBe("htop")
-  })
-
-  it("trims surrounding whitespace from the foreground command", () => {
-    expect(terminalTitle(term({ foreground_cmd: "  npm  " }))).toBe("npm")
+  it("trims surrounding whitespace", () => {
+    expect(terminalForeground(term({ foreground_cmd: "  npm  " }))).toBe("npm")
   })
 
   it('strips a leading "TERM " prefix', () => {
-    expect(terminalTitle(term({ foreground_cmd: "TERM vim" }))).toBe("vim")
+    expect(terminalForeground(term({ foreground_cmd: "TERM vim" }))).toBe("vim")
   })
 
   it('strips a leading lowercase "term " prefix', () => {
-    expect(terminalTitle(term({ foreground_cmd: "term vim" }))).toBe("vim")
+    expect(terminalForeground(term({ foreground_cmd: "term vim" }))).toBe("vim")
   })
 
-  it("falls back to the label when the command is empty", () => {
-    expect(terminalTitle(term({ foreground_cmd: "" }))).toBe("Terminal 1")
+  it("is null when the command is empty", () => {
+    expect(terminalForeground(term({ foreground_cmd: "" }))).toBeNull()
   })
 
-  it("falls back to the label when the command is only whitespace", () => {
-    expect(terminalTitle(term({ foreground_cmd: "   " }))).toBe("Terminal 1")
+  it("is null when the command is only whitespace", () => {
+    expect(terminalForeground(term({ foreground_cmd: "   " }))).toBeNull()
   })
 
-  it('strips the prefix even when a trailing space leaves only "TERM"', () => {
+  it('keeps a bare "TERM" whose trailing space was trimmed away', () => {
     // The TUI trims before stripping, so "TERM " becomes "TERM" (no trailing
     // space to match the "TERM " prefix) and is shown verbatim — not dropped.
-    expect(terminalTitle(term({ foreground_cmd: "TERM " }))).toBe("TERM")
+    expect(terminalForeground(term({ foreground_cmd: "TERM " }))).toBe("TERM")
   })
 
   it("trims the command before checking the prefix", () => {
     // Surrounding whitespace is removed first, so a padded "TERM vim" still
     // matches the prefix and yields the bare command.
-    expect(terminalTitle(term({ foreground_cmd: "  TERM vim  " }))).toBe("vim")
+    expect(terminalForeground(term({ foreground_cmd: "  TERM vim  " }))).toBe(
+      "vim",
+    )
+  })
+})
+
+describe("terminalTitle", () => {
+  it("shows just the label when idle", () => {
+    expect(terminalTitle(term({ foreground_cmd: null }))).toBe("Terminal 1")
+  })
+
+  it("shows the TUI left-pane composite when a command is running", () => {
+    // Mirrors render.rs ~691-702: "{cmd} · {label}" so the running process is
+    // prominent while the terminal's stable identity stays visible.
+    expect(terminalTitle(term({ foreground_cmd: "vim" }))).toBe(
+      "vim · Terminal 1",
+    )
+  })
+
+  it("falls back to just the label when the command normalizes to empty", () => {
+    expect(terminalTitle(term({ foreground_cmd: "   " }))).toBe("Terminal 1")
+  })
+
+  it("normalizes the command inside the composite", () => {
+    expect(terminalTitle(term({ foreground_cmd: "  TERM htop  " }))).toBe(
+      "htop · Terminal 1",
+    )
   })
 })
