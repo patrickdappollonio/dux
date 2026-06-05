@@ -18,6 +18,13 @@ export type SelectedTarget =
 // reads this — it renders all three panes at once.
 export type MobileScreen = "home" | "terminal" | "changes"
 
+// The name-input dialog (one component, two modes) targets either a fresh agent
+// in a project or a fork of an existing session. The shared draft/randomize/
+// generated/pending state below drives both; only the dispatch target differs.
+export type CreateAgentTarget =
+  | { kind: "new"; projectId: string }
+  | { kind: "fork"; sessionId: string }
+
 // The file pending discard-confirmation, or null. `untracked` drives the
 // dialog's warning copy (a tracked file is restored from HEAD; an untracked
 // file is permanently deleted). Derived from the file's git status at the moment
@@ -54,6 +61,12 @@ export interface DuxState {
   // whether an agent or one of its terminals is focused. Kept in `state` (not
   // recomputed per snapshot) so `getSnapshot` stays referentially stable.
   selectedSessionId: string | null
+  // Bumped on every reconnect/force-reconnect so the focused TerminalPane
+  // remounts and re-subscribes. The reconnect replaces the server-side provider
+  // with a new PtyClient; the old PtyClient's byte forwarder is dead, so an
+  // already-focused pane (same target id) must re-issue `subscribe` to attach to
+  // the new provider. Folded into the pane's React key alongside the target id.
+  terminalEpoch: number
   lastMessage: string
   commitTarget: string | null
   commitDraft: string
@@ -71,7 +84,13 @@ export interface DuxState {
   browseEntries: DirEntryView[]
   browseLoading: boolean
   removeProjectTarget: string | null
-  createAgentTarget: string | null
+  // The name-input dialog target: a fresh agent in a project, a fork of an
+  // existing session, or null (closed). One dialog component switches on `kind`.
+  createAgentTarget: CreateAgentTarget | null
+  // The session pending a rename, or null. The dialog pre-fills the current
+  // title (or empty, so the placeholder shows the branch name).
+  renameTarget: string | null
+  renameDraft: string
   // New-agent dialog state lives in the store (like `commitDraft`) so the input
   // is fully store-controlled: the server's generated-name reply fills it via an
   // event-driven callback, never a set-state-in-effect. Mirrors the TUI prompt.
@@ -124,6 +143,7 @@ let state: DuxState = {
   conn: "connecting",
   selectedTarget: null,
   selectedSessionId: null,
+  terminalEpoch: 0,
   lastMessage: "",
   commitTarget: null,
   commitDraft: "",
@@ -138,6 +158,8 @@ let state: DuxState = {
   browseLoading: false,
   removeProjectTarget: null,
   createAgentTarget: null,
+  renameTarget: null,
+  renameDraft: "",
   createAgentDraft: "",
   createAgentRandomize: false,
   createAgentGeneratedName: null,
@@ -500,6 +522,54 @@ export function deleteSession(sessionId: string, deleteWorktree: boolean): void 
   })
 }
 
+// Open the rename dialog for a session, pre-filling the current custom title
+// (empty when none, so the placeholder shows the branch name).
+export function openRename(sessionId: string): void {
+  const session = state.viewModel?.sessions.find((s) => s.id === sessionId)
+  setState({ renameTarget: sessionId, renameDraft: session?.title ?? "" })
+}
+
+export function closeRename(): void {
+  setState({ renameTarget: null, renameDraft: "" })
+}
+
+export function setRenameDraft(raw: string): void {
+  // Sanitize like the new-agent input: a custom title is validated as an agent
+  // name server-side, so keep the dialog from accepting characters the server
+  // would reject. Empty stays empty (clears the title back to the branch name).
+  setState({ renameDraft: sanitizeAgentName(raw) })
+}
+
+// Ask the server to set a session's display title. An empty title clears it
+// back to the branch name; a non-empty title is validated server-side.
+export function renameSession(sessionId: string, title: string): void {
+  socket.sendCommand("rename_session", { session_id: sessionId, title })
+}
+
+// Submit the rename dialog and close it.
+export function submitRename(): void {
+  const id = state.renameTarget
+  if (!id) return
+  renameSession(id, state.renameDraft.trim())
+  closeRename()
+}
+
+// Ask the server to reconnect (relaunch) an agent. `force` starts a fresh
+// session with no resume args (the TUI's force-reconnect); the default resumes
+// the prior conversation when the provider supports it. Focus the session and
+// bump `terminalEpoch` so the pane remounts and re-subscribes — the reconnect
+// swaps in a new server-side provider, and the previously-attached forwarder is
+// dead, so even an already-focused pane must re-issue `subscribe`. The server
+// defers that subscribe until the freshly launched provider comes up.
+export function reconnectSession(sessionId: string, force: boolean): void {
+  socket.sendCommand("reconnect_session", { session_id: sessionId, force })
+  setState({
+    selectedTarget: { kind: "agent", sessionId },
+    selectedSessionId: sessionId,
+    terminalEpoch: state.terminalEpoch + 1,
+  })
+}
+
 export function openGlobalEnv(): void {
   setState({ globalEnvOpen: true })
 }
@@ -556,9 +626,26 @@ export function removeProject(projectId: string): void {
 // right away so the input previews it. This runs in the click handler that opens
 // the dialog — never an effect — so there is no set-state-in-effect.
 export function openCreateAgent(projectId: string): void {
+  openNameDialog({ kind: "new", projectId })
+}
+
+// Open the name dialog in fork mode for an existing session. Reuses the exact
+// new-agent UX (sanitized input, pet-name checkbox, generated-name plumbing);
+// only the dispatch target differs. Unlike create, a fork REQUIRES a name (the
+// server rejects an empty fork), so the dialog's Fork button is disabled while
+// the input is empty.
+export function openForkAgent(sessionId: string): void {
+  openNameDialog({ kind: "fork", sessionId })
+}
+
+// Shared opener for both modes of the name dialog. Pre-checks the randomize
+// default and requests a name right away so the input previews it, exactly like
+// the TUI prompt. Runs in the click handler that opens the dialog — never an
+// effect — so there is no set-state-in-effect.
+function openNameDialog(target: CreateAgentTarget): void {
   const randomize = state.viewModel?.randomize_agent_names_by_default ?? false
   setState({
-    createAgentTarget: projectId,
+    createAgentTarget: target,
     createAgentDraft: "",
     createAgentRandomize: randomize,
     createAgentGeneratedName: null,
@@ -614,6 +701,25 @@ export function toggleCreateAgentRandomize(): void {
 // never empty, so the empty path is the unchecked-and-blank case.
 export function createAgent(projectId: string, name: string): void {
   socket.sendCommand("create_agent", { project_id: projectId, name })
+}
+
+// Ask the server to fork an existing session into a fresh branched worktree.
+// Unlike create, a fork requires a non-empty name (the server rejects empty).
+export function forkAgent(sessionId: string, name: string): void {
+  socket.sendCommand("fork_session", { session_id: sessionId, name })
+}
+
+// Submit the name dialog: dispatch create or fork based on the current target,
+// then close. Mirrors the TUI, where the same name prompt drives both flows.
+export function submitNameDialog(name: string): void {
+  const target = state.createAgentTarget
+  if (!target) return
+  if (target.kind === "new") {
+    createAgent(target.projectId, name)
+  } else {
+    forkAgent(target.sessionId, name)
+  }
+  closeCreateAgent()
 }
 
 // Optimistically reorder a project's sessions, then tell the server. `orderedIds`

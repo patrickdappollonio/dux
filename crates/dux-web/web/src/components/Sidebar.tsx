@@ -19,9 +19,13 @@ import {
   Folder,
   FolderOpen,
   GitCommitHorizontal,
+  GitFork,
   GitPullRequest,
+  Pencil,
+  Plug,
   Plus,
   RefreshCw,
+  RotateCcw,
   Send,
   Settings,
   SquareTerminal,
@@ -87,8 +91,11 @@ import {
   openCreateAgent,
   openDelete,
   openDeleteTerminal,
+  openForkAgent,
   openProjectSettings,
   openRemoveProject,
+  openRename,
+  reconnectSession,
   reorderProjects,
   reorderSessions,
   selectSession,
@@ -265,6 +272,23 @@ function SessionSubItem({
             <DropdownMenuItem onClick={() => selectSession(session.id)}>
               <Terminal />
               Stream
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => reconnectSession(session.id, false)}>
+              <Plug />
+              Reconnect
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => reconnectSession(session.id, true)}>
+              <RotateCcw />
+              Force reconnect (fresh)
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => openRename(session.id)}>
+              <Pencil />
+              Rename…
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => openForkAgent(session.id)}>
+              <GitFork />
+              Fork agent…
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={handleToggleAutoReopen}>

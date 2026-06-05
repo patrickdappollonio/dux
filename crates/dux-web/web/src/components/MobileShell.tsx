@@ -19,9 +19,13 @@ import {
   Ellipsis,
   FolderOpen,
   GitCommitHorizontal,
+  GitFork,
   GitPullRequest,
+  Pencil,
+  Plug,
   Plus,
   RefreshCw,
+  RotateCcw,
   Search,
   Send,
   Settings,
@@ -69,8 +73,11 @@ import {
   openCreateAgent,
   openDelete,
   openDeleteTerminal,
+  openForkAgent,
   openProjectSettings,
   openRemoveProject,
+  openRename,
+  reconnectSession,
   reorderProjects,
   reorderSessions,
   selectSession,
@@ -114,6 +121,23 @@ function SessionActions({ session }: { session: SessionView }) {
       <DropdownMenuItem onClick={() => selectAndOpen(session.id)}>
         <SquareTerminal />
         Stream
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => reconnectSession(session.id, false)}>
+        <Plug />
+        Reconnect
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => reconnectSession(session.id, true)}>
+        <RotateCcw />
+        Force reconnect (fresh)
+      </DropdownMenuItem>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem onClick={() => openRename(session.id)}>
+        <Pencil />
+        Rename…
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => openForkAgent(session.id)}>
+        <GitFork />
+        Fork agent…
       </DropdownMenuItem>
       <DropdownMenuSeparator />
       <DropdownMenuItem onClick={handleToggleAutoReopen}>
@@ -585,7 +609,7 @@ function HomeScreen() {
 // The focused-terminal spoke: a slim top bar (back · project·branch · changes
 // count · ⋯ actions) over the full-screen shared terminal.
 function TerminalScreen() {
-  const { viewModel, selectedSessionId, selectedTarget } = useDux()
+  const { viewModel, selectedSessionId, selectedTarget, terminalEpoch } = useDux()
   const session = viewModel?.sessions.find((s) => s.id === selectedSessionId)
   const project = session
     ? viewModel?.projects.find((p) => p.id === session.project_id)
@@ -605,6 +629,10 @@ function TerminalScreen() {
     selectedTarget.kind === "terminal"
       ? selectedTarget.terminalId
       : selectedTarget.sessionId
+  // Remount on reconnect (see App.tsx TerminalArea): a bumped epoch forces the
+  // focused agent pane to re-subscribe to the freshly launched provider.
+  const paneKey =
+    selectedTarget.kind === "agent" ? `${targetId}:${terminalEpoch}` : targetId
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
@@ -659,7 +687,7 @@ function TerminalScreen() {
         <ChunkBoundary>
           <Suspense fallback={null}>
             <LazyTerminalPane
-              key={targetId}
+              key={paneKey}
               kind={selectedTarget.kind}
               id={targetId}
             />

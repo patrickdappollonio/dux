@@ -16,7 +16,7 @@ use crate::engine::{
 };
 use crate::model::{Project, ProjectBranchStatus, ProviderKind};
 use crate::statusline::StatusTone;
-use crate::worker::{CreateAgentRequest, ProjectPersistenceAction, PullTarget};
+use crate::worker::{AgentLaunchKind, CreateAgentRequest, ProjectPersistenceAction, PullTarget};
 
 /// A command as received from a generic transport (e.g. the web WebSocket).
 /// `#[serde(tag = "command", content = "args")]` matches the `{ "command": "...",
@@ -110,6 +110,34 @@ pub enum WireCommand {
     CreateAgent {
         project_id: String,
         name: String,
+    },
+    /// Fork an existing agent session into a fresh worktree branched from the
+    /// source session's branch. `name` follows the same rules as `CreateAgent`:
+    /// empty auto-generates a branch name (server pet-name path), a non-empty
+    /// name becomes the custom branch/agent name. Mirrors the TUI's
+    /// `fork_selected_session`, which builds a `CreateAgentRequest::ForkSession`.
+    ForkSession {
+        session_id: String,
+        name: String,
+    },
+    /// Rename an agent session's display title. `title` is trimmed; an empty
+    /// title clears the custom name back to `None`, so the row reverts to
+    /// showing the branch name. A non-empty title is validated with the same
+    /// agent-name rules the TUI rename enforces. This is title-only: unlike the
+    /// TUI prompt (which can also rename the git branch via a checkbox), the web
+    /// rename never touches the branch — see `rename_session` for the rationale.
+    RenameSession {
+        session_id: String,
+        title: String,
+    },
+    /// Reconnect (relaunch) an agent session's provider. `force == false`
+    /// resumes the prior conversation when the provider supports it (the
+    /// TUI's `reconnect_selected_session`); `force == true` always starts a
+    /// fresh session with no resume args and first tears down any running
+    /// provider (the TUI's `force_reconnect_agent`).
+    ReconnectSession {
+        session_id: String,
+        force: bool,
     },
     /// Persist a custom display order for a project's agent sessions.
     /// `session_ids` must list exactly that project's sessions (the engine
@@ -272,6 +300,22 @@ fn discard_classify(worktree_path: &std::path::Path, path: &str) -> anyhow::Resu
 impl Engine {
     /// Reconstruct and dispatch a wire command, returning a wire-safe outcome.
     pub fn apply_wire(&mut self, command: WireCommand) -> anyhow::Result<WireCommandOutcome> {
+        // Rename and Reconnect need `&mut self` and don't map cleanly onto a
+        // single `Command`, so they're handled directly here rather than via
+        // `wire_to_command`/`apply`.
+        match command {
+            WireCommand::RenameSession { session_id, title } => {
+                let status = self.rename_session(&session_id, &title)?;
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
+                });
+            }
+            WireCommand::ReconnectSession { session_id, force } => {
+                let status = self.reconnect_session(&session_id, force)?;
+                return Ok(WireCommandOutcome { status });
+            }
+            _ => {}
+        }
         let core = self.wire_to_command(command)?;
         let reaction = self.apply(core)?;
         let mut status = wire_status_from_reaction(&reaction);
@@ -279,6 +323,206 @@ impl Engine {
             status = self.drive_delete_followup(&reaction).into_iter().next();
         }
         Ok(WireCommandOutcome { status })
+    }
+
+    /// Rename an agent session's display title, mirroring the title half of the
+    /// TUI's `apply_rename_session`. The custom `title` is trimmed; a non-empty
+    /// title is validated with the same `is_valid_agent_name` backstop the TUI
+    /// enforces and stored as `Some(title)`; an empty title clears it back to
+    /// `None` so the row reverts to the branch name.
+    ///
+    /// Deliberate deviation from the TUI prompt: that prompt also renames the
+    /// git branch by default (a `rename_branch` checkbox) and rejects an empty
+    /// name outright. The web rename is title-only — it never touches the git
+    /// branch — so clearing the title is the only way to revert to the branch
+    /// name, which is why an empty title clears rather than errors here.
+    fn rename_session(&mut self, session_id: &str, title: &str) -> anyhow::Result<WireStatus> {
+        let trimmed = title.trim();
+        let new_title = if trimmed.is_empty() {
+            None
+        } else {
+            if !crate::git::is_valid_agent_name(trimmed) {
+                anyhow::bail!(
+                    "Invalid agent name \"{trimmed}\". Use only letters, digits, dashes, \
+                     underscores and slashes; it must start with a letter or digit, must \
+                     not contain \"//\", and must not end with \"/\"."
+                );
+            }
+            Some(trimmed.to_string())
+        };
+        let session = self
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == session_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
+        session.title = new_title.clone();
+        session.updated_at = chrono::Utc::now();
+        // Re-borrow immutably to persist (the mutable borrow above has ended).
+        if let Some(session) = self.sessions.iter().find(|s| s.id == session_id) {
+            self.session_store.upsert_session(session)?;
+        }
+        let message = match &new_title {
+            Some(name) => format!("Renamed agent to \"{name}\"."),
+            None => {
+                let branch = self
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == session_id)
+                    .map(|s| s.branch_name.clone())
+                    .unwrap_or_default();
+                format!("Cleared the custom name. Agent shows its branch name \"{branch}\" again.")
+            }
+        };
+        Ok(WireStatus::new("info", message))
+    }
+
+    /// Reconnect (relaunch) an agent session's provider. Mirrors the TUI's
+    /// `reconnect_selected_session` (`force == false`) and `force_reconnect_agent`
+    /// (`force == true`):
+    ///
+    /// - Both require the session to exist and its worktree to still be present.
+    /// - Normal reconnect REFUSES while a provider is already connected
+    ///   (matching the TUI's "already connected" early-return); force reconnect
+    ///   first tears down any running provider + pins + activity + resume
+    ///   candidate, then starts fresh with no resume args.
+    /// - Normal reconnect resumes the prior conversation when the provider
+    ///   supports it (`should_resume_session`); force never resumes.
+    ///
+    /// Deliberate substitution: the TUI sources the PTY size from view state
+    /// (`last_pty_size`); the web has no such state, so it uses the same default
+    /// `(24, 80)` the subscribe-launch path already uses (`launch_agent`). The
+    /// focused TerminalPane re-attaches via the existing subscribe machinery
+    /// once the new provider comes up.
+    ///
+    /// Returns the busy status to surface synchronously (matching the TUI's
+    /// `set_busy` after a successful dispatch), or the launch view's status when
+    /// the dispatch was refused (e.g. a launch already in flight).
+    fn reconnect_session(
+        &mut self,
+        session_id: &str,
+        force: bool,
+    ) -> anyhow::Result<Option<WireStatus>> {
+        let session = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
+
+        // Check order mirrors the TUI exactly: normal reconnect tests
+        // "already connected" first (`reconnect_selected_session`), then the
+        // worktree; force reconnect has no connected-check (it kills the
+        // provider) and only guards the worktree (`force_reconnect_agent`).
+        if !force && self.providers.contains_key(&session.id) {
+            return Ok(Some(WireStatus::new(
+                "info",
+                format!("Agent \"{}\" is already connected.", session.branch_name),
+            )));
+        }
+
+        if !std::path::Path::new(&session.worktree_path).exists() {
+            anyhow::bail!(
+                "Worktree for agent \"{}\" no longer exists. Delete and re-create the agent.",
+                session.branch_name
+            );
+        }
+
+        if force {
+            // Kill the existing provider and clear all resume state so the
+            // relaunch starts genuinely fresh (mirrors `force_reconnect_agent`).
+            self.providers.remove(&session.id);
+            self.running_provider_pins.remove(&session.id);
+            self.pty_activity.remove(&session.id);
+            self.resume_fallback_candidates.remove(&session.id);
+        }
+
+        // Detach any other session holding the same worktree's live PTY. The
+        // engine method marks it Detached and clears provider/pin/candidate;
+        // mirror the TUI App wrapper by also clearing its `pty_activity` entry.
+        let detached_label = self
+            .detach_conflicting_worktree_session(&session.worktree_path, &session.id)
+            .map(|detached| {
+                self.pty_activity.remove(&detached.id);
+                detached.label
+            });
+
+        let use_resume = if force {
+            false
+        } else {
+            self.should_resume_session(&session)
+        };
+        let proj_name = self.project_name_for_session(&session);
+        let mut msg = if use_resume {
+            format!(
+                "Resumed {} agent \"{}\" in project \"{}\".",
+                session.provider.as_str(),
+                session.branch_name,
+                proj_name
+            )
+        } else {
+            format!(
+                "Started fresh {} session for agent \"{}\" in project \"{}\". Use /sessions inside the agent to restore a prior conversation.",
+                session.provider.as_str(),
+                session.branch_name,
+                proj_name
+            )
+        };
+        if let Some(detached) = &detached_label {
+            msg.push_str(&format!(
+                " Agent \"{}\" was detached to avoid worktree conflicts.",
+                detached,
+            ));
+        }
+        if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
+            && project.default_provider != session.provider
+        {
+            let provider_label = if self.project_uses_explicit_default_provider(&project.id) {
+                "current project provider"
+            } else {
+                "current global default provider"
+            };
+            msg.push_str(&format!(
+                " Note: this agent uses {}. Your {provider_label} is {}.",
+                session.provider.as_str(),
+                project.default_provider.as_str(),
+            ));
+        }
+
+        let branch_name = session.branch_name.clone();
+        let kind = if force {
+            AgentLaunchKind::ForceReconnect {
+                status_message: msg,
+            }
+        } else {
+            AgentLaunchKind::Reconnect {
+                status_message: msg,
+            }
+        };
+        // The TUI sources `last_pty_size` from view state; the web has none, so
+        // reuse the subscribe-launch default `(24, 80)` (rows, cols).
+        let request = self.build_agent_launch_request(session, use_resume, (24, 80), kind);
+        let reaction = self.apply(Command::DispatchAgentLaunch {
+            request: Box::new(request),
+        })?;
+        // `DispatchAgentLaunch` returns a `DispatchAgentLaunchView`, which
+        // `wire_status_from_reaction` doesn't surface. Mirror the TUI: on a
+        // successful dispatch (`launched`) show the busy status; otherwise
+        // surface the view's own status (e.g. "already launching").
+        let busy = if force {
+            format!("Starting fresh agent \"{branch_name}\"...")
+        } else {
+            format!("Launching agent \"{branch_name}\"...")
+        };
+        match reaction {
+            EventReaction::DispatchAgentLaunchView(view) => {
+                if view.launched {
+                    Ok(Some(WireStatus::new("busy", busy)))
+                } else {
+                    Ok(view.status.as_ref().map(WireStatus::from_update))
+                }
+            }
+            other => Ok(wire_status_from_reaction(&other)),
+        }
     }
 
     /// Drive a delete-related reaction to completion, returning user-facing
@@ -553,6 +797,72 @@ impl Engine {
                     busy_message: "Creating a new agent\u{2026}".to_string(),
                     term_size: (80, 24),
                 }
+            }
+            WireCommand::ForkSession { session_id, name } => {
+                let source_session = self
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == session_id)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
+                let project = self
+                    .projects
+                    .iter()
+                    .find(|p| p.id == source_session.project_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("unknown project: {}", source_session.project_id)
+                    })?;
+                // `source_label` mirrors the TUI's `session_label`: the custom
+                // title if set, otherwise the branch name.
+                let source_label = source_session
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| source_session.branch_name.clone());
+                let trimmed = name.trim();
+                // Unlike CreateAgent, a fork REQUIRES a name: the create-agent
+                // worker rejects a `None` custom_name with "Forking an agent
+                // requires choosing a name first.", and the TUI's name prompt
+                // refuses an empty name for every request kind. Mirror the
+                // prompt's rejection here so the failure is immediate and clear
+                // rather than surfacing later from the worker.
+                if trimmed.is_empty() {
+                    anyhow::bail!("Agent name cannot be empty.");
+                }
+                // Same backstop as CreateAgent: reject names git would refuse as
+                // a ref before dispatching the worker.
+                if !crate::git::is_valid_agent_name(trimmed) {
+                    anyhow::bail!(
+                        "Invalid agent name \"{trimmed}\". Use only letters, digits, dashes, \
+                         underscores and slashes; it must start with a letter or digit, must \
+                         not contain \"//\", and must not end with \"/\"."
+                    );
+                }
+                let name = trimmed.to_string();
+                // Mirror the TUI's fork busy copy (input.rs NameNewAgent confirm).
+                let busy_message = format!(
+                    "Forking agent \"{source_label}\" as \"{name}\" by cloning its current \
+                     worktree contents into a fresh session...",
+                );
+                let request = CreateAgentRequest::ForkSession {
+                    project,
+                    source_session: Box::new(source_session),
+                    source_label,
+                    custom_name: Some(name),
+                };
+                Command::DispatchCreateAgentRequest {
+                    request: Box::new(request),
+                    busy_message,
+                    term_size: (80, 24),
+                }
+            }
+            // Rename and Reconnect are NOT reconstructible into a single
+            // `Command` — both need `&mut self` (rename persists in place;
+            // reconnect tears down provider state and surfaces a launch view's
+            // status synchronously). `apply_wire` intercepts them before this
+            // immutable mapping; reaching here means that interception broke.
+            WireCommand::RenameSession { .. } | WireCommand::ReconnectSession { .. } => {
+                unreachable!("rename/reconnect are handled in apply_wire before wire_to_command")
             }
             WireCommand::ReorderSessions {
                 project_id,
@@ -1609,6 +1919,358 @@ mod tests {
                 && statuses[0].message.contains("removed its worktree"),
             "unexpected status: {}",
             statuses[0].message
+        );
+    }
+
+    // ---- G2: fork ----------------------------------------------------------
+
+    #[test]
+    fn wire_fork_session_deserializes() {
+        let json = r#"{"command":"fork_session","args":{"session_id":"s1","name":"feature-y"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::ForkSession {
+                session_id: "s1".to_string(),
+                name: "feature-y".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn wire_to_command_fork_session_builds_request() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        // `sample_session` sets title = Some("s1-title"); source_label must use it.
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+
+        let cmd = engine
+            .wire_to_command(WireCommand::ForkSession {
+                session_id: "s1".to_string(),
+                name: "feature-y".to_string(),
+            })
+            .expect("reconstruct");
+        match cmd {
+            Command::DispatchCreateAgentRequest {
+                request,
+                busy_message,
+                ..
+            } => match *request {
+                CreateAgentRequest::ForkSession {
+                    project,
+                    source_session,
+                    source_label,
+                    custom_name,
+                } => {
+                    assert_eq!(project.id, "p1");
+                    assert_eq!(source_session.id, "s1");
+                    // session_label precedence: title-or-branch.
+                    assert_eq!(source_label, "s1-title");
+                    assert_eq!(custom_name.as_deref(), Some("feature-y"));
+                    // Busy copy mirrors the TUI fork message.
+                    assert!(
+                        busy_message.contains("Forking agent \"s1-title\" as \"feature-y\""),
+                        "unexpected busy message: {busy_message}"
+                    );
+                }
+                other => panic!("expected ForkSession, got {other:?}"),
+            },
+            _ => panic!("expected Command::DispatchCreateAgentRequest variant"),
+        }
+    }
+
+    #[test]
+    fn wire_to_command_fork_session_label_falls_back_to_branch() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.title = None; // no custom title -> source_label is the branch.
+        engine.sessions.push(session);
+
+        let cmd = engine
+            .wire_to_command(WireCommand::ForkSession {
+                session_id: "s1".to_string(),
+                name: "feature-y".to_string(),
+            })
+            .expect("reconstruct");
+        match cmd {
+            Command::DispatchCreateAgentRequest { request, .. } => match *request {
+                CreateAgentRequest::ForkSession { source_label, .. } => {
+                    assert_eq!(source_label, "feat");
+                }
+                other => panic!("expected ForkSession, got {other:?}"),
+            },
+            _ => panic!("expected Command::DispatchCreateAgentRequest variant"),
+        }
+    }
+
+    #[test]
+    fn wire_to_command_fork_session_unknown_session_errors() {
+        let (engine, _tmp) = test_engine();
+        let err = engine
+            .wire_to_command(WireCommand::ForkSession {
+                session_id: "ghost".to_string(),
+                name: "feature-y".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown session"), "err: {err}");
+    }
+
+    #[test]
+    fn wire_to_command_fork_session_empty_name_errors() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        // Unlike CreateAgent, a fork requires a name (the worker would otherwise
+        // reject it). Mirror the TUI prompt's "cannot be empty" rejection.
+        for blank in ["", "   "] {
+            let err = engine
+                .wire_to_command(WireCommand::ForkSession {
+                    session_id: "s1".to_string(),
+                    name: blank.to_string(),
+                })
+                .map(|_| ())
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("cannot be empty"),
+                "blank {blank:?} err: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn wire_to_command_fork_session_rejects_invalid_name() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        for bad in ["-leading", "a//b", "trailing/", "with.dot"] {
+            let err = engine
+                .wire_to_command(WireCommand::ForkSession {
+                    session_id: "s1".to_string(),
+                    name: bad.to_string(),
+                })
+                .map(|_| ())
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("Invalid agent name"),
+                "bad {bad:?} err: {err}"
+            );
+        }
+    }
+
+    // ---- G2: rename --------------------------------------------------------
+
+    #[test]
+    fn wire_rename_session_deserializes() {
+        let json = r#"{"command":"rename_session","args":{"session_id":"s1","title":"My agent"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::RenameSession {
+                session_id: "s1".to_string(),
+                title: "My agent".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn apply_wire_rename_session_sets_title_and_persists() {
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat");
+        session.title = None;
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let outcome = engine
+            .apply_wire(WireCommand::RenameSession {
+                session_id: "s1".to_string(),
+                title: "  My-agent  ".to_string(),
+            })
+            .expect("apply_wire");
+        // Trimmed and stored in memory.
+        assert_eq!(
+            engine.sessions[0].title.as_deref(),
+            Some("My-agent"),
+            "title should be trimmed and set"
+        );
+        let status = outcome.status.expect("rename surfaces a status");
+        assert_eq!(status.tone, "info");
+        assert!(
+            status.message.contains("My-agent"),
+            "msg: {}",
+            status.message
+        );
+
+        // Persisted: a fresh load from the same SQLite file sees the new title.
+        let reloaded = engine
+            .session_store
+            .load_sessions()
+            .expect("reload sessions");
+        let s = reloaded.iter().find(|s| s.id == "s1").expect("session row");
+        assert_eq!(s.title.as_deref(), Some("My-agent"));
+    }
+
+    #[test]
+    fn apply_wire_rename_session_empty_clears_title() {
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat");
+        session.title = Some("old-name".to_string());
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let outcome = engine
+            .apply_wire(WireCommand::RenameSession {
+                session_id: "s1".to_string(),
+                title: "   ".to_string(),
+            })
+            .expect("apply_wire");
+        // Cleared back to None -> row shows the branch name again.
+        assert_eq!(engine.sessions[0].title, None);
+        let status = outcome.status.expect("clear surfaces a status");
+        assert!(
+            status.message.contains("feat"),
+            "clear message names the branch: {}",
+            status.message
+        );
+
+        let reloaded = engine
+            .session_store
+            .load_sessions()
+            .expect("reload sessions");
+        let s = reloaded.iter().find(|s| s.id == "s1").expect("session row");
+        assert_eq!(s.title, None, "cleared title should persist");
+    }
+
+    #[test]
+    fn apply_wire_rename_session_rejects_invalid_title() {
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        let err = engine
+            .apply_wire(WireCommand::RenameSession {
+                session_id: "s1".to_string(),
+                title: "bad name!".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("Invalid agent name"), "err: {err}");
+    }
+
+    #[test]
+    fn apply_wire_rename_session_unknown_errors() {
+        let (mut engine, _tmp) = test_engine();
+        let err = engine
+            .apply_wire(WireCommand::RenameSession {
+                session_id: "ghost".to_string(),
+                title: "x".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown session"), "err: {err}");
+    }
+
+    // ---- G2: reconnect -----------------------------------------------------
+
+    #[test]
+    fn wire_reconnect_session_deserializes() {
+        let json = r#"{"command":"reconnect_session","args":{"session_id":"s1","force":true}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::ReconnectSession {
+                session_id: "s1".to_string(),
+                force: true,
+            }
+        );
+    }
+
+    #[test]
+    fn apply_wire_reconnect_session_unknown_errors() {
+        let (mut engine, _tmp) = test_engine();
+        let err = engine
+            .apply_wire(WireCommand::ReconnectSession {
+                session_id: "ghost".to_string(),
+                force: false,
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown session"), "err: {err}");
+    }
+
+    #[test]
+    fn apply_wire_reconnect_session_missing_worktree_errors() {
+        let (mut engine, _tmp) = test_engine();
+        // sample_session points worktree_path at a path that does not exist.
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        let err = engine
+            .apply_wire(WireCommand::ReconnectSession {
+                session_id: "s1".to_string(),
+                force: false,
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("no longer exists"), "err: {err}");
+    }
+
+    #[test]
+    fn apply_wire_reconnect_session_dispatches_launch() {
+        let (mut engine, tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        let mut session = sample_session("s1", "p1", "feat");
+        // Point the worktree at a real, existing directory so the
+        // worktree-exists pre-check passes.
+        let wt = tmp.path().join("wt-s1");
+        std::fs::create_dir_all(&wt).unwrap();
+        session.worktree_path = wt.to_string_lossy().to_string();
+        engine.sessions.push(session);
+
+        let outcome = engine
+            .apply_wire(WireCommand::ReconnectSession {
+                session_id: "s1".to_string(),
+                force: false,
+            })
+            .expect("apply_wire");
+        // The launch was dispatched: the in-flight guard is set and a busy
+        // status was surfaced.
+        assert!(
+            engine.is_in_flight(&crate::engine::InFlightKey::AgentLaunch("s1".to_string())),
+            "reconnect should mark the launch in-flight"
+        );
+        let status = outcome.status.expect("reconnect surfaces a busy status");
+        assert_eq!(status.tone, "busy");
+        assert!(
+            status.message.contains("Launching agent \"feat\""),
+            "msg: {}",
+            status.message
+        );
+    }
+
+    #[test]
+    fn apply_wire_reconnect_session_force_uses_fresh_busy_copy() {
+        let (mut engine, tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        let mut session = sample_session("s1", "p1", "feat");
+        let wt = tmp.path().join("wt-s1");
+        std::fs::create_dir_all(&wt).unwrap();
+        session.worktree_path = wt.to_string_lossy().to_string();
+        engine.sessions.push(session);
+
+        let outcome = engine
+            .apply_wire(WireCommand::ReconnectSession {
+                session_id: "s1".to_string(),
+                force: true,
+            })
+            .expect("apply_wire");
+        let status = outcome
+            .status
+            .expect("force reconnect surfaces a busy status");
+        assert_eq!(status.tone, "busy");
+        // Force reconnect uses the "Starting fresh agent" copy, distinct from
+        // the normal reconnect's "Launching agent".
+        assert!(
+            status.message.contains("Starting fresh agent \"feat\""),
+            "msg: {}",
+            status.message
         );
     }
 }

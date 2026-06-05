@@ -12,19 +12,20 @@ import { Input } from "@/components/ui/input"
 import { isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
 import {
   closeCreateAgent,
-  createAgent,
   setCreateAgentDraft,
+  submitNameDialog,
   toggleCreateAgentRandomize,
   useDux,
 } from "@/lib/store"
 
-// The new-agent dialog mirrors the TUI prompt: the input filters characters live
-// (spaces -> dashes, disallowed chars dropped), and a "Use randomized pet name"
-// checkbox fills the input with a server-generated name when toggled on (and
-// clears it on toggle off only if the text is still that generated name). All of
-// that state lives in the store (like the commit draft), so the server's
-// generated-name reply fills the input through an event callback — never a
-// set-state-in-effect.
+// The name dialog mirrors the TUI prompt and serves two modes — creating a fresh
+// agent and forking an existing session — switched on the store's
+// `createAgentTarget.kind`. The input filters characters live (spaces -> dashes,
+// disallowed chars dropped), and a "Use randomized pet name" checkbox fills the
+// input with a server-generated name when toggled on (and clears it on toggle
+// off only if the text is still that generated name). All of that state lives in
+// the store (like the commit draft), so the server's generated-name reply fills
+// the input through an event callback — never a set-state-in-effect.
 export function CreateAgentDialog() {
   const {
     createAgentTarget,
@@ -34,22 +35,33 @@ export function CreateAgentDialog() {
     viewModel,
   } = useDux()
   const open = createAgentTarget !== null
-  const project = viewModel?.projects.find((p) => p.id === createAgentTarget)
+  const isFork = createAgentTarget?.kind === "fork"
+  const project =
+    createAgentTarget?.kind === "new"
+      ? viewModel?.projects.find((p) => p.id === createAgentTarget.projectId)
+      : undefined
+  const forkSession =
+    createAgentTarget?.kind === "fork"
+      ? viewModel?.sessions.find((s) => s.id === createAgentTarget.sessionId)
+      : undefined
   const projectName = project?.name ?? "project"
+  const sourceLabel = forkSession?.title || forkSession?.branch_name || "agent"
 
   // A generation request is in flight: show the spinner and disable the input
   // so a late reply can never clobber text typed in the meantime. Tracked
   // explicitly in the store — manually clearing the input does NOT fake this.
   const generating = createAgentNamePending
-  // The Create button is gated only when there's a non-empty invalid name (e.g.
-  // a trailing slash mid-typing). Empty is allowed: the server auto-generates,
-  // the equivalent outcome to the TUI's generate-a-pet-name path.
-  const invalid = createAgentDraft !== "" && !isValidAgentName(createAgentDraft)
+  // For a NEW agent, empty is allowed: the server auto-generates a pet name.
+  // For a FORK, a name is REQUIRED — the server rejects an empty fork — so the
+  // button is also gated on emptiness. Either way, a non-empty invalid name
+  // (e.g. a trailing slash mid-typing) disables the button.
+  const empty = createAgentDraft.trim() === ""
+  const invalidNonEmpty = !empty && !isValidAgentName(createAgentDraft)
+  const disabled = invalidNonEmpty || (isFork && empty)
 
-  function handleCreate() {
-    if (!createAgentTarget || invalid) return
-    createAgent(createAgentTarget, createAgentDraft.trim())
-    closeCreateAgent()
+  function handleSubmit() {
+    if (disabled) return
+    submitNameDialog(createAgentDraft.trim())
   }
 
   return (
@@ -61,10 +73,13 @@ export function CreateAgentDialog() {
     >
       <DialogContent showCloseButton={false}>
         <DialogHeader>
-          <DialogTitle>New agent in {projectName}</DialogTitle>
+          <DialogTitle>
+            {isFork ? `Fork ${sourceLabel}` : `New agent in ${projectName}`}
+          </DialogTitle>
           <DialogDescription>
-            Creates a git worktree + branch and launches the agent. Tick
-            &ldquo;Use randomized pet name&rdquo; to autofill a generated name.
+            {isFork
+              ? "Forks the agent into a new git worktree + branch (copying its current files) and launches a fresh session."
+              : "Creates a git worktree + branch and launches the agent. Tick “Use randomized pet name” to autofill a generated name."}
           </DialogDescription>
         </DialogHeader>
         <div className="relative">
@@ -89,11 +104,11 @@ export function CreateAgentDialog() {
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault()
-                handleCreate()
+                handleSubmit()
               }
             }}
-            placeholder="Branch name (optional)"
-            aria-invalid={invalid}
+            placeholder={isFork ? "Branch name" : "Branch name (optional)"}
+            aria-invalid={invalidNonEmpty}
             disabled={generating}
             autoFocus
           />
@@ -122,8 +137,8 @@ export function CreateAgentDialog() {
           <Button variant="outline" onClick={closeCreateAgent}>
             Cancel
           </Button>
-          <Button onClick={handleCreate} disabled={invalid}>
-            Create agent
+          <Button onClick={handleSubmit} disabled={disabled}>
+            {isFork ? "Fork agent" : "Create agent"}
           </Button>
         </DialogFooter>
       </DialogContent>

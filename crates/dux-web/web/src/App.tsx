@@ -10,6 +10,7 @@ import { CommitDialog } from "@/components/CommitDialog"
 import { ConfirmDeleteTerminalDialog } from "@/components/ConfirmDeleteTerminalDialog"
 import { ConfirmDiscardFileDialog } from "@/components/ConfirmDiscardFileDialog"
 import { CreateAgentDialog } from "@/components/CreateAgentDialog"
+import { RenameSessionDialog } from "@/components/RenameSessionDialog"
 import { DeleteSessionDialog } from "@/components/DeleteSessionDialog"
 import { GlobalEnvDialog } from "@/components/GlobalEnvDialog"
 import { MobileShell } from "@/components/MobileShell"
@@ -110,7 +111,7 @@ function InsetHeader() {
 }
 
 function TerminalArea() {
-  const { selectedTarget } = useDux()
+  const { selectedTarget, terminalEpoch } = useDux()
 
   // Idle center pane: the duck + logo + a tip, exactly like the TUI's welcome
   // screen. It vanishes the moment a target is selected (the loading state is
@@ -125,6 +126,11 @@ function TerminalArea() {
     selectedTarget.kind === "terminal"
       ? selectedTarget.terminalId
       : selectedTarget.sessionId
+  // A reconnect bumps `terminalEpoch` so an already-focused agent pane remounts
+  // and re-subscribes to the freshly launched provider. Terminals don't
+  // reconnect, so the epoch only affects the agent key.
+  const paneKey =
+    selectedTarget.kind === "agent" ? `${targetId}:${terminalEpoch}` : targetId
 
   // TerminalPane owns its own background and padding (via inline style) so the
   // padding area is seamlessly part of the terminal surface.
@@ -147,7 +153,7 @@ function TerminalArea() {
       <ChunkBoundary>
         <Suspense fallback={null}>
           <LazyTerminalPane
-            key={targetId}
+            key={paneKey}
             kind={selectedTarget.kind}
             id={targetId}
           />
@@ -165,6 +171,7 @@ function GlobalOverlays() {
       <CommandPalette />
       <CommitDialog />
       <CreateAgentDialog />
+      <RenameSessionDialog />
       <DeleteSessionDialog />
       <ConfirmDeleteTerminalDialog />
       <ConfirmDiscardFileDialog />

@@ -12,7 +12,10 @@ import {
   openAddProject,
   openCommit,
   openCreateAgent,
+  openForkAgent,
   openGlobalEnv,
+  openRename,
+  reconnectSession,
   selectSession,
   setPaletteOpen,
   socket,
@@ -91,6 +94,42 @@ export function CommandPalette() {
               </CommandItem>
               <CommandItem className="cursor-pointer" onSelect={handlePush}>
                 Push
+              </CommandItem>
+              <CommandItem
+                className="cursor-pointer"
+                onSelect={() => {
+                  reconnectSession(selectedSession.id, false)
+                  close()
+                }}
+              >
+                Reconnect
+              </CommandItem>
+              <CommandItem
+                className="cursor-pointer"
+                onSelect={() => {
+                  reconnectSession(selectedSession.id, true)
+                  close()
+                }}
+              >
+                Force reconnect (fresh)
+              </CommandItem>
+              <CommandItem
+                className="cursor-pointer"
+                onSelect={() => {
+                  openRename(selectedSession.id)
+                  close()
+                }}
+              >
+                Rename…
+              </CommandItem>
+              <CommandItem
+                className="cursor-pointer"
+                onSelect={() => {
+                  openForkAgent(selectedSession.id)
+                  close()
+                }}
+              >
+                Fork agent…
               </CommandItem>
               <CommandItem
                 className="cursor-pointer"
