@@ -1,3 +1,5 @@
+import { useEffect } from "react"
+
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -14,9 +16,26 @@ import { closeDiscard, discardFile, useDux } from "@/lib/store"
 // outcomes the way the TUI's discard semantics do: a tracked file is restored
 // from its last committed state, while an untracked file is permanently DELETED.
 export function ConfirmDiscardFileDialog() {
-  const { discardTarget } = useDux()
+  const { discardTarget, viewModel } = useDux()
 
-  const isOpen = discardTarget !== null
+  // If the file leaves the unstaged list while the dialog is open (committed
+  // or staged elsewhere, or already discarded), close rather than linger on a
+  // stale path with possibly-wrong restore-vs-DELETE copy. Mirrors the
+  // vanished-target handling in ConfirmDeleteTerminalDialog; the external-store
+  // call is not a React setState, so the set-state-in-effect rule doesn't bite.
+  const stillUnstaged =
+    discardTarget !== null &&
+    (viewModel?.changed_files.unstaged.some(
+      (f) => f.path === discardTarget.path,
+    ) ??
+      false)
+  useEffect(() => {
+    if (discardTarget && !stillUnstaged) {
+      closeDiscard()
+    }
+  }, [discardTarget, stillUnstaged])
+
+  const isOpen = discardTarget !== null && stillUnstaged
   const path = discardTarget?.path ?? ""
   const untracked = discardTarget?.untracked ?? false
 

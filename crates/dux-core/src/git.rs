@@ -815,6 +815,16 @@ pub fn unstage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
 pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -> Result<()> {
     if is_untracked {
         let full = worktree_path.join(file_path);
+        // Defense-in-depth before a destructive remove: callers classify the
+        // path against live `git status` output (which never yields paths
+        // outside the worktree), but a filesystem delete should not rest on
+        // that invariant alone. `is_under` rejects any resolved path that
+        // escapes the worktree (e.g. via a symlinked parent component).
+        if !is_under(worktree_path, &full) {
+            return Err(anyhow!(
+                "refusing to delete \"{file_path}\": it resolves outside the worktree"
+            ));
+        }
         if full.is_dir() {
             fs::remove_dir_all(&full)?;
         } else {

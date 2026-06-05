@@ -375,7 +375,7 @@ impl Engine {
                     format!("Deleted untracked file \"{path}\".")
                 } else {
                     format!(
-                        "Discarded changes to \"{path}\". File restored to last committed state."
+                        "Discarded unstaged changes to \"{path}\" — staged changes, if any, are kept."
                     )
                 };
                 Ok(EventReaction::Status(StatusUpdate::info(message)))
@@ -1016,8 +1016,12 @@ mod tests {
         match reaction {
             EventReaction::Status(update) => {
                 assert_eq!(update.tone, StatusTone::Info);
-                assert!(update.message.contains("Discarded changes to \"a.txt\""));
-                assert!(update.message.contains("restored to last committed state"));
+                assert!(
+                    update
+                        .message
+                        .contains("Discarded unstaged changes to \"a.txt\"")
+                );
+                assert!(update.message.contains("staged changes, if any, are kept"));
             }
             _ => panic!("expected Info status reaction"),
         }

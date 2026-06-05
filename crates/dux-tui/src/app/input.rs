@@ -4718,7 +4718,7 @@ impl App {
             match git::discard_file(&worktree, &file_path, is_untracked) {
                 Ok(()) => {
                     self.set_info(format!(
-                        "Discarded changes to \"{file_path}\". File restored to last committed state."
+                        "Discarded unstaged changes to \"{file_path}\" — staged changes, if any, are kept."
                     ));
                     self.reload_changed_files();
                 }
