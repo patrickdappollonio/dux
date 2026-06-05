@@ -23,7 +23,6 @@ import { RemoveProjectDialog } from "@/components/RemoveProjectDialog"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
 import { StatusBar } from "@/components/StatusBar"
 import { Welcome } from "@/components/Welcome"
-import { Badge } from "@/components/ui/badge"
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -46,12 +45,11 @@ import {
 import { Toaster } from "@/components/ui/sonner"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
-import { CONN_BADGE } from "@/lib/conn"
 import { setPaletteOpen, useDux } from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
 
 function InsetHeader() {
-  const { viewModel, selectedSessionId, selectedTarget, conn } = useDux()
+  const { viewModel, selectedSessionId, selectedTarget } = useDux()
   const session = viewModel?.sessions.find((s) => s.id === selectedSessionId)
   const project = session
     ? viewModel?.projects.find((p) => p.id === session.project_id)
@@ -63,7 +61,6 @@ function InsetHeader() {
       ? session?.terminals.find((t) => t.id === selectedTarget.terminalId)
       : undefined
   const terminalLabel = terminal ? terminalTitle(terminal) : undefined
-  const badge = CONN_BADGE[conn]
 
   return (
     <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
@@ -108,7 +105,6 @@ function InsetHeader() {
           <span className="font-mono text-xs">⌘K</span>
           Search…
         </Button>
-        <Badge variant={badge.variant}>{badge.label}</Badge>
       </div>
     </header>
   )

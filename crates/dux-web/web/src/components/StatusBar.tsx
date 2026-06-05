@@ -1,75 +1,70 @@
-import { StatusBadge } from "@/components/StatusBadge"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
-import { GitPullRequest } from "lucide-react"
-import { reconnect, useDux } from "@/lib/store"
-import type { PrView } from "@/lib/types"
+import { CircleX, TriangleAlert } from "lucide-react"
 
-// Colored PR badge matching GitHub/TUI semantics: green=open, purple=merged, red=closed.
-function prBadgeClass(state: PrView["state"]): string {
-  if (state === "open") return "border-transparent bg-green-600/15 text-green-500"
-  if (state === "merged") return "border-transparent bg-purple-600/15 text-purple-400"
-  return "border-transparent bg-red-600/15 text-red-400"
+import { BrailleSpinner } from "@/components/BrailleSpinner"
+import { Button } from "@/components/ui/button"
+import { reconnect, useDux } from "@/lib/store"
+import { statusPresentation } from "@/lib/statusLine"
+import type { ConnState } from "@/lib/types"
+
+// The ONE connection indicator, bottom-left of the statusline bar. A small
+// colored dot gives the at-a-glance state; a short label spells it out. Colors
+// follow the app's soft-color convention: green=open, amber=connecting,
+// red=closed/failed (matching the status-badge tints elsewhere).
+const CONN: Record<ConnState, { dot: string; label: string }> = {
+  open: { dot: "bg-green-500", label: "Connected" },
+  connecting: { dot: "bg-amber-500", label: "Connecting" },
+  closed: { dot: "bg-red-500", label: "Offline" },
+  failed: { dot: "bg-red-500", label: "Connection failed" },
 }
 
-const CONN_LABEL: Record<string, string> = {
-  open: "Connected",
-  connecting: "Connecting",
-  closed: "Offline",
-  failed: "Connection failed",
+function ConnectionIndicator() {
+  const { conn } = useDux()
+  const c = CONN[conn]
+
+  return (
+    <div className="flex shrink-0 items-center gap-2">
+      <span className={`size-2 shrink-0 rounded-full ${c.dot}`} aria-hidden />
+      <span className="truncate">{c.label}</span>
+      {conn === "failed" ? (
+        <Button variant="outline" size="sm" onClick={reconnect}>
+          Reconnect
+        </Button>
+      ) : null}
+    </div>
+  )
+}
+
+// The persistent statusline, rendered 1:1 with the TUI: tone drives both the
+// text color and the leading iconography (so the meaning survives in monochrome
+// too). An empty message renders nothing.
+function StatusLine() {
+  const { statusLine } = useDux()
+  if (!statusLine.message) {
+    return null
+  }
+  const { icon, className } = statusPresentation(statusLine.tone)
+
+  return (
+    <div className={`flex min-w-0 items-center gap-1.5 ${className}`}>
+      {icon === "spinner" ? <BrailleSpinner /> : null}
+      {icon === "warning" ? (
+        <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+      ) : null}
+      {icon === "error" ? (
+        <CircleX className="size-3.5 shrink-0" aria-hidden />
+      ) : null}
+      <span className="truncate" title={statusLine.message}>
+        {statusLine.message}
+      </span>
+    </div>
+  )
 }
 
 export function StatusBar() {
-  const { viewModel, selectedSessionId, selectedTarget, lastMessage, conn } =
-    useDux()
-  const session = viewModel?.sessions.find((s) => s.id === selectedSessionId)
-  const focusLabel =
-    selectedTarget?.kind === "terminal" ? "terminal" : "agent"
-
   return (
-    <footer className="flex h-7 shrink-0 items-center justify-between border-t px-3 text-xs text-muted-foreground">
-      <div className="flex min-w-0 items-center gap-2">
-        {session ? (
-          <>
-            <Badge variant="outline">{focusLabel}</Badge>
-            <span className="truncate font-mono">
-              {session.provider} · {session.branch_name}
-            </span>
-            {session ? (
-              <StatusBadge status={session.status} working={session.working} />
-            ) : null}
-            {session.pr ? (
-              <Badge
-                className={prBadgeClass(session.pr.state)}
-                render={
-                  <a
-                    href={session.pr.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title={session.pr.title}
-                  >
-                    <GitPullRequest data-icon="inline-start" />#{session.pr.number}
-                  </a>
-                }
-              />
-            ) : null}
-          </>
-        ) : (
-          <span>No session</span>
-        )}
-      </div>
-      <div className="flex min-w-0 items-center gap-2">
-        {conn === "failed" ? (
-          <Button variant="outline" size="sm" onClick={reconnect}>
-            Reconnect
-          </Button>
-        ) : (
-          <span>{CONN_LABEL[conn]}</span>
-        )}
-        <span className="truncate" title={lastMessage}>
-          {lastMessage}
-        </span>
-      </div>
+    <footer className="flex h-7 shrink-0 items-center gap-3 border-t px-3 text-xs text-muted-foreground">
+      <ConnectionIndicator />
+      <StatusLine />
     </footer>
   )
 }

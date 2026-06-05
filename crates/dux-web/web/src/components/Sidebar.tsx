@@ -35,8 +35,6 @@ import {
   SquareTerminal,
   Terminal,
   Trash2,
-  Wifi,
-  WifiOff,
   X,
 } from "lucide-react"
 import type * as React from "react"
@@ -67,7 +65,6 @@ import {
 import {
   Sidebar,
   SidebarContent,
-  SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
   SidebarGroupLabel,
@@ -118,12 +115,7 @@ import {
 } from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
 import type { SelectedTarget } from "@/lib/store"
-import type {
-  ConnState,
-  PrView,
-  SessionView,
-  TerminalView,
-} from "@/lib/types"
+import type { PrView, SessionView, TerminalView } from "@/lib/types"
 
 // Return a className for PR badge coloring. This is the ONE intentional
 // semantic-color exception: GitHub PR states carry real-world meaning that
@@ -557,34 +549,6 @@ function ProjectItem({
   )
 }
 
-const CONN_BADGE: Record<
-  ConnState,
-  { variant: "default" | "secondary" | "outline"; label: string }
-> = {
-  open: { variant: "default", label: "Connected" },
-  connecting: { variant: "secondary", label: "Connecting" },
-  closed: { variant: "outline", label: "Offline" },
-  failed: { variant: "outline", label: "Failed" },
-}
-
-function ConnFooter() {
-  const { conn } = useDux()
-  const badge = CONN_BADGE[conn]
-  const WifiIcon = conn === "open" ? Wifi : WifiOff
-
-  return (
-    <SidebarMenu>
-      <SidebarMenuItem>
-        <SidebarMenuButton className="pointer-events-none">
-          <WifiIcon />
-          <span className="flex-1 truncate">Connection</span>
-          <Badge variant={badge.variant}>{badge.label}</Badge>
-        </SidebarMenuButton>
-      </SidebarMenuItem>
-    </SidebarMenu>
-  )
-}
-
 // Drag handle pinned to the sidebar's right edge. shadcn's `collapsible="icon"`
 // only collapses; this lets the user resize the expanded width by dragging,
 // clamped to [14rem, 28rem] and persisted on release. Hidden while collapsed.
@@ -803,10 +767,6 @@ export function AppSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
-
-      <SidebarFooter>
-        <ConnFooter />
-      </SidebarFooter>
 
       <SidebarRail />
       <SidebarResizeHandle />

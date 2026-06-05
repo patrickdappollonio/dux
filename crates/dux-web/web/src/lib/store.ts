@@ -3,6 +3,7 @@ import { toast } from "sonner"
 
 import { sanitizeAgentName } from "./agentName"
 import { ordersMatch } from "./reorder"
+import type { StatusLineState } from "./statusLine"
 import { sortedSessionIds, type SortKey } from "./sortSessions"
 import { DuxSocket } from "./ws"
 import type {
@@ -57,7 +58,8 @@ export interface PendingSessionOrder {
 
 // A tiny external store backed by `useSyncExternalStore`. A single module-level
 // `DuxSocket` instance feeds it: ViewModel updates, connection state, and
-// command/error results (surfaced as `lastMessage`). The PTY byte stream is
+// command/error results (surfaced as `statusLine`, carrying the engine tone so
+// the StatusBar renders 1:1 with the TUI's status line). The PTY byte stream is
 // NOT kept in React state — the terminal attaches to `socket.onPtyBytes`
 // directly.
 
@@ -76,7 +78,12 @@ export interface DuxState {
   // already-focused pane (same target id) must re-issue `subscribe` to attach to
   // the new provider. Folded into the pane's React key alongside the target id.
   terminalEpoch: number
-  lastMessage: string
+  // The persistent statusline shown at the bottom of the shell, mirroring the
+  // TUI 1:1. Both the synchronous command-result path and the async status
+  // stream write here, keeping the engine's tone so the bar can color and
+  // icon-tag the message (toasts are a separate, transient surface). An empty
+  // message renders nothing.
+  statusLine: StatusLineState
   commitTarget: string | null
   commitDraft: string
   deleteTarget: string | null
@@ -204,7 +211,7 @@ let state: DuxState = {
   selectedTarget: null,
   selectedSessionId: null,
   terminalEpoch: 0,
-  lastMessage: "",
+  statusLine: { tone: "info", message: "" },
   commitTarget: null,
   commitDraft: "",
   deleteTarget: null,
@@ -363,17 +370,24 @@ function toastForTone(tone: string, message: string): void {
 socket.onCommandResult = (status, error) => {
   if (error) {
     // A rejected reorder (stale/partial id set) comes back as an error here;
-    // drop any optimistic overlay so the UI reverts to the server's order.
-    setState({ lastMessage: error, ...clearPendingOrders() })
+    // drop any optimistic overlay so the UI reverts to the server's order. The
+    // error string IS the message and the tone is "error".
+    setState({
+      statusLine: { tone: "error", message: error },
+      ...clearPendingOrders(),
+    })
     toast.error(error)
   } else if (status) {
-    setState({ lastMessage: status.message })
+    setState({ statusLine: { tone: status.tone, message: status.message } })
     toastForTone(status.tone, status.message)
   }
 }
 
 socket.onError = (message) => {
-  setState({ lastMessage: message, ...clearPendingOrders() })
+  setState({
+    statusLine: { tone: "error", message },
+    ...clearPendingOrders(),
+  })
   toast.error(message)
 }
 
@@ -390,7 +404,7 @@ function clearPendingOrders(): Partial<DuxState> {
 socket.onStatus = (tone, message) => {
   // An error-toned async status also unwinds any optimistic reorder overlay.
   const patch = tone === "error" ? clearPendingOrders() : {}
-  setState({ lastMessage: message, ...patch })
+  setState({ statusLine: { tone, message }, ...patch })
   toastForTone(tone, message)
 }
 

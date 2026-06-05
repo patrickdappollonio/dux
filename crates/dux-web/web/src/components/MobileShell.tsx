@@ -62,7 +62,6 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { CONN_BADGE } from "@/lib/conn"
 import { projectBranchDisplay } from "@/lib/projectBranch"
 import type { ProjectBranchDisplay } from "@/lib/projectBranch"
 import { partitionProjects } from "@/lib/projects"
@@ -566,7 +565,7 @@ function ProjectGroupList({
 // the sidebar's partition (projects with agents first, agent-less ones under
 // their own heading).
 function HomeScreen() {
-  const { viewModel, selectedTarget, conn, pendingSessionOrder, pendingProjectOrder } =
+  const { viewModel, selectedTarget, pendingSessionOrder, pendingProjectOrder } =
     useDux()
   const rawSessions = viewModel?.sessions ?? []
   const rawProjects = viewModel?.projects ?? []
@@ -590,7 +589,6 @@ function HomeScreen() {
     return project ? projectBranchDisplay(project) : null
   }
   const fullOrder = [...withAgents, ...withoutAgents]
-  const badge = CONN_BADGE[conn]
   const hasProjects = projects.length > 0 || sessions.length > 0
 
   return (
@@ -607,7 +605,6 @@ function HomeScreen() {
           >
             <Search />
           </Button>
-          <Badge variant={badge.variant}>{badge.label}</Badge>
         </div>
       </header>
 
