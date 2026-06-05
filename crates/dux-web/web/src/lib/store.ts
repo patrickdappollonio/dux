@@ -18,6 +18,17 @@ export type SelectedTarget =
 // reads this — it renders all three panes at once.
 export type MobileScreen = "home" | "terminal" | "changes"
 
+// The file pending discard-confirmation, or null. `untracked` drives the
+// dialog's warning copy (a tracked file is restored from HEAD; an untracked
+// file is permanently deleted). Derived from the file's git status at the moment
+// the affordance is clicked; the server independently re-derives and re-validates
+// it, so this is only a UI hint.
+export interface DiscardTarget {
+  sessionId: string
+  path: string
+  untracked: boolean
+}
+
 // An optimistic session-order overlay for one project: while a drag-and-drop
 // reorder is in flight, the UI renders `ids` (the new complete order of that
 // project's sessions) instead of the server's order, so the row doesn't snap
@@ -50,6 +61,9 @@ export interface DuxState {
   // The companion terminal id pending close confirmation, or null. Mirrors the
   // TUI, which ALWAYS confirms terminal deletion (the running process is killed).
   deleteTerminalTarget: string | null
+  // The unstaged file pending discard confirmation, or null. The TUI confirms
+  // every discard (it's destructive); the web mirrors that.
+  discardTarget: DiscardTarget | null
   globalEnvOpen: boolean
   projectSettingsTarget: string | null
   addProjectOpen: boolean
@@ -115,6 +129,7 @@ let state: DuxState = {
   commitDraft: "",
   deleteTarget: null,
   deleteTerminalTarget: null,
+  discardTarget: null,
   globalEnvOpen: false,
   projectSettingsTarget: null,
   addProjectOpen: false,
@@ -422,6 +437,25 @@ export function closeDeleteTerminal(): void {
 // ViewModel-prune in `onViewModel`.
 export function deleteTerminal(terminalId: string): void {
   socket.sendCommand("delete_terminal", { terminal_id: terminalId })
+}
+
+// Open the discard-confirmation dialog for an unstaged file. The TUI confirms
+// every discard because it's destructive — an untracked file is deleted, a
+// tracked one loses its working-tree changes. The web mirrors that.
+export function openDiscard(target: DiscardTarget): void {
+  setState({ discardTarget: target })
+}
+
+export function closeDiscard(): void {
+  setState({ discardTarget: null })
+}
+
+// Ask the server to discard a file's working-tree changes. The server re-derives
+// the tracked/untracked distinction from live git status and rejects the command
+// if the file is staged, so this never trusts the client about the destructive
+// outcome.
+export function discardFile(sessionId: string, path: string): void {
+  socket.sendCommand("discard_file", { session_id: sessionId, path })
 }
 
 export function openCommit(sessionId: string): void {

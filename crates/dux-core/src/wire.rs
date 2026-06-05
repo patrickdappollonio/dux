@@ -32,6 +32,15 @@ pub enum WireCommand {
         session_id: String,
         path: String,
     },
+    /// Discard a single file's working-tree changes. The wire layer derives the
+    /// destructive distinction (tracked → restore from HEAD vs untracked →
+    /// delete the file) SERVER-SIDE from the worktree's live git status, and
+    /// rejects the command when the file is currently staged — mirroring the
+    /// TUI, which only allows discarding unstaged files.
+    DiscardFile {
+        session_id: String,
+        path: String,
+    },
     CommitChanges {
         session_id: String,
         message: String,
@@ -240,6 +249,26 @@ pub fn delete_session_status_message(
     }
 }
 
+/// Classify a discard request against the worktree's LIVE git status and return
+/// whether the target file is untracked. Discard is destructive (it deletes
+/// untracked files and restores tracked ones from HEAD), so the tracked vs
+/// untracked distinction is derived server-side from `git status` rather than
+/// trusted from the client. Mirrors the TUI's guard: a file that is currently
+/// STAGED cannot be discarded (the TUI tells the user to unstage it first), and
+/// a file with no working-tree change has nothing to discard.
+fn discard_classify(worktree_path: &std::path::Path, path: &str) -> anyhow::Result<bool> {
+    let (staged, unstaged) = crate::git::changed_files(worktree_path)?;
+    // Reject when the file is staged. The TUI surfaces "Unstage the file first
+    // to discard changes." for the same case; mirror that wording.
+    if staged.iter().any(|f| f.path == path) && !unstaged.iter().any(|f| f.path == path) {
+        anyhow::bail!("Unstage the file first to discard changes.");
+    }
+    match unstaged.iter().find(|f| f.path == path) {
+        Some(file) => Ok(file.status == "?"),
+        None => anyhow::bail!("No unstaged changes to discard for \"{path}\"."),
+    }
+}
+
 impl Engine {
     /// Reconstruct and dispatch a wire command, returning a wire-safe outcome.
     pub fn apply_wire(&mut self, command: WireCommand) -> anyhow::Result<WireCommandOutcome> {
@@ -330,6 +359,15 @@ impl Engine {
                 worktree_path: self.session_worktree(&session_id)?,
                 path,
             },
+            WireCommand::DiscardFile { session_id, path } => {
+                let worktree_path = self.session_worktree(&session_id)?;
+                let is_untracked = discard_classify(&worktree_path, &path)?;
+                Command::DiscardFile {
+                    worktree_path,
+                    path,
+                    is_untracked,
+                }
+            }
             WireCommand::CommitChanges {
                 session_id,
                 message,
@@ -552,6 +590,7 @@ mod tests {
     use super::*;
     use crate::engine::DeleteTerminalView;
     use crate::engine::test_support::{sample_project, sample_session, test_engine};
+    use crate::model::AgentSession;
     use std::path::Path;
 
     #[test]
@@ -611,6 +650,124 @@ mod tests {
             }
             _ => panic!("expected Command::StageFile variant"),
         }
+    }
+
+    #[test]
+    fn wire_discard_file_deserializes() {
+        let json = r#"{"command":"discard_file","args":{"session_id":"s1","path":"a.txt"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::DiscardFile {
+                session_id: "s1".to_string(),
+                path: "a.txt".to_string()
+            }
+        );
+    }
+
+    /// Build a session whose worktree points at a real temp git repo so the
+    /// discard classifier can run `git status` against it.
+    fn session_in_repo(id: &str, repo: &Path) -> AgentSession {
+        let mut s = sample_session(id, "p1", "feat");
+        s.worktree_path = repo.to_string_lossy().into_owned();
+        s
+    }
+
+    #[test]
+    fn wire_to_command_discard_derives_untracked_for_untracked_file() {
+        // init_repo leaves a.txt untracked (never committed).
+        let repo = init_repo();
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(session_in_repo("s1", repo.path()));
+        let cmd = engine
+            .wire_to_command(WireCommand::DiscardFile {
+                session_id: "s1".to_string(),
+                path: "a.txt".to_string(),
+            })
+            .expect("reconstruct");
+        match cmd {
+            Command::DiscardFile {
+                worktree_path,
+                path,
+                is_untracked,
+            } => {
+                assert_eq!(worktree_path, repo.path());
+                assert_eq!(path, "a.txt");
+                assert!(is_untracked, "untracked file must be classified untracked");
+            }
+            _ => panic!("expected Command::DiscardFile variant"),
+        }
+    }
+
+    #[test]
+    fn wire_to_command_discard_derives_tracked_for_modified_file() {
+        // init_repo_with_commit commits a.txt; modify it so it has an unstaged
+        // (tracked) change.
+        let repo = init_repo_with_commit();
+        std::fs::write(repo.path().join("a.txt"), "changed\n").expect("modify file");
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(session_in_repo("s1", repo.path()));
+        let cmd = engine
+            .wire_to_command(WireCommand::DiscardFile {
+                session_id: "s1".to_string(),
+                path: "a.txt".to_string(),
+            })
+            .expect("reconstruct");
+        match cmd {
+            Command::DiscardFile { is_untracked, .. } => {
+                assert!(!is_untracked, "modified tracked file must not be untracked");
+            }
+            _ => panic!("expected Command::DiscardFile variant"),
+        }
+    }
+
+    #[test]
+    fn wire_to_command_discard_rejects_staged_file() {
+        // Commit a.txt, modify it, then STAGE the modification: it is now purely
+        // staged with no remaining working-tree change. The TUI blocks this.
+        let repo = init_repo_with_commit();
+        std::fs::write(repo.path().join("a.txt"), "staged change\n").expect("modify file");
+        let ok = std::process::Command::new("git")
+            .args(["add", "a.txt"])
+            .current_dir(repo.path())
+            .status()
+            .expect("spawn git")
+            .success();
+        assert!(ok, "git add failed");
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(session_in_repo("s1", repo.path()));
+        let err = engine
+            .wire_to_command(WireCommand::DiscardFile {
+                session_id: "s1".to_string(),
+                path: "a.txt".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        // Mirrors the TUI's "Unstage the file first to discard changes." copy.
+        assert!(
+            err.to_string()
+                .contains("Unstage the file first to discard changes."),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn wire_to_command_discard_rejects_unchanged_file() {
+        // a.txt is committed and clean — nothing to discard.
+        let repo = init_repo_with_commit();
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(session_in_repo("s1", repo.path()));
+        let err = engine
+            .wire_to_command(WireCommand::DiscardFile {
+                session_id: "s1".to_string(),
+                path: "a.txt".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("No unstaged changes to discard"),
+            "got: {err}"
+        );
     }
 
     #[test]

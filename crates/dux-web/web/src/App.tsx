@@ -8,6 +8,7 @@ import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { CommandPalette } from "@/components/CommandPalette"
 import { CommitDialog } from "@/components/CommitDialog"
 import { ConfirmDeleteTerminalDialog } from "@/components/ConfirmDeleteTerminalDialog"
+import { ConfirmDiscardFileDialog } from "@/components/ConfirmDiscardFileDialog"
 import { CreateAgentDialog } from "@/components/CreateAgentDialog"
 import { DeleteSessionDialog } from "@/components/DeleteSessionDialog"
 import { GlobalEnvDialog } from "@/components/GlobalEnvDialog"
@@ -166,6 +167,7 @@ function GlobalOverlays() {
       <CreateAgentDialog />
       <DeleteSessionDialog />
       <ConfirmDeleteTerminalDialog />
+      <ConfirmDiscardFileDialog />
       <GlobalEnvDialog />
       <ProjectSettingsDialog />
       <AddProjectDialog />

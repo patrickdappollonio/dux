@@ -88,6 +88,18 @@ pub enum Command {
         path: String,
     },
 
+    /// Discard a single unstaged file's changes. Synchronous git call (`git
+    /// checkout -- <path>` for tracked files, `rm` for untracked ones — the
+    /// `is_untracked` flag selects which). Destructive: it permanently throws
+    /// away working-tree changes (or deletes the file outright when untracked).
+    /// Returns `EventReaction::Status(Info(...))` with an actionable message on
+    /// success; an `Err` propagates to the caller on failure.
+    DiscardFile {
+        worktree_path: PathBuf,
+        path: String,
+        is_untracked: bool,
+    },
+
     /// Run `git commit -m <message>` synchronously. Returns
     /// `EventReaction::Status(Info(success_message))` on success or
     /// `EventReaction::Status(Error("Commit failed: <e>"))` on failure. The
@@ -351,6 +363,22 @@ impl Engine {
             } => {
                 crate::git::unstage_file(&worktree_path, &path)?;
                 Ok(EventReaction::Nothing)
+            }
+
+            Command::DiscardFile {
+                worktree_path,
+                path,
+                is_untracked,
+            } => {
+                crate::git::discard_file(&worktree_path, &path, is_untracked)?;
+                let message = if is_untracked {
+                    format!("Deleted untracked file \"{path}\".")
+                } else {
+                    format!(
+                        "Discarded changes to \"{path}\". File restored to last committed state."
+                    )
+                };
+                Ok(EventReaction::Status(StatusUpdate::info(message)))
             }
 
             Command::CommitChanges {
@@ -719,6 +747,7 @@ fn reorder_in_place<T>(items: &mut Vec<T>, position: impl Fn(&T) -> Option<usize
 mod tests {
     use super::*;
     use crate::engine::test_support::{sample_project, sample_session, test_engine};
+    use crate::statusline::StatusTone;
 
     fn session_ids_for(engine: &Engine, project_id: &str) -> Vec<String> {
         engine
@@ -945,5 +974,83 @@ mod tests {
             .map(|s| s.id)
             .collect();
         assert_eq!(reloaded, vec!["c", "b", "a"]);
+    }
+
+    /// Init a temp git repo with a committed `a.txt` so discard tests can both
+    /// restore a tracked file and create an untracked one.
+    fn discard_test_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let run = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .expect("spawn git")
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(dir.path().join("a.txt"), "original\n").expect("write file");
+        run(&["add", "a.txt"]);
+        run(&["commit", "-q", "-m", "init"]);
+        dir
+    }
+
+    #[test]
+    fn discard_file_restores_tracked_file_from_head() {
+        let repo = discard_test_repo();
+        let file = repo.path().join("a.txt");
+        std::fs::write(&file, "modified\n").expect("modify");
+        let (mut engine, _tmp) = test_engine();
+
+        let reaction = engine
+            .apply(Command::DiscardFile {
+                worktree_path: repo.path().to_path_buf(),
+                path: "a.txt".to_string(),
+                is_untracked: false,
+            })
+            .expect("apply");
+
+        match reaction {
+            EventReaction::Status(update) => {
+                assert_eq!(update.tone, StatusTone::Info);
+                assert!(update.message.contains("Discarded changes to \"a.txt\""));
+                assert!(update.message.contains("restored to last committed state"));
+            }
+            _ => panic!("expected Info status reaction"),
+        }
+        // The working copy is back to the committed content.
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "original\n");
+    }
+
+    #[test]
+    fn discard_file_deletes_untracked_file() {
+        let repo = discard_test_repo();
+        let untracked = repo.path().join("new.txt");
+        std::fs::write(&untracked, "scratch\n").expect("write untracked");
+        let (mut engine, _tmp) = test_engine();
+
+        let reaction = engine
+            .apply(Command::DiscardFile {
+                worktree_path: repo.path().to_path_buf(),
+                path: "new.txt".to_string(),
+                is_untracked: true,
+            })
+            .expect("apply");
+
+        match reaction {
+            EventReaction::Status(update) => {
+                assert_eq!(update.tone, StatusTone::Info);
+                assert!(
+                    update
+                        .message
+                        .contains("Deleted untracked file \"new.txt\"")
+                );
+            }
+            _ => panic!("expected Info status reaction"),
+        }
+        assert!(!untracked.exists(), "untracked file should be deleted");
     }
 }

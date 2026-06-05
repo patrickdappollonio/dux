@@ -1,5 +1,5 @@
 import { useMemo, useState, useSyncExternalStore } from "react"
-import { Check, MousePointerClick } from "lucide-react"
+import { Check, MousePointerClick, Search, Undo2 } from "lucide-react"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -22,6 +22,7 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty"
+import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
 import {
@@ -36,7 +37,8 @@ import {
   languageForPath,
   subscribeHighlighter,
 } from "@/lib/highlight"
-import { closeDiff, openCommit, requestDiff, socket, useDux } from "@/lib/store"
+import { filterChangedFiles } from "@/lib/changedFiles"
+import { closeDiff, openCommit, openDiscard, requestDiff, socket, useDux } from "@/lib/store"
 import type { DuxState } from "@/lib/store"
 import type { ChangedFileView, DiffLine, FileDiff } from "@/lib/types"
 
@@ -70,6 +72,14 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
     socket.sendCommand(command, { session_id: sessionId, path: file.path })
   }
 
+  // Discard is only offered on unstaged files (the "stage" action rows), mirroring
+  // the TUI which blocks discarding staged files. An untracked file ("?") will be
+  // deleted; a tracked one is restored — the dialog distinguishes them.
+  function handleDiscard(e: React.MouseEvent) {
+    e.stopPropagation()
+    openDiscard({ sessionId, path: file.path, untracked: statusGlyph(file.status) === "?" })
+  }
+
   return (
     <div
       role="row"
@@ -95,6 +105,22 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
         </span>
       )}
 
+      {/* Discard action — unstaged rows only (the TUI blocks discarding staged
+          files). Destructive-tinted, hover-reveal on desktop / always-visible
+          ≥44px on touch, same as the Stage button. */}
+      {action === "stage" && (
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={`Discard changes to ${file.path}`}
+          title="Discard changes"
+          className="shrink-0 text-destructive opacity-100 hover:text-destructive max-md:size-11 md:opacity-0 md:group-hover:opacity-100"
+          onClick={handleDiscard}
+        >
+          <Undo2 />
+        </Button>
+      )}
+
       {/* Stage / Unstage action. Hover-reveal works on desktop, but touch has
           no hover — so on phones the button is always visible and ≥44px tall. */}
       <Button
@@ -112,21 +138,30 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
 interface FileGroupProps {
   heading: string
   files: ChangedFileView[]
+  // The unfiltered group size, so the badge can show "N of M" while a search is
+  // active. Equal to `files.length` when nothing is filtered out.
+  total: number
+  filtering: boolean
   action: "stage" | "unstage"
   sessionId: string
   onOpenDiff: (path: string) => void
 }
 
-function FileGroup({ heading, files, action, sessionId, onOpenDiff }: FileGroupProps) {
+function FileGroup({ heading, files, total, filtering, action, sessionId, onOpenDiff }: FileGroupProps) {
   const [open, setOpen] = useState(true)
 
+  // Hide a group that's empty in the source. While filtering, a group that has
+  // source files but no matches stays hidden too (the overall empty state below
+  // covers the "no matches anywhere" case).
   if (files.length === 0) return null
 
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
       <CollapsibleTrigger className="flex w-full items-center gap-2 rounded px-1 py-1 text-sm font-medium hover:bg-muted max-md:min-h-11">
         <span className="flex-1 text-left">{heading}</span>
-        <Badge variant="secondary">{files.length}</Badge>
+        <Badge variant="secondary">
+          {filtering ? `${files.length} of ${total}` : files.length}
+        </Badge>
       </CollapsibleTrigger>
       <CollapsibleContent>
         <div className="mt-1 flex flex-col gap-0.5">
@@ -148,6 +183,17 @@ function FileGroup({ heading, files, action, sessionId, onOpenDiff }: FileGroupP
 export function ChangedFiles() {
   const { viewModel, selectedSessionId, currentDiff } = useDux()
 
+  // Changed-files search filter (frontend-only). The query is stored alongside
+  // the session id it belongs to, so switching sessions yields an empty filter
+  // without a set-state-in-effect: a stale entry (different session) reads as "".
+  const [search, setSearch] = useState<{ sessionId: string; query: string }>({
+    sessionId: "",
+    query: "",
+  })
+  const query = search.sessionId === selectedSessionId ? search.query : ""
+  const setQuery = (next: string) =>
+    setSearch({ sessionId: selectedSessionId ?? "", query: next })
+
   // No session selected — muted empty state.
   if (!selectedSessionId) {
     return (
@@ -165,7 +211,12 @@ export function ChangedFiles() {
 
   const changed = viewModel?.changed_files ?? { staged: [], unstaged: [] }
   const hasChanges = changed.staged.length > 0 || changed.unstaged.length > 0
-  const showSeparator = changed.staged.length > 0 && changed.unstaged.length > 0
+
+  const filtering = query.trim() !== ""
+  const filteredStaged = filterChangedFiles(changed.staged, query)
+  const filteredUnstaged = filterChangedFiles(changed.unstaged, query)
+  const hasMatches = filteredStaged.length > 0 || filteredUnstaged.length > 0
+  const showSeparator = filteredStaged.length > 0 && filteredUnstaged.length > 0
 
   return (
     <>
@@ -199,6 +250,24 @@ export function ChangedFiles() {
         </CardHeader>
 
         <CardContent className="flex min-h-0 flex-1 flex-col p-0">
+          {/* Compact case-insensitive search over both lists. Only shown when
+              there are changes to filter. Sized ≥44px tall for touch. */}
+          {hasChanges && (
+            <div className="border-b p-2">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  type="search"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Filter changed files…"
+                  aria-label="Filter changed files"
+                  className="h-9 pl-8 max-md:h-11"
+                />
+              </div>
+            </div>
+          )}
+
           <ScrollArea className="flex-1">
             <div className="flex flex-col gap-1 p-3">
               {!hasChanges && (
@@ -213,9 +282,25 @@ export function ChangedFiles() {
                 </Empty>
               )}
 
+              {hasChanges && filtering && !hasMatches && (
+                <Empty className="border-0 py-6">
+                  <EmptyHeader>
+                    <EmptyMedia variant="icon">
+                      <Search />
+                    </EmptyMedia>
+                    <EmptyTitle>No matching files</EmptyTitle>
+                    <EmptyDescription>
+                      No changed file matches “{query.trim()}”.
+                    </EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
+              )}
+
               <FileGroup
                 heading="Staged"
-                files={changed.staged}
+                files={filteredStaged}
+                total={changed.staged.length}
+                filtering={filtering}
                 action="unstage"
                 sessionId={selectedSessionId}
                 onOpenDiff={(path) => requestDiff(selectedSessionId, path)}
@@ -225,7 +310,9 @@ export function ChangedFiles() {
 
               <FileGroup
                 heading="Unstaged"
-                files={changed.unstaged}
+                files={filteredUnstaged}
+                total={changed.unstaged.length}
+                filtering={filtering}
                 action="stage"
                 sessionId={selectedSessionId}
                 onOpenDiff={(path) => requestDiff(selectedSessionId, path)}
