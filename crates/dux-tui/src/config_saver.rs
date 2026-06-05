@@ -53,6 +53,9 @@ impl ConfigSaver for TuiConfigSaver {
                             .map_err(|err| format!("{err:#}"))?;
                             let projects = crate::app::load_projects(
                                 &store.load_projects().map_err(|err| format!("{err:#}"))?,
+                                &store
+                                    .load_project_created_ats()
+                                    .map_err(|err| format!("{err:#}"))?,
                                 &config,
                             );
                             crate::app::persist_runtime_projects_to_config_and_store(

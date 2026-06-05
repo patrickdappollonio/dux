@@ -269,6 +269,30 @@ impl SessionStore {
         Ok(projects)
     }
 
+    /// Map of project id -> `created_at` timestamp from the `projects` table.
+    /// Kept separate from [`SessionStore::load_projects`] because `created_at` is
+    /// persisted/runtime state, not portable `ProjectConfig`: surfacing it does
+    /// not pollute the config representation that gets written back to disk.
+    pub fn load_project_created_ats(
+        &self,
+    ) -> Result<std::collections::HashMap<String, DateTime<Utc>>> {
+        let mut stmt = self.conn.prepare("select id, created_at from projects")?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let created_at: String = row.get(1)?;
+            Ok((id, created_at))
+        })?;
+
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (id, created_at) = row?;
+            if let Some(parsed) = parse_time(&created_at) {
+                map.insert(id, parsed);
+            }
+        }
+        Ok(map)
+    }
+
     pub fn update_project_default_provider(
         &self,
         project_id: &str,

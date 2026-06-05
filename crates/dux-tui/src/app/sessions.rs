@@ -138,6 +138,7 @@ impl App {
             current_branch: branch,
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
+            created_at: Some(chrono::Utc::now()),
         };
         logger::info(&format!("registered project {}", path_buf.display()));
         let reaction = self.engine.apply(Command::PersistProject(Box::new(
@@ -2798,6 +2799,7 @@ mod tests {
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
+            created_at: None,
         }
     }
 
@@ -3049,6 +3051,7 @@ mod tests {
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
+            created_at: None,
         }
     }
 

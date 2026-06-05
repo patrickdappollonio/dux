@@ -69,6 +69,11 @@ pub struct Project {
     pub current_branch: String,
     pub branch_status: ProjectBranchStatus,
     pub path_missing: bool,
+    /// When this project was first added, as persisted in the SQLite `projects`
+    /// table. This is derived/runtime state (not portable config), surfaced so
+    /// clients can show an "added" date. `None` for projects constructed
+    /// in-memory before a store row exists (e.g. during creation/migration).
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

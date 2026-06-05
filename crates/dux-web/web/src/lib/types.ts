@@ -19,6 +19,11 @@ export interface ProjectView {
   current_branch: string
   branch_status: string
   path_missing: boolean
+  /** The project's configured leading/default branch, or null when not detected. */
+  leading_branch: string | null
+  /** RFC 3339 timestamp of when the project was added, or "" when no store row
+   * exists yet. */
+  created_at: string
 }
 
 export interface PrView {

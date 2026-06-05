@@ -17,6 +17,7 @@ import { CheckoutDefaultBranchDialog } from "@/components/CheckoutDefaultBranchD
 import { DeleteSessionDialog } from "@/components/DeleteSessionDialog"
 import { GlobalEnvDialog } from "@/components/GlobalEnvDialog"
 import { MobileShell } from "@/components/MobileShell"
+import { ProjectInfoDialog } from "@/components/ProjectInfoDialog"
 import { ProjectSettingsDialog } from "@/components/ProjectSettingsDialog"
 import { RemoveProjectDialog } from "@/components/RemoveProjectDialog"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
@@ -180,6 +181,7 @@ function GlobalOverlays() {
       <ConfirmDeleteTerminalDialog />
       <ConfirmDiscardFileDialog />
       <GlobalEnvDialog />
+      <ProjectInfoDialog />
       <ProjectSettingsDialog />
       <AddProjectDialog />
       <AttachWorktreeDialog />

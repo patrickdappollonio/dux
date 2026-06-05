@@ -1114,6 +1114,7 @@ mod tests {
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
+            created_at: None,
         };
         let now = Utc::now();
         let source_session = AgentSession {
@@ -1179,6 +1180,7 @@ mod tests {
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
+            created_at: None,
         };
         let (worker_tx, worker_rx) = mpsc::channel();
 

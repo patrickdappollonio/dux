@@ -88,6 +88,9 @@ export interface DuxState {
   discardTarget: DiscardTarget | null
   globalEnvOpen: boolean
   projectSettingsTarget: string | null
+  // The project whose read-only info modal is open, or null (closed). Pure
+  // presentation of existing ViewModel data — no wire command, no git read.
+  projectInfoTarget: string | null
   addProjectOpen: boolean
   browsePath: string
   browseEntries: DirEntryView[]
@@ -209,6 +212,7 @@ let state: DuxState = {
   discardTarget: null,
   globalEnvOpen: false,
   projectSettingsTarget: null,
+  projectInfoTarget: null,
   addProjectOpen: false,
   browsePath: "",
   browseEntries: [],
@@ -700,6 +704,14 @@ export function openProjectSettings(projectId: string): void {
 
 export function closeProjectSettings(): void {
   setState({ projectSettingsTarget: null })
+}
+
+export function openProjectInfo(projectId: string): void {
+  setState({ projectInfoTarget: projectId })
+}
+
+export function closeProjectInfo(): void {
+  setState({ projectInfoTarget: null })
 }
 
 export function openAddProject(): void {

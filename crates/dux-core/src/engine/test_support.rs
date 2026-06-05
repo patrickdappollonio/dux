@@ -87,6 +87,7 @@ pub(crate) fn sample_project(id: &str, path: &str) -> Project {
         current_branch: "main".to_string(),
         branch_status: ProjectBranchStatus::Leading,
         path_missing: false,
+        created_at: None,
     }
 }
 

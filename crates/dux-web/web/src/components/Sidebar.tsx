@@ -24,6 +24,7 @@ import {
   GitCommitHorizontal,
   GitFork,
   GitPullRequest,
+  Info,
   Pencil,
   Plug,
   Plus,
@@ -101,6 +102,7 @@ import {
   openDelete,
   openDeleteTerminal,
   openForkAgent,
+  openProjectInfo,
   openProjectSettings,
   openRemoveProject,
   openRename,
@@ -458,24 +460,31 @@ function ProjectItem({
               is expanded, closed when collapsed — instead of a chevron. */}
           <Folder className="group-data-[state=open]/collapsible:hidden" />
           <FolderOpen className="hidden group-data-[state=open]/collapsible:block" />
-          {/* font-semibold makes project names visually distinct from agent rows. */}
-          <span className="min-w-0 truncate font-semibold">{name}</span>
-          {/* Current branch as a muted, monospace secondary span after the name.
-              Both spans are min-w-0 so flex can actually shrink-truncate them
-              (flex items default to min-width:auto) and the count badge never
-              gets pushed out. A non-leading branch is tinted with the web's
-              warning convention and explains itself via the title tooltip.
-              Omitted entirely for empty/unknown branches (e.g. path_missing). */}
-          {branch ? (
-            <span
-              className={`min-w-0 truncate font-mono text-xs ${
-                branch.warn ? "text-amber-500" : "text-muted-foreground"
-              }`}
-              title={branch.tooltip ?? undefined}
-            >
-              {branch.branch}
-            </span>
-          ) : null}
+          {/* Name + branch share a baseline-aligned inner flex so the smaller
+              text-xs branch sits on the name's baseline instead of floating
+              high like a superscript (the outer button is items-center, which
+              would vertically-center the two different font sizes). Keeping the
+              folder icon and count badge outside this inner flex leaves them
+              vertically centered against the row. min-w-0 lets both the inner
+              flex and each span shrink-truncate. */}
+          <span className="flex min-w-0 items-baseline gap-1.5">
+            {/* font-semibold makes project names visually distinct from agent rows. */}
+            <span className="min-w-0 truncate font-semibold">{name}</span>
+            {/* Current branch as a muted, monospace secondary span after the
+                name. A non-leading branch is tinted with the web's warning
+                convention and explains itself via the title tooltip. Omitted
+                entirely for empty/unknown branches (e.g. path_missing). */}
+            {branch ? (
+              <span
+                className={`min-w-0 truncate font-mono text-xs ${
+                  branch.warn ? "text-amber-500" : "text-muted-foreground"
+                }`}
+                title={branch.tooltip ?? undefined}
+              >
+                {branch.branch}
+              </span>
+            ) : null}
+          </span>
           {/* Session count badge sits inline, right after the name — omitted
               for agent-less projects (their group heading already says so). */}
           {sessions.length > 0 ? (
@@ -516,6 +525,10 @@ function ProjectItem({
               Checkout default branch…
             </DropdownMenuItem>
             <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => openProjectInfo(id)}>
+              <Info />
+              Project info…
+            </DropdownMenuItem>
             <DropdownMenuItem onClick={() => openProjectSettings(id)}>
               <Settings />
               Project settings…

@@ -52,6 +52,14 @@ pub struct ProjectView {
     /// "leading" | "not_leading" | "unknown"
     pub branch_status: String,
     pub path_missing: bool,
+    /// The project's configured leading/default branch, if known. Surfaced so a
+    /// client can show the default branch in a project-info view. `None` when it
+    /// has not been detected yet (e.g. a missing checkout).
+    pub leading_branch: Option<String>,
+    /// When this project was first added, as an RFC 3339 / ISO 8601 string.
+    /// Empty when no store row exists yet (a freshly constructed project that
+    /// has not been persisted). Surfaced so a client can show an "added" date.
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -153,6 +161,8 @@ impl ProjectView {
             }
             .to_string(),
             path_missing: p.path_missing,
+            leading_branch: p.leading_branch.clone(),
+            created_at: p.created_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
         }
     }
 }
@@ -350,6 +360,36 @@ mod tests {
         assert!(p.auto_reopen_agents.is_none());
         assert!(p.startup_command.is_none());
         assert!(p.env.is_empty());
+    }
+
+    #[test]
+    fn project_leading_branch_and_created_at_are_projected() {
+        let (mut engine, _tmp) = test_engine();
+
+        // A project with a known leading branch and a stored created_at.
+        let mut with = sample_project("p1", "/repo");
+        with.leading_branch = Some("trunk".to_string());
+        let added = chrono::DateTime::parse_from_rfc3339("2026-02-03T04:05:06+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        with.created_at = Some(added);
+        engine.projects.push(with);
+
+        // A project with no detected leading branch and no store row yet.
+        let mut without = sample_project("p2", "/repo2");
+        without.leading_branch = None;
+        without.created_at = None;
+        engine.projects.push(without);
+
+        let vm = engine.view_model();
+
+        assert_eq!(vm.projects[0].leading_branch.as_deref(), Some("trunk"));
+        assert_eq!(vm.projects[0].created_at, added.to_rfc3339());
+        assert!(vm.projects[1].leading_branch.is_none());
+        assert_eq!(
+            vm.projects[1].created_at, "",
+            "a project with no store row projects an empty created_at"
+        );
     }
 
     #[test]

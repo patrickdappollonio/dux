@@ -1035,6 +1035,7 @@ impl Engine {
                     current_branch: target_branch.clone(),
                     branch_status: ProjectBranchStatus::Unknown,
                     path_missing: false,
+                    created_at: Some(chrono::Utc::now()),
                 };
                 match self.apply(Command::PersistProject(Box::new(
                     ProjectPersistenceAction::Add {
@@ -1337,6 +1338,7 @@ impl Engine {
                     current_branch: branch,
                     branch_status: ProjectBranchStatus::Unknown,
                     path_missing: false,
+                    created_at: Some(chrono::Utc::now()),
                 };
                 let status_message =
                     format!("Added project \"{display_name}\" to the workspace.");

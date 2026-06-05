@@ -24,6 +24,7 @@ import {
   GitCommitHorizontal,
   GitFork,
   GitPullRequest,
+  Info,
   Pencil,
   Plug,
   Plus,
@@ -83,6 +84,7 @@ import {
   openDelete,
   openDeleteTerminal,
   openForkAgent,
+  openProjectInfo,
   openProjectSettings,
   openRemoveProject,
   openRename,
@@ -392,20 +394,28 @@ function ProjectBlock({
           {...listeners}
           className="flex min-h-11 flex-1 touch-manipulation items-center gap-2 px-2"
         >
-          <span className="min-w-0 truncate font-semibold">{name}</span>
-          {/* Current branch as a muted, monospace secondary span; non-leading
-              branches are warning-tinted (amber) with an explanatory title.
-              Omitted entirely for empty/unknown branches (e.g. path_missing). */}
-          {branch ? (
-            <span
-              className={`min-w-0 truncate font-mono text-xs ${
-                branch.warn ? "text-amber-500" : "text-muted-foreground"
-              }`}
-              title={branch.tooltip ?? undefined}
-            >
-              {branch.branch}
-            </span>
-          ) : null}
+          {/* Name + branch share a baseline-aligned inner flex so the smaller
+              text-xs branch sits on the name's baseline instead of floating
+              high like a superscript (the outer row is items-center, which
+              centers the two different font sizes). The count badge stays
+              outside this inner flex so it remains vertically centered. min-w-0
+              lets both the inner flex and each span shrink-truncate. */}
+          <span className="flex min-w-0 items-baseline gap-1.5">
+            <span className="min-w-0 truncate font-semibold">{name}</span>
+            {/* Current branch as a muted, monospace secondary span; non-leading
+                branches are warning-tinted (amber) with an explanatory title.
+                Omitted entirely for empty/unknown branches (e.g. path_missing). */}
+            {branch ? (
+              <span
+                className={`min-w-0 truncate font-mono text-xs ${
+                  branch.warn ? "text-amber-500" : "text-muted-foreground"
+                }`}
+                title={branch.tooltip ?? undefined}
+              >
+                {branch.branch}
+              </span>
+            ) : null}
+          </span>
           {sessions.length > 0 ? (
             <Badge variant="secondary" className="shrink-0">
               {sessions.length}
@@ -449,6 +459,10 @@ function ProjectBlock({
               Checkout default branch…
             </DropdownMenuItem>
             <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => openProjectInfo(id)}>
+              <Info />
+              Project info…
+            </DropdownMenuItem>
             <DropdownMenuItem onClick={() => openProjectSettings(id)}>
               <Settings />
               Project settings…

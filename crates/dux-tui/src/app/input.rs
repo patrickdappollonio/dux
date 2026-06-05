@@ -6452,6 +6452,7 @@ mod tests {
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
+            created_at: None,
         };
         session_store
             .upsert_project(&ProjectConfig {
@@ -9230,6 +9231,7 @@ not_a_real_action = ["x"]
                 current_branch: "main".to_string(),
                 branch_status: ProjectBranchStatus::Unknown,
                 path_missing: false,
+                created_at: None,
             });
         }
     }
@@ -13863,6 +13865,7 @@ cyan = "#00ffff"
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
+            created_at: None,
         };
         app.engine
             .session_store
@@ -14028,6 +14031,7 @@ cyan = "#00ffff"
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
+            created_at: None,
         };
         app.engine
             .session_store

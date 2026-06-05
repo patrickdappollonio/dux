@@ -591,6 +591,7 @@ mod tests {
             current_branch: "main".to_string(),
             branch_status: crate::model::ProjectBranchStatus::Leading,
             path_missing: false,
+            created_at: None,
         }
     }
 

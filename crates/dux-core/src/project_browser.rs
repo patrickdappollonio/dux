@@ -79,7 +79,11 @@ pub fn leading_branch_for_project(path: &Path, current_branch: &str) -> String {
 /// Each project gets its path expanded, its provider resolved (falling back to the global
 /// default), and its current branch read from git. Missing or non-git paths are flagged
 /// with `path_missing = true` and receive an empty `current_branch`.
-pub fn load_projects(project_configs: &[ProjectConfig], config: &Config) -> Vec<Project> {
+pub fn load_projects(
+    project_configs: &[ProjectConfig],
+    created_ats: &HashMap<String, chrono::DateTime<chrono::Utc>>,
+    config: &Config,
+) -> Vec<Project> {
     let mut projects = Vec::new();
     for project in project_configs {
         let (path, missing) = match expand_path(&project.path) {
@@ -128,6 +132,7 @@ pub fn load_projects(project_configs: &[ProjectConfig], config: &Config) -> Vec<
             current_branch,
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: missing,
+            created_at: created_ats.get(&project.id).copied(),
         });
     }
     projects
@@ -303,6 +308,7 @@ mod tests {
             current_branch: "feature".to_string(),
             branch_status: ProjectBranchStatus::NotLeading,
             path_missing: false,
+            created_at: None,
         };
         let (worker_tx, worker_rx) = mpsc::channel();
 
@@ -348,6 +354,7 @@ mod tests {
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Leading,
             path_missing: false,
+            created_at: None,
         };
         let paths = DuxPaths {
             root: root.clone(),
@@ -451,11 +458,16 @@ mod tests {
             env: Default::default(),
         };
         let config = Config::default();
-        let projects = load_projects(&[cfg], &config);
+        let mut created_ats = HashMap::new();
+        let added = Utc::now();
+        created_ats.insert("test-project-id".to_string(), added);
+        let projects = load_projects(&[cfg], &created_ats, &config);
 
         assert_eq!(projects.len(), 1);
         let project = &projects[0];
         assert_eq!(project.id, "test-project-id");
+        // created_at is threaded from the store row map keyed by project id.
+        assert_eq!(project.created_at, Some(added));
         // No explicit provider → falls back to the global default ("claude").
         assert_eq!(
             project.default_provider.as_str(),

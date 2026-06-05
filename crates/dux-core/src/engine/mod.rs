@@ -370,8 +370,11 @@ impl Engine {
     /// the surface's responsibility and are not touched here.
     pub fn apply_reloaded_config(&mut self, config: Config) -> anyhow::Result<()> {
         self.github_integration_enabled = config.ui.github_integration;
-        self.projects =
-            crate::project_browser::load_projects(&self.session_store.load_projects()?, &config);
+        self.projects = crate::project_browser::load_projects(
+            &self.session_store.load_projects()?,
+            &self.session_store.load_project_created_ats()?,
+            &config,
+        );
         self.config = config;
         self.refresh_project_defaults();
         self.update_branch_sync_sessions();

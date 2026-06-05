@@ -1205,7 +1205,11 @@ impl App {
 
         let session_store = SessionStore::open(&paths.sessions_db_path)?;
         sync_config_projects_with_store(&mut config, &paths, &bindings, &session_store)?;
-        let projects = load_projects(&session_store.load_projects()?, &config);
+        let projects = load_projects(
+            &session_store.load_projects()?,
+            &session_store.load_project_created_ats()?,
+            &config,
+        );
         persist_runtime_projects_to_config_and_store(
             &projects,
             &mut config,
@@ -2126,7 +2130,11 @@ impl App {
         self.commit_pane_height_pct = config.ui.commit_pane_height_pct;
         self.engine.github_integration_enabled = config.ui.github_integration;
         self.pr_banner_at_bottom = config.ui.pr_banner_position == "bottom";
-        self.engine.projects = load_projects(&self.engine.session_store.load_projects()?, &config);
+        self.engine.projects = load_projects(
+            &self.engine.session_store.load_projects()?,
+            &self.engine.session_store.load_project_created_ats()?,
+            &config,
+        );
         persist_runtime_projects_to_config_and_store(
             &self.engine.projects,
             &mut config,
@@ -2992,6 +3000,7 @@ mod tests {
             current_branch: "main".to_string(),
             branch_status: ProjectBranchStatus::Unknown,
             path_missing: false,
+            created_at: None,
         }
     }
 
@@ -3437,7 +3446,13 @@ leading_branch = "main"
 
         sync_config_projects_with_store(&mut config, &paths, &bindings, &store)
             .expect("sync projects");
-        let projects = load_projects(&store.load_projects().expect("load projects"), &config);
+        let projects = load_projects(
+            &store.load_projects().expect("load projects"),
+            &store
+                .load_project_created_ats()
+                .expect("load project created_ats"),
+            &config,
+        );
         assert_eq!(projects[0].leading_branch.as_deref(), Some("main"));
 
         persist_runtime_projects_to_config_and_store(

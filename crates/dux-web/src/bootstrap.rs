@@ -83,8 +83,11 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     let session_store = SessionStore::open(&paths.sessions_db_path)?;
     let single_instance_lock = SingleInstanceLock::acquire(&paths.lock_path)?;
     let sessions = session_store.load_sessions()?;
-    let projects =
-        dux_core::project_browser::load_projects(&session_store.load_projects()?, &config);
+    let projects = dux_core::project_browser::load_projects(
+        &session_store.load_projects()?,
+        &session_store.load_project_created_ats()?,
+        &config,
+    );
     let (worker_tx, worker_rx): (mpsc::Sender<WorkerEvent>, mpsc::Receiver<WorkerEvent>) =
         mpsc::channel();
 
