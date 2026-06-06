@@ -1,5 +1,6 @@
 import type * as React from "react"
 import { Suspense } from "react"
+import { LogOut } from "lucide-react"
 
 import { AddProjectDialog } from "@/components/AddProjectDialog"
 import { AttachWorktreeDialog } from "@/components/AttachWorktreeDialog"
@@ -23,7 +24,9 @@ import { ProjectSettingsDialog } from "@/components/ProjectSettingsDialog"
 import { RemoveProjectDialog } from "@/components/RemoveProjectDialog"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
 import { StatusBar } from "@/components/StatusBar"
+import { LoginScreen } from "@/components/LoginScreen"
 import { Welcome } from "@/components/Welcome"
+import { BrailleSpinner } from "@/components/BrailleSpinner"
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -47,11 +50,11 @@ import { Toaster } from "@/components/ui/sonner"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import { paletteShortcutLabel } from "@/lib/platform"
-import { setPaletteOpen, useDux } from "@/lib/store"
+import { logout, setPaletteOpen, useDux } from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
 
 function InsetHeader() {
-  const { viewModel, selectedSessionId, selectedTarget } = useDux()
+  const { viewModel, selectedSessionId, selectedTarget, auth } = useDux()
   const session = viewModel?.sessions.find((s) => s.id === selectedSessionId)
   const project = session
     ? viewModel?.projects.find((p) => p.id === session.project_id)
@@ -107,6 +110,22 @@ function InsetHeader() {
           <span className="font-mono text-xs">{paletteShortcutLabel()}</span>
           Search…
         </Button>
+        {auth.phase === "authed" ? (
+          <div className="flex items-center gap-1.5">
+            <span className="max-w-32 truncate text-xs text-muted-foreground">
+              {auth.username}
+            </span>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Log out"
+              title="Log out"
+              onClick={() => void logout()}
+            >
+              <LogOut />
+            </Button>
+          </div>
+        ) : null}
       </div>
     </header>
   )
@@ -263,8 +282,32 @@ function MobileApp() {
   )
 }
 
+// While the boot `/api/me` round-trip is in flight, the app shell must NOT mount
+// — both because we don't yet know whether to show the login screen, and because
+// the WS connect (issued the moment we learn auth is off / we're authed) must
+// precede the terminal's first subscribe. A minimal centered spinner covers the
+// brief gap.
+function BootSpinner() {
+  return (
+    <div className="flex min-h-svh items-center justify-center bg-background">
+      <BrailleSpinner className="text-primary" />
+    </div>
+  )
+}
+
 function App() {
+  const { auth } = useDux()
   const isMobile = useIsMobile()
+
+  // Top-level auth branch, BEFORE the shell. "checking" → spinner; "anonymous" →
+  // the login screen ONLY (no sidebar, no WS-dependent UI); "disabled"/"authed" →
+  // today's app exactly.
+  if (auth.phase === "checking") {
+    return <BootSpinner />
+  }
+  if (auth.phase === "anonymous") {
+    return <LoginScreen />
+  }
 
   if (isMobile) {
     return <MobileApp />

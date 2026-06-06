@@ -9,6 +9,7 @@ import {
   CommandSeparator,
 } from "@/components/ui/command"
 import {
+  logout,
   openCheckoutDefaultBranch,
   openCommit,
   openCreateAgent,
@@ -25,7 +26,7 @@ import {
 import { PALETTE_HANDLERS } from "@/lib/paletteRegistry"
 
 export function CommandPalette() {
-  const { paletteOpen, viewModel, selectedSessionId } = useDux()
+  const { paletteOpen, viewModel, selectedSessionId, auth } = useDux()
 
   const selectedSession = viewModel?.sessions.find(
     (s) => s.id === selectedSessionId
@@ -245,7 +246,11 @@ export function CommandPalette() {
 
         {/* Web-only: not a TUI palette command (no BINDING_DEFS/core entry), so
             it stays hand-written. Overwrites config.toml from the running
-            config — paired with the registry's reload-config. */}
+            config — paired with the registry's reload-config. Log out is also
+            web-only (the TUI has no session to end) and is shown only when auth
+            is on AND a session is active — following the recover-config
+            precedent of a hand-written entry that never touches the core
+            registry. */}
         <CommandGroup heading="Config">
           <CommandItem
             className="cursor-pointer"
@@ -256,6 +261,17 @@ export function CommandPalette() {
           >
             Recover config (overwrite config.toml)
           </CommandItem>
+          {auth.phase === "authed" ? (
+            <CommandItem
+              className="cursor-pointer"
+              onSelect={() => {
+                void logout()
+                close()
+              }}
+            >
+              Log out{auth.username ? ` (${auth.username})` : ""}
+            </CommandItem>
+          ) : null}
         </CommandGroup>
         <CommandSeparator />
 

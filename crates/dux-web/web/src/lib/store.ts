@@ -2,6 +2,14 @@ import { useSyncExternalStore } from "react"
 import { toast } from "sonner"
 
 import { sanitizeAgentName } from "./agentName"
+import {
+  type AuthState,
+  type MeBody,
+  loginErrorMessage,
+  LOGIN_NETWORK_MESSAGE,
+  parseRetryAfter,
+  phaseFromMe,
+} from "./auth"
 import { ordersMatch } from "./reorder"
 import type { StatusLineState } from "./statusLine"
 import { sortedSessionIds, type SortKey } from "./sortSessions"
@@ -66,6 +74,13 @@ export interface PendingSessionOrder {
 export interface DuxState {
   viewModel: ViewModel | null
   conn: ConnState
+  // The login/auth-state machine. Starts "checking" while the boot `/api/me`
+  // round-trip is in flight; resolves to "disabled" (auth off — today's UX),
+  // "authed" (a valid session), or "anonymous" (auth on, no session → the login
+  // screen). The app shell only renders once the phase leaves "checking", so the
+  // WS connect (issued the moment we learn auth is off or we're authed) always
+  // precedes the terminal's first subscribe. See `bootAuth` below.
+  auth: AuthState
   selectedTarget: SelectedTarget | null
   // Derived from `selectedTarget`: the owning session id. Session-scoped UI
   // (breadcrumb, changed files, statusbar) reads this so it keeps working
@@ -208,6 +223,7 @@ function loadShowDiffLineNumbers(): boolean {
 let state: DuxState = {
   viewModel: null,
   conn: "connecting",
+  auth: { phase: "checking", username: null, error: null, pending: false },
   selectedTarget: null,
   selectedSessionId: null,
   terminalEpoch: 0,
@@ -266,7 +282,10 @@ function subscribe(listener: () => void): () => void {
   }
 }
 
-function getSnapshot(): DuxState {
+// The external-store snapshot accessor `useSyncExternalStore` consumes. Exported
+// so unit tests can read the live state after dispatching an action (there is no
+// React harness in this test setup); production code reads it only via `useDux`.
+export function getSnapshot(): DuxState {
   return state
 }
 
@@ -342,6 +361,35 @@ socket.onConn = (conn) => {
   // showing an order the server never persisted. Snap back to authoritative.
   const patch = conn === "closed" || conn === "failed" ? clearPendingOrders() : {}
   setState({ conn, ...patch })
+  // When the socket gives up (the reconnect loop exhausted its attempts) while
+  // we believe we're authed, the cause may be a session that expired or was
+  // revoked server-side: the gated `/ws` upgrade now 401s, which the browser
+  // surfaces as an error+close, never an open — so the loop fails. Re-check
+  // `/api/me`; a 401 means we really are logged out, so flip to the login screen
+  // instead of showing the dead "Reconnect" UX. A still-authed `/api/me` means
+  // it was a genuine network blip, so we leave "failed" in place (the user can
+  // hit Reconnect). Event-driven: this fires only on the terminal "failed" edge.
+  if (conn === "failed" && state.auth.phase === "authed") {
+    void recheckAuthAfterFailure()
+  }
+}
+
+// After the WS reconnect loop fails while authed, re-verify the session. A 401
+// means the session is gone (expired/revoked): drop to the login screen. Any
+// other outcome (still authed, or the probe itself failed) is treated as a
+// transient network problem and left as "failed" so the Reconnect affordance
+// stands. Never connects the socket here — that happens on a fresh login.
+async function recheckAuthAfterFailure(): Promise<void> {
+  try {
+    const resp = await fetch("/api/me", { credentials: "same-origin" })
+    if (resp.status === 401) {
+      setState({
+        auth: { phase: "anonymous", username: null, error: null, pending: false },
+      })
+    }
+  } catch {
+    // Probe failed too — keep "failed"; this was a network problem, not a logout.
+  }
 }
 
 // Show a toast colored by the engine's StatusTone. dux uses Info for positive
@@ -474,7 +522,102 @@ socket.onProjectPathInspection = (path, currentBranch, warning, error) => {
   })
 }
 
-socket.connect()
+// Boot the auth-state machine, THEN connect the socket (the reordering vs. the
+// previous module-load `socket.connect()`). With auth on and no session, the
+// gated `/ws` upgrade 401s; a blind boot connect would just burn the reconnect
+// loop down to "failed" before the user ever logs in. So we first ask `/api/me`
+// who we are:
+//   - auth disabled OR a valid session → set the phase, THEN connect (today's UX
+//     for the disabled case; an authed user lands straight in the app). The
+//     connect is synchronous within this resolution, so it still happens exactly
+//     once and is in flight before React renders the shell — the app shell is
+//     gated behind the non-"checking" phase, so the focused TerminalPane never
+//     mounts (and never issues its first `subscribe`, which would be dropped on a
+//     non-OPEN socket) until after this connect is issued.
+//   - 401 → "anonymous"; the login screen renders and NO socket connect happens
+//     until a successful login.
+// Network failure (server unreachable at boot) falls back to "anonymous" so the
+// login screen shows rather than a stuck spinner; a successful login then probes
+// the real auth state again.
+async function bootAuth(): Promise<void> {
+  try {
+    const resp = await fetch("/api/me", { credentials: "same-origin" })
+    let body: MeBody | null = null
+    if (resp.status === 200) {
+      body = (await resp.json().catch(() => null)) as MeBody | null
+    }
+    const { phase, username } = phaseFromMe(resp.status, body)
+    setState({ auth: { phase, username, error: null, pending: false } })
+    if (phase === "disabled" || phase === "authed") {
+      socket.connect()
+    }
+  } catch {
+    setState({
+      auth: { phase: "anonymous", username: null, error: null, pending: false },
+    })
+  }
+}
+
+void bootAuth()
+
+// Attempt a login. On success the phase flips to "authed" and the socket
+// connects (the one connect for the auth-on path). A 401 surfaces the generic
+// invalid-credentials message; a 429 surfaces a throttle message naming the
+// Retry-After window; a network error surfaces a reachability message. The
+// `pending` flag drives the submit button while the request is in flight.
+export async function login(username: string, password: string): Promise<void> {
+  setState({ auth: { ...state.auth, error: null, pending: true } })
+  try {
+    const resp = await fetch("/api/login", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    })
+    if (resp.status === 200) {
+      const body = (await resp.json().catch(() => null)) as MeBody | null
+      const name =
+        body && typeof body.username === "string" ? body.username : username
+      setState({
+        auth: { phase: "authed", username: name, error: null, pending: false },
+      })
+      socket.connect()
+      return
+    }
+    const retryAfter =
+      resp.status === 429
+        ? parseRetryAfter(resp.headers.get("retry-after"))
+        : undefined
+    setState({
+      auth: {
+        ...state.auth,
+        error: loginErrorMessage(resp.status, retryAfter),
+        pending: false,
+      },
+    })
+  } catch {
+    setState({
+      auth: { ...state.auth, error: LOGIN_NETWORK_MESSAGE, pending: false },
+    })
+  }
+}
+
+// Log out: tell the server to destroy the session, deliberately disconnect the
+// socket (suppressing the reconnect loop — `socket.close()` sets the
+// closed-by-user flag), and drop to the login screen. The server call is
+// best-effort: even if it fails we still tear down the client-side session view,
+// since the cookie is HttpOnly and the gate re-checks every request anyway.
+export async function logout(): Promise<void> {
+  socket.close()
+  try {
+    await fetch("/api/logout", { method: "POST", credentials: "same-origin" })
+  } catch {
+    // Ignore — the local teardown below is what matters for the UI.
+  }
+  setState({
+    auth: { phase: "anonymous", username: null, error: null, pending: false },
+  })
+}
 
 // Hardware/browser Back for the mobile shell. Registered ONCE at module scope
 // (never in a React effect) so it survives re-renders and shell switches. The

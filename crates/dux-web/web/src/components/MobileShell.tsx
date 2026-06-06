@@ -25,6 +25,7 @@ import {
   GitFork,
   GitPullRequest,
   Info,
+  LogOut,
   Pencil,
   Plug,
   Plus,
@@ -73,6 +74,7 @@ import {
 } from "@/lib/reorder"
 import {
   createTerminal,
+  logout,
   mobileNavigate,
   openAddProject,
   openAttachWorktree,
@@ -562,8 +564,13 @@ function ProjectGroupList({
 // the sidebar's partition (projects with agents first, agent-less ones under
 // their own heading).
 function HomeScreen() {
-  const { viewModel, selectedTarget, pendingSessionOrder, pendingProjectOrder } =
-    useDux()
+  const {
+    viewModel,
+    selectedTarget,
+    pendingSessionOrder,
+    pendingProjectOrder,
+    auth,
+  } = useDux()
   const rawSessions = viewModel?.sessions ?? []
   const rawProjects = viewModel?.projects ?? []
   // Fold the optimistic drag overlays over the server order (see
@@ -605,6 +612,17 @@ function HomeScreen() {
         >
           <Search />
         </Button>
+        {auth.phase === "authed" ? (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-11 shrink-0"
+            aria-label={`Log out ${auth.username ?? ""}`.trim()}
+            onClick={() => void logout()}
+          >
+            <LogOut />
+          </Button>
+        ) : null}
       </header>
 
       {hasProjects ? (
