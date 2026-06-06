@@ -3239,6 +3239,79 @@ impl App {
             return Ok(false);
         }
 
+        if matches!(self.prompt, PromptState::ServerAddUserName { .. }) {
+            let is_plain_char = matches!(key.code, KeyCode::Char(_))
+                && !key.modifiers.contains(KeyModifiers::CONTROL);
+            let action = if is_plain_char {
+                None
+            } else {
+                self.bindings.lookup(&key, BindingScope::Dialog)
+            };
+            match action {
+                Some(Action::CloseOverlay) => {
+                    self.prompt = PromptState::None;
+                }
+                Some(Action::Confirm) => {
+                    self.confirm_server_add_user_name();
+                }
+                _ => {
+                    if let PromptState::ServerAddUserName { input } = &mut self.prompt {
+                        input.handle_key(key);
+                    }
+                }
+            }
+            return Ok(false);
+        }
+
+        if matches!(self.prompt, PromptState::ServerAddUserPassword { .. }) {
+            let is_plain_char = matches!(key.code, KeyCode::Char(_))
+                && !key.modifiers.contains(KeyModifiers::CONTROL);
+            let action = if is_plain_char {
+                None
+            } else {
+                self.bindings.lookup(&key, BindingScope::Dialog)
+            };
+            match action {
+                Some(Action::CloseOverlay) => {
+                    self.prompt = PromptState::None;
+                }
+                Some(Action::Confirm) => {
+                    self.confirm_server_add_user_password();
+                }
+                _ => {
+                    if let PromptState::ServerAddUserPassword { input, .. } = &mut self.prompt {
+                        input.handle_key(key);
+                    }
+                }
+            }
+            return Ok(false);
+        }
+
+        if let PromptState::ServerRemoveUser {
+            usernames,
+            selected,
+        } = &mut self.prompt
+        {
+            match self.bindings.lookup(&key, BindingScope::Dialog) {
+                Some(Action::CloseOverlay) => {
+                    self.prompt = PromptState::None;
+                }
+                Some(Action::Confirm) => {
+                    self.confirm_server_remove_user();
+                }
+                _ => match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        *selected = selected.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        *selected = (*selected + 1).min(usernames.len().saturating_sub(1));
+                    }
+                    _ => {}
+                },
+            }
+            return Ok(false);
+        }
+
         if let PromptState::RenameSession {
             session_id,
             input,
@@ -7113,6 +7186,196 @@ not_a_real_action = ["x"]
         assert!(matches!(app.prompt, PromptState::RenameSession { .. }));
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    // ── server-add-user / server-remove-user prompt flows ─────────────
+
+    /// Type each character of `text` into the active prompt via the real key
+    /// path, so the tests exercise the same input handling as a user.
+    fn type_into_prompt(app: &mut App, text: &str) {
+        for ch in text.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap();
+        }
+    }
+
+    /// Block until one worker event arrives (the spawned hash/persist thread)
+    /// and apply it through the normal engine path. Times out so a hang fails
+    /// loudly rather than wedging the test run.
+    fn await_one_worker_event(app: &mut App) {
+        let event = app
+            .engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("worker event from auth-user persistence thread");
+        let reaction = app.engine.process_worker_event(event);
+        app.apply_reaction(reaction);
+    }
+
+    #[test]
+    fn server_add_user_happy_path_persists_hashed_entry() {
+        let mut app = test_app(default_bindings());
+        assert!(app.engine.config.auth.users.is_empty());
+
+        app.open_server_add_user();
+        type_into_prompt(&mut app, "alice");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(
+            app.prompt,
+            PromptState::ServerAddUserPassword { .. }
+        ));
+        type_into_prompt(&mut app, "hunter2");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        // Hashing/persistence happens off-thread; the prompt closes immediately.
+        assert!(matches!(app.prompt, PromptState::None));
+
+        await_one_worker_event(&mut app);
+
+        assert_eq!(app.engine.config.auth.users.len(), 1);
+        assert!(
+            dux_core::auth::verify_credentials(&app.engine.config.auth.users, "alice", "hunter2"),
+            "the persisted entry must verify the password"
+        );
+        // Entry must be htpasswd-style and never store the plaintext.
+        assert!(app.engine.config.auth.users[0].starts_with("alice:"));
+        assert!(!app.engine.config.auth.users[0].contains("hunter2"));
+        // The on-disk config round-trips the new user.
+        let persisted = crate::config::ensure_config(&app.engine.paths).expect("reload config");
+        assert_eq!(persisted.auth.users, app.engine.config.auth.users);
+        assert!(app.status.text().contains("alice"));
+        assert!(app.status.text().contains("added"));
+    }
+
+    #[test]
+    fn server_add_user_existing_username_updates_password() {
+        let mut app = test_app(default_bindings());
+        let old = dux_core::auth::hash_password("old-pass").expect("hash");
+        app.engine.config.auth.users = vec![format!("alice:{old}")];
+
+        app.open_server_add_user();
+        type_into_prompt(&mut app, "alice");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        match &app.prompt {
+            PromptState::ServerAddUserPassword { is_update, .. } => assert!(*is_update),
+            other => panic!("expected password step, got {other:?}"),
+        }
+        type_into_prompt(&mut app, "new-pass");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        await_one_worker_event(&mut app);
+
+        // Last-wins: the new password verifies, the old one no longer does.
+        assert!(dux_core::auth::verify_credentials(
+            &app.engine.config.auth.users,
+            "alice",
+            "new-pass"
+        ));
+        assert!(!dux_core::auth::verify_credentials(
+            &app.engine.config.auth.users,
+            "alice",
+            "old-pass"
+        ));
+        assert!(app.status.text().contains("updated"));
+    }
+
+    #[test]
+    fn server_add_user_rejects_colon_username() {
+        let mut app = test_app(default_bindings());
+        app.open_server_add_user();
+        type_into_prompt(&mut app, "al:ice");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        // Still on the username step; an error is shown; nothing persisted.
+        assert!(matches!(app.prompt, PromptState::ServerAddUserName { .. }));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(app.engine.config.auth.users.is_empty());
+    }
+
+    #[test]
+    fn server_add_user_rejects_overlong_password() {
+        let mut app = test_app(default_bindings());
+        app.open_server_add_user();
+        type_into_prompt(&mut app, "alice");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        // 73 bytes — one past the bcrypt limit. Set directly to avoid 73 keystrokes.
+        if let PromptState::ServerAddUserPassword { input, .. } = &mut app.prompt {
+            input.set_text("a".repeat(73));
+        } else {
+            panic!("expected password step");
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        // Rejected: still on the password step, error shown, nothing persisted.
+        assert!(matches!(
+            app.prompt,
+            PromptState::ServerAddUserPassword { .. }
+        ));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(app.engine.config.auth.users.is_empty());
+    }
+
+    #[test]
+    fn server_add_user_password_input_is_masked() {
+        let mut app = test_app(default_bindings());
+        app.open_server_add_user();
+        type_into_prompt(&mut app, "alice");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        type_into_prompt(&mut app, "secret");
+        match &app.prompt {
+            PromptState::ServerAddUserPassword { input, .. } => {
+                // Real value preserved for submit…
+                assert_eq!(input.text, "secret");
+                // …but display masks it.
+                assert_eq!(input.display_text(), "••••••");
+            }
+            other => panic!("expected password step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_remove_user_removes_all_duplicate_entries() {
+        let mut app = test_app(default_bindings());
+        let h1 = dux_core::auth::hash_password("p1").expect("hash");
+        let h2 = dux_core::auth::hash_password("p2").expect("hash");
+        let hb = dux_core::auth::hash_password("pb").expect("hash");
+        // alice appears twice (a password change via append) plus bob.
+        app.engine.config.auth.users = vec![
+            format!("alice:{h1}"),
+            format!("bob:{hb}"),
+            format!("alice:{h2}"),
+        ];
+
+        app.open_server_remove_user();
+        match &app.prompt {
+            // Picker collapses alice's duplicates into one row.
+            PromptState::ServerRemoveUser { usernames, .. } => {
+                assert_eq!(usernames, &vec!["alice".to_string(), "bob".to_string()]);
+            }
+            other => panic!("expected remove-user picker, got {other:?}"),
+        }
+        // alice is selected (index 0); confirm removes ALL alice entries.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(app.prompt, PromptState::None));
+        await_one_worker_event(&mut app);
+
+        assert_eq!(app.engine.config.auth.users.len(), 1);
+        assert!(app.engine.config.auth.users[0].starts_with("bob:"));
+        assert!(app.status.text().contains("alice"));
+    }
+
+    #[test]
+    fn server_remove_user_with_no_users_reports_error() {
+        let mut app = test_app(default_bindings());
+        assert!(app.engine.config.auth.users.is_empty());
+        app.open_server_remove_user();
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
     }
 
     #[test]

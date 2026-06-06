@@ -297,6 +297,17 @@ pub enum WorkerEvent {
         env: BTreeMap<String, String>,
         result: Result<(), String>,
     },
+    /// A web UI `[auth]` user add/update/remove was hashed (for adds) and
+    /// persisted to config.toml on a background thread. On success the worker
+    /// carries the updated user list so the engine can refresh its in-memory
+    /// config; `message` is the verbose, already-formatted status line to show.
+    /// On failure `result` is the formatted error and the config is left
+    /// untouched.
+    AuthUsersPersisted {
+        users: Vec<String>,
+        message: String,
+        result: Result<(), String>,
+    },
     StartupCommandRerunCompleted(crate::startup::StartupCommandResult),
     StartupCommandLogsLoaded {
         scope_label: String,

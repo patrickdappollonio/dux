@@ -443,6 +443,24 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // Per-session: web exposes "Force reconnect (fresh)" in session actions.
         surface: PaletteSurface::Tui,
     },
+    PaletteCommand {
+        action: Action::ServerAddUser,
+        name: "server-add-user",
+        description: "Add or update a web UI login user",
+        // TUI-only by design (Locked scope cut): web UI user management is
+        // deliberately excluded in v1. A remote web session minting login users
+        // is a privilege-escalation surface, so credentials are managed only
+        // from the trusted side — the TUI palette or the config file.
+        surface: PaletteSurface::Tui,
+    },
+    PaletteCommand {
+        action: Action::ServerRemoveUser,
+        name: "server-remove-user",
+        description: "Remove a web UI login user",
+        // TUI-only by design (Locked scope cut): see server-add-user. User
+        // management stays trusted-side; the web has no user-management surface.
+        surface: PaletteSurface::Tui,
+    },
 ];
 
 /// All palette commands surfaced on the web, in registry (canonical) order.

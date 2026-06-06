@@ -611,6 +611,26 @@ pub(crate) enum PromptState {
         input: TextInput,
         rename_branch: bool,
     },
+    /// Step 1 of `server-add-user`: type the username. Enter advances to the
+    /// masked password step; Esc cancels.
+    ServerAddUserName {
+        input: TextInput,
+    },
+    /// Step 2 of `server-add-user`: type the (masked) password for `username`.
+    /// `is_update` records whether this username already exists so the success
+    /// message can say "password updated" rather than "added". Enter hashes the
+    /// password off-thread and persists; Esc cancels.
+    ServerAddUserPassword {
+        username: String,
+        input: TextInput,
+        is_update: bool,
+    },
+    /// `server-remove-user`: a picker over the configured usernames. Enter
+    /// removes every entry for the highlighted username; Esc cancels.
+    ServerRemoveUser {
+        usernames: Vec<String>,
+        selected: usize,
+    },
     PullRequestInput {
         project: Project,
         input: TextInput,
@@ -1161,6 +1181,7 @@ fn push_project_left_items(
     }
 }
 
+mod auth_users;
 mod components;
 mod input;
 mod render;
@@ -1892,6 +1913,14 @@ impl App {
             "reload-config" => self.reload_config_from_disk(),
             "start-web-server" => {
                 self.start_web_server();
+                Ok(())
+            }
+            "server-add-user" => {
+                self.open_server_add_user();
+                Ok(())
+            }
+            "server-remove-user" => {
+                self.open_server_remove_user();
                 Ok(())
             }
             "toggle-project-auto-reopen-agents" => self.toggle_project_auto_reopen_agents(),

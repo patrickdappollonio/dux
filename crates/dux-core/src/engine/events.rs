@@ -1383,6 +1383,22 @@ impl Engine {
                     "Could not save global environment variables to config.toml: {err}"
                 ))),
             },
+            WorkerEvent::AuthUsersPersisted {
+                users,
+                message,
+                result,
+            } => match result {
+                Ok(()) => {
+                    // Adopt the persisted list so the running config matches
+                    // disk; a flip to the web server rebuilds AuthState from
+                    // this config, and a running server picks it up on reload.
+                    self.config.auth.users = users;
+                    EventReaction::Status(StatusUpdate::info(message))
+                }
+                Err(err) => EventReaction::Status(StatusUpdate::error(format!(
+                    "Could not save web UI login users to config.toml: {err}"
+                ))),
+            },
             WorkerEvent::StartupCommandRerunCompleted(result) => match result.status {
                 Ok(()) => EventReaction::StartupCommandSucceeded {
                     project_name: result.project_name,

@@ -63,6 +63,9 @@ enum Role {
     Muted,
     /// The non-loopback security warning — warning-styled, bold.
     Warning,
+    /// The quieter "authenticated mode" informational line shown when the login
+    /// gate is on — muted, not alarming.
+    AuthInfo,
     /// An exit hint's key portion (e.g. "q or Esc").
     HintKey,
     /// An exit hint's description portion.
@@ -82,6 +85,12 @@ pub struct ServerStatusScreen {
     theme: Theme,
     url: String,
     loopback: bool,
+    /// Whether the web login gate is active for this serve. Controls whether the
+    /// status screen shows the quiet "login required" line (auth on) or the loud
+    /// no-auth warning on a non-loopback bind (auth off).
+    auth_enabled: bool,
+    /// Number of configured login users, shown in the auth-on informational line.
+    user_count: usize,
     started: Instant,
     /// Uptime second most recently drawn, so [`tick`] redraws only when the
     /// visible value actually changes (wall-clock, not per engine-loop tick).
@@ -93,7 +102,14 @@ impl ServerStatusScreen {
     /// and draw the first frame. The caller (binary) falls back to a plain
     /// println if this returns `Err` — the server must still run even if the
     /// status screen cannot be set up.
-    pub fn new(url: &str, loopback: bool, theme_name: &str, paths: &DuxPaths) -> Result<Self> {
+    pub fn new(
+        url: &str,
+        loopback: bool,
+        auth_enabled: bool,
+        user_count: usize,
+        theme_name: &str,
+        paths: &DuxPaths,
+    ) -> Result<Self> {
         // The theme name comes from `engine.config.ui.theme`; fall back to the
         // bundled default (and log) if it cannot be loaded. We deliberately
         // drop the fallback warning string here — the status screen has no
@@ -115,6 +131,8 @@ impl ServerStatusScreen {
             theme,
             url: url.to_string(),
             loopback,
+            auth_enabled,
+            user_count,
             started,
             // Force the first `tick` redraw by seeding an impossible "last
             // drawn" value; the initial frame is drawn explicitly below.
@@ -161,7 +179,13 @@ impl ServerStatusScreen {
     /// Draw one frame for the given uptime (seconds).
     fn draw(&mut self, uptime_secs: u64) -> Result<()> {
         let theme = &self.theme;
-        let lines = screen_lines(&self.url, self.loopback, uptime_secs);
+        let lines = screen_lines(
+            &self.url,
+            self.loopback,
+            self.auth_enabled,
+            self.user_count,
+            uptime_secs,
+        );
         self.terminal.draw(|frame| {
             let area = frame.area();
             // Pre-fill the whole frame with the theme background so the alt
@@ -295,9 +319,19 @@ fn format_uptime(secs: u64) -> String {
 
 /// Build the screen's content as a pure, terminal-free description: each line is
 /// a list of `(text, Role)` segments. Theme-free so it can be unit-tested
-/// without a TTY or a loaded theme. The warning line is present only when the
-/// bind is non-loopback.
-fn screen_lines(url: &str, loopback: bool, uptime_secs: u64) -> Vec<ScreenLine> {
+/// without a TTY or a loaded theme.
+///
+/// The auth/security line is re-keyed off the login gate:
+/// - auth ON  → a quiet informational line naming the configured user count;
+/// - auth OFF + non-loopback → the loud no-auth security warning;
+/// - auth OFF + loopback → nothing (the bind is unreachable off the machine).
+fn screen_lines(
+    url: &str,
+    loopback: bool,
+    auth_enabled: bool,
+    user_count: usize,
+    uptime_secs: u64,
+) -> Vec<ScreenLine> {
     let mut lines: Vec<ScreenLine> = Vec::new();
 
     for logo_line in ASCII_LOGO {
@@ -312,7 +346,14 @@ fn screen_lines(url: &str, loopback: bool, uptime_secs: u64) -> Vec<ScreenLine> 
         Role::Muted,
     )]);
 
-    if !loopback {
+    if auth_enabled {
+        let noun = if user_count == 1 { "user" } else { "users" };
+        lines.push(vec![(String::new(), Role::Spacer)]);
+        lines.push(vec![(
+            format!("Login required — {user_count} {noun} configured."),
+            Role::AuthInfo,
+        )]);
+    } else if !loopback {
         lines.push(vec![(String::new(), Role::Spacer)]);
         lines.push(vec![(
             "Listening beyond this machine with NO authentication — \
@@ -364,6 +405,9 @@ fn line_for<'a>(segments: &'a ScreenLine, theme: &Theme) -> Line<'a> {
                 Role::Warning => Style::default()
                     .fg(theme.warning_fg)
                     .add_modifier(Modifier::BOLD),
+                // Auth-on info line: muted secondary text — informational, not
+                // alarming, since the login gate is protecting the bind.
+                Role::AuthInfo => Style::default().fg(theme.provider_label_fg),
                 // Exit-hint key: accent key color, bold.
                 Role::HintKey => Style::default()
                     .fg(theme.hint_key_fg)
@@ -513,7 +557,7 @@ mod tests {
 
     #[test]
     fn content_includes_url_and_heading_and_uptime() {
-        let lines = screen_lines("http://127.0.0.1:8080", true, 42);
+        let lines = screen_lines("http://127.0.0.1:8080", true, false, 0, 42);
         let text = plain_text(&lines);
         assert!(text.contains("dux server running"));
         assert!(text.contains("http://127.0.0.1:8080"));
@@ -521,22 +565,23 @@ mod tests {
     }
 
     #[test]
-    fn loopback_omits_the_warning() {
-        let lines = screen_lines("http://127.0.0.1:8080", true, 0);
+    fn loopback_auth_off_omits_the_warning() {
+        let lines = screen_lines("http://127.0.0.1:8080", true, false, 0, 0);
         let text = plain_text(&lines);
         assert!(!text.contains("NO authentication"));
-        // No line should carry the Warning role either.
+        assert!(!text.contains("Login required"));
+        // No line should carry the Warning or AuthInfo role either.
         assert!(
             !lines
                 .iter()
                 .flatten()
-                .any(|(_, role)| *role == Role::Warning)
+                .any(|(_, role)| matches!(role, Role::Warning | Role::AuthInfo))
         );
     }
 
     #[test]
-    fn non_loopback_includes_the_warning() {
-        let lines = screen_lines("http://0.0.0.0:8080", false, 0);
+    fn non_loopback_auth_off_includes_the_loud_warning() {
+        let lines = screen_lines("http://0.0.0.0:8080", false, false, 0, 0);
         let text = plain_text(&lines);
         assert!(text.contains("NO authentication"));
         assert!(text.contains("control your agents"));
@@ -546,11 +591,49 @@ mod tests {
                 .flatten()
                 .any(|(_, role)| *role == Role::Warning)
         );
+        // And it must NOT also show the quiet auth line.
+        assert!(
+            !lines
+                .iter()
+                .flatten()
+                .any(|(_, role)| *role == Role::AuthInfo)
+        );
+    }
+
+    #[test]
+    fn auth_on_shows_quiet_login_line_not_the_warning() {
+        // Auth on: a non-loopback bind is fine — show the quiet informational
+        // line, never the loud no-auth warning.
+        let lines = screen_lines("http://0.0.0.0:8080", false, true, 3, 0);
+        let text = plain_text(&lines);
+        assert!(text.contains("Login required"));
+        assert!(text.contains("3 users configured"));
+        assert!(!text.contains("NO authentication"));
+        assert!(
+            lines
+                .iter()
+                .flatten()
+                .any(|(_, role)| *role == Role::AuthInfo)
+        );
+        assert!(
+            !lines
+                .iter()
+                .flatten()
+                .any(|(_, role)| *role == Role::Warning)
+        );
+    }
+
+    #[test]
+    fn auth_on_singular_user_uses_singular_noun() {
+        let lines = screen_lines("http://127.0.0.1:8080", true, true, 1, 0);
+        let text = plain_text(&lines);
+        assert!(text.contains("1 user configured"));
+        assert!(!text.contains("1 users"));
     }
 
     #[test]
     fn content_includes_both_exit_hints() {
-        let lines = screen_lines("http://127.0.0.1:8080", true, 0);
+        let lines = screen_lines("http://127.0.0.1:8080", true, false, 0, 0);
         let text = plain_text(&lines);
         assert!(text.contains("q or Esc"));
         assert!(text.contains("return to dux"));
@@ -562,7 +645,7 @@ mod tests {
     fn content_includes_the_wordmark() {
         // The first lines are the shared ASCII wordmark; assert one of its
         // distinctive rows is present so a future logo-export break is caught.
-        let lines = screen_lines("http://127.0.0.1:8080", true, 0);
+        let lines = screen_lines("http://127.0.0.1:8080", true, false, 0, 0);
         assert!(lines.len() >= ASCII_LOGO.len());
         assert_eq!(lines[0][0].1, Role::Logo);
         assert_eq!(lines[0][0].0, ASCII_LOGO[0]);

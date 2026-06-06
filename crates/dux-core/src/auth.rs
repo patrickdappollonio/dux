@@ -29,11 +29,59 @@ use crate::config::Config;
 /// the result.
 const DUMMY_HASH: &str = "$2b$12$P6LY6t.tj2V/XGO3FxFCkO6LQKVpEedM1YeKqEOL8vuUkT4PdlsfC";
 
+/// The maximum password byte length bcrypt actually hashes. bcrypt silently
+/// truncates anything past 72 bytes, so two distinct passwords that share a
+/// 72-byte prefix would verify against the same hash. Rather than hand the user
+/// that surprise, the TUI add-user flow rejects longer passwords up front (see
+/// [`password_within_bcrypt_limit`]).
+pub const MAX_BCRYPT_PASSWORD_BYTES: usize = 72;
+
 /// Hash a plaintext password with bcrypt at [`DEFAULT_COST`]. Returns the
 /// htpasswd-compatible hash string suitable for storing in an `[auth]` entry.
 pub fn hash_password(plain: &str) -> anyhow::Result<String> {
     let hash = bcrypt::hash(plain, DEFAULT_COST)?;
     Ok(hash)
+}
+
+/// Whether a password is short enough that bcrypt will hash it in full.
+///
+/// bcrypt only considers the first [`MAX_BCRYPT_PASSWORD_BYTES`] bytes of the
+/// input; anything beyond is silently ignored. Callers should reject (not
+/// truncate) over-long passwords so the user is never under the false
+/// impression that the dropped suffix protects their account.
+pub fn password_within_bcrypt_limit(password: &str) -> bool {
+    password.len() <= MAX_BCRYPT_PASSWORD_BYTES
+}
+
+/// Validate a proposed `[auth]` username.
+///
+/// Usernames are stored htpasswd-style as the part before the FIRST `':'` in a
+/// `"username:hash"` entry, so a username may not be empty and may not contain
+/// `':'` (that is the field separator — see [`parse_user`]). dux also rejects
+/// leading/trailing whitespace and any control or whitespace characters inside
+/// the name, because such usernames are confusing to type at the login form and
+/// easy to mistype in config. Usernames are case-sensitive (slice A1): `Alice`
+/// and `alice` are different accounts. Returns `Ok(())` when valid, or an
+/// explanatory message suitable for a status line when not.
+pub fn validate_username(username: &str) -> Result<(), String> {
+    if username.is_empty() {
+        return Err("Username cannot be empty.".to_string());
+    }
+    if username.contains(':') {
+        return Err(
+            "Username cannot contain ':' — it separates the username from the password hash in config.".to_string(),
+        );
+    }
+    if username != username.trim() {
+        return Err("Username cannot start or end with whitespace.".to_string());
+    }
+    if username
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err("Username cannot contain spaces or control characters.".to_string());
+    }
+    Ok(())
 }
 
 /// A single parsed `[auth]` entry: a username and its bcrypt hash, borrowed from
@@ -279,6 +327,54 @@ mod tests {
             !auth_enabled(&config, true),
             "--disable-auth forces the gate off even with users"
         );
+    }
+
+    #[test]
+    fn validate_username_accepts_reasonable_names() {
+        assert!(validate_username("alice").is_ok());
+        assert!(validate_username("Bob").is_ok());
+        assert!(validate_username("user_42-x").is_ok());
+        assert!(validate_username("dev.lead").is_ok());
+    }
+
+    #[test]
+    fn validate_username_rejects_empty() {
+        assert!(validate_username("").is_err());
+    }
+
+    #[test]
+    fn validate_username_rejects_colon() {
+        // The colon is the username:hash separator — a username carrying one
+        // would corrupt the stored entry.
+        let err = validate_username("al:ice").expect_err("colon must be rejected");
+        assert!(err.contains(':'), "message should explain the colon: {err}");
+    }
+
+    #[test]
+    fn validate_username_rejects_whitespace_and_control() {
+        assert!(validate_username("al ice").is_err());
+        assert!(validate_username(" alice").is_err());
+        assert!(validate_username("alice ").is_err());
+        assert!(validate_username("al\tice").is_err());
+        assert!(validate_username("al\nice").is_err());
+    }
+
+    #[test]
+    fn validate_username_is_case_sensitive() {
+        // Both forms are independently valid; the gate treats them as distinct
+        // accounts (slice A1), so validation must not normalize case.
+        assert!(validate_username("alice").is_ok());
+        assert!(validate_username("ALICE").is_ok());
+    }
+
+    #[test]
+    fn password_within_bcrypt_limit_boundary() {
+        assert!(password_within_bcrypt_limit(""));
+        assert!(password_within_bcrypt_limit(&"a".repeat(72)));
+        assert!(!password_within_bcrypt_limit(&"a".repeat(73)));
+        // Byte length, not char count: a 36-char multi-byte string is 72 bytes.
+        assert!(password_within_bcrypt_limit(&"é".repeat(36)));
+        assert!(!password_within_bcrypt_limit(&"é".repeat(37)));
     }
 
     #[test]

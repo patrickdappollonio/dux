@@ -57,21 +57,34 @@ fn run_tui_with_flip() -> Result<()> {
                     .map(|addr| addr.ip().is_loopback())
                     .unwrap_or(true);
 
+                // The flip never passes --disable-auth (that is a `dux server`
+                // CLI flag), so the gate is on iff [auth] has valid users. The
+                // user count drives the quiet "login required" line; the served
+                // engine rebuilds its AuthState from this same config.
+                let auth_enabled = dux_core::auth::auth_enabled(&engine.config, false);
+                let user_count = dux_core::auth::parse_users(&engine.config.auth.users).len();
+
                 // Try to set up the interactive status screen. If it fails (no
                 // TTY, raw-mode error), fall back to a plain line — the server
                 // must still run. `screen` lives outside the tick closure so we
                 // can drop it (restoring the terminal) AFTER serving returns.
-                let mut screen =
-                    match dux_tui::ServerStatusScreen::new(&url, loopback, &theme_name, &paths) {
-                        Ok(screen) => Some(screen),
-                        Err(err) => {
-                            eprintln!(
-                                "dux server running at {url} (status screen unavailable: {err}) \
+                let mut screen = match dux_tui::ServerStatusScreen::new(
+                    &url,
+                    loopback,
+                    auth_enabled,
+                    user_count,
+                    &theme_name,
+                    &paths,
+                ) {
+                    Ok(screen) => Some(screen),
+                    Err(err) => {
+                        eprintln!(
+                            "dux server running at {url} (status screen unavailable: {err}) \
                                  — press Ctrl-C to stop"
-                            );
-                            None
-                        }
-                    };
+                        );
+                        None
+                    }
+                };
 
                 let (engine, exit) = dux_web::serve_with_engine(*engine, listener, || {
                     // With the screen up, its keys drive the exit; without it,

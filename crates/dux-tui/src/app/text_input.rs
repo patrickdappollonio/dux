@@ -29,6 +29,11 @@ pub struct TextInput {
     /// inserted, and the candidate character. Return `Some(c)` to insert `c`
     /// (which may differ from the input), or `None` to silently reject.
     char_map: Option<CharMapFn>,
+    /// When true, renderers mask the value by drawing one bullet per character
+    /// instead of the literal text (used for password entry). The underlying
+    /// `text` is always the real value for editing and submit; only
+    /// [`TextInput::display_text`] reflects the mask.
+    masked: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +61,7 @@ impl TextInput {
             placeholder: None,
             overlay: None,
             char_map: None,
+            masked: false,
         }
     }
 
@@ -68,6 +74,7 @@ impl TextInput {
             placeholder: None,
             overlay: None,
             char_map: None,
+            masked: false,
         }
     }
 
@@ -106,6 +113,25 @@ impl TextInput {
     pub fn with_char_map(mut self, map: fn(&str, usize, char) -> Option<char>) -> Self {
         self.char_map = Some(map);
         self
+    }
+
+    /// Mark this input as masked so its rendered display shows bullets instead
+    /// of the typed characters (password entry). Editing and submit still use
+    /// the real `text`.
+    pub fn masked(mut self) -> Self {
+        self.masked = true;
+        self
+    }
+
+    /// The string a single-line renderer should display: the literal text, or
+    /// (when masked) one `•` per character of the underlying text. Character
+    /// count is preserved so the cursor still lands correctly.
+    pub fn display_text(&self) -> String {
+        if self.masked {
+            "•".repeat(self.text.chars().count())
+        } else {
+            self.text.clone()
+        }
     }
 
     /// Enable multiline editing with a visible line limit for rendering.
@@ -927,6 +953,31 @@ mod tests {
         assert!(ti.handle_key(key(KeyCode::Char('a'))));
         assert_eq!(ti.text, "a");
         assert_eq!(ti.cursor, 1);
+    }
+
+    #[test]
+    fn masked_display_hides_text_but_keeps_real_value() {
+        let mut ti = TextInput::new().masked();
+        for ch in "s3cret".chars() {
+            ti.insert_char(ch);
+        }
+        // The real value is preserved for submit/editing…
+        assert_eq!(ti.text, "s3cret");
+        // …but the display is bullets, one per character.
+        assert_eq!(ti.display_text(), "••••••");
+    }
+
+    #[test]
+    fn unmasked_display_is_the_literal_text() {
+        let ti = TextInput::with_text("hello".into());
+        assert_eq!(ti.display_text(), "hello");
+    }
+
+    #[test]
+    fn masked_display_counts_chars_not_bytes() {
+        let ti = TextInput::with_text("café".into()).masked();
+        // 4 characters → 4 bullets, even though "é" is 2 bytes.
+        assert_eq!(ti.display_text(), "••••");
     }
 
     #[test]
