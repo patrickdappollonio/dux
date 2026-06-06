@@ -1,9 +1,30 @@
-//! Placeholder for sub-project #3 — the web layer that will expose the
-//! `dux-core` engine over HTTP/WebSocket. Empty for now so the workspace
-//! topology is ready: this crate depends on `dux-core` (not `dux-tui`).
+//! The web layer: exposes the `dux-core` engine over HTTP/WebSocket so a browser
+//! SPA can drive the same agent sessions the TUI does.
 //!
-//! Dependency isolation is enforced by the `dep-isolation` CI job, which
-//! runs `cargo tree -p dux-web` and fails if any TUI-only crate appears.
+//! ## Entry points
+//!
+//! - [`run_server`] — the `dux server` CLI path. Boots the engine on its own
+//!   thread, builds the login gate's shared auth snapshot once from config, and
+//!   serves axum on a self-built tokio runtime until SIGINT/SIGTERM.
+//! - [`serve_with_engine`] — the in-process TUI↔server flip. Serves the web UI
+//!   over an EXISTING live engine (PTYs intact) on the caller's thread, returning
+//!   the engine when serving stops so the TUI can resume around the same agents.
+//!
+//! ## Major pieces
+//!
+//! - [`auth`] — the session-backed login gate: bcrypt verification (in
+//!   `dux-core`), the per-IP login backoff, and the [`auth::SharedAuth`] snapshot
+//!   that a config reload rebuilds live.
+//! - [`server`] — the axum router (open vs gated routes, the gate middleware, the
+//!   same-origin WebSocket check) and the `/ws` bridge to the engine.
+//! - [`engine_actor`] — the `EngineHandle` and the request/drain loop that owns
+//!   the `!Send` engine on its thread, plus the auth-reload hook.
+//!
+//! ## Dependency isolation
+//!
+//! This crate depends on `dux-core`, never `dux-tui`. Isolation is enforced by
+//! the `dep-isolation` CI job, which runs `cargo tree -p dux-web` and fails if
+//! any TUI-only crate appears.
 
 pub mod auth;
 pub mod bootstrap;

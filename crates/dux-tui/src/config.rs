@@ -466,7 +466,7 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
             ConfigEntry::StartupCommandTerminal => {
                 render_startup_command_terminal_config(&mut out, &config.startup_command_terminal);
             }
-            ConfigEntry::Auth => render_auth_config(&mut out, &config.auth),
+            ConfigEntry::Auth => render_auth_config(&mut out, &config.auth, bindings),
             ConfigEntry::Keys => render_keys_config(&mut out, &config.keys, bindings),
             ConfigEntry::Macros => render_macros_config(&mut out, &config.macros, bindings),
         }
@@ -734,19 +734,25 @@ fn render_env_config(out: &mut String, env: &BTreeMap<String, String>) {
     out.push('\n');
 }
 
-fn render_auth_config(out: &mut String, auth: &AuthConfig) {
+fn render_auth_config(
+    out: &mut String,
+    auth: &AuthConfig,
+    bindings: &crate::keybindings::RuntimeBindings,
+) {
+    let palette_key = bindings.label_for(crate::keybindings::Action::OpenPalette);
     out.push_str("[auth]\n");
-    out.push_str(
+    let _ = writeln!(
+        out,
         "# Login credentials for the `dux server` web UI. Each entry is an\n\
          # htpasswd-style \"username:bcrypt-hash\" string, for example:\n\
          #   users = [\"alice:$2y$12$......\"]\n\
          # The hash must be bcrypt (the $2a$/$2b$/$2y$ family); plaintext is never\n\
          # stored. Manage entries with the server-add-user and server-remove-user\n\
-         # commands in the palette (Ctrl-p) rather than editing hashes by hand.\n\
+         # commands in the palette ({palette_key}) rather than editing hashes by hand.\n\
          # The login gate turns ON automatically as soon as at least one user is\n\
          # listed here, and OFF when the list is empty. To run with no login (for\n\
          # example behind an upstream auth proxy), leave this empty and start the\n\
-         # server with `dux server --disable-auth`.\n",
+         # server with `dux server --disable-auth`.",
     );
     out.push_str(&format!("users = {}\n\n", render_string_list(&auth.users)));
 }
@@ -941,6 +947,14 @@ mod tests {
         assert!(rendered.contains("users = []"));
         assert!(rendered.contains("server-add-user"));
         assert!(rendered.contains("--disable-auth"));
+        // The palette-open keybinding in the [auth] comment is interpolated from
+        // the runtime bindings, never hardcoded (CLAUDE.md). The default label is
+        // "Ctrl-p", but assert the dynamic value so a rebind keeps the comment
+        // accurate.
+        let palette_key =
+            crate::keybindings::RuntimeBindings::from_keys_config(&KeysConfig::default())
+                .label_for(crate::keybindings::Action::OpenPalette);
+        assert!(rendered.contains(&format!("commands in the palette ({palette_key})")));
         assert!(rendered.contains("[keys]"));
         assert!(rendered.contains("show_terminal_keys = true"));
         assert!(rendered.contains("move_down = "));
@@ -1790,6 +1804,33 @@ oneshot_output = "stdout"
         let rendered = render_config_default(&config);
         assert!(rendered.contains("\"Review\" = { text = \"hello world\", surface = \"agent\" }"));
         assert!(rendered.contains("\"Test\" = { text = \"foo bar\", surface = \"terminal\" }"));
+    }
+
+    #[test]
+    fn render_auth_config_interpolates_rebound_palette_key() {
+        // The [auth] comment must reflect the USER's palette binding, not a
+        // hardcoded "(Ctrl-p)" (CLAUDE.md). Rebind the palette and assert the
+        // comment names the new key and never the literal default.
+        let mut config = Config::default();
+        config
+            .keys
+            .bindings
+            .insert("open_palette".to_string(), vec!["Ctrl-k".to_string()]);
+        let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
+        let rendered = render_config(&config, &bindings);
+        let palette_key = bindings.label_for(crate::keybindings::Action::OpenPalette);
+        assert_eq!(
+            palette_key, "Ctrl-k",
+            "rebind must take effect in the label"
+        );
+        assert!(
+            rendered.contains("commands in the palette (Ctrl-k)"),
+            "the [auth] comment must interpolate the rebound palette key"
+        );
+        assert!(
+            !rendered.contains("commands in the palette (Ctrl-p)"),
+            "the [auth] comment must not hardcode the default palette key"
+        );
     }
 
     #[test]

@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+import {
+  LOGIN_INVALID_MESSAGE,
+  LOGIN_NETWORK_MESSAGE,
+  loginErrorMessage,
+} from "./auth"
+
 // `store` reads `location`, `localStorage`, and registers a `popstate` listener
 // at module load (the test env is node, not a DOM), AND now fires a boot
 // `/api/me` fetch and constructs a `DuxSocket` (which references `WebSocket`).
@@ -177,7 +183,7 @@ describe("store login()", () => {
     await mod.login("alice", "wrong")
 
     expect(currentPhase(mod)).toBe("anonymous")
-    expect(currentError(mod)).toBe("Invalid username or password.")
+    expect(currentError(mod)).toBe(LOGIN_INVALID_MESSAGE)
   })
 
   it("surfaces a throttle message with the Retry-After window on a 429", async () => {
@@ -187,7 +193,9 @@ describe("store login()", () => {
     await mod.login("alice", "pw")
 
     expect(currentPhase(mod)).toBe("anonymous")
-    expect(currentError(mod)).toBe("Too many attempts — try again in 30 s.")
+    // Mirror the store: the 429 message is built by loginErrorMessage with the
+    // parsed Retry-After window, not a hardcoded string.
+    expect(currentError(mod)).toBe(loginErrorMessage(429, 30))
   })
 
   it("surfaces a network message when the fetch rejects", async () => {
@@ -197,9 +205,7 @@ describe("store login()", () => {
     await mod.login("alice", "pw")
 
     expect(currentPhase(mod)).toBe("anonymous")
-    expect(currentError(mod)).toBe(
-      "Could not reach the server. Please try again.",
-    )
+    expect(currentError(mod)).toBe(LOGIN_NETWORK_MESSAGE)
   })
 })
 

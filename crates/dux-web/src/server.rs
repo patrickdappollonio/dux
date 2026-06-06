@@ -137,18 +137,12 @@ async fn gate(
     if !auth::is_enabled(&state.auth) {
         return next.run(request).await;
     }
-    match session.get::<String>(auth::SESSION_USER_KEY).await {
-        Ok(Some(username)) if auth::username_exists(&state.auth, &username) => {
-            next.run(request).await
-        }
-        Ok(Some(_)) => {
-            // The session names a user who no longer exists (removed + reloaded):
-            // destroy the orphaned session so its cookie can't keep retrying, and
-            // treat the request as unauthenticated.
-            let _ = session.flush().await;
-            StatusCode::UNAUTHORIZED.into_response()
-        }
-        _ => StatusCode::UNAUTHORIZED.into_response(),
+    // Session presence is not enough: the named user must STILL exist in the
+    // current snapshot (shared with `/api/me`; flushes an orphaned session
+    // internally). `None` → unauthenticated.
+    match auth::session_user_if_valid(&state.auth, &session).await {
+        Some(_) => next.run(request).await,
+        None => StatusCode::UNAUTHORIZED.into_response(),
     }
 }
 

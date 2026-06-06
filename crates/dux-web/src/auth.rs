@@ -57,9 +57,9 @@ pub(crate) const SESSION_INACTIVITY_DAYS: i64 = 7;
 /// `dux_core::auth::verify_credentials` expects, so the one bcrypt-verify-per-call
 /// implementation (with its timing mitigation) stays the single source of truth.
 #[derive(Clone, Debug)]
-pub struct OwnedUser {
-    pub username: String,
-    pub hash: String,
+pub(crate) struct OwnedUser {
+    pub(crate) username: String,
+    pub(crate) hash: String,
 }
 
 /// The login gate's parsed, owned credential snapshot.
@@ -71,7 +71,7 @@ pub struct OwnedUser {
 #[derive(Clone, Debug, Default)]
 pub struct AuthState {
     pub enabled: bool,
-    pub users: Vec<OwnedUser>,
+    pub(crate) users: Vec<OwnedUser>,
 }
 
 impl AuthState {
@@ -84,7 +84,7 @@ impl AuthState {
     /// stays OFF — a loopback fail-open footgun. We surface it on BOTH the logger
     /// (dux.log) and stderr because an operator launching `dux server` watches the
     /// terminal, while a longer-running server is diagnosed from the log.
-    pub fn build(users: &[String], disable_auth: bool) -> Self {
+    pub(crate) fn build(users: &[String], disable_auth: bool) -> Self {
         let parsed = dux_core::auth::parse_users(users);
         let owned: Vec<OwnedUser> = parsed
             .iter()
@@ -171,6 +171,26 @@ pub(crate) fn username_exists(auth: &SharedAuth, username: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Read the session's username and return it only if it STILL names a configured
+/// user in the current auth snapshot. Returns `None` for a missing session, a
+/// session whose user has been removed (config edit or TUI palette +
+/// `reload-config`), or a session error — flushing the now-orphaned session
+/// internally so its cookie can't keep retrying. Shared by the HTTP gate, the
+/// `/api/me` handler, and the live WebSocket re-verify so all three apply the
+/// same "presence of a cookie is not enough; the user must still exist" rule.
+pub(crate) async fn session_user_if_valid(auth: &SharedAuth, session: &Session) -> Option<String> {
+    match session.get::<String>(SESSION_USER_KEY).await {
+        Ok(Some(username)) if username_exists(auth, &username) => Some(username),
+        Ok(Some(_)) => {
+            // The session names a user who no longer exists (removed + reloaded):
+            // destroy the orphaned session so its cookie can't keep retrying.
+            let _ = session.flush().await;
+            None
+        }
+        _ => None,
+    }
+}
+
 // --- Per-IP login attempt backoff -----------------------------------------
 
 /// Failed logins allowed per IP within [`RATE_WINDOW`] before the IP is told to
@@ -240,14 +260,14 @@ struct Bucket {
 }
 
 impl RateLimiter {
-    pub fn new(max_failures: u32, window: Duration) -> Self {
+    pub(crate) fn new(max_failures: u32, window: Duration) -> Self {
         Self::with_cap(max_failures, window, RATE_LIMIT_MAX_BUCKETS)
     }
 
     /// Like [`RateLimiter::new`] but with an injectable bucket cap so tests can
     /// exercise the eviction path with a tiny map instead of allocating 4096
     /// entries.
-    pub fn with_cap(max_failures: u32, window: Duration, max_buckets: usize) -> Self {
+    pub(crate) fn with_cap(max_failures: u32, window: Duration, max_buckets: usize) -> Self {
         Self {
             max_failures,
             window,
@@ -285,6 +305,10 @@ impl RateLimiter {
     /// hot path skips both — see [`RateLimiter`] for the bounding rationale.
     fn record_failure(&self, ip: IpAddr) {
         let Ok(mut buckets) = self.buckets.write() else {
+            // Deliberate fail-OPEN: a poisoned limiter must not lock out
+            // legitimate users (the asymmetry vs `username_exists`, which fails
+            // closed). Skipping the record only loosens throttling, and the
+            // per-attempt bcrypt cost still rate-limits each guess.
             return;
         };
         let now = Instant::now();
@@ -346,7 +370,7 @@ impl Default for RateLimiter {
 // --- Login / logout / me handlers -----------------------------------------
 
 #[derive(Deserialize)]
-pub struct LoginRequest {
+pub(crate) struct LoginRequest {
     username: String,
     password: String,
 }
@@ -367,7 +391,7 @@ const LOGIN_FAILED_MESSAGE: &str = "Invalid username or password.";
 /// `cycle_id()` BEFORE inserting the username so the post-login session id is
 /// fresh — anti-session-fixation: an id an attacker may have planted pre-login is
 /// discarded. Failures increment the per-IP backoff and return a generic `401`.
-pub async fn login(
+pub(crate) async fn login(
     State(state): State<AppState>,
     session: Session,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -410,7 +434,24 @@ pub async fn login(
             .into_response();
     }
 
-    let ok = dux_core::auth::verify_credentials(&entries, &body.username, &body.password);
+    // bcrypt verify is a deliberately slow (~250ms at cost 12) CPU-bound op, so
+    // run it off the async reactor in spawn_blocking — the same discipline every
+    // other blocking op in this crate follows (see the spawn_blocking sites in
+    // server.rs). The entries were already snapshotted under the brief read lock
+    // above; move the credential clones into the blocking task.
+    let username = body.username.clone();
+    let password = body.password.clone();
+    let ok = match tokio::task::spawn_blocking(move || {
+        dux_core::auth::verify_credentials(&entries, &username, &password)
+    })
+    .await
+    {
+        Ok(ok) => ok,
+        Err(e) => {
+            dux_core::logger::error(&format!("login verify task failed: {e}"));
+            return (StatusCode::INTERNAL_SERVER_ERROR, "verify error").into_response();
+        }
+    };
     if !ok {
         state.rate_limiter.record_failure(ip);
         return (StatusCode::UNAUTHORIZED, LOGIN_FAILED_MESSAGE).into_response();
@@ -440,7 +481,7 @@ pub async fn login(
 /// `POST /api/logout` — destroy the session. Idempotent: logging out when not
 /// logged in (or with auth off) still returns `204`, so the endpoint can live
 /// outside the gate.
-pub async fn logout(session: Session) -> axum::response::Response {
+pub(crate) async fn logout(session: Session) -> axum::response::Response {
     if let Err(e) = session.flush().await {
         dux_core::logger::warn(&format!("failed to flush session on logout: {e}"));
     }
@@ -468,7 +509,10 @@ enum MeResponse {
 /// removed from the current snapshot reports `401` (and its orphaned session is
 /// flushed), not the stale username — so the SPA falls back to the login screen
 /// the moment the operator revokes the user, matching the gate's behavior.
-pub async fn me(State(state): State<AppState>, session: Session) -> axum::response::Response {
+pub(crate) async fn me(
+    State(state): State<AppState>,
+    session: Session,
+) -> axum::response::Response {
     if !is_enabled(&state.auth) {
         return (
             StatusCode::OK,
@@ -476,17 +520,9 @@ pub async fn me(State(state): State<AppState>, session: Session) -> axum::respon
         )
             .into_response();
     }
-    match session.get::<String>(SESSION_USER_KEY).await {
-        Ok(Some(username)) if username_exists(&state.auth, &username) => {
-            (StatusCode::OK, Json(MeResponse::Authed { username })).into_response()
-        }
-        Ok(Some(_)) => {
-            // Username no longer configured (removed + reloaded): flush the
-            // orphaned session and report unauthenticated.
-            let _ = session.flush().await;
-            StatusCode::UNAUTHORIZED.into_response()
-        }
-        _ => StatusCode::UNAUTHORIZED.into_response(),
+    match session_user_if_valid(&state.auth, &session).await {
+        Some(username) => (StatusCode::OK, Json(MeResponse::Authed { username })).into_response(),
+        None => StatusCode::UNAUTHORIZED.into_response(),
     }
 }
 

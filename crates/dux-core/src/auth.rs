@@ -309,6 +309,30 @@ mod tests {
     }
 
     #[test]
+    fn htpasswd_prefix_variants_round_trip() {
+        // Pin the advertised htpasswd compatibility: a real bcrypt fixture in
+        // each of the $2a$/$2b$/$2y$ version families must verify with the right
+        // password and reject the wrong one. All three are the SAME digest of
+        // "htpasswd-pw" at cost 6 (cheap for a test) — only the version tag
+        // differs, which is exactly what htpasswd-produced $2y$ hashes look like.
+        const TWO_B: &str = "$2b$06$XKnmjYm7zibkFIc7mP7ulO5rBmEcWf6zEL/HQgbEUX9I7ue4k7NNS";
+        const TWO_A: &str = "$2a$06$XKnmjYm7zibkFIc7mP7ulO5rBmEcWf6zEL/HQgbEUX9I7ue4k7NNS";
+        const TWO_Y: &str = "$2y$06$XKnmjYm7zibkFIc7mP7ulO5rBmEcWf6zEL/HQgbEUX9I7ue4k7NNS";
+
+        for (label, hash) in [("$2b$", TWO_B), ("$2a$", TWO_A), ("$2y$", TWO_Y)] {
+            let users = vec![format!("alice:{hash}")];
+            assert!(
+                verify_credentials(&users, "alice", "htpasswd-pw"),
+                "{label} hash must verify with the correct password"
+            );
+            assert!(
+                !verify_credentials(&users, "alice", "wrong-pw"),
+                "{label} hash must reject the wrong password"
+            );
+        }
+    }
+
+    #[test]
     fn auth_enabled_requires_a_valid_user() {
         let mut config = Config::default();
         assert!(
