@@ -196,7 +196,9 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
         }
     };
 
-    match plan {
+    // Print the startup banner / warnings from the resolved plan, then hand the
+    // WHOLE plan to dux-web, which serves plain HTTP or built-in TLS accordingly.
+    match &plan {
         dux_core::config::ServerPlan::PlainHttp { addrs } => {
             // An address is LOCAL when it is loopback OR the detected Tailscale
             // address; only PUBLIC addresses are gated and warned about.
@@ -224,21 +226,42 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
                 .collect::<Vec<_>>()
                 .join(", ");
             println!("dux server listening on {urls} — open it in your browser");
-            dux_web::run_server(paths, addrs, cli_disable_auth)
         }
-        // T1 resolves and validates the ACME plan but does not serve it: the
-        // dux-web TLS path lands in the next slice. Refuse explicitly so nothing
-        // pretends to work. T2 replaces this arm with the real dual-listener.
-        dux_core::config::ServerPlan::Acme { domains, .. } => {
-            anyhow::bail!(
-                "ACME/TLS serving lands in the next slice — this build resolves and validates \
-                 the plan only. The configuration is valid (domains: {}); built-in HTTPS is \
-                 not wired yet. To run now, disable ACME with --no-acme (or set [server.acme] \
-                 enabled = false) and serve plain HTTP, optionally behind a TLS-terminating proxy.",
-                domains.join(", ")
-            )
+        dux_core::config::ServerPlan::Acme {
+            https_addr,
+            domains,
+            production,
+            ..
+        } => {
+            // Normalize the same way the TLS path does so the banner shows the
+            // hostname the certificate will actually carry. Fall back to the raw
+            // first domain if normalization somehow fails (the resolver already
+            // validated there is ≥1 domain; build_acme_state re-validates).
+            let primary = dux_web::tls::normalize_domains(domains)
+                .ok()
+                .and_then(|d| d.into_iter().next())
+                .unwrap_or_else(|| domains.first().cloned().unwrap_or_default());
+            let suffix = if https_addr.port() == 443 {
+                String::new()
+            } else {
+                format!(":{}", https_addr.port())
+            };
+            if !*production {
+                eprintln!(
+                    "NOTE: [server.acme] production = false — using the Let's Encrypt STAGING \
+                     environment. Certificates will NOT be trusted by browsers; set production = \
+                     true once the staging flow succeeds."
+                );
+            }
+            println!(
+                "dux server listening with built-in TLS on https://{primary}{suffix}/ — \
+                 plain HTTP on :80 redirects here and answers ACME HTTP-01 challenges. \
+                 Open it in your browser once the certificate is issued."
+            );
         }
     }
+
+    dux_web::run_server(paths, plan, cli_disable_auth)
 }
 
 /// Outcome of parsing `dux server` arguments. Separated from `run_server` so the

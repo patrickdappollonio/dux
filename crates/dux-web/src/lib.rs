@@ -31,6 +31,7 @@ pub mod bootstrap;
 pub mod engine_actor;
 pub mod protocol;
 pub mod server;
+pub mod tls;
 pub mod web_assets;
 
 use std::net::SocketAddr;
@@ -39,10 +40,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use dux_core::config::DuxPaths;
+use dux_core::config::{DuxPaths, ServerPlan};
 use dux_core::engine::Engine;
 
 use crate::engine_actor::LoopControl;
+use crate::server::RouterParams;
+use crate::tls::{AcmePlan, SESSION_SWEEP_PERIOD};
 
 /// Boot the engine on its own thread and serve the web UI on every address in
 /// `addrs` (one axum task per listener, sharing the router/state). Blocking
@@ -60,7 +63,36 @@ use crate::engine_actor::LoopControl;
 /// login gate is off even when `[auth]` users exist. The gate's shared auth
 /// snapshot is built ONCE here from the engine's loaded config users, handed to
 /// both the engine actor (so a config reload rebuilds it live) and the router.
-pub fn run_server(paths: DuxPaths, addrs: Vec<SocketAddr>, disable_auth: bool) -> Result<()> {
+pub fn run_server(paths: DuxPaths, plan: ServerPlan, disable_auth: bool) -> Result<()> {
+    match plan {
+        ServerPlan::PlainHttp { addrs } => run_plain_http(paths, addrs, disable_auth),
+        ServerPlan::Acme {
+            http_addr,
+            https_addr,
+            domains,
+            email,
+            production,
+            cache_dir,
+        } => run_acme(
+            paths,
+            AcmePlan {
+                http_addr,
+                https_addr,
+                domains,
+                email,
+                production,
+                cache_dir,
+            },
+            disable_auth,
+        ),
+    }
+}
+
+/// The plain-HTTP serve path: one axum task per listener (loopback, Tailscale,
+/// LAN, or proxy-fronted), sharing the router/state, plus the periodic
+/// expired-session sweep. Behaviorally identical to the pre-TLS `run_server`
+/// except for the added sweep task (deferral 3).
+fn run_plain_http(paths: DuxPaths, addrs: Vec<SocketAddr>, disable_auth: bool) -> Result<()> {
     let engine = bootstrap::bootstrap_engine(&paths)?;
     // host-only ⇔ EVERY listener is genuine loopback. A Tailscale (or public)
     // address makes the server reachable off-host, so the downgrade rule must
@@ -82,13 +114,27 @@ pub fn run_server(paths: DuxPaths, addrs: Vec<SocketAddr>, disable_auth: bool) -
         .enable_all()
         .build()?;
     runtime.block_on(async move {
-        // Bind every address; share one router across all listeners by cloning
-        // the axum app (it is a cheap `Arc`-backed service). Each serve task gets
-        // its own graceful-shutdown future driven by the same signal.
+        // Drives the session sweep's lifetime: flipped to `true` once all serve
+        // tasks finish (a shutdown signal fired), so the sweep task exits with the
+        // server rather than lingering.
+        let (sweep_shutdown_tx, sweep_shutdown_rx) = tokio::sync::watch::channel(false);
+        // Build ONE app + store, clone the router across listeners (it is a cheap
+        // `Arc`-backed service). The store is shared (an `Arc`), so the single
+        // sweep prunes the same map every listener serves.
+        let (app, store) = server::build_app(
+            handle.clone(),
+            Arc::clone(&auth),
+            axum::Router::new(),
+            RouterParams::plain_http(),
+        );
+        let sweep = tls::spawn_session_sweep(store, SESSION_SWEEP_PERIOD, sweep_shutdown_rx);
+
+        // Bind every address; each serve task gets its own graceful-shutdown
+        // future driven by the same signal.
         let mut tasks = tokio::task::JoinSet::new();
         for addr in addrs {
             let listener = tokio::net::TcpListener::bind(addr).await?;
-            let app = server::router_with_auth(handle.clone(), Arc::clone(&auth));
+            let app = app.clone();
             tasks.spawn(async move {
                 // Serve with connect-info so the login handler can read the peer
                 // IP for the per-IP attempt backoff.
@@ -102,14 +148,213 @@ pub fn run_server(paths: DuxPaths, addrs: Vec<SocketAddr>, disable_auth: bool) -
         }
         // Wait for all serve tasks to finish (they all wind down together when a
         // shutdown signal fires). Surface the first error if any task failed.
+        let mut first_err: Option<anyhow::Error> = None;
         while let Some(joined) = tasks.join_next().await {
-            joined??;
+            if let Err(e) = joined
+                .map_err(anyhow::Error::from)
+                .and_then(|r| r.map_err(Into::into))
+                && first_err.is_none()
+            {
+                first_err = Some(e);
+            }
         }
-        // SIGTERM the agents (they save state for a later resume), mark their
-        // sessions Detached, then exit; Drop hard-kills any straggler.
+        // Stop the sweep, then SIGTERM the agents (they save state for a later
+        // resume), mark their sessions Detached, then exit; Drop hard-kills any
+        // straggler.
+        let _ = sweep_shutdown_tx.send(true);
+        let _ = sweep.await;
         handle.shutdown().await;
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok::<(), anyhow::Error>(()),
+        }
+    })
+}
+
+/// The ACME (built-in TLS) serve path: two public listeners. `:80` answers the
+/// HTTP-01 challenge and otherwise 308-redirects to HTTPS; `:443` serves the
+/// existing app router over TLS with the rustls-acme acceptor. A dedicated task
+/// polls the `AcmeState` so certificates acquire and renew, and the periodic
+/// session sweep runs here too. Graceful shutdown is wired through axum-server
+/// `Handle`s on the same signal lane, and the FIRST listener error aborts both,
+/// mirroring `run_plain_http`/`serve_with_engine`.
+///
+/// `host_only` is FALSE by nature here (the certs make dux reachable on the
+/// public internet), so the live auth-downgrade rule refuses to open the gate.
+fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool) -> Result<()> {
+    let engine = bootstrap::bootstrap_engine(&paths)?;
+    let auth = auth::shared_auth(&engine.config.auth.users, disable_auth);
+    let (handle, _join) = engine_actor::spawn_engine_thread_with_auth(
+        engine,
+        engine_actor::AuthReloadContext {
+            shared: Arc::clone(&auth),
+            disable_auth,
+            // ACME serving is public by nature: never host-only, so a live
+            // reload that removes the last user must NOT silently open the gate.
+            host_only: false,
+        },
+    );
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    let https_port = plan.https_addr.port();
+
+    runtime.block_on(async move {
+        // Build the ACME state (creates the 0700 cache dir, normalizes domains)
+        // and the normalized domain list reused for the Host allowlist + the
+        // :80 redirect router.
+        let (acme_state, domains) = tls::build_acme_state(&plan)?;
+
+        // The :80 challenge service borrows the SAME state's resolver, so build
+        // the challenge router BEFORE moving the state into the polling task.
+        let http_router =
+            tls::build_http_challenge_router(&acme_state, https_port, domains.clone());
+        let acceptor = acme_state.axum_acceptor(acme_state.default_rustls_config());
+
+        // Drive certificate acquisition/renewal. Without this nothing progresses.
+        let acme_task = tls::spawn_acme_event_task(acme_state);
+
+        // Build the HTTPS app (Secure cookie ON) + its session store, then pin
+        // every route to the configured domains (DNS-rebinding defense).
+        let (https_app, store) = server::build_app(
+            handle.clone(),
+            Arc::clone(&auth),
+            axum::Router::new(),
+            RouterParams::tls(),
+        );
+        let https_app = tls::host_allowlist_layer(https_app, domains.clone());
+
+        // Sweep lifetime + shutdown lane.
+        let (sweep_shutdown_tx, sweep_shutdown_rx) = tokio::sync::watch::channel(false);
+        let sweep = tls::spawn_session_sweep(store, SESSION_SWEEP_PERIOD, sweep_shutdown_rx);
+
+        // axum-server graceful-shutdown handles, one per listener, both driven by
+        // the shared signal below.
+        let http_handle = axum_server::Handle::new();
+        let https_handle = axum_server::Handle::new();
+
+        // First-error abort across BOTH listeners (mirrors run_plain_http /
+        // serve_with_engine): the first serve task to die trips this flag so the
+        // signal task can wind the other listener down too.
+        let serve_failed = Arc::new(AtomicBool::new(false));
+        let serve_error: Arc<std::sync::Mutex<Option<anyhow::Error>>> =
+            Arc::new(std::sync::Mutex::new(None));
+
+        let mut tasks = tokio::task::JoinSet::new();
+        {
+            let http_addr = plan.http_addr;
+            let h = http_handle.clone();
+            let failed = Arc::clone(&serve_failed);
+            let errslot = Arc::clone(&serve_error);
+            tasks.spawn(async move {
+                let r = tls::serve_http_challenge(http_addr, http_router, h).await;
+                if let Err(e) = &r {
+                    dux_core::logger::error(&format!(
+                        "[server] the :80 ACME challenge/redirect listener failed: {e}"
+                    ));
+                    record_serve_failure_named(
+                        &failed,
+                        &errslot,
+                        anyhow::anyhow!("the :80 ACME challenge/redirect listener failed: {e}"),
+                    );
+                }
+                r
+            });
+        }
+        {
+            let https_addr = plan.https_addr;
+            let h = https_handle.clone();
+            let failed = Arc::clone(&serve_failed);
+            let errslot = Arc::clone(&serve_error);
+            tasks.spawn(async move {
+                let r = tls::serve_https_acme(https_addr, https_app, acceptor, h).await;
+                if let Err(e) = &r {
+                    dux_core::logger::error(&format!("[server] the :443 TLS listener failed: {e}"));
+                    record_serve_failure_named(
+                        &failed,
+                        &errslot,
+                        anyhow::anyhow!("the :443 TLS listener failed: {e}"),
+                    );
+                }
+                r
+            });
+        }
+
+        // Signal/abort watcher: a SIGINT/SIGTERM OR a first listener error
+        // triggers graceful shutdown on both axum-server handles.
+        {
+            let http_handle = http_handle.clone();
+            let https_handle = https_handle.clone();
+            let serve_failed = Arc::clone(&serve_failed);
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = shutdown_signal() => {}
+                    _ = wait_for_flag(serve_failed) => {}
+                }
+                // Bounded graceful shutdown so a wedged TLS client can't hang exit.
+                http_handle.graceful_shutdown(Some(ACME_GRACEFUL_SHUTDOWN));
+                https_handle.graceful_shutdown(Some(ACME_GRACEFUL_SHUTDOWN));
+            });
+        }
+
+        // Wait for both serve tasks to finish.
+        while let Some(joined) = tasks.join_next().await {
+            // Join errors (panics) and Err results both surface below via the
+            // captured first error; an Ok serve is a clean graceful shutdown.
+            let _ = joined;
+        }
+
+        // Wind down the ACME poller and the sweep.
+        acme_task.abort();
+        let _ = sweep_shutdown_tx.send(true);
+        let _ = sweep.await;
+
+        handle.shutdown().await;
+
+        if let Ok(mut slot) = serve_error.lock()
+            && let Some(e) = slot.take()
+        {
+            return Err(e);
+        }
         Ok::<(), anyhow::Error>(())
     })
+}
+
+/// Bounded graceful-shutdown window for the ACME listeners: long enough for
+/// in-flight requests to finish, short enough that a wedged TLS connection cannot
+/// hang process exit.
+const ACME_GRACEFUL_SHUTDOWN: Duration = Duration::from_secs(3);
+
+/// Resolve once `flag` becomes `true`, polling on a short interval. Used by the
+/// ACME signal watcher to react to a first-listener failure (the serve tasks set
+/// the flag) without a dedicated channel.
+async fn wait_for_flag(flag: Arc<AtomicBool>) {
+    loop {
+        if flag.load(Ordering::SeqCst) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Record the first serve failure for the ACME path: the first caller stores its
+/// error and arms the flag; later callers no-op the error slot. Always arms the
+/// flag so the signal watcher triggers graceful shutdown. A trimmed sibling of
+/// [`record_serve_failure`] (no shutdown watch — the ACME path uses axum-server
+/// `Handle`s instead).
+fn record_serve_failure_named(
+    serve_failed: &AtomicBool,
+    serve_error: &std::sync::Mutex<Option<anyhow::Error>>,
+    err: anyhow::Error,
+) {
+    let first = serve_failed
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok();
+    if first && let Ok(mut slot) = serve_error.lock() {
+        *slot = Some(err);
+    }
 }
 
 /// What the status-screen tick asks `serve_with_engine` to do after the current
@@ -280,11 +525,26 @@ pub fn serve_with_engine(
     let serve_error: Arc<std::sync::Mutex<Option<anyhow::Error>>> =
         Arc::new(std::sync::Mutex::new(None));
 
+    // Build ONE app + session store, shared across listeners (the router is a
+    // cheap `Arc`-backed service; the store is an `Arc`). The flip is plain HTTP
+    // by type, so no Secure cookie. The periodic expired-session sweep prunes the
+    // shared store and stops when the shutdown watch flips on teardown.
+    let (app, sweep_store) = server::build_app(
+        handle.clone(),
+        Arc::clone(&auth),
+        axum::Router::new(),
+        RouterParams::plain_http(),
+    );
+    let sweep_task = {
+        let _guard = runtime.enter();
+        tls::spawn_session_sweep(sweep_store, SESSION_SWEEP_PERIOD, shutdown_rx.clone())
+    };
+
     // One axum serve task per listener, all sharing the same router/state and the
     // same shutdown watch. A JoinSet lets us join them all (bounded) on teardown.
     let mut server_tasks = tokio::task::JoinSet::new();
     for tokio_listener in tokio_listeners {
-        let app = server::router_with_auth(handle.clone(), Arc::clone(&auth));
+        let app = app.clone();
         let mut shutdown_rx = shutdown_rx.clone();
         let task_shutdown_tx = shutdown_tx.clone();
         let task_serve_failed = Arc::clone(&serve_failed);
@@ -377,13 +637,15 @@ pub fn serve_with_engine(
 
     // Trigger graceful axum shutdown and wait (bounded) for ALL server tasks to
     // wind down. A single bounded join over the whole set keeps a wedged client
-    // connection on any listener from hanging the flip back to the TUI.
+    // connection on any listener from hanging the flip back to the TUI. The same
+    // watch flip also stops the session sweep task; await it (bounded) too.
     let _ = shutdown_tx.send(true);
     runtime.block_on(async {
         let _ = tokio::time::timeout(SERVER_JOIN_TIMEOUT, async {
             while server_tasks.join_next().await.is_some() {}
         })
         .await;
+        let _ = tokio::time::timeout(SERVER_JOIN_TIMEOUT, sweep_task).await;
     });
     // Tear the runtime down with a bounded timeout. An implicit `drop(runtime)`
     // would block forever on any parked `spawn_blocking` task (drop cannot abort

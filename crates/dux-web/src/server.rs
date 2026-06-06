@@ -32,11 +32,12 @@ use axum::routing::{get, post};
 use futures_util::{SinkExt, StreamExt};
 use tower_sessions::cookie::SameSite;
 use tower_sessions::cookie::time::Duration as CookieDuration;
-use tower_sessions::{Expiry, MemoryStore, Session, SessionManagerLayer};
+use tower_sessions::{Expiry, Session, SessionManagerLayer};
 
 use crate::auth::{self, RateLimiter, SharedAuth};
 use crate::engine_actor::EngineHandle;
 use crate::protocol::{BranchWarningView, ClientMessage, ServerMessage};
+use crate::tls::SweepableMemoryStore;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -62,14 +63,17 @@ pub fn router(engine: EngineHandle) -> Router {
     router_with_auth(engine, auth::shared_auth(&[], false))
 }
 
-/// Build the axum router with an explicit shared auth snapshot.
+/// Build the axum router with an explicit shared auth snapshot, plain-HTTP
+/// defaults (no Secure cookie — see [`RouterParams`]). The session store is
+/// discarded here; callers that need to sweep expired sessions (the production
+/// serve paths) use [`build_app`] instead to keep a handle on the store.
 ///
 /// `auth` carries the parsed credentials and the gate flag; when it reports the
 /// gate disabled, the gate middleware passes everything through (today's UX). The
 /// session layer is always installed (it is inert when no session is created), so
 /// turning auth on via a config reload needs no router rebuild.
 pub fn router_with_auth(engine: EngineHandle, auth: SharedAuth) -> Router {
-    build_router(engine, auth, Router::new())
+    build_app(engine, auth, Router::new(), RouterParams::plain_http()).0
 }
 
 /// Production cadence for the live `/ws` user-existence recheck. Short enough
@@ -77,28 +81,79 @@ pub fn router_with_auth(engine: EngineHandle, auth: SharedAuth) -> Router {
 /// the per-socket `Vec` scan under a brief read lock is negligible overhead.
 const WS_RECHECK_PERIOD: std::time::Duration = std::time::Duration::from_secs(4);
 
-/// Shared router builder. `extra_gated` is merged INTO the gated sub-router
-/// before the gate middleware is layered on, so any route it carries inherits
-/// the session gate exactly as `/ws` does. Production callers pass an empty
-/// router; a test injects a probe route to prove the gate covers arbitrary data
-/// routes, not just `/ws` (see [`tests::gated_data_route_is_401_without_session`]).
-fn build_router(engine: EngineHandle, auth: SharedAuth, extra_gated: Router<AppState>) -> Router {
-    build_router_with_recheck(engine, auth, extra_gated, WS_RECHECK_PERIOD)
+/// Knobs that differ between the plain-HTTP serve paths and the TLS (ACME) path.
+#[derive(Clone)]
+pub struct RouterParams {
+    /// `/ws` user-existence recheck cadence (injectable so the revocation e2e can
+    /// drive a short window).
+    pub ws_recheck_period: std::time::Duration,
+    /// Whether the session cookie carries the `Secure` attribute. TRUE only when
+    /// dux itself terminates TLS (the ACME path); FALSE for plain HTTP, where a
+    /// Secure cookie would never be sent over the loopback/proxy deployment and
+    /// would lock everyone out. (Deferral 1.)
+    pub secure_cookie: bool,
 }
 
-/// Like [`build_router`] but with an injectable `/ws` recheck period so the
+impl RouterParams {
+    /// Plain-HTTP defaults: production recheck cadence, NO Secure cookie. Used by
+    /// the loopback/Tailscale/proxy serve paths and every test harness.
+    pub fn plain_http() -> Self {
+        Self {
+            ws_recheck_period: WS_RECHECK_PERIOD,
+            secure_cookie: false,
+        }
+    }
+
+    /// TLS (ACME) defaults: production recheck cadence, Secure cookie ON because
+    /// dux terminates HTTPS so the browser will always send it back.
+    pub fn tls() -> Self {
+        Self {
+            ws_recheck_period: WS_RECHECK_PERIOD,
+            secure_cookie: true,
+        }
+    }
+}
+
+/// Like [`router_with_auth`] but with an injectable `/ws` recheck period so the
 /// revocation e2e can drive a short window instead of the production cadence.
+/// Plain-HTTP defaults otherwise.
 pub fn build_router_with_recheck(
     engine: EngineHandle,
     auth: SharedAuth,
     extra_gated: Router<AppState>,
     ws_recheck_period: std::time::Duration,
 ) -> Router {
+    build_app(
+        engine,
+        auth,
+        extra_gated,
+        RouterParams {
+            ws_recheck_period,
+            secure_cookie: false,
+        },
+    )
+    .0
+}
+
+/// Shared router builder, returning BOTH the router and the session store so a
+/// caller can run the periodic expired-session sweep against it (the store is an
+/// `Arc` clone, so sweeping the returned handle prunes the SAME map the router
+/// uses). `extra_gated` is merged INTO the gated sub-router before the gate
+/// middleware is layered on, so any route it carries inherits the session gate
+/// exactly as `/ws` does. Production callers pass an empty router; a test injects
+/// a probe route to prove the gate covers arbitrary data routes, not just `/ws`
+/// (see [`tests::gated_data_route_is_401_without_session`]).
+pub fn build_app(
+    engine: EngineHandle,
+    auth: SharedAuth,
+    extra_gated: Router<AppState>,
+    params: RouterParams,
+) -> (Router, SweepableMemoryStore) {
     let state = AppState {
         engine,
         auth,
         rate_limiter: RateLimiter::default(),
-        ws_recheck_period,
+        ws_recheck_period: params.ws_recheck_period,
     };
 
     // In-memory session store: sessions die with the server (documented v1
@@ -106,20 +161,22 @@ pub fn build_router_with_recheck(
     // the tower-sessions defaults but we set them explicitly so the intent is
     // visible and a future default change can't silently weaken the cookie.
     //
-    // TODO(step 7 TLS): the `MemoryStore` never sweeps EXPIRED sessions — an
-    // expired record lingers in the map until the process exits, so a long-lived
-    // server with churn slowly accumulates dead entries. Run
-    // `tower_sessions::ExpiredDeletion` (a periodic sweep task) against the store
-    // when the persistent/TLS-fronted deployment lands, so memory stays bounded.
-    let session_layer = SessionManagerLayer::new(MemoryStore::default())
+    // The store is a `SweepableMemoryStore` rather than tower-sessions'
+    // `MemoryStore` because that store never evicts EXPIRED records (its `load`
+    // skips them, but they linger in the map until the process exits). The
+    // sweepable store implements `ExpiredDeletion`; the serve paths spawn a
+    // periodic `delete_expired` sweep against the returned handle so memory stays
+    // bounded on a long-lived server with login churn. (Deferral 3.)
+    let store = SweepableMemoryStore::new();
+    let session_layer = SessionManagerLayer::new(store.clone())
         .with_name(auth::SESSION_COOKIE_NAME)
         .with_http_only(true)
         .with_same_site(SameSite::Strict)
-        // TODO(step 7 TLS): set `.with_secure(true)` once dux terminates TLS (or
-        // is always fronted by an HTTPS proxy). Until then a Secure cookie would
-        // never be sent over the plain-HTTP loopback/dev deployment, locking
-        // everyone out.
-        .with_secure(false)
+        // Secure attribute is set ONLY when dux terminates TLS (the ACME path).
+        // On plain HTTP a Secure cookie would never be sent back over the
+        // loopback/proxy deployment, locking everyone out — so it stays off
+        // there. (Deferral 1; the flag is decided by the caller via RouterParams.)
+        .with_secure(params.secure_cookie)
         .with_expiry(Expiry::OnInactivity(CookieDuration::days(
             auth::SESSION_INACTIVITY_DAYS,
         )));
@@ -133,7 +190,7 @@ pub fn build_router_with_recheck(
         .route_layer(middleware::from_fn_with_state(state.clone(), gate));
 
     // OPEN routes: reachable without a session so the SPA can boot and log in.
-    Router::new()
+    let router = Router::new()
         .merge(gated)
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/login", post(auth::login))
@@ -141,7 +198,8 @@ pub fn build_router_with_recheck(
         .route("/api/me", get(auth::me))
         .fallback(crate::web_assets::static_handler)
         .layer(session_layer)
-        .with_state(state)
+        .with_state(state);
+    (router, store)
 }
 
 /// Gate middleware for the protected sub-router. When auth is enabled, a valid
@@ -182,12 +240,16 @@ async fn gate(
 /// `Host` header. `false` for a present-but-mismatched `Origin`. Browsers always
 /// send `Origin` for WS, so this only ever rejects a genuine cross-site attempt.
 /// Applies whether or not auth is enabled.
-// TODO(step 7 TLS): add a Host allowlist to defend against DNS rebinding. The
-// same-origin check below trusts the request's own `Host` header, so it does not
-// stop a rebinding attacker who points a controlled hostname at this server's IP
-// (the browser then sends a matching Origin/Host pair). Once dux terminates TLS
-// (or is fronted by an HTTPS proxy), pin the set of allowed Host values to the
-// configured public hostname(s) and reject everything else here.
+// DNS-rebinding defense: the same-origin check below trusts the request's own
+// `Host` header, so on its own it does not stop a rebinding attacker who points a
+// controlled hostname at this server's IP (the browser then sends a matching
+// Origin/Host pair). When dux terminates TLS (the ACME path), the
+// `crate::tls::host_allowlist_layer` middleware runs AHEAD of the gate on the
+// whole HTTPS app and pins the accepted `Host` values to the configured domains,
+// closing that gap (a mismatched Host gets 421 before reaching here). The plain
+// HTTP path has no allowlist by design — loopback/proxy mode, where the proxy
+// owns Host hygiene — so this same-origin check remains the WS-specific defense
+// there. (Deferral 2.)
 fn same_origin_allowed(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
         // No Origin: a non-browser client. Allowed (documented tradeoff).
@@ -800,7 +862,7 @@ mod tests {
     /// A representative data route added to the GATED sub-router must 401 without
     /// a session when auth is on — proving the gate covers arbitrary gated data
     /// routes, not only `/ws`. This is the reviewer's regression test: it injects
-    /// a probe route through `build_router`'s test seam so a future data route
+    /// a probe route through `build_app`'s test seam so a future data route
     /// placed in the gated group is provably protected.
     #[tokio::test]
     async fn gated_data_route_is_401_without_session() {
@@ -814,7 +876,7 @@ mod tests {
         // Inject a dummy gated data route through the test seam.
         let probe: Router<AppState> =
             Router::new().route("/api/_test_gated", get(|| async { "secret" }));
-        let app = build_router(handle, auth, probe);
+        let app = build_app(handle, auth, probe, RouterParams::plain_http()).0;
 
         let resp = app
             .oneshot(
