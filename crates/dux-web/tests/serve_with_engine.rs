@@ -130,7 +130,7 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
     // whether the live terminal survived the round-trip.
     let (result_tx, result_rx) = std::sync::mpsc::channel::<(ServerExit, bool)>();
     let serve_thread = std::thread::spawn(move || {
-        let (returned_engine, exit) = serve_with_engine(engine, listener, || {
+        let (returned_engine, exit) = serve_with_engine(engine, vec![listener], || {
             if stop_for_thread.load(Ordering::SeqCst) {
                 ServerTick::ReturnToTui
             } else {
@@ -216,7 +216,7 @@ async fn serve_with_engine_quit_process_shuts_down_ptys() {
 
     let (result_tx, result_rx) = std::sync::mpsc::channel::<(ServerExit, bool)>();
     let serve_thread = std::thread::spawn(move || {
-        let (returned_engine, exit) = serve_with_engine(engine, listener, || {
+        let (returned_engine, exit) = serve_with_engine(engine, vec![listener], || {
             if quit_for_thread.load(Ordering::SeqCst) {
                 ServerTick::QuitProcess
             } else {
@@ -280,7 +280,7 @@ async fn return_to_tui_does_not_hang_with_a_subscribed_pty() {
 
     let (result_tx, result_rx) = std::sync::mpsc::channel::<(ServerExit, bool)>();
     let serve_thread = std::thread::spawn(move || {
-        let (returned_engine, exit) = serve_with_engine(engine, listener, || {
+        let (returned_engine, exit) = serve_with_engine(engine, vec![listener], || {
             if stop_for_thread.load(Ordering::SeqCst) {
                 ServerTick::ReturnToTui
             } else {

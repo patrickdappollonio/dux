@@ -157,10 +157,11 @@ pub struct App {
     /// Active text selection in the startup command log output pane, if any.
     pub(crate) startup_log_selection: Option<TerminalSelection>,
     /// When set, the run loop exits with [`RunExit::FlipToServer`], handing the
-    /// pre-bound listener and its display URL to the binary so the web server
+    /// pre-bound listeners and their display URLs to the binary so the web server
     /// can take over the same process (PTYs keep running). Populated by the
-    /// `StartWebServer` palette action only after its pre-flight succeeds.
-    pub(crate) pending_server_flip: Option<(std::net::TcpListener, String)>,
+    /// `StartWebServer` palette action only after its (worker) pre-flight
+    /// succeeds. LOCAL MODE may bind more than one address (loopback + Tailscale).
+    pub(crate) pending_server_flip: Option<(Vec<std::net::TcpListener>, Vec<String>)>,
 }
 
 /// How [`App::run`] returned: a plain quit, or a request to flip the current
@@ -168,8 +169,8 @@ pub struct App {
 pub enum RunExit {
     Quit,
     FlipToServer {
-        listener: std::net::TcpListener,
-        url: String,
+        listeners: Vec<std::net::TcpListener>,
+        urls: Vec<String>,
     },
 }
 
@@ -1515,8 +1516,8 @@ impl App {
                 // after one more draw so the "Starting the web server…" Busy
                 // status is visible for the brief remainder. Teardown below runs
                 // identically to the quit path, then the binary takes over.
-                if let Some((listener, url)) = self.pending_server_flip.take() {
-                    break 'main RunExit::FlipToServer { listener, url };
+                if let Some((listeners, urls)) = self.pending_server_flip.take() {
+                    break 'main RunExit::FlipToServer { listeners, urls };
                 }
 
                 if self.should_poll_raw_input() {
@@ -2844,33 +2845,39 @@ pub(crate) fn sync_config_projects_with_store(
     Ok(())
 }
 
-/// Pre-flight for the in-process TUI→web flip: resolve the `[server]` bind
-/// through the shared safety gate and actually bind a std `TcpListener` BEFORE
-/// the TUI tears anything down. Returning the bound listener (rather than just
-/// the address) means there is no rebind race when the web server adopts it.
+/// Pre-flight for the in-process TUI→web flip: resolve LOCAL MODE addresses
+/// (loopback:port plus the machine's Tailscale address:port when one was
+/// detected) and actually bind a std `TcpListener` for each BEFORE the TUI tears
+/// anything down. Returning the bound listeners (rather than addresses) means
+/// there is no rebind race when the web server adopts them.
 ///
-/// The display URL reflects the listener's `local_addr`, not the configured
-/// string, so an ephemeral `:0` port resolves to the real port the user can
-/// open. On any failure the TUI stays up and surfaces the (already actionable)
-/// error on the status line.
-fn preflight_server_listener(config: &Config) -> Result<(std::net::TcpListener, String)> {
-    // The flip never disables auth (there is no TUI --disable-auth path), so a
-    // non-loopback bind is allowed whenever a login gate is configured.
-    let auth_enabled = dux_core::auth::auth_enabled(config, false);
-    let addr = dux_core::config::resolve_server_bind(
-        &config.server.bind,
-        config.server.insecure_allow_remote,
-        None,
-        false,
-        auth_enabled,
-    )?;
-    let listener = std::net::TcpListener::bind(addr).map_err(|err| {
-        anyhow::anyhow!(
-            "could not start the web server: {err} (is something already listening on {addr}?)"
-        )
-    })?;
-    let bound = listener.local_addr().unwrap_or(addr);
-    Ok((listener, format!("http://{bound}")))
+/// The flip is structurally local-only: this function takes `port` +
+/// `tailscale_ip`, never `listen_addrs`, so it can never open a public listener.
+/// Tailscale detection (`tailscale ip`) is a subprocess call, so the CALLER runs
+/// it on a worker thread and hands the result here — this function does no
+/// blocking work beyond the (fast, local) `TcpListener::bind`.
+///
+/// Each display URL reflects the listener's `local_addr`, so an ephemeral `:0`
+/// port resolves to the real port the user can open. On any bind failure the
+/// whole pre-flight fails (and the TUI stays up); already-bound listeners drop.
+fn preflight_server_listeners(
+    port: u16,
+    tailscale_ip: Option<std::net::IpAddr>,
+) -> Result<(Vec<std::net::TcpListener>, Vec<String>)> {
+    let addrs = dux_core::config::local_addrs(port, tailscale_ip);
+    let mut listeners = Vec::with_capacity(addrs.len());
+    let mut urls = Vec::with_capacity(addrs.len());
+    for addr in addrs {
+        let listener = std::net::TcpListener::bind(addr).map_err(|err| {
+            anyhow::anyhow!(
+                "could not start the web server: {err} (is something already listening on {addr}?)"
+            )
+        })?;
+        let bound = listener.local_addr().unwrap_or(addr);
+        urls.push(format!("http://{bound}"));
+        listeners.push(listener);
+    }
+    Ok((listeners, urls))
 }
 
 fn validate_project_records(source: &str, projects: &[crate::config::ProjectConfig]) -> Result<()> {
@@ -3057,103 +3064,43 @@ mod tests {
         }
     }
 
-    fn server_test_config(bind: &str, insecure_allow_remote: bool) -> Config {
-        let mut config = Config::default();
-        config.server.bind = bind.to_string();
-        config.server.insecure_allow_remote = insecure_allow_remote;
-        config
-    }
-
     #[test]
     fn preflight_binds_loopback_and_reports_actual_port() {
         // Port 0 lets the OS pick a free port; the display URL must reflect the
-        // ACTUAL bound port (via local_addr), not the configured ":0".
-        let config = server_test_config("127.0.0.1:0", false);
-        let (listener, url) =
-            preflight_server_listener(&config).expect("loopback bind should succeed");
+        // ACTUAL bound port (via local_addr), not the configured ":0". With no
+        // Tailscale address, LOCAL MODE binds loopback only.
+        let (listeners, urls) =
+            preflight_server_listeners(0, None).expect("loopback bind should succeed");
+        assert_eq!(listeners.len(), 1, "no tailscale → loopback only");
+        assert_eq!(urls.len(), 1);
 
-        let bound = listener.local_addr().expect("listener has a local addr");
+        let bound = listeners[0]
+            .local_addr()
+            .expect("listener has a local addr");
         assert!(bound.ip().is_loopback());
         assert_ne!(bound.port(), 0, "OS must have assigned a real port");
-        assert_eq!(url, format!("http://{bound}"));
+        assert_eq!(urls[0], format!("http://{bound}"));
         assert!(
-            !url.ends_with(":0"),
+            !urls[0].ends_with(":0"),
             "URL must not show the placeholder port"
         );
     }
 
     #[test]
-    fn preflight_loopback_unaffected_by_acme_rekey() {
-        // REGRESSION: the T1 ACME slice re-keyed the plain-HTTP non-loopback
-        // bind rule (now also requires --dangerously-listen-http). The TUI flip
-        // still goes through resolve_server_bind with a loopback bind and NO
-        // flags; that path must resolve exactly as before — no new flag is
-        // threaded through the flip, and loopback always passes.
-        let config = server_test_config("127.0.0.1:0", false);
-        let auth_enabled = dux_core::auth::auth_enabled(&config, false);
-        let addr = dux_core::config::resolve_server_bind(
-            &config.server.bind,
-            config.server.insecure_allow_remote,
-            None,
-            false,
-            auth_enabled,
-        )
-        .expect("loopback flip bind must still resolve with no flags");
-        assert!(addr.ip().is_loopback());
-
-        // And the full pre-flight (which binds the socket) still succeeds.
-        let (listener, _url) =
-            preflight_server_listener(&config).expect("loopback pre-flight must still succeed");
+    fn preflight_is_local_only_and_never_reads_listen_addrs() {
+        // STRUCTURAL: the flip pre-flight takes a port + optional Tailscale IP,
+        // never listen_addrs, so it can only ever bind loopback (and Tailscale).
+        // Even with a public listen_addrs configured, the flip path is unaffected
+        // because it does not consult that field at all — this test documents the
+        // local-only guarantee by exercising the only inputs the flip can take.
+        let (listeners, _urls) =
+            preflight_server_listeners(0, None).expect("loopback-only pre-flight succeeds");
         assert!(
-            listener
-                .local_addr()
-                .expect("local addr")
-                .ip()
-                .is_loopback()
+            listeners
+                .iter()
+                .all(|l| l.local_addr().expect("addr").ip().is_loopback()),
+            "the flip must bind loopback only when no tailscale address is present"
         );
-    }
-
-    #[test]
-    fn preflight_rejects_invalid_bind_string() {
-        let config = server_test_config("not-an-address", false);
-        let err = preflight_server_listener(&config)
-            .expect_err("an unparseable bind must fail pre-flight");
-        assert!(
-            format!("{err:#}").contains("invalid bind address"),
-            "error should explain the bad bind: {err:#}"
-        );
-    }
-
-    #[test]
-    fn preflight_refuses_non_loopback_without_opt_in() {
-        // Non-loopback bind with no login configured and no insecure opt-in must
-        // be refused by the safety gate before any socket is opened.
-        let config = server_test_config("0.0.0.0:0", false);
-        let err = preflight_server_listener(&config)
-            .expect_err("non-loopback without auth or opt-in must be refused");
-        let text = format!("{err:#}");
-        assert!(
-            text.contains("[auth]") && text.contains("insecure_allow_remote"),
-            "refusal should be actionable and present auth first: {text}"
-        );
-    }
-
-    #[test]
-    fn preflight_allows_non_loopback_when_auth_configured() {
-        // A non-loopback bind is permitted (without the insecure opt-in) once a
-        // login gate is configured: the flip computes auth_enabled from the
-        // engine config and passes it through to the shared gate.
-        let mut config = server_test_config("127.0.0.1:0", false);
-        // Use a bindable non-loopback would require privileges/availability, so
-        // assert the GATE decision directly via the underlying resolver: a
-        // non-loopback address with auth on must resolve Ok.
-        let hash = dux_core::auth::hash_password("pw").expect("hash");
-        config.auth.users = vec![format!("alice:{hash}")];
-        let auth_enabled = dux_core::auth::auth_enabled(&config, false);
-        let addr =
-            dux_core::config::resolve_server_bind("0.0.0.0:8080", false, None, false, auth_enabled)
-                .expect("auth-enabled non-loopback bind must pass the gate");
-        assert_eq!(addr.to_string(), "0.0.0.0:8080");
     }
 
     #[test]
@@ -3161,9 +3108,8 @@ mod tests {
         // Hold a loopback port, then ask the pre-flight to bind the same one.
         let held = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a port");
         let addr = held.local_addr().expect("held addr");
-        let config = server_test_config(&addr.to_string(), false);
 
-        let err = preflight_server_listener(&config)
+        let err = preflight_server_listeners(addr.port(), None)
             .expect_err("binding an in-use port must fail pre-flight");
         let text = format!("{err:#}");
         assert!(

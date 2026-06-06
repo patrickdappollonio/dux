@@ -83,7 +83,9 @@ type ScreenLine = Vec<(String, Role)>;
 pub struct ServerStatusScreen {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     theme: Theme,
-    url: String,
+    /// Every bound URL (loopback plus the Tailscale address in LOCAL MODE, or all
+    /// the FULL WEB MODE listeners). All are shown so the user can pick one.
+    urls: Vec<String>,
     loopback: bool,
     /// Whether the web login gate is active for this serve. Controls whether the
     /// status screen shows the quiet "login required" line (auth on) or the loud
@@ -103,7 +105,7 @@ impl ServerStatusScreen {
     /// println if this returns `Err` — the server must still run even if the
     /// status screen cannot be set up.
     pub fn new(
-        url: &str,
+        urls: &[String],
         loopback: bool,
         auth_enabled: bool,
         user_count: usize,
@@ -129,7 +131,7 @@ impl ServerStatusScreen {
         let mut screen = Self {
             terminal,
             theme,
-            url: url.to_string(),
+            urls: urls.to_vec(),
             loopback,
             auth_enabled,
             user_count,
@@ -180,7 +182,7 @@ impl ServerStatusScreen {
     fn draw(&mut self, uptime_secs: u64) -> Result<()> {
         let theme = &self.theme;
         let lines = screen_lines(
-            &self.url,
+            &self.urls,
             self.loopback,
             self.auth_enabled,
             self.user_count,
@@ -326,7 +328,7 @@ fn format_uptime(secs: u64) -> String {
 /// - auth OFF + non-loopback → the loud no-auth security warning;
 /// - auth OFF + loopback → nothing (the bind is unreachable off the machine).
 fn screen_lines(
-    url: &str,
+    urls: &[String],
     loopback: bool,
     auth_enabled: bool,
     user_count: usize,
@@ -340,7 +342,10 @@ fn screen_lines(
 
     lines.push(vec![(String::new(), Role::Spacer)]);
     lines.push(vec![("dux server running".to_string(), Role::Heading)]);
-    lines.push(vec![(url.to_string(), Role::Url)]);
+    // One URL line per bound address (loopback + Tailscale in LOCAL MODE).
+    for url in urls {
+        lines.push(vec![(url.to_string(), Role::Url)]);
+    }
     lines.push(vec![(
         format!("up {}", format_uptime(uptime_secs)),
         Role::Muted,
@@ -540,6 +545,11 @@ mod tests {
         );
     }
 
+    /// Wrap one URL in the `&[String]` shape `screen_lines` now expects.
+    fn one(url: &str) -> Vec<String> {
+        vec![url.to_string()]
+    }
+
     /// Collapse a `screen_lines` result into the joined plain text of every
     /// segment so content assertions don't care about segment boundaries.
     fn plain_text(lines: &[ScreenLine]) -> String {
@@ -557,7 +567,7 @@ mod tests {
 
     #[test]
     fn content_includes_url_and_heading_and_uptime() {
-        let lines = screen_lines("http://127.0.0.1:8080", true, false, 0, 42);
+        let lines = screen_lines(&one("http://127.0.0.1:8080"), true, false, 0, 42);
         let text = plain_text(&lines);
         assert!(text.contains("dux server running"));
         assert!(text.contains("http://127.0.0.1:8080"));
@@ -565,8 +575,31 @@ mod tests {
     }
 
     #[test]
+    fn content_lists_all_bound_urls() {
+        // LOCAL MODE binds loopback + Tailscale; both URLs must be shown so the
+        // user can copy either.
+        let urls = vec![
+            "http://127.0.0.1:8080".to_string(),
+            "http://100.101.102.103:8080".to_string(),
+        ];
+        let lines = screen_lines(&urls, true, false, 0, 0);
+        let text = plain_text(&lines);
+        assert!(text.contains("http://127.0.0.1:8080"));
+        assert!(text.contains("http://100.101.102.103:8080"));
+        // Each URL is its own Url-role line.
+        assert_eq!(
+            lines
+                .iter()
+                .flatten()
+                .filter(|(_, role)| *role == Role::Url)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn loopback_auth_off_omits_the_warning() {
-        let lines = screen_lines("http://127.0.0.1:8080", true, false, 0, 0);
+        let lines = screen_lines(&one("http://127.0.0.1:8080"), true, false, 0, 0);
         let text = plain_text(&lines);
         assert!(!text.contains("NO authentication"));
         assert!(!text.contains("Login required"));
@@ -581,7 +614,7 @@ mod tests {
 
     #[test]
     fn non_loopback_auth_off_includes_the_loud_warning() {
-        let lines = screen_lines("http://0.0.0.0:8080", false, false, 0, 0);
+        let lines = screen_lines(&one("http://0.0.0.0:8080"), false, false, 0, 0);
         let text = plain_text(&lines);
         assert!(text.contains("NO authentication"));
         assert!(text.contains("control your agents"));
@@ -604,7 +637,7 @@ mod tests {
     fn auth_on_shows_quiet_login_line_not_the_warning() {
         // Auth on: a non-loopback bind is fine — show the quiet informational
         // line, never the loud no-auth warning.
-        let lines = screen_lines("http://0.0.0.0:8080", false, true, 3, 0);
+        let lines = screen_lines(&one("http://0.0.0.0:8080"), false, true, 3, 0);
         let text = plain_text(&lines);
         assert!(text.contains("Login required"));
         assert!(text.contains("3 users configured"));
@@ -625,7 +658,7 @@ mod tests {
 
     #[test]
     fn auth_on_singular_user_uses_singular_noun() {
-        let lines = screen_lines("http://127.0.0.1:8080", true, true, 1, 0);
+        let lines = screen_lines(&one("http://127.0.0.1:8080"), true, true, 1, 0);
         let text = plain_text(&lines);
         assert!(text.contains("1 user configured"));
         assert!(!text.contains("1 users"));
@@ -633,7 +666,7 @@ mod tests {
 
     #[test]
     fn content_includes_both_exit_hints() {
-        let lines = screen_lines("http://127.0.0.1:8080", true, false, 0, 0);
+        let lines = screen_lines(&one("http://127.0.0.1:8080"), true, false, 0, 0);
         let text = plain_text(&lines);
         assert!(text.contains("q or Esc"));
         assert!(text.contains("return to dux"));
@@ -645,7 +678,7 @@ mod tests {
     fn content_includes_the_wordmark() {
         // The first lines are the shared ASCII wordmark; assert one of its
         // distinctive rows is present so a future logo-export break is caught.
-        let lines = screen_lines("http://127.0.0.1:8080", true, false, 0, 0);
+        let lines = screen_lines(&one("http://127.0.0.1:8080"), true, false, 0, 0);
         assert!(lines.len() >= ASCII_LOGO.len());
         assert_eq!(lines[0][0].1, Role::Logo);
         assert_eq!(lines[0][0].0, ASCII_LOGO[0]);

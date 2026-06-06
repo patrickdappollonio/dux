@@ -576,6 +576,28 @@ impl App {
                     self.set_info(format!("Deleted terminal \"{label}\""));
                 }
             }
+
+            EventReaction::ServerFlipPreflightReady { result, warning } => {
+                match result {
+                    Ok((listeners, urls)) => {
+                        // Surface the warning (if any) first, then announce the
+                        // serve URLs; the flip happens on the next loop iteration.
+                        let url_list = urls.join(", ");
+                        match warning {
+                            Some(warn) => self.set_warning(format!(
+                                "{warn} Starting the web server on {url_list} — your agents keep running."
+                            )),
+                            None => self.set_busy(format!(
+                                "Starting the web server on {url_list} — your agents keep running."
+                            )),
+                        }
+                        self.pending_server_flip = Some((listeners, urls));
+                    }
+                    Err(err) => {
+                        self.set_error(err);
+                    }
+                }
+            }
         }
     }
 

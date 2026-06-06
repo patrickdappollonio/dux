@@ -2448,24 +2448,44 @@ impl App {
     }
 
     /// Palette action: tear down the TUI and serve the web UI in the same
-    /// process. Runs the full pre-flight (bind resolution + an actual
-    /// `TcpListener::bind`) BEFORE touching anything, so a refusal (non-loopback
-    /// without opt-in) or a port collision surfaces on the status line and the
-    /// TUI stays exactly where it was. On success the bound listener and its
-    /// display URL are stashed and the run loop breaks with
-    /// `RunExit::FlipToServer` on its next iteration.
+    /// process. LOCAL MODE only — loopback plus (when enabled) the machine's
+    /// Tailscale address; the flip never reads `listen_addrs`.
+    ///
+    /// The pre-flight (Tailscale detection via `tailscale ip`, then an actual
+    /// `TcpListener::bind` of each address) runs on a WORKER thread because the
+    /// CLI call would otherwise block the UI loop. The worker reports back via
+    /// `WorkerEvent::ServerFlipPreflightReady`; the main loop stashes the flip on
+    /// success or surfaces the (actionable) error on failure, so a port collision
+    /// or a missing Tailscale daemon keeps the TUI exactly where it was.
     pub(crate) fn start_web_server(&mut self) {
-        match preflight_server_listener(&self.engine.config) {
-            Ok((listener, url)) => {
-                self.set_busy(format!(
-                    "Starting the web server on {url} — your agents keep running."
-                ));
-                self.pending_server_flip = Some((listener, url));
-            }
-            Err(err) => {
-                self.set_error(format!("{err:#}"));
-            }
-        }
+        self.set_busy("Starting the web server — your agents keep running.".to_string());
+        let port = self.engine.config.server.port;
+        let tailscale_enabled = self.engine.config.server.tailscale_enabled;
+        let tx = self.engine.worker_tx.clone();
+        std::thread::spawn(move || {
+            // Detect the Tailscale address off the UI thread (the CLI call is the
+            // reason this runs on a worker). When detection fails but the user
+            // opted in, carry a non-fatal warning naming the config key.
+            let (tailscale_ip, warning) = if tailscale_enabled {
+                match dux_core::tailscale::detect_ip() {
+                    Ok(ip) => (Some(ip), None),
+                    Err(reason) => (
+                        None,
+                        Some(format!(
+                            "Tailscale not detected ({}) — serving on loopback only. \
+                             Set tailscale_enabled = false in [server] to silence this warning.",
+                            reason.reason()
+                        )),
+                    ),
+                }
+            } else {
+                (None, None)
+            };
+
+            let result =
+                preflight_server_listeners(port, tailscale_ip).map_err(|err| format!("{err:#}"));
+            let _ = tx.send(WorkerEvent::ServerFlipPreflightReady { result, warning });
+        });
     }
 }
 
@@ -2712,35 +2732,66 @@ mod tests {
     }
 
     #[test]
-    fn start_web_server_stashes_flip_on_success() {
+    fn start_web_server_sets_busy_and_dispatches_worker() {
+        // start_web_server now runs the pre-flight on a WORKER thread (it shells
+        // out to `tailscale ip`), so it does not stash the flip synchronously. It
+        // must immediately set a Busy status and arm nothing yet.
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
-        app.engine.config.server.bind = "127.0.0.1:0".to_string();
-
         app.start_web_server();
-
-        let (_, url) = app
-            .pending_server_flip
-            .as_ref()
-            .expect("a successful pre-flight stashes the flip");
-        assert!(url.starts_with("http://127.0.0.1:"));
-        assert!(!url.ends_with(":0"), "URL must show the real bound port");
+        assert!(app.pending_server_flip.is_none());
         assert!(app.status.message().contains("Starting the web server"));
     }
 
     #[test]
-    fn start_web_server_stays_up_on_preflight_failure() {
+    fn server_flip_preflight_ready_ok_stashes_flip() {
+        // The worker's success path: a constructed event carrying bound listeners
+        // and URLs stashes the flip and shows a busy status.
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
-        // Non-loopback without the opt-in is refused by the safety gate.
-        app.engine.config.server.bind = "0.0.0.0:0".to_string();
-        app.engine.config.server.insecure_allow_remote = false;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        app.apply_reaction(EventReaction::ServerFlipPreflightReady {
+            result: Ok((vec![listener], vec![url.clone()])),
+            warning: None,
+        });
 
-        app.start_web_server();
+        let (listeners, urls) = app
+            .pending_server_flip
+            .as_ref()
+            .expect("a successful pre-flight stashes the flip");
+        assert_eq!(listeners.len(), 1);
+        assert_eq!(urls, &vec![url]);
+        assert!(app.status.message().contains("Starting the web server"));
+    }
 
+    #[test]
+    fn server_flip_preflight_ready_warning_shows_warning_status() {
+        let mut app = test_app_with_sessions(Vec::new(), Vec::new());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        app.apply_reaction(EventReaction::ServerFlipPreflightReady {
+            result: Ok((vec![listener], vec![url])),
+            warning: Some("Tailscale not detected — serving on loopback only.".to_string()),
+        });
+        assert!(app.pending_server_flip.is_some());
+        assert!(app.status.message().contains("Tailscale not detected"));
+    }
+
+    #[test]
+    fn server_flip_preflight_ready_err_surfaces_error_and_stays_up() {
+        let mut app = test_app_with_sessions(Vec::new(), Vec::new());
+        app.apply_reaction(EventReaction::ServerFlipPreflightReady {
+            result: Err("could not start the web server: address in use".to_string()),
+            warning: None,
+        });
         assert!(
             app.pending_server_flip.is_none(),
-            "a refused pre-flight must not arm the flip"
+            "a failed pre-flight must not arm the flip"
         );
-        assert!(app.status.message().contains("[auth]"));
+        assert!(
+            app.status
+                .message()
+                .contains("could not start the web server")
+        );
     }
 
     #[test]

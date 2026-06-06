@@ -266,11 +266,25 @@ fn run_diff_summary(current: &Config) -> Result<()> {
     );
 
     // [server]
+    diff_u16(
+        &mut changes,
+        "server.port",
+        defaults.server.port,
+        current.server.port,
+    );
+    diff_bool(
+        &mut changes,
+        "server.tailscale_enabled",
+        defaults.server.tailscale_enabled,
+        current.server.tailscale_enabled,
+    );
+    let default_listen = defaults.server.listen_addrs.join(", ");
+    let current_listen = current.server.listen_addrs.join(", ");
     diff_str(
         &mut changes,
-        "server.bind",
-        &defaults.server.bind,
-        &current.server.bind,
+        "server.listen_addrs",
+        &format!("[{default_listen}]"),
+        &format!("[{current_listen}]"),
     );
     diff_bool(
         &mut changes,

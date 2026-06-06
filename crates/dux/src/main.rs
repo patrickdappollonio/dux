@@ -6,15 +6,23 @@ Usage: dux server [OPTIONS]
 Run the dux web UI over the headless engine.
 
 Options:
-      --bind <ADDR:PORT>       Address and port to listen on (e.g. 127.0.0.1:8080).
-                               Overrides the [server] bind value in config.toml.
-                               Only used when built-in ACME/TLS is off.
+      --port <PORT>            LOCAL MODE port. dux binds 127.0.0.1:port (and the
+                               machine's Tailscale address:port unless disabled).
+                               Used only when no --listen / [server] listen_addrs
+                               are set. Overrides [server] port (default 8080).
+      --listen <ADDR:PORT>     FULL WEB MODE listener (repeatable). Each is an
+                               IP:port socket address (hostnames are NOT resolved).
+                               Replaces [server] listen_addrs entirely. Only used
+                               when built-in ACME/TLS is off.
+      --bind <ADDR:PORT>       DEPRECATED alias for --listen (accepted with a note).
+      --no-tailscale           Skip Tailscale detection for LOCAL MODE this run
+                               (serve loopback only).
       --disable-auth           Run with the login gate OFF even when [auth] users are
                                configured. Intended for deployments behind an upstream
                                auth proxy (e.g. oauth2-proxy) that handles login itself.
-      --insecure-allow-remote  Allow a non-loopback plain-HTTP bind even though no
-                               login is configured. Anyone who can reach the address
-                               can control your agents and worktrees.
+      --insecure-allow-remote  Allow a non-loopback plain-HTTP listen_addrs entry even
+                               though no login is configured. Anyone who can reach the
+                               address can control your agents and worktrees.
       --acme-domain <DOMAIN>   Domain to request a Let's Encrypt certificate for
                                (repeatable). Overrides [server.acme] domains.
       --acme-email <EMAIL>     Contact email for Let's Encrypt. Overrides config.
@@ -51,23 +59,17 @@ fn run_tui_with_flip() -> Result<()> {
             dux_tui::TuiExit::Done => break,
             dux_tui::TuiExit::FlipToServer {
                 engine,
-                listener,
-                url,
+                listeners,
+                urls,
             } => {
                 // Read everything the status screen needs BEFORE the engine and
-                // listener move into `serve_with_engine`. The theme name lives
-                // on the engine's config; `loopback` decides whether to show the
-                // no-auth warning. `local_addr` failures default to treating the
-                // bind as loopback (the safe, no-warning assumption is wrong if
-                // it's actually remote, but the bind already passed the gate in
-                // the TUI pre-flight, so a non-loopback bind without the opt-in
-                // never reaches here).
+                // listeners move into `serve_with_engine`. The theme name lives
+                // on the engine's config. The flip is local-only by construction
+                // (loopback + optional Tailscale), so it is always "all local" —
+                // there is no public, no-auth path to warn about here.
                 let theme_name = engine.config.ui.theme.clone();
                 let paths = engine.paths.clone();
-                let loopback = listener
-                    .local_addr()
-                    .map(|addr| addr.ip().is_loopback())
-                    .unwrap_or(true);
+                let loopback = true;
 
                 // The flip never passes --disable-auth (that is a `dux server`
                 // CLI flag), so the gate is on iff [auth] has valid users. The
@@ -81,7 +83,7 @@ fn run_tui_with_flip() -> Result<()> {
                 // must still run. `screen` lives outside the tick closure so we
                 // can drop it (restoring the terminal) AFTER serving returns.
                 let mut screen = match dux_tui::ServerStatusScreen::new(
-                    &url,
+                    &urls,
                     loopback,
                     auth_enabled,
                     user_count,
@@ -91,14 +93,15 @@ fn run_tui_with_flip() -> Result<()> {
                     Ok(screen) => Some(screen),
                     Err(err) => {
                         eprintln!(
-                            "dux server running at {url} (status screen unavailable: {err}) \
-                                 — press Ctrl-C to stop"
+                            "dux server running at {} (status screen unavailable: {err}) \
+                                 — press Ctrl-C to stop",
+                            urls.join(", ")
                         );
                         None
                     }
                 };
 
-                let (engine, exit) = dux_web::serve_with_engine(*engine, listener, || {
+                let (engine, exit) = dux_web::serve_with_engine(*engine, listeners, || {
                     // With the screen up, its keys drive the exit; without it,
                     // only SIGINT/SIGTERM (handled inside serve) can stop us.
                     match screen.as_mut() {
@@ -156,11 +159,34 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
 
     let auth_enabled = dux_core::auth::auth_enabled(&config, cli_disable_auth);
 
+    // Detect the Tailscale address up front (blocking is fine at CLI startup).
+    // It feeds LOCAL MODE and the per-entry classification in the resolver. When
+    // detection fails but the user opted in (tailscale_enabled, no --no-tailscale),
+    // warn and proceed on loopback only — never block.
+    let tailscale_wanted = config.server.tailscale_enabled && !overrides.no_tailscale;
+    let tailscale_ip = if tailscale_wanted {
+        match dux_core::tailscale::detect_ip() {
+            Ok(ip) => Some(ip),
+            Err(reason) => {
+                eprintln!(
+                    "WARNING: Tailscale not detected ({}) — serving on loopback only. \
+                     Set tailscale_enabled = false in [server] (or pass --no-tailscale) to \
+                     silence this warning.",
+                    reason.reason()
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let plan = match dux_core::config::resolve_server_plan(
         &config.server,
         auth_enabled,
         cli_disable_auth,
         &overrides,
+        tailscale_ip,
         &paths.root,
     ) {
         Ok(plan) => plan,
@@ -171,21 +197,34 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
     };
 
     match plan {
-        dux_core::config::ServerPlan::PlainHttp { addr } => {
+        dux_core::config::ServerPlan::PlainHttp { addrs } => {
+            // An address is LOCAL when it is loopback OR the detected Tailscale
+            // address; only PUBLIC addresses are gated and warned about.
+            let is_local =
+                |a: &std::net::SocketAddr| a.ip().is_loopback() || Some(a.ip()) == tailscale_ip;
+            let all_addrs_local = addrs.iter().all(is_local);
+
             // Loud warning when auth is deliberately disabled on a reachable
-            // address: --disable-auth turned the gate off on a non-loopback
-            // bind. Only an upstream auth proxy makes this safe.
-            if cli_disable_auth && !addr.ip().is_loopback() {
-                eprintln!(
-                    "WARNING: --disable-auth is set and dux is binding {addr}, a non-loopback \
-                     address, with NO login gate. Anyone who can reach this address can control \
-                     your agents and worktrees. Only do this when an upstream auth proxy is \
-                     handling authentication in front of dux."
-                );
+            // (public) address: --disable-auth turned the gate off. Only an
+            // upstream auth proxy makes this safe.
+            if cli_disable_auth && !all_addrs_local {
+                for addr in addrs.iter().filter(|a| !is_local(a)) {
+                    eprintln!(
+                        "WARNING: --disable-auth is set and dux is binding {addr}, a non-loopback \
+                         address, with NO login gate. Anyone who can reach this address can control \
+                         your agents and worktrees. Only do this when an upstream auth proxy is \
+                         handling authentication in front of dux."
+                    );
+                }
             }
 
-            println!("dux server listening on http://{addr} — open it in your browser");
-            dux_web::run_server(paths, addr, cli_disable_auth)
+            let urls = addrs
+                .iter()
+                .map(|a| format!("http://{a}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("dux server listening on {urls} — open it in your browser");
+            dux_web::run_server(paths, addrs, all_addrs_local, cli_disable_auth)
         }
         // T1 resolves and validates the ACME plan but does not serve it: the
         // dux-web TLS path lands in the next slice. Refuse explicitly so nothing
@@ -213,7 +252,10 @@ enum ParsedServerArgs {
 /// Raw parsed `dux server` flags before config is loaded.
 #[derive(Default)]
 struct ServerArgs {
-    bind: Option<String>,
+    port: Option<u16>,
+    /// `--listen` (repeatable) and the deprecated `--bind` alias, in order.
+    listen: Vec<String>,
+    no_tailscale: bool,
     insecure_allow_remote: bool,
     disable_auth: bool,
     acme_domains: Vec<String>,
@@ -227,7 +269,9 @@ struct ServerArgs {
 impl ServerArgs {
     fn into_overrides(self) -> dux_core::config::ServerCliOverrides {
         dux_core::config::ServerCliOverrides {
-            bind: self.bind,
+            port: self.port,
+            listen: self.listen,
+            no_tailscale: self.no_tailscale,
             insecure_allow_remote: self.insecure_allow_remote,
             acme_domains: self.acme_domains,
             acme_email: self.acme_email,
@@ -274,9 +318,26 @@ fn parse_server_args(mut args: impl Iterator<Item = String>) -> ParsedServerArgs
             "--insecure-allow-remote" => out.insecure_allow_remote = true,
             "--disable-auth" => out.disable_auth = true,
             "--no-acme" => out.no_acme = true,
+            "--no-tailscale" => out.no_tailscale = true,
             "--dangerously-listen-http" => out.dangerously_listen_http = true,
+            "--port" => match take_value("--port", inline, &mut args) {
+                Ok(v) => match parse_port("--port", &v) {
+                    Ok(p) => out.port = Some(p),
+                    Err(e) => return ParsedServerArgs::Error(e),
+                },
+                Err(e) => return ParsedServerArgs::Error(e),
+            },
+            "--listen" => match take_value("--listen", inline, &mut args) {
+                Ok(v) => out.listen.push(v),
+                Err(e) => return ParsedServerArgs::Error(e),
+            },
             "--bind" => match take_value("--bind", inline, &mut args) {
-                Ok(v) => out.bind = Some(v),
+                Ok(v) => {
+                    eprintln!(
+                        "note: --bind is deprecated; use --listen {v} instead (treating it as --listen)."
+                    );
+                    out.listen.push(v);
+                }
                 Err(e) => return ParsedServerArgs::Error(e),
             },
             "--acme-domain" => match take_value("--acme-domain", inline, &mut args) {
@@ -344,7 +405,9 @@ mod tests {
     #[test]
     fn empty_args_parse_to_defaults() {
         let a = ok(&[]);
-        assert!(a.bind.is_none());
+        assert!(a.port.is_none());
+        assert!(a.listen.is_empty());
+        assert!(!a.no_tailscale);
         assert!(!a.insecure_allow_remote);
         assert!(!a.disable_auth);
         assert!(a.acme_domains.is_empty());
@@ -353,6 +416,35 @@ mod tests {
         assert!(a.https_port.is_none());
         assert!(!a.no_acme);
         assert!(!a.dangerously_listen_http);
+    }
+
+    #[test]
+    fn port_parses_as_number() {
+        let a = ok(&["--port", "9090"]);
+        assert_eq!(a.port, Some(9090));
+        let a = ok(&["--port=7000"]);
+        assert_eq!(a.port, Some(7000));
+    }
+
+    #[test]
+    fn listen_is_repeatable() {
+        let a = ok(&["--listen", "127.0.0.1:8080", "--listen=0.0.0.0:9000"]);
+        assert_eq!(
+            a.listen,
+            vec!["127.0.0.1:8080".to_string(), "0.0.0.0:9000".to_string()]
+        );
+    }
+
+    #[test]
+    fn bind_is_a_deprecated_alias_for_listen() {
+        let a = ok(&["--bind", "0.0.0.0:8080"]);
+        assert_eq!(a.listen, vec!["0.0.0.0:8080".to_string()]);
+    }
+
+    #[test]
+    fn no_tailscale_sets_its_field() {
+        let a = ok(&["--no-tailscale"]);
+        assert!(a.no_tailscale);
     }
 
     #[test]
@@ -408,9 +500,14 @@ mod tests {
     }
 
     #[test]
-    fn bind_and_email_take_values() {
-        let a = ok(&["--bind", "0.0.0.0:8080", "--acme-email", "ops@example.com"]);
-        assert_eq!(a.bind.as_deref(), Some("0.0.0.0:8080"));
+    fn listen_and_email_take_values() {
+        let a = ok(&[
+            "--listen",
+            "0.0.0.0:8080",
+            "--acme-email",
+            "ops@example.com",
+        ]);
+        assert_eq!(a.listen, vec!["0.0.0.0:8080".to_string()]);
         assert_eq!(a.acme_email.as_deref(), Some("ops@example.com"));
     }
 

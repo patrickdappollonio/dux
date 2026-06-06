@@ -71,15 +71,26 @@ struct DeprecatedConfigKeyRule {
     action: DeprecatedConfigKeyAction,
 }
 
-const DEPRECATED_CONFIG_KEYS: &[DeprecatedConfigKeyRule] = &[DeprecatedConfigKeyRule {
-    old: DeprecatedConfigKey {
-        section: "defaults",
-        key: "prompt_for_name",
+const DEPRECATED_CONFIG_KEYS: &[DeprecatedConfigKeyRule] = &[
+    DeprecatedConfigKeyRule {
+        old: DeprecatedConfigKey {
+            section: "defaults",
+            key: "prompt_for_name",
+        },
+        action: DeprecatedConfigKeyAction::Replace {
+            migrate: migrate_prompt_for_name,
+        },
     },
-    action: DeprecatedConfigKeyAction::Replace {
-        migrate: migrate_prompt_for_name,
+    DeprecatedConfigKeyRule {
+        old: DeprecatedConfigKey {
+            section: "server",
+            key: "bind",
+        },
+        action: DeprecatedConfigKeyAction::Replace {
+            migrate: migrate_server_bind,
+        },
     },
-}];
+];
 
 fn apply_config_deprecations(doc: &mut DocumentMut) -> Result<bool> {
     apply_config_deprecations_with(doc, DEPRECATED_CONFIG_KEYS)
@@ -135,6 +146,54 @@ fn migrate_prompt_for_name(
     Ok(())
 }
 
+/// Migrate the deprecated `[server] bind` key to the new port / listen_addrs
+/// shape. A LOOPBACK bind adopts its port into `port` (local mode); a
+/// NON-LOOPBACK bind is appended to `listen_addrs` (full web mode). An empty or
+/// unparseable value is dropped silently — the new defaults take over. Existing
+/// new-key values are never overwritten (the user's explicit choice wins).
+fn migrate_server_bind(
+    doc: &mut DocumentMut,
+    old: DeprecatedConfigKey,
+    old_item: Item,
+) -> Result<()> {
+    let Some(raw) = old_item.as_value().and_then(Value::as_str) else {
+        bail!(
+            "unsupported config key [{}.{}]: expected a string value",
+            old.section,
+            old.key
+        );
+    };
+
+    let Ok(addr) = raw.trim().parse::<std::net::SocketAddr>() else {
+        // Not a valid IP:port — nothing safe to migrate; let the new defaults
+        // apply. (An invalid bind would have failed the resolver anyway.)
+        return Ok(());
+    };
+
+    let table = dux_core::config_write::ensure_table(doc, "server");
+    if addr.ip().is_loopback() {
+        // Loopback → local mode: adopt the port unless the user already set one.
+        if !table.contains_key("port") {
+            table["port"] = toml_edit::value(i64::from(addr.port()));
+        }
+    } else {
+        // Non-loopback → full web mode: append to listen_addrs (creating it if
+        // absent), avoiding a duplicate entry.
+        let entry = table
+            .entry("listen_addrs")
+            .or_insert_with(|| toml_edit::value(toml_edit::Array::new()));
+        if let Some(arr) = entry.as_array_mut() {
+            let already = arr
+                .iter()
+                .any(|v| v.as_str() == Some(addr.to_string().as_str()));
+            if !already {
+                arr.push(addr.to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Config schema: defines the layout, comments, and value accessors for the
 // TOML config file. Adding a new setting means adding a struct field, its
@@ -149,6 +208,7 @@ enum FieldValue {
     Usize(usize),
     Bool(bool),
     MultilineStr(Option<String>),
+    StrList(Vec<String>),
 }
 
 /// A comment source: static string or dynamically built.
@@ -379,24 +439,63 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
         },
         ConfigEntry::Blank,
         ConfigEntry::Section("server"),
+        ConfigEntry::Comment(
+            "# The dux web UI has two ways to listen, LOCAL MODE and FULL WEB MODE.\n\
+             #\n\
+             # LOCAL MODE (port + tailscale_enabled below) is what the in-app\n\
+             # \"start web server\" flip uses, and what `dux server` falls back to when\n\
+             # listen_addrs is empty. It always serves on loopback (127.0.0.1) and,\n\
+             # when tailscale_enabled, also on this machine's Tailscale address so\n\
+             # your other tailnet devices can reach it (traffic is WireGuard-encrypted\n\
+             # in transit). The flip NEVER reads listen_addrs — it is local-only by\n\
+             # design and can never open a public listener.",
+        ),
         ConfigEntry::Field {
-            key: "bind",
+            key: "port",
             comment: Some(CommentSource::Static(
-                "# Address and port the `dux server` web UI listens on.\n\
-                 # Must be in IP:port form. The default 127.0.0.1:8080 is loopback,\n\
-                 # meaning the web UI is reachable only from this machine.\n\
-                 # Use 0.0.0.0:8080 to listen on every interface (see the warning below).",
+                "# LOCAL MODE port. dux binds 127.0.0.1:port (and the Tailscale\n\
+                 # address:port when tailscale_enabled). The default is 8080.",
             )),
-            value_fn: |c| FieldValue::Str(c.server.bind.clone()),
+            value_fn: |c| FieldValue::U16(c.server.port),
+        },
+        ConfigEntry::Field {
+            key: "tailscale_enabled",
+            comment: Some(CommentSource::Static(
+                "# Opt-out Tailscale binding for LOCAL MODE. When true (the default),\n\
+                 # dux detects this machine's Tailscale address (via the `tailscale ip`\n\
+                 # CLI) and also listens there, so tailnet devices can open the web UI.\n\
+                 # If the CLI is missing or the daemon is down, dux WARNS and serves on\n\
+                 # loopback only — it never blocks. Set false to skip detection and\n\
+                 # silence that warning.\n\
+                 # NOTE: a shared tailnet means OTHER people's devices can reach dux.\n\
+                 # Configure [auth] users below so the login gate protects it.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.server.tailscale_enabled),
+        },
+        ConfigEntry::Field {
+            key: "listen_addrs",
+            comment: Some(CommentSource::Static(
+                "# FULL WEB MODE listeners — used by `dux server` ONLY (the flip ignores\n\
+                 # this entirely). Each entry is an IP:port socket address; hostnames are\n\
+                 # NOT resolved. When non-empty, this REPLACES local mode for the CLI:\n\
+                 # dux binds exactly these addresses. Examples:\n\
+                 #   listen_addrs = [\"127.0.0.1:8080\"]            # loopback only\n\
+                 #   listen_addrs = [\"0.0.0.0:8080\"]             # every interface\n\
+                 # A non-loopback (public) entry is gated: it needs either [auth] users\n\
+                 # or insecure_allow_remote, AND `dux server --dangerously-listen-http`\n\
+                 # (plain HTTP is unencrypted). Prefer built-in TLS via [server.acme].",
+            )),
+            value_fn: |c| FieldValue::StrList(c.server.listen_addrs.clone()),
         },
         ConfigEntry::Field {
             key: "insecure_allow_remote",
             comment: Some(CommentSource::Static(
-                "# Allow binding to a non-loopback address even though the web UI has\n\
-                 # NO authentication yet: anyone who can reach the port can fully control\n\
+                "# Allow a non-loopback listen_addrs entry even though the web UI has\n\
+                 # NO authentication: anyone who can reach the port can fully control\n\
                  # your agents and worktrees. Keep this false unless you understand the\n\
-                 # risk (for example, brief LAN testing on a trusted network).\n\
-                 # When false, `dux server` refuses to start on a non-loopback bind.",
+                 # risk (for example, an upstream auth proxy fronting dux, or brief LAN\n\
+                 # testing on a trusted network). Loopback and Tailscale binds are never\n\
+                 # gated by this — only public listen_addrs entries are.",
             )),
             value_fn: |c| FieldValue::Bool(c.server.insecure_allow_remote),
         },
@@ -459,6 +558,9 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
                     }
                     FieldValue::MultilineStr(None) => {
                         let _ = writeln!(out, "{key} = \"\"");
+                    }
+                    FieldValue::StrList(list) => {
+                        let _ = writeln!(out, "{key} = {}", render_string_list(&list));
                     }
                 }
             }
@@ -1008,7 +1110,13 @@ mod tests {
         assert!(rendered.contains("[editor]"));
         assert!(rendered.contains("default = \"cursor\""));
         assert!(rendered.contains("[server]"));
-        assert!(rendered.contains("bind = \"127.0.0.1:8080\""));
+        assert!(rendered.contains("port = 8080"));
+        assert!(rendered.contains("tailscale_enabled = true"));
+        assert!(rendered.contains("listen_addrs = []"));
+        assert!(
+            !rendered.contains("bind = "),
+            "renderer must not emit the deprecated bind key"
+        );
         assert!(rendered.contains("insecure_allow_remote = false"));
         assert!(rendered.contains("[server.acme]"));
         assert!(rendered.contains("enabled = false"));
@@ -1373,6 +1481,84 @@ enable_randomized_pet_name_by_default = false
                 .as_value()
                 .and_then(Value::as_bool),
             Some(false),
+        );
+    }
+
+    #[test]
+    fn server_bind_loopback_migrates_port_and_drops_bind() {
+        let mut doc: DocumentMut = r#"
+[server]
+bind = "127.0.0.1:9090"
+"#
+        .parse()
+        .expect("parse doc");
+
+        let changed = apply_config_deprecations(&mut doc).expect("migrate");
+        assert!(changed);
+
+        let server = doc["server"].as_table().expect("server table");
+        assert!(!server.contains_key("bind"), "bind must be dropped");
+        assert_eq!(
+            server["port"].as_value().and_then(Value::as_integer),
+            Some(9090),
+            "loopback bind port adopted into port"
+        );
+        assert!(
+            !server.contains_key("listen_addrs"),
+            "loopback bind must NOT create listen_addrs"
+        );
+
+        // Reparses into the new shape with the migrated port.
+        let config: Config = toml::from_str(&doc.to_string()).expect("reparse migrated config");
+        assert_eq!(config.server.port, 9090);
+        assert!(config.server.listen_addrs.is_empty());
+        assert!(config.server.bind.is_none());
+    }
+
+    #[test]
+    fn server_bind_non_loopback_migrates_into_listen_addrs() {
+        let mut doc: DocumentMut = r#"
+[server]
+bind = "0.0.0.0:9000"
+"#
+        .parse()
+        .expect("parse doc");
+
+        let changed = apply_config_deprecations(&mut doc).expect("migrate");
+        assert!(changed);
+
+        let server = doc["server"].as_table().expect("server table");
+        assert!(!server.contains_key("bind"), "bind must be dropped");
+        let listen = server["listen_addrs"]
+            .as_array()
+            .expect("listen_addrs array");
+        assert_eq!(listen.len(), 1);
+        assert_eq!(listen.get(0).and_then(|v| v.as_str()), Some("0.0.0.0:9000"));
+
+        // Reparses into the new shape with the migrated listener.
+        let config: Config = toml::from_str(&doc.to_string()).expect("reparse migrated config");
+        assert_eq!(config.server.listen_addrs, vec!["0.0.0.0:9000".to_string()]);
+        assert!(config.server.bind.is_none());
+    }
+
+    #[test]
+    fn server_bind_migration_preserves_explicit_new_keys() {
+        // A loopback bind must NOT overwrite an explicitly-set port.
+        let mut doc: DocumentMut = r#"
+[server]
+bind = "127.0.0.1:9090"
+port = 7000
+"#
+        .parse()
+        .expect("parse doc");
+
+        apply_config_deprecations(&mut doc).expect("migrate");
+        let server = doc["server"].as_table().expect("server table");
+        assert!(!server.contains_key("bind"));
+        assert_eq!(
+            server["port"].as_value().and_then(Value::as_integer),
+            Some(7000),
+            "explicit port wins over the migrated loopback bind port"
         );
     }
 

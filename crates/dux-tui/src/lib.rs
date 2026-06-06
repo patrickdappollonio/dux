@@ -34,15 +34,16 @@ use dux_core::engine::Engine;
 
 /// How the TUI surface exited. `Done` ends the process; `FlipToServer` hands
 /// the live engine (PTYs still running, single-instance lock held inside the
-/// engine) and a pre-bound listener to the binary so the web server can take
+/// engine) and pre-bound listeners to the binary so the web server can take
 /// over the same process. The binary resumes the TUI via
-/// [`resume_after_server`] when the server stops.
+/// [`resume_after_server`] when the server stops. LOCAL MODE may bind more than
+/// one address (loopback + Tailscale), so `listeners`/`urls` are vectors.
 pub enum TuiExit {
     Done,
     FlipToServer {
         engine: Box<Engine>,
-        listener: std::net::TcpListener,
-        url: String,
+        listeners: Vec<std::net::TcpListener>,
+        urls: Vec<String>,
     },
 }
 
@@ -117,10 +118,10 @@ pub fn resume_after_server(engine: Box<Engine>) -> Result<TuiExit> {
 fn run_app(mut app: app::App) -> Result<TuiExit> {
     match app.run()? {
         app::RunExit::Quit => Ok(TuiExit::Done),
-        app::RunExit::FlipToServer { listener, url } => Ok(TuiExit::FlipToServer {
+        app::RunExit::FlipToServer { listeners, urls } => Ok(TuiExit::FlipToServer {
             engine: Box::new(app.into_engine()),
-            listener,
-            url,
+            listeners,
+            urls,
         }),
     }
 }

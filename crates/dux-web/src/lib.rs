@@ -44,54 +44,69 @@ use dux_core::engine::Engine;
 
 use crate::engine_actor::LoopControl;
 
-/// The non-loopback bind gate now lives in `dux-core` so both server entry
-/// points (the `dux server` CLI and the in-process TUI↔server flip's pre-flight
-/// in dux-tui) share it without dux-tui depending on dux-web. Re-exported here
-/// so `crates/dux/src/main.rs` keeps calling `dux_web::resolve_bind` unchanged.
-/// The gate now also accepts an `auth_enabled` argument: a non-loopback bind is
-/// permitted when the login gate is active, not only when the insecure opt-in is
-/// set.
-pub use dux_core::config::resolve_server_bind as resolve_bind;
-
-/// Boot the engine on its own thread and serve the web UI on `addr` (loopback for now).
-/// Blocking entry — builds its own tokio runtime.
+/// Boot the engine on its own thread and serve the web UI on every address in
+/// `addrs` (one axum task per listener, sharing the router/state). Blocking
+/// entry — builds its own tokio runtime.
+///
+/// `all_addrs_local` is the caller's classification of whether EVERY bound
+/// address is local (loopback OR the machine's own Tailscale address). It feeds
+/// the auth-reload context's downgrade rule: the refuse-downgrade protection
+/// guards PUBLIC binds, and a Tailscale bind is local (reachable only over the
+/// operator's own WireGuard tailnet), so an all-local serve permits a reload
+/// that turns the gate off — identical to a pure loopback bind. We thread the
+/// classification rather than recomputing `addr.is_loopback()` per address
+/// precisely so a Tailscale address does NOT count as a non-loopback public bind.
 ///
 /// `disable_auth` mirrors the `dux server --disable-auth` flag: with it set the
 /// login gate is off even when `[auth]` users exist. The gate's shared auth
 /// snapshot is built ONCE here from the engine's loaded config users, handed to
 /// both the engine actor (so a config reload rebuilds it live) and the router.
-pub fn run_server(paths: DuxPaths, addr: SocketAddr, disable_auth: bool) -> Result<()> {
+pub fn run_server(
+    paths: DuxPaths,
+    addrs: Vec<SocketAddr>,
+    all_addrs_local: bool,
+    disable_auth: bool,
+) -> Result<()> {
     let engine = bootstrap::bootstrap_engine(&paths)?;
     // Build the login gate's shared state from the loaded config users (parsed
     // ONCE here, not per request). The same `Arc` is handed to the engine actor
     // (for live reload refresh) and to the router (for login/gate reads).
     let auth = auth::shared_auth(&engine.config.auth.users, disable_auth);
-    // Thread the live bind's loopback-ness into the reload context: on a
-    // non-loopback bind the gate must REFUSE a reload that would remove the last
-    // user and turn auth off (see `AuthState::rebuild`).
-    let loopback = addr.ip().is_loopback();
     let (handle, _join) = engine_actor::spawn_engine_thread_with_auth(
         engine,
         engine_actor::AuthReloadContext {
             shared: Arc::clone(&auth),
             disable_auth,
-            loopback,
+            loopback: all_addrs_local,
         },
     );
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     runtime.block_on(async move {
-        let app = server::router_with_auth(handle.clone(), auth);
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        // Serve with connect-info so the login handler can read the peer IP for
-        // the per-IP attempt backoff.
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        // Bind every address; share one router across all listeners by cloning
+        // the axum app (it is a cheap `Arc`-backed service). Each serve task gets
+        // its own graceful-shutdown future driven by the same signal.
+        let mut tasks = tokio::task::JoinSet::new();
+        for addr in addrs {
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            let app = server::router_with_auth(handle.clone(), Arc::clone(&auth));
+            tasks.spawn(async move {
+                // Serve with connect-info so the login handler can read the peer
+                // IP for the per-IP attempt backoff.
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .with_graceful_shutdown(shutdown_signal())
+                .await
+            });
+        }
+        // Wait for all serve tasks to finish (they all wind down together when a
+        // shutdown signal fires). Surface the first error if any task failed.
+        while let Some(joined) = tasks.join_next().await {
+            joined??;
+        }
         // SIGTERM the agents (they save state for a later resume), mark their
         // sessions Detached, then exit; Drop hard-kills any straggler.
         handle.shutdown().await;
@@ -137,8 +152,11 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// Serve the web UI over an EXISTING engine on the CALLER's thread, returning
 /// the engine when serving stops. This is the in-process TUI↔server flip's
 /// entry point: the TUI hands its live `Engine` (PTYs running, owned on the main
-/// thread) and a pre-bound std `TcpListener` here; this turns the caller's
-/// thread INTO the engine-actor loop while axum serves on a background runtime.
+/// thread) and pre-bound std `TcpListener`s here; this turns the caller's thread
+/// INTO the engine-actor loop while axum serves on a background runtime. LOCAL
+/// MODE may bind more than one address (loopback + the machine's Tailscale
+/// address), so `listeners` is a vector and one axum task serves each, sharing
+/// the router/state; graceful shutdown stops them all.
 ///
 /// `on_tick` runs once per engine-loop iteration (the binary implements it with
 /// a dux-tui status screen that polls keys and redraws). Its return value drives
@@ -151,7 +169,7 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 ///   and returns `(engine, QuitProcess)`.
 pub fn serve_with_engine(
     mut engine: Engine,
-    listener: std::net::TcpListener,
+    listeners: Vec<std::net::TcpListener>,
     mut on_tick: impl FnMut() -> ServerTick,
 ) -> Result<(Engine, ServerExit)> {
     // The flip never disables auth (there is no TUI `--disable-auth` path), and
@@ -161,22 +179,20 @@ pub fn serve_with_engine(
     // gate on mid-flip. The same `Arc` is threaded into both the actor (live
     // reload) and the router.
     let auth = auth::shared_auth(&engine.config.auth.users, false);
-    // The flip's loopback-ness comes from the pre-bound listener. A non-loopback
-    // flip bind would only be reachable if the gate is on (the bind pre-flight
-    // enforces that), so refusing a reload-driven downgrade matches the CLI path.
-    // If `local_addr` errors we fail SAFE: treat the bind as non-loopback so a
-    // reload that would remove the last user is REFUSED rather than silently
-    // opening a possibly-reachable server (fail-closed, not fail-open).
-    let loopback = listener
-        .local_addr()
-        .map(|a| a.ip().is_loopback())
-        .unwrap_or(false);
+    // The flip is ALWAYS local by construction: `local_addrs` only ever yields
+    // loopback plus the machine's own Tailscale address, never a public bind. A
+    // Tailscale bind is reachable only over the operator's own WireGuard tailnet,
+    // so it is local-classified — the auth-reload downgrade rule (which protects
+    // PUBLIC binds) treats this serve exactly like a pure loopback bind, allowing
+    // a reload that removes the last user. We therefore pass `loopback: true`
+    // unconditionally rather than recomputing from per-listener `is_loopback()`,
+    // which would wrongly flag the Tailscale listener as non-loopback.
     let (handle, ends) = engine_actor::build_actor_channels_with_auth(
         &engine,
         Some(engine_actor::AuthReloadContext {
             shared: Arc::clone(&auth),
             disable_auth: false,
-            loopback,
+            loopback: true,
         }),
     );
     engine_actor::spawn_global_workers(&mut engine);
@@ -192,37 +208,54 @@ pub fn serve_with_engine(
         .enable_all()
         .build()?;
 
-    // The std listener travels through the flip (the TUI bound it BEFORE tearing
-    // down, so there is no rebind race); tokio needs it non-blocking.
-    listener.set_nonblocking(true)?;
-    let tokio_listener = {
+    // The std listeners travel through the flip (the TUI bound them BEFORE tearing
+    // down, so there is no rebind race); tokio needs them non-blocking.
+    let tokio_listeners = {
         let _guard = runtime.enter();
-        tokio::net::TcpListener::from_std(listener)?
+        let mut out = Vec::with_capacity(listeners.len());
+        for listener in listeners {
+            listener.set_nonblocking(true)?;
+            out.push(tokio::net::TcpListener::from_std(listener)?);
+        }
+        out
     };
 
     // Graceful-shutdown trigger for axum: the synchronous engine loop flips this
-    // watch to `true` on exit, and the server's shutdown future awaits it.
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    // watch to `true` on exit, and each server's shutdown future awaits it.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     // Set by the signal task; polled by the control closure so a SIGINT/SIGTERM
     // received while serving breaks the engine loop too (not just axum).
     let signal_quit = Arc::new(AtomicBool::new(false));
 
-    let app = server::router_with_auth(handle, auth);
-    let server_task = runtime.spawn(async move {
-        axum::serve(
-            tokio_listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
-            // Wait until the loop flips the watch to `true`.
-            while !*shutdown_rx.borrow_and_update() {
-                if shutdown_rx.changed().await.is_err() {
-                    break;
-                }
-            }
-        })
-        .await
-    });
+    // One axum serve task per listener, all sharing the same router/state and the
+    // same shutdown watch. A JoinSet lets us join them all (bounded) on teardown.
+    let mut server_tasks = tokio::task::JoinSet::new();
+    for tokio_listener in tokio_listeners {
+        let app = server::router_with_auth(handle.clone(), Arc::clone(&auth));
+        let mut shutdown_rx = shutdown_rx.clone();
+        server_tasks.spawn_on(
+            async move {
+                axum::serve(
+                    tokio_listener,
+                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .with_graceful_shutdown(async move {
+                    // Wait until the loop flips the watch to `true`.
+                    while !*shutdown_rx.borrow_and_update() {
+                        if shutdown_rx.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                })
+                .await
+            },
+            runtime.handle(),
+        );
+    }
+    drop(shutdown_rx);
+    // The router holds its own cloned handle(s); drop ours so only the serve
+    // tasks keep the request side alive (matches the pre-multi-listener move).
+    drop(handle);
 
     // Signal task: trip the flag on SIGINT/SIGTERM so the control closure exits
     // the loop with QuitProcess on the next tick.
@@ -262,11 +295,15 @@ pub fn serve_with_engine(
     // window elapses (and an implicit drop would hang forever).
     shutdown_flag.store(true, Ordering::SeqCst);
 
-    // Trigger graceful axum shutdown and wait (bounded) for the server task to
-    // wind down.
+    // Trigger graceful axum shutdown and wait (bounded) for ALL server tasks to
+    // wind down. A single bounded join over the whole set keeps a wedged client
+    // connection on any listener from hanging the flip back to the TUI.
     let _ = shutdown_tx.send(true);
     runtime.block_on(async {
-        let _ = tokio::time::timeout(SERVER_JOIN_TIMEOUT, server_task).await;
+        let _ = tokio::time::timeout(SERVER_JOIN_TIMEOUT, async {
+            while server_tasks.join_next().await.is_some() {}
+        })
+        .await;
     });
     // Tear the runtime down with a bounded timeout. An implicit `drop(runtime)`
     // would block forever on any parked `spawn_blocking` task (drop cannot abort
