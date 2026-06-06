@@ -8,9 +8,12 @@ Run the dux web UI over the headless engine.
 Options:
       --bind <ADDR:PORT>      Address and port to listen on (e.g. 127.0.0.1:8080).
                               Overrides the [server] bind value in config.toml.
-      --insecure-allow-remote Allow binding a non-loopback address even though the
-                              web UI has no authentication yet. Anyone who can reach
-                              the address can control your agents and worktrees.
+      --disable-auth          Run with the login gate OFF even when [auth] users are
+                              configured. Intended for deployments behind an upstream
+                              auth proxy (e.g. oauth2-proxy) that handles login itself.
+      --insecure-allow-remote Allow binding a non-loopback address even though no
+                              login is configured. Anyone who can reach the address
+                              can control your agents and worktrees.
   -h, --help                  Print this help and exit.";
 
 fn main() -> Result<()> {
@@ -108,6 +111,7 @@ fn run_tui_with_flip() -> Result<()> {
 fn run_server(mut args: impl Iterator<Item = String>) -> Result<()> {
     let mut cli_bind: Option<String> = None;
     let mut cli_insecure_allow_remote = false;
+    let mut cli_disable_auth = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -116,6 +120,7 @@ fn run_server(mut args: impl Iterator<Item = String>) -> Result<()> {
                 return Ok(());
             }
             "--insecure-allow-remote" => cli_insecure_allow_remote = true,
+            "--disable-auth" => cli_disable_auth = true,
             "--bind" => match args.next() {
                 Some(value) => cli_bind = Some(value),
                 None => {
@@ -139,11 +144,14 @@ fn run_server(mut args: impl Iterator<Item = String>) -> Result<()> {
     std::fs::create_dir_all(&paths.root)?;
     let config = dux_core::config::load_config(&paths);
 
+    let auth_enabled = dux_core::auth::auth_enabled(&config, cli_disable_auth);
+
     let addr = match dux_web::resolve_bind(
         &config.server.bind,
         config.server.insecure_allow_remote,
         cli_bind.as_deref(),
         cli_insecure_allow_remote,
+        auth_enabled,
     ) {
         Ok(addr) => addr,
         Err(e) => {
@@ -151,6 +159,18 @@ fn run_server(mut args: impl Iterator<Item = String>) -> Result<()> {
             std::process::exit(1);
         }
     };
+
+    // Loud warning when auth is deliberately disabled on a reachable address:
+    // --disable-auth turned the gate off on a non-loopback bind. Only an
+    // upstream auth proxy makes this safe.
+    if cli_disable_auth && !addr.ip().is_loopback() {
+        eprintln!(
+            "WARNING: --disable-auth is set and dux is binding {addr}, a non-loopback \
+             address, with NO login gate. Anyone who can reach this address can control \
+             your agents and worktrees. Only do this when an upstream auth proxy is \
+             handling authentication in front of dux."
+        );
+    }
 
     println!("dux server listening on http://{addr} — open it in your browser");
     dux_web::run_server(paths, addr)

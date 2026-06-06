@@ -5,6 +5,7 @@
 
 pub mod action;
 pub mod agent_job;
+pub mod auth;
 pub mod browser;
 pub mod config;
 pub mod config_write;

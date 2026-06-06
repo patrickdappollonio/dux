@@ -2740,7 +2740,7 @@ mod tests {
             app.pending_server_flip.is_none(),
             "a refused pre-flight must not arm the flip"
         );
-        assert!(app.status.message().contains("no authentication"));
+        assert!(app.status.message().contains("[auth]"));
     }
 
     #[test]

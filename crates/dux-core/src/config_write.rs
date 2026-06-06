@@ -181,6 +181,9 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         config.server.insecure_allow_remote,
     );
 
+    // --- [auth] ---
+    patch_table_string_array(doc, "auth", "users", &config.auth.users);
+
     // --- [terminal] ---
     patch_table_str(doc, "terminal", "command", &config.terminal.command);
     patch_table_string_array(doc, "terminal", "args", &config.terminal.args);
@@ -579,6 +582,60 @@ unknown_key = \"untouched\"
         let parsed: Config = toml::from_str(&saved).expect("reparse");
         assert_eq!(parsed.server.bind, "0.0.0.0:9000");
         assert!(parsed.server.insecure_allow_remote);
+    }
+
+    #[test]
+    fn write_config_plain_round_trips_auth_users() {
+        // LESSON from the [server] slice: a managed section that forgets its
+        // apply_patches entry silently wipes user settings on the recover path.
+        // Guard the [auth] users against that regression: non-default users must
+        // survive a from-scratch plain write.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+
+        let mut config = Config::default();
+        config.auth.users = vec![
+            "alice:$2y$12$abcdefghijklmnopqrstuv".to_string(),
+            "bob:$2y$12$wxyz0123456789abcdefgh".to_string(),
+        ];
+
+        write_config_plain(&config_path, &config).expect("write_config_plain");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        let parsed: Config = toml::from_str(&saved).expect("reparse");
+        assert_eq!(
+            parsed.auth.users,
+            vec![
+                "alice:$2y$12$abcdefghijklmnopqrstuv".to_string(),
+                "bob:$2y$12$wxyz0123456789abcdefgh".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn patch_preserves_existing_auth_users() {
+        // Patching an existing file must keep configured [auth] users intact.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[auth]\nusers = [\"alice:$2y$12$existinghashvalue000000\"]\n",
+        )
+        .expect("write initial");
+
+        let mut config = Config::default();
+        // Mirror what a real load would do: the in-memory config carries the
+        // same users back into the patch.
+        config.auth.users = vec!["alice:$2y$12$existinghashvalue000000".to_string()];
+
+        patch_config_file(&config_path, &config).expect("patch");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        let parsed: Config = toml::from_str(&saved).expect("reparse");
+        assert_eq!(
+            parsed.auth.users,
+            vec!["alice:$2y$12$existinghashvalue000000".to_string()]
+        );
     }
 
     #[test]

@@ -279,6 +279,16 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         current.server.insecure_allow_remote,
     );
 
+    // [auth]
+    // Report only the configured user count, never the entries themselves —
+    // they embed bcrypt password hashes that must not be echoed to stdout.
+    if !current.auth.users.is_empty() {
+        changes.push(format!(
+            "auth.users: {} user(s) configured",
+            current.auth.users.len()
+        ));
+    }
+
     // [terminal]
     diff_str(
         &mut changes,

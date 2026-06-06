@@ -2825,11 +2825,15 @@ pub(crate) fn sync_config_projects_with_store(
 /// open. On any failure the TUI stays up and surfaces the (already actionable)
 /// error on the status line.
 fn preflight_server_listener(config: &Config) -> Result<(std::net::TcpListener, String)> {
+    // The flip never disables auth (there is no TUI --disable-auth path), so a
+    // non-loopback bind is allowed whenever a login gate is configured.
+    let auth_enabled = dux_core::auth::auth_enabled(config, false);
     let addr = dux_core::config::resolve_server_bind(
         &config.server.bind,
         config.server.insecure_allow_remote,
         None,
         false,
+        auth_enabled,
     )?;
     let listener = std::net::TcpListener::bind(addr).map_err(|err| {
         anyhow::anyhow!(
@@ -3062,16 +3066,34 @@ mod tests {
 
     #[test]
     fn preflight_refuses_non_loopback_without_opt_in() {
-        // Non-loopback bind without the insecure opt-in must be refused by the
-        // safety gate before any socket is opened.
+        // Non-loopback bind with no login configured and no insecure opt-in must
+        // be refused by the safety gate before any socket is opened.
         let config = server_test_config("0.0.0.0:0", false);
         let err = preflight_server_listener(&config)
-            .expect_err("non-loopback without opt-in must be refused");
+            .expect_err("non-loopback without auth or opt-in must be refused");
         let text = format!("{err:#}");
         assert!(
-            text.contains("no authentication") && text.contains("insecure_allow_remote"),
-            "refusal should be actionable: {text}"
+            text.contains("[auth]") && text.contains("insecure_allow_remote"),
+            "refusal should be actionable and present auth first: {text}"
         );
+    }
+
+    #[test]
+    fn preflight_allows_non_loopback_when_auth_configured() {
+        // A non-loopback bind is permitted (without the insecure opt-in) once a
+        // login gate is configured: the flip computes auth_enabled from the
+        // engine config and passes it through to the shared gate.
+        let mut config = server_test_config("127.0.0.1:0", false);
+        // Use a bindable non-loopback would require privileges/availability, so
+        // assert the GATE decision directly via the underlying resolver: a
+        // non-loopback address with auth on must resolve Ok.
+        let hash = dux_core::auth::hash_password("pw").expect("hash");
+        config.auth.users = vec![format!("alice:{hash}")];
+        let auth_enabled = dux_core::auth::auth_enabled(&config, false);
+        let addr =
+            dux_core::config::resolve_server_bind("0.0.0.0:8080", false, None, false, auth_enabled)
+                .expect("auth-enabled non-loopback bind must pass the gate");
+        assert_eq!(addr.to_string(), "0.0.0.0:8080");
     }
 
     #[test]

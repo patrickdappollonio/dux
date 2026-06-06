@@ -144,6 +144,20 @@ pub struct ServerConfig {
     pub insecure_allow_remote: bool,
 }
 
+/// Web UI login credentials.
+///
+/// Each entry is an htpasswd-style `"username:bcrypt-hash"` string. This shape
+/// renders as a self-documenting TOML array and round-trips trivially through
+/// `config_write`. Auth turns ON automatically when at least one valid entry
+/// exists (see [`crate::auth::auth_enabled`]); an empty list means the gate is
+/// off. Entries are managed by the TUI palette commands (server-add-user /
+/// server-remove-user) or by editing the config directly.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthConfig {
+    pub users: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OneshotOutput {
@@ -767,6 +781,8 @@ pub struct Config {
     pub editor: EditorConfig,
     #[serde(default)]
     pub server: ServerConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
     pub keys: KeysConfig,
     pub macros: MacrosConfig,
 }
@@ -827,6 +843,7 @@ impl Default for Config {
             },
             editor: EditorConfig::default(),
             server: ServerConfig::default(),
+            auth: AuthConfig::default(),
             keys: KeysConfig::default(),
             macros: MacrosConfig::default(),
         }
@@ -942,13 +959,17 @@ fn is_executable_file(path: &Path) -> bool {
     metadata.permissions().mode() & 0o111 != 0
 }
 
-/// Resolve the address the dux web server should bind to, enforcing the no-auth
-/// safety gate. CLI values take precedence over config values.
+/// Resolve the address the dux web server should bind to, enforcing the
+/// non-loopback safety gate. CLI values take precedence over config values.
 ///
-/// The web UI ships with NO authentication yet, so binding to anything other
-/// than loopback is refused unless the operator explicitly opts in (via the
-/// `--insecure-allow-remote` CLI flag or `insecure_allow_remote = true` under
-/// `[server]` in config.toml).
+/// Binding to anything other than loopback is refused unless one of the
+/// following holds:
+/// - `auth_enabled` is true (at least one valid `[auth]` user exists), so the
+///   web UI is protected by a login gate; or
+/// - the operator explicitly opts in to running with no auth via the
+///   `--insecure-allow-remote` CLI flag or `insecure_allow_remote = true` under
+///   `[server]` in config.toml (intended for upstream auth proxies fronting dux,
+///   together with `dux server --disable-auth`).
 ///
 /// Lives in dux-core (not dux-web) because both server entry points need the
 /// same gate: the `dux server` CLI and the in-process TUI↔server flip. The flip
@@ -959,6 +980,7 @@ pub fn resolve_server_bind(
     cfg_insecure_allow_remote: bool,
     cli_bind: Option<&str>,
     cli_insecure_allow_remote: bool,
+    auth_enabled: bool,
 ) -> Result<std::net::SocketAddr> {
     let raw = cli_bind.unwrap_or(cfg_bind);
     let addr: std::net::SocketAddr = raw.parse().map_err(|_| {
@@ -969,12 +991,15 @@ pub fn resolve_server_bind(
     })?;
 
     let allow_remote = cli_insecure_allow_remote || cfg_insecure_allow_remote;
-    if !addr.ip().is_loopback() && !allow_remote {
+    if !addr.ip().is_loopback() && !auth_enabled && !allow_remote {
         bail!(
-            "refusing to bind {addr}: the dux web UI has no authentication yet, \
+            "refusing to bind {addr}: the dux web UI has no login configured, \
              so anyone who can reach this address can control your agents and worktrees. \
-             To proceed deliberately, re-run with --insecure-allow-remote, \
-             or set insecure_allow_remote = true under [server] in config.toml."
+             To proceed, add at least one user to [auth] in config.toml \
+             (or use the server-add-user palette command) so the login gate protects it. \
+             Alternatively, if an upstream auth proxy handles authentication, \
+             re-run with --insecure-allow-remote or set insecure_allow_remote = true \
+             under [server] in config.toml."
         );
     }
 
@@ -987,20 +1012,27 @@ mod resolve_server_bind_tests {
 
     #[test]
     fn default_loopback_passes_without_opt_in() {
-        let addr = resolve_server_bind("127.0.0.1:8080", false, None, false).expect("loopback ok");
+        let addr =
+            resolve_server_bind("127.0.0.1:8080", false, None, false, false).expect("loopback ok");
         assert_eq!(addr.to_string(), "127.0.0.1:8080");
     }
 
     #[test]
     fn cli_bind_overrides_config_bind() {
-        let addr = resolve_server_bind("127.0.0.1:8080", false, Some("127.0.0.1:9999"), false)
-            .expect("cli ok");
+        let addr = resolve_server_bind(
+            "127.0.0.1:8080",
+            false,
+            Some("127.0.0.1:9999"),
+            false,
+            false,
+        )
+        .expect("cli ok");
         assert_eq!(addr.to_string(), "127.0.0.1:9999");
     }
 
     #[test]
     fn invalid_value_error_mentions_the_value() {
-        let err = resolve_server_bind("not-an-addr", false, None, false)
+        let err = resolve_server_bind("not-an-addr", false, None, false, false)
             .expect_err("invalid address should error");
         let msg = err.to_string();
         assert!(
@@ -1015,7 +1047,7 @@ mod resolve_server_bind_tests {
 
     #[test]
     fn non_loopback_without_opt_in_errors() {
-        let err = resolve_server_bind("0.0.0.0:8080", false, None, false)
+        let err = resolve_server_bind("0.0.0.0:8080", false, None, false, false)
             .expect_err("non-loopback without opt-in should error");
         let msg = err.to_string();
         assert!(
@@ -1023,33 +1055,63 @@ mod resolve_server_bind_tests {
             "error should point to the CLI flag: {msg}"
         );
         assert!(
-            msg.contains("authentication"),
-            "error should explain why it refused: {msg}"
+            msg.contains("[auth]"),
+            "error should present auth as the primary fix: {msg}"
+        );
+    }
+
+    #[test]
+    fn non_loopback_with_auth_enabled_passes() {
+        // With a login gate configured, binding a non-loopback address is safe
+        // and must not require the insecure opt-in.
+        let addr = resolve_server_bind("0.0.0.0:8080", false, None, false, true)
+            .expect("auth-enabled non-loopback ok");
+        assert_eq!(addr.to_string(), "0.0.0.0:8080");
+    }
+
+    #[test]
+    fn non_loopback_auth_off_no_opt_in_errors_mentioning_auth() {
+        let err = resolve_server_bind("0.0.0.0:8080", false, None, false, false)
+            .expect_err("non-loopback with auth off and no opt-in should error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("[auth]"),
+            "refusal should mention configuring [auth] users first: {msg}"
+        );
+        assert!(
+            msg.contains("server-add-user"),
+            "refusal should reference the palette command: {msg}"
+        );
+        assert!(
+            msg.contains("--insecure-allow-remote"),
+            "refusal should still mention the insecure flag as a secondary option: {msg}"
         );
     }
 
     #[test]
     fn non_loopback_with_cli_opt_in_passes() {
-        let addr = resolve_server_bind("0.0.0.0:8080", false, None, true).expect("cli opt-in ok");
+        let addr =
+            resolve_server_bind("0.0.0.0:8080", false, None, true, false).expect("cli opt-in ok");
         assert_eq!(addr.to_string(), "0.0.0.0:8080");
     }
 
     #[test]
     fn non_loopback_with_config_opt_in_passes() {
-        let addr =
-            resolve_server_bind("0.0.0.0:8080", true, None, false).expect("config opt-in ok");
+        let addr = resolve_server_bind("0.0.0.0:8080", true, None, false, false)
+            .expect("config opt-in ok");
         assert_eq!(addr.to_string(), "0.0.0.0:8080");
     }
 
     #[test]
     fn loopback_ipv6_passes_without_opt_in() {
-        let addr = resolve_server_bind("[::1]:8080", false, None, false).expect("ipv6 loopback ok");
+        let addr =
+            resolve_server_bind("[::1]:8080", false, None, false, false).expect("ipv6 loopback ok");
         assert!(addr.ip().is_loopback());
     }
 
     #[test]
     fn unspecified_ipv6_without_opt_in_errors() {
-        let err = resolve_server_bind("[::]:8080", false, None, false)
+        let err = resolve_server_bind("[::]:8080", false, None, false, false)
             .expect_err("ipv6 unspecified without opt-in should error");
         let msg = err.to_string();
         assert!(
@@ -1057,14 +1119,14 @@ mod resolve_server_bind_tests {
             "error should point to the CLI flag: {msg}"
         );
         assert!(
-            msg.contains("authentication"),
-            "error should explain why it refused: {msg}"
+            msg.contains("[auth]"),
+            "error should present auth as the primary fix: {msg}"
         );
     }
 
     #[test]
     fn loopback_range_beyond_one_passes_without_opt_in() {
-        let addr = resolve_server_bind("127.0.0.2:8080", false, None, false)
+        let addr = resolve_server_bind("127.0.0.2:8080", false, None, false, false)
             .expect("127.0.0.2 loopback ok");
         assert_eq!(addr.to_string(), "127.0.0.2:8080");
     }
@@ -1436,6 +1498,42 @@ bind = "0.0.0.0:9000"
         .expect("config with partial [server] should parse");
         assert_eq!(config.server.bind, "0.0.0.0:9000");
         assert!(!config.server.insecure_allow_remote);
+    }
+
+    #[test]
+    fn auth_config_defaults_when_section_absent() {
+        // A config TOML with no [auth] section must still parse and yield an
+        // empty user list (auth off).
+        let config: Config = toml::from_str("").expect("empty config should parse");
+        assert!(config.auth.users.is_empty());
+    }
+
+    #[test]
+    fn auth_config_parses_user_entries() {
+        let config: Config = toml::from_str(
+            r#"
+[auth]
+users = ["alice:$2y$12$abc", "bob:$2y$12$def"]
+"#,
+        )
+        .expect("config with [auth] users should parse");
+        assert_eq!(
+            config.auth.users,
+            vec!["alice:$2y$12$abc".to_string(), "bob:$2y$12$def".to_string()]
+        );
+    }
+
+    #[test]
+    fn auth_config_empty_users_array_parses() {
+        // The canonical first-boot value `users = []` must parse cleanly.
+        let config: Config = toml::from_str(
+            r#"
+[auth]
+users = []
+"#,
+        )
+        .expect("config with empty [auth] users should parse");
+        assert!(config.auth.users.is_empty());
     }
 
     #[test]

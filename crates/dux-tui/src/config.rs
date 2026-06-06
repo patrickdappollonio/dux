@@ -181,6 +181,8 @@ enum ConfigEntry {
     Terminal,
     /// Renders the `[startup_command_terminal]` section.
     StartupCommandTerminal,
+    /// Renders the `[auth]` section with the web UI login users.
+    Auth,
     /// Renders the `[keys]` section with all keybindings.
     Keys,
     /// Renders the `[macros]` section with text macros.
@@ -397,6 +399,7 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.server.insecure_allow_remote),
         },
         ConfigEntry::Blank,
+        ConfigEntry::Auth,
         ConfigEntry::Keys,
         ConfigEntry::Blank,
         ConfigEntry::Macros,
@@ -463,6 +466,7 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
             ConfigEntry::StartupCommandTerminal => {
                 render_startup_command_terminal_config(&mut out, &config.startup_command_terminal);
             }
+            ConfigEntry::Auth => render_auth_config(&mut out, &config.auth),
             ConfigEntry::Keys => render_keys_config(&mut out, &config.keys, bindings),
             ConfigEntry::Macros => render_macros_config(&mut out, &config.macros, bindings),
         }
@@ -730,6 +734,23 @@ fn render_env_config(out: &mut String, env: &BTreeMap<String, String>) {
     out.push('\n');
 }
 
+fn render_auth_config(out: &mut String, auth: &AuthConfig) {
+    out.push_str("[auth]\n");
+    out.push_str(
+        "# Login credentials for the `dux server` web UI. Each entry is an\n\
+         # htpasswd-style \"username:bcrypt-hash\" string, for example:\n\
+         #   users = [\"alice:$2y$12$......\"]\n\
+         # The hash must be bcrypt (the $2a$/$2b$/$2y$ family); plaintext is never\n\
+         # stored. Manage entries with the server-add-user and server-remove-user\n\
+         # commands in the palette (Ctrl-p) rather than editing hashes by hand.\n\
+         # The login gate turns ON automatically as soon as at least one user is\n\
+         # listed here, and OFF when the list is empty. To run with no login (for\n\
+         # example behind an upstream auth proxy), leave this empty and start the\n\
+         # server with `dux server --disable-auth`.\n",
+    );
+    out.push_str(&format!("users = {}\n\n", render_string_list(&auth.users)));
+}
+
 fn render_terminal_config(out: &mut String, terminal: &TerminalConfig) {
     out.push_str("[terminal]\n");
     out.push_str(
@@ -916,6 +937,10 @@ mod tests {
         assert!(rendered.contains("[server]"));
         assert!(rendered.contains("bind = \"127.0.0.1:8080\""));
         assert!(rendered.contains("insecure_allow_remote = false"));
+        assert!(rendered.contains("[auth]"));
+        assert!(rendered.contains("users = []"));
+        assert!(rendered.contains("server-add-user"));
+        assert!(rendered.contains("--disable-auth"));
         assert!(rendered.contains("[keys]"));
         assert!(rendered.contains("show_terminal_keys = true"));
         assert!(rendered.contains("move_down = "));

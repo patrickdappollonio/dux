@@ -22,10 +22,13 @@ use dux_core::engine::Engine;
 
 use crate::engine_actor::LoopControl;
 
-/// The no-auth bind gate now lives in `dux-core` so both server entry points
-/// (the `dux server` CLI and the in-process TUI↔server flip's pre-flight in
-/// dux-tui) share it without dux-tui depending on dux-web. Re-exported here so
-/// `crates/dux/src/main.rs` keeps calling `dux_web::resolve_bind` unchanged.
+/// The non-loopback bind gate now lives in `dux-core` so both server entry
+/// points (the `dux server` CLI and the in-process TUI↔server flip's pre-flight
+/// in dux-tui) share it without dux-tui depending on dux-web. Re-exported here
+/// so `crates/dux/src/main.rs` keeps calling `dux_web::resolve_bind` unchanged.
+/// The gate now also accepts an `auth_enabled` argument: a non-loopback bind is
+/// permitted when the login gate is active, not only when the insecure opt-in is
+/// set.
 pub use dux_core::config::resolve_server_bind as resolve_bind;
 
 /// Boot the engine on its own thread and serve the web UI on `addr` (loopback for now).
