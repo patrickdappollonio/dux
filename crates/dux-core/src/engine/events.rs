@@ -1386,19 +1386,33 @@ impl Engine {
             WorkerEvent::AuthUsersPersisted {
                 users,
                 message,
+                warn,
                 result,
-            } => match result {
-                Ok(()) => {
-                    // Adopt the persisted list so the running config matches
-                    // disk; a flip to the web server rebuilds AuthState from
-                    // this config, and a running server picks it up on reload.
-                    self.config.auth.users = users;
-                    EventReaction::Status(StatusUpdate::info(message))
+            } => {
+                // Clear the single-flight guard on BOTH outcomes so the next
+                // add/remove can start; opening either prompt while this was set
+                // was refused (see App::open_server_add_user/open_server_remove_user).
+                self.clear_in_flight(&InFlightKey::AuthUsers);
+                match result {
+                    Ok(()) => {
+                        // Adopt the persisted list so the running config matches
+                        // disk; a flip to the web server rebuilds AuthState from
+                        // this config, and a running server picks it up on reload.
+                        self.config.auth.users = users;
+                        // A removal that empties the list disables the gate, so
+                        // its message carries a warning tone, not info.
+                        let update = if warn {
+                            StatusUpdate::warning(message)
+                        } else {
+                            StatusUpdate::info(message)
+                        };
+                        EventReaction::Status(update)
+                    }
+                    Err(err) => EventReaction::Status(StatusUpdate::error(format!(
+                        "Could not save web UI login users to config.toml: {err}"
+                    ))),
                 }
-                Err(err) => EventReaction::Status(StatusUpdate::error(format!(
-                    "Could not save web UI login users to config.toml: {err}"
-                ))),
-            },
+            }
             WorkerEvent::StartupCommandRerunCompleted(result) => match result.status {
                 Ok(()) => EventReaction::StartupCommandSucceeded {
                     project_name: result.project_name,

@@ -302,10 +302,12 @@ pub enum WorkerEvent {
     /// carries the updated user list so the engine can refresh its in-memory
     /// config; `message` is the verbose, already-formatted status line to show.
     /// On failure `result` is the formatted error and the config is left
-    /// untouched.
+    /// untouched. `warn` requests a warning-tone status on success (set when a
+    /// removal leaves zero users, which disables the login gate).
     AuthUsersPersisted {
         users: Vec<String>,
         message: String,
+        warn: bool,
         result: Result<(), String>,
     },
     StartupCommandRerunCompleted(crate::startup::StartupCommandResult),

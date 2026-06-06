@@ -109,6 +109,27 @@ impl AuthState {
         }
     }
 
+    /// Rebuild the snapshot on a config reload, warning loudly when the gate
+    /// transitions from ON to OFF while the server is already serving.
+    ///
+    /// `was_enabled` is the gate state BEFORE this rebuild. Removing the last
+    /// user (or otherwise clearing the credentials) flips `enabled` false, but
+    /// the bind gate only protects at STARTUP — a running server stays bound, so
+    /// a previously protected non-loopback server silently becomes open. We log
+    /// a loud warning (dux.log + stderr) on that exact transition so the
+    /// operator is not left unaware.
+    pub fn rebuild(was_enabled: bool, users: &[String], disable_auth: bool) -> Self {
+        let next = AuthState::build(users, disable_auth);
+        if was_enabled && !next.enabled {
+            let warning = "[auth] users removed — the login gate is now OFF. \
+                A running server stays bound, so a non-loopback server is now open \
+                to anyone. Add a user (or stop the server) to re-protect it.";
+            dux_core::logger::warn(warning);
+            eprintln!("WARNING: {warning}");
+        }
+        next
+    }
+
     /// Re-serialize the owned users to the `"name:hash"` shape that
     /// `dux_core::auth::verify_credentials` consumes, so verification (one bcrypt
     /// op per call, with the unknown-user timing mitigation) stays in core.
@@ -524,6 +545,37 @@ mod tests {
         assert!(!dux_core::auth::verify_credentials(
             &entries, "alice", "wrong"
         ));
+    }
+
+    #[test]
+    fn rebuild_disables_when_users_removed() {
+        // enabled → disabled (the last user removed): the gate turns OFF. The
+        // loud warning is emitted as a side effect; here we assert the effective
+        // transition, which is what the live server then serves with.
+        let next = AuthState::rebuild(true, &[], false);
+        assert!(
+            !next.enabled,
+            "removing the last user must turn the gate off"
+        );
+        assert!(next.users.is_empty());
+    }
+
+    #[test]
+    fn rebuild_stays_enabled_when_a_user_remains() {
+        let hash = dux_core::auth::hash_password("pw").unwrap();
+        let next = AuthState::rebuild(true, &[format!("bob:{hash}")], false);
+        assert!(next.enabled, "a remaining valid user keeps the gate on");
+        assert_eq!(next.users.len(), 1);
+    }
+
+    #[test]
+    fn rebuild_enabling_from_disabled_does_not_trip_the_warning_path() {
+        // disabled → enabled (a first user added): no enabled→disabled
+        // transition, so the gate simply comes on.
+        let hash = dux_core::auth::hash_password("pw").unwrap();
+        let next = AuthState::rebuild(false, &[format!("alice:{hash}")], false);
+        assert!(next.enabled);
+        assert_eq!(next.users.len(), 1);
     }
 
     #[test]

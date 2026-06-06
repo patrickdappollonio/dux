@@ -462,7 +462,11 @@ pub(crate) fn run_engine_loop(
                         if let Some((shared, disable_auth)) = auth_reload.as_ref()
                             && let Ok(mut guard) = shared.write()
                         {
-                            *guard = crate::auth::AuthState::build(
+                            // Rebuild from the new config, warning if this reload
+                            // turns the gate OFF while the server is serving
+                            // (e.g. the last user was removed).
+                            *guard = crate::auth::AuthState::rebuild(
+                                guard.enabled,
                                 &engine.config.auth.users,
                                 *disable_auth,
                             );

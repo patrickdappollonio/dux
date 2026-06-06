@@ -13,6 +13,11 @@ pub enum InFlightKey {
     AgentLaunch(String),
     Pull(String),
     ResourceStats,
+    /// A web UI login-user add/remove is persisting. The bcrypt hash + config
+    /// write run off-thread, so this single guard serializes those operations:
+    /// a second add/remove started from the same stale `[auth] users` snapshot
+    /// would silently drop the first writer's change (last-writer-wins).
+    AuthUsers,
 }
 
 /// Convenience alias so call sites can spell the storage shape once.

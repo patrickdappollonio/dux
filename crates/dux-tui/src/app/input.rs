@@ -7379,6 +7379,89 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn server_add_user_refused_while_persist_in_flight() {
+        let mut app = test_app(default_bindings());
+        // Simulate an add/remove already persisting off-thread.
+        app.engine.mark_in_flight(InFlightKey::AuthUsers);
+
+        app.open_server_add_user();
+
+        // The prompt never opens and an actionable error is shown.
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(app.status.text().contains("already in progress"));
+    }
+
+    #[test]
+    fn server_remove_user_refused_while_persist_in_flight() {
+        let mut app = test_app(default_bindings());
+        let h = dux_core::auth::hash_password("pw").expect("hash");
+        app.engine.config.auth.users = vec![format!("alice:{h}")];
+        app.engine.mark_in_flight(InFlightKey::AuthUsers);
+
+        app.open_server_remove_user();
+
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(app.status.text().contains("already in progress"));
+    }
+
+    #[test]
+    fn auth_users_guard_set_during_add_and_cleared_after_worker_event() {
+        let mut app = test_app(default_bindings());
+
+        app.open_server_add_user();
+        type_into_prompt(&mut app, "alice");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        type_into_prompt(&mut app, "hunter2");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        // The guard is set the moment the persist is spawned…
+        assert!(
+            app.engine.is_in_flight(&InFlightKey::AuthUsers),
+            "guard must be set while the hash/persist is in flight"
+        );
+        // A second open is refused while the first is pending.
+        app.open_server_remove_user();
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+
+        // …and cleared once the worker completion event is processed.
+        await_one_worker_event(&mut app);
+        assert!(
+            !app.engine.is_in_flight(&InFlightKey::AuthUsers),
+            "guard must clear after AuthUsersPersisted"
+        );
+        // The next operation can now open.
+        app.open_server_add_user();
+        assert!(matches!(app.prompt, PromptState::ServerAddUserName { .. }));
+    }
+
+    #[test]
+    fn server_remove_last_user_warns_auth_disabled() {
+        let mut app = test_app(default_bindings());
+        let h = dux_core::auth::hash_password("pw").expect("hash");
+        app.engine.config.auth.users = vec![format!("alice:{h}")];
+
+        app.open_server_remove_user();
+        // alice is the only (selected) user; removing her empties the list.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        await_one_worker_event(&mut app);
+
+        assert!(app.engine.config.auth.users.is_empty());
+        // Finding 2(a): the completion status is a WARNING, not info, and spells
+        // out that authentication is now disabled.
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
+        let text = app.status.text();
+        assert!(text.contains("No users remain"));
+        assert!(text.contains("authentication is now DISABLED"));
+        assert!(text.contains("after reload-config"));
+    }
+
+    #[test]
     fn configure_startup_command_edit_mode_keeps_enter_in_input() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfigureStartupCommand {

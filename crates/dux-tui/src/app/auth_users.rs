@@ -19,10 +19,27 @@ use super::*;
 
 use crate::keybindings::RuntimeBindings;
 use dux_core::auth;
+use dux_core::engine::InFlightKey;
+
+/// Status error shown when an add/remove is opened while another persist is
+/// still in flight (the bcrypt hash + config write run off-thread).
+const AUTH_USERS_IN_FLIGHT_MESSAGE: &str =
+    "A login-user change is already in progress — wait for it to finish.";
 
 impl App {
+    /// True while a login-user add/remove is persisting. Opening either prompt
+    /// is refused in this window so two operations can't start from the same
+    /// stale `[auth] users` snapshot and silently drop one writer's change.
+    fn auth_users_persist_in_flight(&self) -> bool {
+        self.engine.is_in_flight(&InFlightKey::AuthUsers)
+    }
+
     /// Open step 1 of `server-add-user`: prompt for the username.
     pub(crate) fn open_server_add_user(&mut self) {
+        if self.auth_users_persist_in_flight() {
+            self.set_error(AUTH_USERS_IN_FLIGHT_MESSAGE);
+            return;
+        }
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.prompt = PromptState::ServerAddUserName {
@@ -98,6 +115,10 @@ impl App {
     /// distinct username appears once even if duplicate entries exist (removal
     /// deletes them all).
     pub(crate) fn open_server_remove_user(&mut self) {
+        if self.auth_users_persist_in_flight() {
+            self.set_error(AUTH_USERS_IN_FLIGHT_MESSAGE);
+            return;
+        }
         let usernames = distinct_usernames(&self.engine.config.auth.users);
         if usernames.is_empty() {
             self.set_error(
@@ -145,16 +166,35 @@ impl App {
 
         self.prompt = PromptState::None;
         self.input_target = InputTarget::None;
-        let message = format!(
-            "Removed web UI login user \"{username}\". A running web server revokes that user's sessions after reload-config; otherwise it applies on the next server start."
-        );
+        // Removing the last valid user turns the login gate OFF (auth_enabled
+        // counts only valid entries). Warn loudly: on a non-loopback bind a
+        // running server stays bound and becomes open once it reloads config.
+        let no_users_left = auth::parse_users(&remaining).is_empty();
+        let (message, warn) = if no_users_left {
+            (
+                format!(
+                    "Removed web UI login user \"{username}\". No users remain — authentication is now DISABLED. A running web server applies this after reload-config."
+                ),
+                true,
+            )
+        } else {
+            (
+                format!(
+                    "Removed web UI login user \"{username}\". A running web server revokes that user's sessions after reload-config; otherwise it applies on the next server start."
+                ),
+                false,
+            )
+        };
         self.set_busy(format!("Removing web UI login user \"{username}\"\u{2026}"));
-        self.spawn_auth_users_persist(remaining, message);
+        self.spawn_auth_users_persist(remaining, message, warn);
     }
 
     /// Append `username:hash` to the configured users (last-wins replaces an
     /// existing password) and persist. Hashing happens on the worker thread.
     fn spawn_auth_user_add(&mut self, username: String, password: String, is_update: bool) {
+        // Set the single-flight guard at the spawn point; the engine's
+        // AuthUsersPersisted arm clears it on completion (success and failure).
+        self.engine.mark_in_flight(InFlightKey::AuthUsers);
         let mut users = self.engine.config.auth.users.clone();
         let config = self.engine.config.clone();
         let config_path = self.engine.paths.config_path.clone();
@@ -166,6 +206,7 @@ impl App {
                     let _ = tx.send(WorkerEvent::AuthUsersPersisted {
                         users,
                         message: String::new(),
+                        warn: false,
                         result: Err(format!("could not hash the password: {err:#}")),
                     });
                     return;
@@ -176,18 +217,22 @@ impl App {
             let message = format!(
                 "Web UI login user \"{username}\" {verb}. A running web server picks this up after reload-config; otherwise it applies on the next server start."
             );
-            persist_auth_users(users, config, config_path, message, tx);
+            // An add never empties the list, so it is always an info-tone result.
+            persist_auth_users(users, config, config_path, message, false, tx);
         });
     }
 
     /// Persist an already-computed users list (no hashing needed) on a worker
     /// thread. Used by removal.
-    fn spawn_auth_users_persist(&mut self, users: Vec<String>, message: String) {
+    fn spawn_auth_users_persist(&mut self, users: Vec<String>, message: String, warn: bool) {
+        // Set the single-flight guard at the spawn point; the engine's
+        // AuthUsersPersisted arm clears it on completion (success and failure).
+        self.engine.mark_in_flight(InFlightKey::AuthUsers);
         let config = self.engine.config.clone();
         let config_path = self.engine.paths.config_path.clone();
         let tx = self.engine.worker_tx.clone();
         std::thread::spawn(move || {
-            persist_auth_users(users, config, config_path, message, tx);
+            persist_auth_users(users, config, config_path, message, warn, tx);
         });
     }
 }
@@ -200,6 +245,7 @@ fn persist_auth_users(
     mut config: Config,
     config_path: std::path::PathBuf,
     message: String,
+    warn: bool,
     tx: std::sync::mpsc::Sender<WorkerEvent>,
 ) {
     config.auth.users = users.clone();
@@ -209,6 +255,7 @@ fn persist_auth_users(
     let _ = tx.send(WorkerEvent::AuthUsersPersisted {
         users,
         message,
+        warn,
         result,
     });
 }

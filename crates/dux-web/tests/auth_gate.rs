@@ -717,6 +717,102 @@ async fn reload_config_removing_user_revokes_live_session() {
     }
 }
 
+/// Removing the LAST user from config + `reload_config` turns the login gate OFF
+/// on a running server (Finding 2(b)): the rebuild transitions enabled→disabled,
+/// so `/api/me` reports `auth:disabled` instead of `401`. (The loud warning is a
+/// side effect of the rebuild; here we assert the observable gate transition the
+/// warning is meant to flag.)
+#[tokio::test]
+async fn reload_config_removing_last_user_disables_gate_live() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let paths = seed_paths(&root);
+
+    // One user on disk; the gate is ON at boot.
+    let alice = user_entry("alice", "secret-pw");
+    std::fs::write(
+        &paths.config_path,
+        format!("[auth]\nusers = [\"{alice}\"]\n"),
+    )
+    .unwrap();
+
+    let mut engine = bootstrap_engine(&paths).unwrap();
+    let users_at_boot = engine.config.auth.users.clone();
+    assert_eq!(users_at_boot, vec![alice.clone()]);
+    engine.config.providers.commands.insert(
+        "claude".to_string(),
+        ProviderCommandConfig {
+            command: "cat".to_string(),
+            args: vec![],
+            resume_args: None,
+            ..Default::default()
+        },
+    );
+
+    let auth = shared_auth(&users_at_boot, false);
+    assert!(
+        auth.read().unwrap().enabled,
+        "gate must be ON before removal"
+    );
+    let (handle, _join) = spawn_engine_thread_with_auth(engine, (auth.clone(), false));
+    let app = router_with_auth(handle, auth);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let c = client();
+    // alice logs in and drives the reload over her own (still-valid) WS.
+    let login = c
+        .post(format!("http://{addr}/api/login"))
+        .json(&serde_json::json!({"username":"alice","password":"secret-pw"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(login.status(), 200);
+    let cookie = session_cookie(&login).expect("cookie");
+
+    // Empty the users list on disk, then trigger the reload.
+    std::fs::write(&paths.config_path, "[auth]\nusers = []\n").unwrap();
+
+    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    req.headers_mut().insert("cookie", cookie.parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.expect("ws");
+    let _ = ws.next().await; // initial view_model
+    use futures_util::SinkExt;
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        r#"{"type":"command","command":"reload_config","args":{}}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    // Poll until /api/me reports auth disabled (200 with the disabled marker),
+    // proving the rebuild flipped the gate OFF live.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let mut gate_off = false;
+    while tokio::time::Instant::now() < deadline {
+        let resp = c.get(format!("http://{addr}/api/me")).send().await.unwrap();
+        if resp.status() == 200 {
+            let body = resp.text().await.unwrap();
+            if body.contains("\"auth\":\"disabled\"") {
+                gate_off = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    assert!(
+        gate_off,
+        "removing the last user via reload must turn the login gate OFF on the running server"
+    );
+}
+
 /// The concrete connected client stream type from the dev-dependency
 /// `tokio-tungstenite` (axum carries a different internal version, so a generic
 /// here would be ambiguous — we pin the exact type instead).
