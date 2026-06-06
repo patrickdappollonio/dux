@@ -56,7 +56,7 @@ pub fn write_config_secure(path: &Path, contents: &str) -> Result<()> {
 }
 
 use crate::config::{
-    Config, MacroSurface, MacrosConfig, OneshotOutput, ProjectConfig, ProvidersConfig,
+    AcmeSettings, Config, MacroSurface, MacrosConfig, OneshotOutput, ProjectConfig, ProvidersConfig,
 };
 
 /// Patch an EXISTING `config.toml` in place, preserving the user's comments,
@@ -215,6 +215,9 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         config.server.insecure_allow_remote,
     );
 
+    // --- [server.acme] ---
+    patch_acme(doc, &config.server.acme);
+
     // --- [auth] ---
     patch_table_string_array(doc, "auth", "users", &config.auth.users);
 
@@ -350,6 +353,36 @@ fn patch_table_string_array(doc: &mut DocumentMut, section: &str, key: &str, val
         arr.push(v.as_str());
     }
     table[key] = toml_edit::value(arr);
+}
+
+/// Patch the `[server.acme]` subtable. Mirrors [`patch_providers`] for nested
+/// table access — every field is written so a recover/plain write never silently
+/// drops a setting (the [server] lesson).
+fn patch_acme(doc: &mut DocumentMut, acme: &AcmeSettings) {
+    let server = doc
+        .entry("server")
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+        .unwrap();
+    let tbl = server
+        .entry("acme")
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+        .unwrap();
+
+    tbl["enabled"] = toml_edit::value(acme.enabled);
+
+    let mut domains = Array::new();
+    for d in &acme.domains {
+        domains.push(d.as_str());
+    }
+    tbl["domains"] = toml_edit::value(domains);
+
+    tbl["email"] = toml_edit::value(acme.email.as_str());
+    tbl["http_port"] = toml_edit::value(i64::from(acme.http_port));
+    tbl["https_port"] = toml_edit::value(i64::from(acme.https_port));
+    tbl["production"] = toml_edit::value(acme.production);
+    tbl["cache_dir"] = toml_edit::value(acme.cache_dir.as_deref().unwrap_or(""));
 }
 
 fn patch_providers(doc: &mut DocumentMut, providers: &ProvidersConfig) {
@@ -616,6 +649,72 @@ unknown_key = \"untouched\"
         let parsed: Config = toml::from_str(&saved).expect("reparse");
         assert_eq!(parsed.server.bind, "0.0.0.0:9000");
         assert!(parsed.server.insecure_allow_remote);
+    }
+
+    #[test]
+    fn write_config_plain_round_trips_acme_settings() {
+        // LESSON from the [server] slice: every managed field needs an
+        // apply_patches entry or a plain/recover write silently drops it. Guard
+        // the whole [server.acme] subtable against that regression.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+
+        let mut config = Config::default();
+        config.server.acme.enabled = true;
+        config.server.acme.domains =
+            vec!["dux.example.com".to_string(), "www.example.com".to_string()];
+        config.server.acme.email = "ops@example.com".to_string();
+        config.server.acme.http_port = 8080;
+        config.server.acme.https_port = 8443;
+        config.server.acme.production = false;
+        config.server.acme.cache_dir = Some("/var/lib/dux/acme".to_string());
+
+        write_config_plain(&config_path, &config).expect("write_config_plain");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        let parsed: Config = toml::from_str(&saved).expect("reparse");
+        assert!(parsed.server.acme.enabled);
+        assert_eq!(
+            parsed.server.acme.domains,
+            vec!["dux.example.com".to_string(), "www.example.com".to_string()]
+        );
+        assert_eq!(parsed.server.acme.email, "ops@example.com");
+        assert_eq!(parsed.server.acme.http_port, 8080);
+        assert_eq!(parsed.server.acme.https_port, 8443);
+        assert!(!parsed.server.acme.production);
+        assert_eq!(
+            parsed.server.acme.cache_dir.as_deref(),
+            Some("/var/lib/dux/acme")
+        );
+    }
+
+    #[test]
+    fn patch_preserves_existing_acme_settings() {
+        // Patching an existing file must keep the [server.acme] subtable intact
+        // (mirrors patch_preserves_existing_auth_users for the nested table).
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[server.acme]\nenabled = true\ndomains = [\"dux.example.com\"]\n",
+        )
+        .expect("write initial");
+
+        let mut config = Config::default();
+        // Mirror what a real load would do: the in-memory config carries the
+        // same acme settings back into the patch.
+        config.server.acme.enabled = true;
+        config.server.acme.domains = vec!["dux.example.com".to_string()];
+
+        patch_config_file(&config_path, &config).expect("patch");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        let parsed: Config = toml::from_str(&saved).expect("reparse");
+        assert!(parsed.server.acme.enabled);
+        assert_eq!(
+            parsed.server.acme.domains,
+            vec!["dux.example.com".to_string()]
+        );
     }
 
     #[test]

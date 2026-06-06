@@ -3083,6 +3083,37 @@ mod tests {
     }
 
     #[test]
+    fn preflight_loopback_unaffected_by_acme_rekey() {
+        // REGRESSION: the T1 ACME slice re-keyed the plain-HTTP non-loopback
+        // bind rule (now also requires --dangerously-listen-http). The TUI flip
+        // still goes through resolve_server_bind with a loopback bind and NO
+        // flags; that path must resolve exactly as before — no new flag is
+        // threaded through the flip, and loopback always passes.
+        let config = server_test_config("127.0.0.1:0", false);
+        let auth_enabled = dux_core::auth::auth_enabled(&config, false);
+        let addr = dux_core::config::resolve_server_bind(
+            &config.server.bind,
+            config.server.insecure_allow_remote,
+            None,
+            false,
+            auth_enabled,
+        )
+        .expect("loopback flip bind must still resolve with no flags");
+        assert!(addr.ip().is_loopback());
+
+        // And the full pre-flight (which binds the socket) still succeeds.
+        let (listener, _url) =
+            preflight_server_listener(&config).expect("loopback pre-flight must still succeed");
+        assert!(
+            listener
+                .local_addr()
+                .expect("local addr")
+                .ip()
+                .is_loopback()
+        );
+    }
+
+    #[test]
     fn preflight_rejects_invalid_bind_string() {
         let config = server_test_config("not-an-address", false);
         let err = preflight_server_listener(&config)

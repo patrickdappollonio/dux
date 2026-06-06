@@ -279,6 +279,52 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         current.server.insecure_allow_remote,
     );
 
+    // [server.acme]
+    diff_bool(
+        &mut changes,
+        "server.acme.enabled",
+        defaults.server.acme.enabled,
+        current.server.acme.enabled,
+    );
+    let default_domains = defaults.server.acme.domains.join(", ");
+    let current_domains = current.server.acme.domains.join(", ");
+    diff_str(
+        &mut changes,
+        "server.acme.domains",
+        &format!("[{default_domains}]"),
+        &format!("[{current_domains}]"),
+    );
+    diff_str(
+        &mut changes,
+        "server.acme.email",
+        &defaults.server.acme.email,
+        &current.server.acme.email,
+    );
+    diff_u16(
+        &mut changes,
+        "server.acme.http_port",
+        defaults.server.acme.http_port,
+        current.server.acme.http_port,
+    );
+    diff_u16(
+        &mut changes,
+        "server.acme.https_port",
+        defaults.server.acme.https_port,
+        current.server.acme.https_port,
+    );
+    diff_bool(
+        &mut changes,
+        "server.acme.production",
+        defaults.server.acme.production,
+        current.server.acme.production,
+    );
+    diff_opt_str(
+        &mut changes,
+        "server.acme.cache_dir",
+        defaults.server.acme.cache_dir.as_deref(),
+        current.server.acme.cache_dir.as_deref(),
+    );
+
     // [auth]
     // Report only the configured user count, never the entries themselves —
     // they embed bcrypt password hashes that must not be echoed to stdout.
