@@ -1897,11 +1897,56 @@ mod resolve_server_plan_tests {
     }
 
     #[test]
+    fn acme_rejects_http_port_zero_via_cli_override() {
+        // A non-zero config http_port overridden to 0 on the CLI must still be
+        // refused — the resolver checks the CLI-resolved port, not just config.
+        let mut acme = acme_on(&["dux.example.com"]);
+        acme.http_port = 80;
+        let cfg = server("", false, acme);
+        let cli = ServerCliOverrides {
+            http_port: Some(0),
+            ..ServerCliOverrides::default()
+        };
+        let err =
+            resolve(&cfg, true, false, cli).expect_err("--http-port 0 must be refused for ACME");
+        assert!(err.to_string().contains("port 0"), "names the cause: {err}");
+    }
+
+    #[test]
+    fn acme_rejects_https_port_zero_via_cli_override() {
+        let mut acme = acme_on(&["dux.example.com"]);
+        acme.https_port = 443;
+        let cfg = server("", false, acme);
+        let cli = ServerCliOverrides {
+            https_port: Some(0),
+            ..ServerCliOverrides::default()
+        };
+        let err =
+            resolve(&cfg, true, false, cli).expect_err("--https-port 0 must be refused for ACME");
+        assert!(err.to_string().contains("port 0"), "names the cause: {err}");
+    }
+
+    #[test]
     fn local_mode_rejects_port_zero() {
         let mut cfg = server_listen(&[], false, AcmeSettings::default());
         cfg.port = 0;
         let err = resolve(&cfg, false, false, ServerCliOverrides::default())
             .expect_err("local-mode port 0 must be refused");
+        assert!(err.to_string().contains("port 0"), "names it: {err}");
+    }
+
+    #[test]
+    fn local_mode_rejects_port_zero_via_cli_override() {
+        // A healthy config port overridden to 0 on the CLI (--port 0) must be
+        // refused: the CLI value wins via `unwrap_or`, so the zero must be caught.
+        let mut cfg = server_listen(&[], false, AcmeSettings::default());
+        cfg.port = 8080;
+        let cli = ServerCliOverrides {
+            port: Some(0),
+            ..ServerCliOverrides::default()
+        };
+        let err = resolve(&cfg, false, false, cli)
+            .expect_err("--port 0 must be refused for the local server");
         assert!(err.to_string().contains("port 0"), "names it: {err}");
     }
 

@@ -186,38 +186,34 @@ async fn boot_tls(users: Vec<String>) -> TlsServer {
 
     // Bind both listeners on loopback:0 first so we know the ports before the
     // :80 router (the redirect needs the real https port). We bind the std
-    // listeners, read the addrs, then hand them to axum-server via from_tcp.
+    // listeners, read the addrs, then hand them to the PRODUCTION serve seams via
+    // `from_tcp`. The seams set the listeners non-blocking themselves.
     let https_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let http_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    // tokio refuses to register a blocking std socket; mark them non-blocking
-    // before handing them to axum-server (`from_tcp`), exactly as serve_with_engine
-    // does for the flip's pre-bound listeners.
-    https_listener.set_nonblocking(true).unwrap();
-    http_listener.set_nonblocking(true).unwrap();
     let https_addr = https_listener.local_addr().unwrap();
     let http_addr = http_listener.local_addr().unwrap();
 
     let https_handle = axum_server::Handle::new();
     let http_handle = axum_server::Handle::new();
 
-    // :443 — the SAME serving construction production uses, with the injected
-    // self-signed acceptor (production injects rustls-acme's AxumAcceptor).
+    // :443 — drive the PRODUCTION serve path (`tls::serve_https_with_acceptor`,
+    // the shared core `tls::serve_https_acme` delegates to after binding) with the
+    // injected self-signed acceptor. Production injects rustls-acme's
+    // `AxumAcceptor`; the only difference is the acceptor object and who binds, so
+    // this exercises the real connect-info + graceful-shutdown chain.
     {
         let h = https_handle.clone();
         let app = https_app;
         tokio::spawn(async move {
-            let _ = axum_server::from_tcp(https_listener)
-                .unwrap()
-                .handle(h)
-                .acceptor(acceptor)
-                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-                .await;
+            let _ = tls::serve_https_with_acceptor(https_listener, app, acceptor, h).await;
         });
     }
 
-    // :80 — the production challenge/redirect router verbatim. We need an
-    // AcmeState to mount the real challenge tower service; build one against a
-    // throwaway cache dir (staging directory, never contacted in tests).
+    // :80 — the production challenge/redirect router verbatim, served through the
+    // PRODUCTION seam (`tls::serve_http_challenge_from_tcp`, the shared core
+    // `tls::serve_http_challenge` delegates to). We need an AcmeState to mount the
+    // real challenge tower service; build one against a throwaway cache dir
+    // (staging directory, never contacted in tests).
     {
         let plan = tls::AcmePlan {
             http_addr,
@@ -237,11 +233,7 @@ async fn boot_tls(users: Vec<String>) -> TlsServer {
         std::mem::forget(_acme_task); // test-lifetime task; process exit cleans up
         let h = http_handle.clone();
         tokio::spawn(async move {
-            let _ = axum_server::from_tcp(http_listener)
-                .unwrap()
-                .handle(h)
-                .serve(http_router.into_make_service_with_connect_info::<SocketAddr>())
-                .await;
+            let _ = tls::serve_http_challenge_from_tcp(http_listener, http_router, h).await;
         });
     }
 
@@ -458,6 +450,55 @@ async fn acme_challenge_unknown_token_is_404_via_real_tower_service() {
         resp.status(),
         404,
         "an unknown ACME challenge token must 404 via the real tower service, not redirect"
+    );
+}
+
+#[tokio::test]
+async fn acme_challenge_is_allowlist_exempt_for_foreign_host() {
+    // F1 regression: a CA validation probe (or any prober) may dial the challenge
+    // path with a Host that is NOT one of our configured domains. The challenge
+    // route MUST stay exempt from the Host allowlist — it has to reach the real
+    // tower service (which 404s an unknown token) and must NOT be turned into a
+    // 421 Misdirected Request, which would silently break issuance/renewal.
+    let server = boot_tls(vec![]).await;
+    // A client that does NOT pin Host to dux.test: connect straight to the :80
+    // listener by IP and override the Host to a foreign domain.
+    let c = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let challenge = c
+        .get(format!(
+            "http://127.0.0.1:{}/.well-known/acme-challenge/some-token",
+            server.http_addr.port()
+        ))
+        .header("host", "evil.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        challenge.status(),
+        404,
+        "a challenge probe with a foreign Host must hit the real tower service (404 for an \
+         unknown token), NOT be rejected with 421 by the allowlist"
+    );
+
+    // The redirect fallback, by contrast, IS allowlisted: a foreign Host on any
+    // non-challenge path must get 421, not a 308 that legitimizes the attacker's
+    // hostname.
+    let redirect = c
+        .get(format!(
+            "http://127.0.0.1:{}/some/other/path",
+            server.http_addr.port()
+        ))
+        .header("host", "evil.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        redirect.status(),
+        421,
+        "a foreign Host on the redirect fallback must get 421, not a redirect"
     );
 }
 

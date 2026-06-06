@@ -282,6 +282,24 @@ fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool) -> Result<()> {
             });
         }
 
+        // Boot log for the pre-first-cert window. rustls-acme has not issued a
+        // certificate yet at this point, so TLS handshakes on :443 will FAIL until
+        // the first cert arrives from Let's Encrypt (driven by the poller task and
+        // the :80 HTTP-01 challenge). Say so loudly per the explicit-failure tenet
+        // so an operator watching the log knows the early handshake failures are
+        // expected, not a misconfiguration.
+        let directory = if plan.production {
+            "production"
+        } else {
+            "staging"
+        };
+        dux_core::logger::info(&format!(
+            "[server] TLS listener up on {} — waiting for the first certificate from {directory} \
+             Let's Encrypt (HTTP-01 challenge served on {}). HTTPS handshakes will FAIL until that \
+             certificate is issued; watch this log for the [acme] certificate lifecycle events.",
+            plan.https_addr, plan.http_addr
+        ));
+
         // Signal/abort watcher: a SIGINT/SIGTERM OR a first listener error
         // triggers graceful shutdown on both axum-server handles.
         {
@@ -299,11 +317,27 @@ fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool) -> Result<()> {
             });
         }
 
-        // Wait for both serve tasks to finish.
+        // Wait for both serve tasks to finish. A serve task that returned `Err`
+        // already recorded itself via `record_serve_failure_named` inside the
+        // task; but a task that PANICKED yields a `JoinError` here and recorded
+        // nothing, so the failure slot would stay empty and the sibling listener
+        // would serve on. Record the JoinError too and arm the failure flag so the
+        // signal watcher winds the other listener down — consistent with
+        // `run_plain_http`, which surfaces join errors rather than swallowing them.
         while let Some(joined) = tasks.join_next().await {
-            // Join errors (panics) and Err results both surface below via the
-            // captured first error; an Ok serve is a clean graceful shutdown.
-            let _ = joined;
+            if let Err(join_err) = joined {
+                dux_core::logger::error(&format!(
+                    "[server] an ACME serve task panicked: {join_err} — shutting the other \
+                     listener down so the server does not limp on half-dead."
+                ));
+                record_serve_failure_named(
+                    &serve_failed,
+                    &serve_error,
+                    anyhow::anyhow!("an ACME serve task panicked: {join_err}"),
+                );
+                http_handle.graceful_shutdown(Some(ACME_GRACEFUL_SHUTDOWN));
+                https_handle.graceful_shutdown(Some(ACME_GRACEFUL_SHUTDOWN));
+            }
         }
 
         // Wind down the ACME poller and the sweep.

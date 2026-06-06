@@ -15,6 +15,12 @@ libc.workspace = true
 tower-sessions.workspace = true
 rustls-acme.workspace = true
 axum-server.workspace = true
+# `hyper`'s `body::Incoming` names the request body type that axum-server's
+# `MakeService`/`SendService` bounds are written over, referenced in the generic
+# bounds of the shared HTTPS serve seam (`serve_https_with_acceptor`) so the
+# acceptor can be generic over the `axum_server::accept::Accept` contract that both
+# the production `AxumAcceptor` and the e2e's `RustlsAcceptor` satisfy.
+hyper = "1"
 # The tower-sessions `SessionStore`/`ExpiredDeletion` traits are `#[async_trait]`,
 # so the sweepable in-memory store that implements them needs the same macro.
 async-trait = "0.1"

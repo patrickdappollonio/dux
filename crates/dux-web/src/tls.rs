@@ -28,12 +28,15 @@
 //! ## Injectability for tests
 //!
 //! Real ACME cannot run in tests (it needs a public IP, DNS, and a CA). The
-//! acceptor is the injectable seam: production serves the `:443` app via
-//! [`serve_https_acme`] with rustls-acme's `AxumAcceptor`; the e2e drives the
-//! IDENTICAL axum-server serving construction
-//! (`bind/from_tcp(addr).handle(h).acceptor(acc).serve(make_svc)`) with a plain
-//! self-signed `RustlsAcceptor`, exercising connect-info, graceful shutdown, and
-//! WS upgrade over TLS. See `tests/tls_serving.rs`.
+//! acceptor is the injectable seam, and the serve path is genuinely SHARED:
+//! production binds by address ([`serve_https_acme`] / [`serve_http_challenge`])
+//! and delegates to the `from_tcp` cores ([`serve_https_with_acceptor`] /
+//! [`serve_http_challenge_from_tcp`]); the e2e pre-binds an ephemeral
+//! `127.0.0.1:0` listener and calls those SAME cores directly with a self-signed
+//! `RustlsAcceptor` (production injects rustls-acme's `AxumAcceptor`). The only
+//! prod-vs-test difference left is the acceptor object and who binds, so the e2e
+//! exercises the real connect-info, graceful-shutdown, and WS-over-TLS chain
+//! rather than an inline copy of it. See `tests/tls_serving.rs`.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -316,10 +319,19 @@ async fn redirect_to_https(
 
 /// Build the `:80` router: the real HTTP-01 challenge tower service mounted at
 /// `/.well-known/acme-challenge/{token}` (EXEMPT from the Host allowlist — it is
-/// token-keyed, returns 404 for unknown tokens, and the CA dials it by IP) and a
-/// fallback that redirects everything else to HTTPS. The allowlist middleware is
-/// layered onto the FALLBACK only (the challenge route is a `route_service`, so
-/// the fallback layer never touches it).
+/// token-keyed, returns 404 for unknown tokens, and the CA dials it by IP, often
+/// with a Host that is not one of our domains) and a fallback that redirects
+/// everything else to HTTPS.
+///
+/// Construction (the part that makes the exemption REAL, not just commented):
+/// `Router::layer` in axum 0.8 wraps EVERY route in the router INCLUDING any
+/// `route_service` and the fallback — so layering the allowlist onto the whole
+/// `:80` router would 421 a foreign-Host challenge probe and silently break
+/// issuance/renewal. Instead the allowlist is scoped to a dedicated redirect
+/// sub-router (its `.layer()` wraps only that sub-router's fallback), which is
+/// then mounted via `fallback_service`. The challenge `route_service` lives on
+/// the OUTER router, which carries no layer at all, so a challenge request with
+/// any Host reaches the real tower service untouched.
 pub fn build_http_challenge_router(
     state: &DuxAcmeState,
     https_port: u16,
@@ -327,18 +339,23 @@ pub fn build_http_challenge_router(
 ) -> Router {
     let challenge = state.http01_challenge_tower_service();
     let allowlist = Arc::new(DomainAllowlist::new(domains));
-    Router::new()
-        .route_service("/.well-known/acme-challenge/{token}", challenge)
+    // The redirect sub-router: the allowlist guards its fallback so a rebinding
+    // attacker cannot coax a redirect that legitimizes their hostname. The
+    // `.layer()` here wraps only THIS sub-router (its lone fallback), never the
+    // challenge route on the outer router below.
+    let redirect = Router::new()
         .fallback(redirect_to_https)
-        // The allowlist guards the redirect fallback (a rebinding attacker must
-        // not get a redirect that legitimizes their hostname). `route_service`
-        // routes are matched before the fallback and are NOT wrapped by a
-        // fallback-scoped layer, so the challenge stays exempt.
         .layer(axum::middleware::from_fn_with_state(
             allowlist,
             host_allowlist_middleware,
         ))
-        .with_state(RedirectState { https_port })
+        .with_state(RedirectState { https_port });
+    // The outer router carries NO layer: the challenge route_service is genuinely
+    // exempt from the allowlist, and everything else falls through to the
+    // allowlisted redirect sub-router.
+    Router::new()
+        .route_service("/.well-known/acme-challenge/{token}", challenge)
+        .fallback_service(redirect)
 }
 
 // ── Host allowlist (deferral 2) ────────────────────────────────────────────
@@ -555,17 +572,62 @@ pub fn spawn_session_sweep(
 /// return means a clean wind-down and an `Err` means the accept loop genuinely
 /// died.
 ///
-/// The acceptor is the seam that makes this testable: `serve_app_over_axum`
-/// below is the SHARED, acceptor-generic serve path the e2e drives with a plain
-/// self-signed `RustlsAcceptor`. Production passes rustls-acme's `AxumAcceptor`;
-/// neither path has test-only serving code.
+/// Production binds by address; this is a thin wrapper that binds then delegates
+/// to [`serve_https_with_acceptor`], the SHARED core the e2e drives with a
+/// pre-bound ephemeral listener and a self-signed `RustlsAcceptor`. The ONLY
+/// difference between prod and test is the acceptor object and who binds — the
+/// `into_make_service_with_connect_info` serve path is shared, so no e2e can pass
+/// while production silently drops connect-info.
 pub async fn serve_https_acme(
     addr: SocketAddr,
     app: Router,
     acceptor: rustls_acme::axum::AxumAcceptor,
     handle: axum_server::Handle<SocketAddr>,
 ) -> std::io::Result<()> {
-    axum_server::bind(addr)
+    let listener = std::net::TcpListener::bind(addr)?;
+    serve_https_with_acceptor(listener, app, acceptor, handle).await
+}
+
+/// Shared HTTPS serve core: serve `app` over axum-server on a PRE-BOUND std
+/// listener with the given acceptor, connect-info, and graceful-shutdown handle.
+/// Production reaches this via [`serve_https_acme`] (bind-by-addr → here with
+/// rustls-acme's `AxumAcceptor`); the e2e reaches it directly with a self-signed
+/// `RustlsAcceptor` on a `127.0.0.1:0` listener. The acceptor is generic over the
+/// axum-server `Accept` contract so both injections share this exact serve path.
+///
+/// The std listener must be non-blocking before tokio registers it; this sets it
+/// so callers (prod and test alike) need not remember to.
+pub async fn serve_https_with_acceptor<A, S>(
+    listener: std::net::TcpListener,
+    app: Router,
+    acceptor: A,
+    handle: axum_server::Handle<SocketAddr>,
+) -> std::io::Result<()>
+where
+    // The make-service produces a per-connection service `S` (the router with
+    // connect-info injected); the acceptor must accept a `TcpStream` and pass that
+    // `S` through. Both the production `AxumAcceptor` and the e2e's
+    // `RustlsAcceptor` are service-preserving (`Service = S`), so this is exactly
+    // axum-server's own `serve` contract specialized to our connect-info app.
+    A: axum_server::accept::Accept<tokio::net::TcpStream, S, Service = S>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    A::Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
+    A::Future: Send,
+    axum::extract::connect_info::IntoMakeServiceWithConnectInfo<Router, SocketAddr>:
+        axum_server::service::MakeService<
+                SocketAddr,
+                axum::http::Request<hyper::body::Incoming>,
+                Service = S,
+            >,
+    S: axum_server::service::SendService<axum::http::Request<hyper::body::Incoming>>
+        + Send
+        + 'static,
+{
+    listener.set_nonblocking(true)?;
+    axum_server::from_tcp(listener)?
         .handle(handle)
         .acceptor(acceptor)
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
@@ -575,12 +637,32 @@ pub async fn serve_https_acme(
 /// Serve the plain `:80` challenge + redirect router with a graceful-shutdown
 /// handle and connect-info (kept for parity even though the redirect path does
 /// not read the peer). Returns the accept loop's `io::Result`.
+///
+/// Production binds by address; this wrapper binds then delegates to
+/// [`serve_http_challenge_from_tcp`], the SHARED core the e2e drives with a
+/// pre-bound ephemeral listener — so the e2e exercises the production serve path
+/// (connect-info included), not an inline copy of it.
 pub async fn serve_http_challenge(
     addr: SocketAddr,
     app: Router,
     handle: axum_server::Handle<SocketAddr>,
 ) -> std::io::Result<()> {
-    axum_server::bind(addr)
+    let listener = std::net::TcpListener::bind(addr)?;
+    serve_http_challenge_from_tcp(listener, app, handle).await
+}
+
+/// Shared `:80` serve core: serve the challenge + redirect router over
+/// axum-server on a PRE-BOUND std listener with connect-info and a
+/// graceful-shutdown handle. Production reaches it via [`serve_http_challenge`]
+/// (bind-by-addr → here); the e2e reaches it directly with a `127.0.0.1:0`
+/// listener. Sets the listener non-blocking so callers need not.
+pub async fn serve_http_challenge_from_tcp(
+    listener: std::net::TcpListener,
+    app: Router,
+    handle: axum_server::Handle<SocketAddr>,
+) -> std::io::Result<()> {
+    listener.set_nonblocking(true)?;
+    axum_server::from_tcp(listener)?
         .handle(handle)
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await

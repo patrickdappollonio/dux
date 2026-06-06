@@ -954,6 +954,7 @@ dependencies = [
  "chrono",
  "dux-core",
  "futures-util",
+ "hyper",
  "libc",
  "rcgen",
  "reqwest",
