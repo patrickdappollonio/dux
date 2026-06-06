@@ -1165,6 +1165,30 @@ pub fn resolve_server_plan(
 
         let http_port = cli.http_port.unwrap_or(server.acme.http_port);
         let https_port = cli.https_port.unwrap_or(server.acme.https_port);
+        // Port 0 means "let the OS pick an ephemeral port", which is meaningless
+        // for ACME: HTTP-01 needs the challenge reachable on the public :80 the
+        // CA dials, and the published HTTPS URL needs a fixed port. Refuse it.
+        if http_port == 0 || https_port == 0 {
+            bail!(
+                "refusing to start the ACME (Let's Encrypt) server: port 0 means \
+                 \"pick any free port\", but ACME needs fixed, publicly reachable ports \
+                 (HTTP-01 validation dials :80 and the certificate URL uses the HTTPS port). \
+                 Set [server.acme] http_port and https_port in config.toml (the defaults are \
+                 80 and 443), or pass --http-port / --https-port with non-zero values."
+            );
+        }
+        // The two listeners cannot share a port — one terminates TLS, the other
+        // answers the plaintext challenge + redirect, and they bind the SAME
+        // wildcard address, so an identical port is a guaranteed bind clash.
+        if http_port == https_port {
+            bail!(
+                "refusing to start the ACME (Let's Encrypt) server: the HTTP and HTTPS ports \
+                 are both {http_port}, but they must differ — dux binds one plaintext listener \
+                 (for the HTTP-01 challenge and the HTTPS redirect) and one TLS listener, and \
+                 they cannot share a port. Set distinct [server.acme] http_port and https_port \
+                 in config.toml (the defaults are 80 and 443), or pass --http-port / --https-port."
+            );
+        }
         let http_addr = std::net::SocketAddr::from(([0, 0, 0, 0], http_port));
         let https_addr = std::net::SocketAddr::from(([0, 0, 0, 0], https_port));
 
@@ -1196,6 +1220,16 @@ pub fn resolve_server_plan(
     // EMPTY listen_addrs → LOCAL MODE fallback: loopback:port (+ Tailscale).
     if listen_addrs.is_empty() {
         let port = cli.port.unwrap_or(server.port);
+        // Port 0 is "pick any free port", which would leave the operator with no
+        // stable URL to open. Refuse it with a named fix.
+        if port == 0 {
+            bail!(
+                "refusing to start the local server on port 0: port 0 means \
+                 \"pick any free port\", so there would be no stable address to open. \
+                 Set [server] port in config.toml (the default is 8080) or pass --port \
+                 with a non-zero value."
+            );
+        }
         let ts = if server.tailscale_enabled && !cli.no_tailscale {
             tailscale_ip
         } else {
@@ -1216,6 +1250,16 @@ pub fn resolve_server_plan(
                  e.g. 127.0.0.1:8080 or 0.0.0.0:8080 (hostnames are not resolved)"
             )
         })?;
+        // Port 0 is "pick any free port" — useless for a server the operator
+        // must reach at a known address. Refuse it with the offending entry.
+        if addr.port() == 0 {
+            bail!(
+                "refusing to bind the listen address \"{raw}\": port 0 means \
+                 \"pick any free port\", so there would be no stable address to reach dux at. \
+                 Use a fixed port, e.g. {ip}:8080.",
+                ip = addr.ip()
+            );
+        }
         if !addrs.contains(&addr) {
             addrs.push(addr);
         }
@@ -1800,6 +1844,76 @@ mod resolve_server_plan_tests {
             }
             other => panic!("expected Acme plan, got {other:?}"),
         }
+    }
+
+    // ── Obligation 2: port 0 / http==https collision refusals ─────────────
+
+    #[test]
+    fn acme_rejects_http_port_zero() {
+        let mut acme = acme_on(&["dux.example.com"]);
+        acme.http_port = 0;
+        let cfg = server("", false, acme);
+        let err = resolve(&cfg, true, false, ServerCliOverrides::default())
+            .expect_err("port 0 must be refused for ACME");
+        assert!(err.to_string().contains("port 0"), "names the cause: {err}");
+    }
+
+    #[test]
+    fn acme_rejects_https_port_zero() {
+        let mut acme = acme_on(&["dux.example.com"]);
+        acme.https_port = 0;
+        let cfg = server("", false, acme);
+        let err = resolve(&cfg, true, false, ServerCliOverrides::default())
+            .expect_err("https port 0 must be refused for ACME");
+        assert!(err.to_string().contains("port 0"), "names the cause: {err}");
+    }
+
+    #[test]
+    fn acme_rejects_equal_http_and_https_ports() {
+        let mut acme = acme_on(&["dux.example.com"]);
+        acme.http_port = 8443;
+        acme.https_port = 8443;
+        let cfg = server("", false, acme);
+        let err = resolve(&cfg, true, false, ServerCliOverrides::default())
+            .expect_err("identical http/https ports must be refused");
+        assert!(
+            err.to_string().contains("must differ"),
+            "names the collision: {err}"
+        );
+    }
+
+    #[test]
+    fn acme_port_collision_via_cli_overrides_is_refused() {
+        // The collision check sees the CLI-resolved ports, not just config.
+        let cfg = server("", false, acme_on(&["dux.example.com"]));
+        let cli = ServerCliOverrides {
+            http_port: Some(9000),
+            https_port: Some(9000),
+            ..ServerCliOverrides::default()
+        };
+        let err = resolve(&cfg, true, false, cli)
+            .expect_err("CLI-induced port collision must be refused");
+        assert!(err.to_string().contains("must differ"), "names it: {err}");
+    }
+
+    #[test]
+    fn local_mode_rejects_port_zero() {
+        let mut cfg = server_listen(&[], false, AcmeSettings::default());
+        cfg.port = 0;
+        let err = resolve(&cfg, false, false, ServerCliOverrides::default())
+            .expect_err("local-mode port 0 must be refused");
+        assert!(err.to_string().contains("port 0"), "names it: {err}");
+    }
+
+    #[test]
+    fn listen_addrs_rejects_port_zero_entry() {
+        let cfg = server_listen(&["127.0.0.1:0"], false, AcmeSettings::default());
+        let err = resolve(&cfg, false, false, ServerCliOverrides::default())
+            .expect_err("a :0 listen entry must be refused");
+        assert!(
+            err.to_string().contains("port 0") && err.to_string().contains("127.0.0.1:0"),
+            "names the offending entry and the cause: {err}"
+        );
     }
 }
 
