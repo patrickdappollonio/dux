@@ -136,12 +136,17 @@ impl AuthState {
     /// Any other transition (enabling from disabled, swapping which users exist
     /// while at least one remains, a no-op reload) simply takes the rebuilt
     /// snapshot.
+    ///
+    /// Returns the (possibly-kept) snapshot plus a `refused` flag: `true` only
+    /// when a non-loopback downgrade was REFUSED (the `[auth]` change was NOT
+    /// applied). The caller uses it to report a warn-tone reload status instead
+    /// of a plain success — otherwise the refusal's "why" lives only in the log.
     pub(crate) fn rebuild(
         prev: &AuthState,
         users: &[String],
         disable_auth: bool,
         loopback: bool,
-    ) -> Self {
+    ) -> (Self, bool) {
         let next = AuthState::build(users, disable_auth);
         let downgrades_to_open = prev.enabled && !next.enabled && next.users.is_empty();
         if downgrades_to_open && !loopback {
@@ -155,7 +160,7 @@ impl AuthState {
                 --insecure-allow-remote).";
             dux_core::logger::error(error);
             eprintln!("ERROR: {error}");
-            return prev.clone();
+            return (prev.clone(), true);
         }
         if downgrades_to_open {
             // Loopback: the documented downgrade is allowed; warn so the operator
@@ -166,7 +171,7 @@ impl AuthState {
             dux_core::logger::warn(warning);
             eprintln!("WARNING: {warning}");
         }
-        next
+        (next, false)
     }
 
     /// Re-serialize the owned users to the `"name:hash"` shape that
@@ -636,12 +641,16 @@ mod tests {
         // LOOPBACK bind: enabled → disabled (the last user removed) is ALLOWED,
         // with a warning side effect. Here we assert the effective transition.
         let prev = enabled_with_user("alice");
-        let next = AuthState::rebuild(&prev, &[], false, true);
+        let (next, refused) = AuthState::rebuild(&prev, &[], false, true);
         assert!(
             !next.enabled,
             "on a loopback bind, removing the last user must turn the gate off"
         );
         assert!(next.users.is_empty());
+        assert!(
+            !refused,
+            "a loopback downgrade is allowed, not refused — refused must be false"
+        );
     }
 
     #[test]
@@ -650,13 +659,17 @@ mod tests {
         // The prior snapshot is kept (users + enabled stay) so the live server
         // never silently opens; a restart is the explicit way to run open.
         let prev = enabled_with_user("alice");
-        let next = AuthState::rebuild(&prev, &[], false, false);
+        let (next, refused) = AuthState::rebuild(&prev, &[], false, false);
         assert!(
             next.enabled,
             "on a non-loopback bind, the gate must NOT downgrade to open"
         );
         assert_eq!(next.users.len(), 1, "the previous user must be kept");
         assert_eq!(next.users[0].username, "alice");
+        assert!(
+            refused,
+            "a refused non-loopback downgrade must signal refused = true"
+        );
     }
 
     #[test]
@@ -664,7 +677,7 @@ mod tests {
         // Entries present but none valid counts as "users dropped to zero": on a
         // non-loopback bind the downgrade is still REFUSED.
         let prev = enabled_with_user("alice");
-        let next = AuthState::rebuild(
+        let (next, refused) = AuthState::rebuild(
             &prev,
             &["garbage".to_string(), ":nohash".to_string()],
             false,
@@ -675,6 +688,10 @@ mod tests {
             "all-malformed entries must not open a non-loopback server"
         );
         assert_eq!(next.users.len(), 1, "the previous valid user must be kept");
+        assert!(
+            refused,
+            "an all-malformed non-loopback downgrade must also signal refused = true"
+        );
     }
 
     #[test]
@@ -683,19 +700,24 @@ mod tests {
         // a downgrade-to-open, so even a non-loopback bind takes the new snapshot.
         let prev = enabled_with_user("alice");
         let hash = dux_core::auth::hash_password("pw").unwrap();
-        let next = AuthState::rebuild(&prev, &[format!("bob:{hash}")], false, false);
+        let (next, refused) = AuthState::rebuild(&prev, &[format!("bob:{hash}")], false, false);
         assert!(next.enabled, "a remaining valid user keeps the gate on");
         assert_eq!(next.users.len(), 1);
         assert_eq!(next.users[0].username, "bob");
+        assert!(
+            !refused,
+            "swapping users (one still valid) is not a downgrade, so not refused"
+        );
     }
 
     #[test]
     fn rebuild_stays_enabled_when_a_user_remains() {
         let prev = enabled_with_user("alice");
         let hash = dux_core::auth::hash_password("pw").unwrap();
-        let next = AuthState::rebuild(&prev, &[format!("bob:{hash}")], false, true);
+        let (next, refused) = AuthState::rebuild(&prev, &[format!("bob:{hash}")], false, true);
         assert!(next.enabled, "a remaining valid user keeps the gate on");
         assert_eq!(next.users.len(), 1);
+        assert!(!refused, "a user remains, so nothing was refused");
     }
 
     #[test]
@@ -705,9 +727,10 @@ mod tests {
         let prev = AuthState::build(&[], false);
         assert!(!prev.enabled);
         let hash = dux_core::auth::hash_password("pw").unwrap();
-        let next = AuthState::rebuild(&prev, &[format!("alice:{hash}")], false, false);
+        let (next, refused) = AuthState::rebuild(&prev, &[format!("alice:{hash}")], false, false);
         assert!(next.enabled);
         assert_eq!(next.users.len(), 1);
+        assert!(!refused, "enabling from disabled is never a refusal");
     }
 
     #[test]

@@ -363,7 +363,22 @@ async fn handle_socket(
             // Re-verify the session's user still exists. On failure, close the
             // socket — this stops streaming AND command intake. Disabled for
             // auth-off sockets (`recheck_user` is None).
+            //
+            // Revocation means: the gate is still ON, but THIS user is gone.
+            // A whole-gate downgrade (the gate flipped OFF entirely — e.g. a
+            // loopback operator removed the last user and reloaded) is a
+            // LOOSENING, not a revocation: the operator deliberately turned auth
+            // off, so the gate no longer protects anyone and there is nothing to
+            // revoke. Closing the operator's own live socket there would be
+            // wrong (transient, but a needless disconnect). So short-circuit
+            // when the gate is no longer enabled — stop rechecking, keep
+            // streaming — BEFORE testing whether the user still exists.
             _ = recheck.tick(), if recheck_user.is_some() => {
+                if !auth::is_enabled(&auth) {
+                    // Gate downgraded to OFF: this is a loosening, not a
+                    // revocation. Keep this socket streaming.
+                    continue;
+                }
                 let still_valid = recheck_user
                     .as_deref()
                     .map(|u| auth::username_exists(&auth, u))

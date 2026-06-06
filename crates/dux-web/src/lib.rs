@@ -164,10 +164,13 @@ pub fn serve_with_engine(
     // The flip's loopback-ness comes from the pre-bound listener. A non-loopback
     // flip bind would only be reachable if the gate is on (the bind pre-flight
     // enforces that), so refusing a reload-driven downgrade matches the CLI path.
+    // If `local_addr` errors we fail SAFE: treat the bind as non-loopback so a
+    // reload that would remove the last user is REFUSED rather than silently
+    // opening a possibly-reachable server (fail-closed, not fail-open).
     let loopback = listener
         .local_addr()
         .map(|a| a.ip().is_loopback())
-        .unwrap_or(true);
+        .unwrap_or(false);
     let (handle, ends) = engine_actor::build_actor_channels_with_auth(
         &engine,
         Some(engine_actor::AuthReloadContext {

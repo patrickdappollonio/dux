@@ -1021,6 +1021,100 @@ async fn auth_off_socket_unaffected_by_recheck() {
     );
 }
 
+/// Finding 1: on a LOOPBACK server, removing the LAST user (whole-gate downgrade
+/// to disabled) must NOT close the operator's own live socket. A whole-gate
+/// downgrade is a loosening, not a per-user revocation — the recheck must
+/// short-circuit on "gate off" and keep streaming. alice opens a socket and
+/// drives the reload that empties the users list; her socket must keep streaming
+/// (a subsequent frame arrives) while `/api/me` reports auth disabled.
+#[tokio::test]
+async fn live_ws_keeps_streaming_when_gate_downgrades_to_disabled() {
+    let recheck = Duration::from_millis(200);
+    let alice = user_entry("alice", "secret-pw");
+    // Single user: removing them is a WHOLE-GATE downgrade (enabled → disabled),
+    // not a per-user revocation.
+    let (addr, config_path, _tmp) = boot_for_recheck(vec![alice.clone()], recheck).await;
+    let c = client();
+
+    let login = c
+        .post(format!("http://{addr}/api/login"))
+        .json(&serde_json::json!({"username":"alice","password":"secret-pw"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(login.status(), 200);
+    let cookie = session_cookie(&login).expect("cookie");
+
+    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    req.headers_mut().insert("cookie", cookie.parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req)
+        .await
+        .expect("alice's authenticated WS must connect");
+    assert!(
+        wait_for_view_model(&mut ws).await,
+        "alice's socket must stream a frame before the downgrade"
+    );
+
+    // Empty the users list, then trigger the reload over alice's OWN socket
+    // (the operator turning their own auth off). On a loopback bind the gate
+    // downgrades to disabled with a warning.
+    std::fs::write(&config_path, "[auth]\nusers = []\n").unwrap();
+    use futures_util::SinkExt;
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        r#"{"type":"command","command":"reload_config","args":{}}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    // Poll until /api/me reports auth disabled, proving the gate actually
+    // downgraded (so the recheck is now in the "gate off" regime).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let mut gate_off = false;
+    while tokio::time::Instant::now() < deadline {
+        let resp = c.get(format!("http://{addr}/api/me")).send().await.unwrap();
+        if resp.status() == 200 {
+            let body = resp.text().await.unwrap();
+            if body.contains("\"auth\":\"disabled\"") {
+                gate_off = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        gate_off,
+        "removing the last user must flip the loopback gate to disabled"
+    );
+
+    // The operator's socket must KEEP streaming across several recheck windows:
+    // it must NOT self-close on the whole-gate downgrade. Prove liveness by
+    // waiting for a subsequent frame (the recheck short-circuits on gate-off and
+    // continues, so the ViewModel/status stream stays alive).
+    let still_streaming = wait_for_any_frame(&mut ws, Duration::from_secs(3)).await;
+    assert!(
+        still_streaming,
+        "the operator's own socket must keep streaming after they turn auth off \
+         (a whole-gate downgrade is a loosening, not a revocation)"
+    );
+}
+
+/// Wait (bounded) for ANY non-close frame on the socket, returning whether one
+/// arrived. A `Close` frame, a stream end, or a transport error all count as
+/// "not streaming" (the socket died), so they return `false`.
+async fn wait_for_any_frame(ws: &mut ClientWs, within: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(200), ws.next()).await {
+            Ok(None) => return false, // stream ended → not streaming
+            Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))) => return false,
+            Ok(Some(Ok(_))) => return true,   // a live frame arrived
+            Ok(Some(Err(_))) => return false, // transport error → closed
+            Err(_) => {}                      // timeout this round; loop until deadline
+        }
+    }
+    false
+}
+
 /// Drain a socket until it closes (returns true) or the deadline elapses
 /// (returns false). A `Close` frame or a stream end both count as closed.
 async fn wait_for_socket_close(ws: &mut ClientWs, within: Duration) -> bool {

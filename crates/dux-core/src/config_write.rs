@@ -12,7 +12,8 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -24,12 +25,30 @@ use toml_edit::{Array, DocumentMut, Formatted, InlineTable, Item, Table, Value};
 /// and Linux (CLAUDE.md), so no `cfg(windows)` branch is needed.
 const CONFIG_FILE_MODE: u32 = 0o600;
 
-/// Write `contents` to `path`, then restrict the file to owner-only `0600`. Used
+/// Write `contents` to `path`, restricting the file to owner-only `0600`. Used
 /// for every `config.toml` write so the secrets it carries (bcrypt hashes,
-/// `[env]` tokens) are never left group/world readable. The chmod happens AFTER
-/// the write so it applies regardless of the process umask.
+/// `[env]` tokens) are never left group/world readable.
+///
+/// We create the file with the `0600` mode applied AT creation (via
+/// `OpenOptions::mode`) so a fresh file is never briefly world-readable: a plain
+/// `fs::write` would create the file at umask perms (typically `0644`) with the
+/// secrets already in it, then chmod afterward — a window where the hashes are
+/// readable. The mode arg only takes effect when the file is newly created, so
+/// for an EXISTING file (e.g. an older `0644` config) we still run an explicit
+/// `set_permissions(0600)` after writing to tighten it. Both behaviors live in
+/// this one helper so every write path is covered.
 pub fn write_config_secure(path: &Path, contents: &str) -> Result<()> {
-    fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(CONFIG_FILE_MODE)
+        .open(path)
+        .with_context(|| format!("failed to open {} for writing", path.display()))?;
+    file.write_all(contents.as_bytes())
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    // `mode` above only applies on creation; an existing file keeps its old
+    // perms, so tighten it explicitly to upgrade older `0644` configs to `0600`.
     let perms = fs::Permissions::from_mode(CONFIG_FILE_MODE);
     fs::set_permissions(path, perms)
         .with_context(|| format!("failed to set permissions on {}", path.display()))?;
@@ -672,6 +691,35 @@ unknown_key = \"untouched\"
             mode & 0o777,
             0o600,
             "config.toml must be owner-read/write only, got {:o}",
+            mode & 0o777
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_config_secure_creates_fresh_file_owner_only() {
+        // The create path must apply 0600 AT creation (OpenOptions::mode), so a
+        // brand-new config holding secrets is never briefly world-readable. We
+        // call the low-level helper directly to assert the create branch, not
+        // just the post-write chmod.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        assert!(
+            !config_path.exists(),
+            "file must not exist before the write"
+        );
+
+        write_config_secure(&config_path, "[defaults]\nprovider = \"claude\"\n")
+            .expect("write_config_secure");
+
+        let mode = fs::metadata(&config_path)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "a freshly created config must be owner-read/write only, got {:o}",
             mode & 0o777
         );
     }

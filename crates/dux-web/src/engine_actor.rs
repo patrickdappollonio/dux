@@ -473,6 +473,7 @@ pub(crate) fn run_engine_loop(
                         // (add/remove/change password via config or the TUI
                         // palette) take effect without a server restart. The
                         // `--disable-auth` flag captured at startup is preserved.
+                        let mut auth_refused = false;
                         if let Some(ctx) = auth_reload.as_ref()
                             && let Ok(mut guard) = ctx.shared.write()
                         {
@@ -481,17 +482,34 @@ pub(crate) fn run_engine_loop(
                             // removed) and keeps the prior users; on loopback it
                             // downgrades with a warning. See `AuthState::rebuild`.
                             let prev = guard.clone();
-                            *guard = crate::auth::AuthState::rebuild(
+                            let (next, refused) = crate::auth::AuthState::rebuild(
                                 &prev,
                                 &engine.config.auth.users,
                                 ctx.disable_auth,
                                 ctx.loopback,
                             );
+                            *guard = next;
+                            auth_refused = refused;
                         }
-                        let _ = thread_status_tx.send(WireStatus::new(
-                            "info",
-                            "Configuration reloaded. New settings are active.",
-                        ));
+                        // When the rebuild REFUSED the downgrade the `[auth]`
+                        // change was deliberately NOT applied, so a plain
+                        // "settings are active" status would mislead. Surface the
+                        // refusal (and how to actually run open) in a warn-tone
+                        // status instead.
+                        let status = if auth_refused {
+                            WireStatus::new(
+                                "warning",
+                                "Configuration reloaded, but removing the last login user was \
+                                 refused: this server is on a non-loopback bind and will not drop \
+                                 its login gate while running. Restart the server to apply.",
+                            )
+                        } else {
+                            WireStatus::new(
+                                "info",
+                                "Configuration reloaded. New settings are active.",
+                            )
+                        };
+                        let _ = thread_status_tx.send(status);
                     }
                     Err(e) => {
                         let _ = thread_status_tx.send(WireStatus::new(
