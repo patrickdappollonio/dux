@@ -170,21 +170,7 @@ impl App {
         // counts only valid entries). Warn loudly: on a non-loopback bind a
         // running server stays bound and becomes open once it reloads config.
         let no_users_left = auth::parse_users(&remaining).is_empty();
-        let (message, warn) = if no_users_left {
-            (
-                format!(
-                    "Removed web UI login user \"{username}\". No users remain — authentication is now DISABLED. A running web server applies this after reload-config."
-                ),
-                true,
-            )
-        } else {
-            (
-                format!(
-                    "Removed web UI login user \"{username}\". A running web server revokes that user's sessions after reload-config; otherwise it applies on the next server start."
-                ),
-                false,
-            )
-        };
+        let (message, warn) = remove_user_status(&username, no_users_left);
         self.set_busy(format!("Removing web UI login user \"{username}\"\u{2026}"));
         self.spawn_auth_users_persist(remaining, message, warn);
     }
@@ -260,6 +246,33 @@ fn persist_auth_users(
     });
 }
 
+/// Build the status line (and warn tone) shown after removing a login user.
+///
+/// `no_users_left` is whether the removal emptied the valid-user set (the last
+/// user). When true the message must reflect the S2 refuse-the-downgrade rule:
+/// the TUI only edits config, so it cannot know the live server's bind — it
+/// spells out BOTH outcomes. A loopback server turns the gate off on
+/// reload-config; a non-loopback server REFUSES the downgrade and keeps the
+/// previous users until it is restarted. The non-empty case is the ordinary
+/// per-user revocation message (info tone).
+fn remove_user_status(username: &str, no_users_left: bool) -> (String, bool) {
+    if no_users_left {
+        (
+            format!(
+                "Removed web UI login user \"{username}\". No users remain — authentication is now DISABLED in config. A running LOOPBACK web server turns the gate off on reload-config; a NON-LOOPBACK server REFUSES the downgrade and keeps the previous users until it is restarted."
+            ),
+            true,
+        )
+    } else {
+        (
+            format!(
+                "Removed web UI login user \"{username}\". A running web server revokes that user's sessions after reload-config; otherwise it applies on the next server start."
+            ),
+            false,
+        )
+    }
+}
+
 /// The distinct usernames present in `users`, in first-seen order, skipping
 /// malformed entries. Duplicates collapse to a single picker row even though
 /// removal deletes every matching entry.
@@ -276,7 +289,48 @@ pub(crate) fn distinct_usernames(users: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::distinct_usernames;
+    use super::{distinct_usernames, remove_user_status};
+
+    #[test]
+    fn remove_user_status_last_user_explains_loopback_vs_non_loopback() {
+        let (message, warn) = remove_user_status("alice", true);
+        assert!(warn, "removing the last user is a warn-tone event");
+        assert!(message.contains("alice"));
+        assert!(
+            message.contains("DISABLED"),
+            "must say auth becomes disabled in config: {message}"
+        );
+        // The S2 refuse-the-downgrade rule: both bind outcomes must be spelled
+        // out (the TUI cannot know the live server's bind).
+        assert!(
+            message.to_lowercase().contains("loopback"),
+            "must mention the loopback case: {message}"
+        );
+        assert!(
+            message.contains("REFUSES the downgrade"),
+            "must say a non-loopback server refuses the downgrade: {message}"
+        );
+        assert!(
+            message.contains("restarted"),
+            "must say a non-loopback server keeps users until restarted: {message}"
+        );
+        // The stale wording must be gone.
+        assert!(
+            !message.contains("A running web server applies this after reload-config"),
+            "the old unconditional wording must be replaced: {message}"
+        );
+    }
+
+    #[test]
+    fn remove_user_status_non_last_user_is_info_tone_revocation() {
+        let (message, warn) = remove_user_status("bob", false);
+        assert!(!warn, "removing a non-last user is an info-tone event");
+        assert!(message.contains("bob"));
+        assert!(
+            message.contains("revokes that user's sessions after reload-config"),
+            "must describe per-user revocation: {message}"
+        );
+    }
 
     #[test]
     fn distinct_usernames_dedupes_in_first_seen_order() {

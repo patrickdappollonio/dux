@@ -109,21 +109,60 @@ impl AuthState {
         }
     }
 
-    /// Rebuild the snapshot on a config reload, warning loudly when the gate
-    /// transitions from ON to OFF while the server is already serving.
+    /// Rebuild the snapshot on a config reload.
     ///
-    /// `was_enabled` is the gate state BEFORE this rebuild. Removing the last
-    /// user (or otherwise clearing the credentials) flips `enabled` false, but
-    /// the bind gate only protects at STARTUP — a running server stays bound, so
-    /// a previously protected non-loopback server silently becomes open. We log
-    /// a loud warning (dux.log + stderr) on that exact transition so the
-    /// operator is not left unaware.
-    pub fn rebuild(was_enabled: bool, users: &[String], disable_auth: bool) -> Self {
+    /// `prev` is the gate snapshot BEFORE this rebuild. `loopback` is whether the
+    /// LIVE server is bound to a loopback address (threaded from the resolved
+    /// bind addr at the server entry point). Removing the last user (or otherwise
+    /// clearing the credentials) flips `enabled` false, but the bind gate only
+    /// protects at STARTUP — a running server stays bound, so a previously
+    /// protected non-loopback server would silently become open. How we handle
+    /// that enabled→disabled-because-users-dropped-to-zero transition depends on
+    /// the bind:
+    ///
+    /// - **Non-loopback bind: REFUSE the downgrade.** The gate never downgrades
+    ///   to open on a reachable address. We KEEP the prior snapshot (users +
+    ///   enabled stay) and log a loud error. Restarting the server is the
+    ///   explicit way to run open here — the startup bind gate then demands
+    ///   `--insecure-allow-remote`.
+    /// - **Loopback bind: allow the downgrade with a warning.** A loopback
+    ///   server is only reachable from the same host, so flipping the gate off is
+    ///   the documented behavior; we still warn so the operator is not unaware.
+    ///
+    /// The "users dropped to zero" rule covers the entries-present-but-all-
+    /// malformed case too: `parse_users` returns empty there, so `build` reports
+    /// `enabled = false` and this transition fires.
+    ///
+    /// Any other transition (enabling from disabled, swapping which users exist
+    /// while at least one remains, a no-op reload) simply takes the rebuilt
+    /// snapshot.
+    pub(crate) fn rebuild(
+        prev: &AuthState,
+        users: &[String],
+        disable_auth: bool,
+        loopback: bool,
+    ) -> Self {
         let next = AuthState::build(users, disable_auth);
-        if was_enabled && !next.enabled {
-            let warning = "[auth] users removed — the login gate is now OFF. \
-                A running server stays bound, so a non-loopback server is now open \
-                to anyone. Add a user (or stop the server) to re-protect it.";
+        let downgrades_to_open = prev.enabled && !next.enabled && next.users.is_empty();
+        if downgrades_to_open && !loopback {
+            // REFUSE: the gate must not silently open a non-loopback server. Keep
+            // the prior snapshot (users + enabled) so the live server stays
+            // protected; a restart is the explicit, gated way to run open.
+            let error = "[auth] reload would remove the last user and turn the login gate OFF, \
+                but this server is bound to a NON-LOOPBACK address. Refusing the downgrade: \
+                the previous users are kept and the gate stays ON. To run with no login on a \
+                reachable address, restart the server (the startup bind gate then requires \
+                --insecure-allow-remote).";
+            dux_core::logger::error(error);
+            eprintln!("ERROR: {error}");
+            return prev.clone();
+        }
+        if downgrades_to_open {
+            // Loopback: the documented downgrade is allowed; warn so the operator
+            // is aware the gate is now off.
+            let warning = "[auth] users removed — the login gate is now OFF. This loopback \
+                server is only reachable from this host, but anyone with local access can now \
+                control your agents and worktrees. Add a user to re-protect it.";
             dux_core::logger::warn(warning);
             eprintln!("WARNING: {warning}");
         }
@@ -583,23 +622,78 @@ mod tests {
         ));
     }
 
+    /// Build an enabled snapshot with a single valid user, for use as the `prev`
+    /// argument to `rebuild` in the transition tests below.
+    fn enabled_with_user(name: &str) -> AuthState {
+        let hash = dux_core::auth::hash_password("pw").unwrap();
+        let prev = AuthState::build(&[format!("{name}:{hash}")], false);
+        assert!(prev.enabled, "fixture must start enabled");
+        prev
+    }
+
     #[test]
-    fn rebuild_disables_when_users_removed() {
-        // enabled → disabled (the last user removed): the gate turns OFF. The
-        // loud warning is emitted as a side effect; here we assert the effective
-        // transition, which is what the live server then serves with.
-        let next = AuthState::rebuild(true, &[], false);
+    fn rebuild_loopback_disables_when_last_user_removed() {
+        // LOOPBACK bind: enabled → disabled (the last user removed) is ALLOWED,
+        // with a warning side effect. Here we assert the effective transition.
+        let prev = enabled_with_user("alice");
+        let next = AuthState::rebuild(&prev, &[], false, true);
         assert!(
             !next.enabled,
-            "removing the last user must turn the gate off"
+            "on a loopback bind, removing the last user must turn the gate off"
         );
         assert!(next.users.is_empty());
     }
 
     #[test]
-    fn rebuild_stays_enabled_when_a_user_remains() {
+    fn rebuild_non_loopback_refuses_last_user_removal() {
+        // NON-LOOPBACK bind: the same enabled → disabled downgrade is REFUSED.
+        // The prior snapshot is kept (users + enabled stay) so the live server
+        // never silently opens; a restart is the explicit way to run open.
+        let prev = enabled_with_user("alice");
+        let next = AuthState::rebuild(&prev, &[], false, false);
+        assert!(
+            next.enabled,
+            "on a non-loopback bind, the gate must NOT downgrade to open"
+        );
+        assert_eq!(next.users.len(), 1, "the previous user must be kept");
+        assert_eq!(next.users[0].username, "alice");
+    }
+
+    #[test]
+    fn rebuild_non_loopback_refuses_when_entries_all_malformed() {
+        // Entries present but none valid counts as "users dropped to zero": on a
+        // non-loopback bind the downgrade is still REFUSED.
+        let prev = enabled_with_user("alice");
+        let next = AuthState::rebuild(
+            &prev,
+            &["garbage".to_string(), ":nohash".to_string()],
+            false,
+            false,
+        );
+        assert!(
+            next.enabled,
+            "all-malformed entries must not open a non-loopback server"
+        );
+        assert_eq!(next.users.len(), 1, "the previous valid user must be kept");
+    }
+
+    #[test]
+    fn rebuild_non_loopback_allows_swapping_users() {
+        // A reload that REPLACES the user (still one valid user remaining) is not
+        // a downgrade-to-open, so even a non-loopback bind takes the new snapshot.
+        let prev = enabled_with_user("alice");
         let hash = dux_core::auth::hash_password("pw").unwrap();
-        let next = AuthState::rebuild(true, &[format!("bob:{hash}")], false);
+        let next = AuthState::rebuild(&prev, &[format!("bob:{hash}")], false, false);
+        assert!(next.enabled, "a remaining valid user keeps the gate on");
+        assert_eq!(next.users.len(), 1);
+        assert_eq!(next.users[0].username, "bob");
+    }
+
+    #[test]
+    fn rebuild_stays_enabled_when_a_user_remains() {
+        let prev = enabled_with_user("alice");
+        let hash = dux_core::auth::hash_password("pw").unwrap();
+        let next = AuthState::rebuild(&prev, &[format!("bob:{hash}")], false, true);
         assert!(next.enabled, "a remaining valid user keeps the gate on");
         assert_eq!(next.users.len(), 1);
     }
@@ -607,9 +701,11 @@ mod tests {
     #[test]
     fn rebuild_enabling_from_disabled_does_not_trip_the_warning_path() {
         // disabled → enabled (a first user added): no enabled→disabled
-        // transition, so the gate simply comes on.
+        // transition, so the gate simply comes on (loopback-ness is irrelevant).
+        let prev = AuthState::build(&[], false);
+        assert!(!prev.enabled);
         let hash = dux_core::auth::hash_password("pw").unwrap();
-        let next = AuthState::rebuild(false, &[format!("alice:{hash}")], false);
+        let next = AuthState::rebuild(&prev, &[format!("alice:{hash}")], false, false);
         assert!(next.enabled);
         assert_eq!(next.users.len(), 1);
     }

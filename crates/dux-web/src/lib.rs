@@ -66,8 +66,18 @@ pub fn run_server(paths: DuxPaths, addr: SocketAddr, disable_auth: bool) -> Resu
     // ONCE here, not per request). The same `Arc` is handed to the engine actor
     // (for live reload refresh) and to the router (for login/gate reads).
     let auth = auth::shared_auth(&engine.config.auth.users, disable_auth);
-    let (handle, _join) =
-        engine_actor::spawn_engine_thread_with_auth(engine, (Arc::clone(&auth), disable_auth));
+    // Thread the live bind's loopback-ness into the reload context: on a
+    // non-loopback bind the gate must REFUSE a reload that would remove the last
+    // user and turn auth off (see `AuthState::rebuild`).
+    let loopback = addr.ip().is_loopback();
+    let (handle, _join) = engine_actor::spawn_engine_thread_with_auth(
+        engine,
+        engine_actor::AuthReloadContext {
+            shared: Arc::clone(&auth),
+            disable_auth,
+            loopback,
+        },
+    );
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -151,8 +161,21 @@ pub fn serve_with_engine(
     // gate on mid-flip. The same `Arc` is threaded into both the actor (live
     // reload) and the router.
     let auth = auth::shared_auth(&engine.config.auth.users, false);
-    let (handle, ends) =
-        engine_actor::build_actor_channels_with_auth(&engine, Some((Arc::clone(&auth), false)));
+    // The flip's loopback-ness comes from the pre-bound listener. A non-loopback
+    // flip bind would only be reachable if the gate is on (the bind pre-flight
+    // enforces that), so refusing a reload-driven downgrade matches the CLI path.
+    let loopback = listener
+        .local_addr()
+        .map(|a| a.ip().is_loopback())
+        .unwrap_or(true);
+    let (handle, ends) = engine_actor::build_actor_channels_with_auth(
+        &engine,
+        Some(engine_actor::AuthReloadContext {
+            shared: Arc::clone(&auth),
+            disable_auth: false,
+            loopback,
+        }),
+    );
     engine_actor::spawn_global_workers(&mut engine);
 
     // Grab the teardown flag before the handle moves into the router. We trip it

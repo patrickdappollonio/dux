@@ -509,8 +509,10 @@ pub fn save_config(
         // written, exactly as before.
         let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
         let body = render_config(config, &bindings);
-        fs::write(config_path, body)
-            .with_context(|| format!("failed to write {}", config_path.display()))?;
+        // 0600 perms: this file holds [auth] bcrypt hashes and [env] tokens, so
+        // it must not be group/world readable (shared with the config writer's
+        // patch path so first-creation and later saves agree).
+        dux_core::config_write::write_config_secure(config_path, &body)?;
         Ok(())
     }
 }

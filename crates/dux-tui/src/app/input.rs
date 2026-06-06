@@ -7458,7 +7458,16 @@ not_a_real_action = ["x"]
         let text = app.status.text();
         assert!(text.contains("No users remain"));
         assert!(text.contains("authentication is now DISABLED"));
-        assert!(text.contains("after reload-config"));
+        // S2: the wording must distinguish loopback (downgrades on reload-config)
+        // from non-loopback (REFUSES the downgrade and keeps users until restart),
+        // since the TUI can't know the live server's bind.
+        assert!(text.to_lowercase().contains("loopback"));
+        assert!(text.contains("REFUSES the downgrade"));
+        assert!(text.contains("restarted"));
+        assert!(
+            !text.contains("A running web server applies this after reload-config"),
+            "the old unconditional wording must be gone: {text}"
+        );
     }
 
     #[test]

@@ -12,10 +12,29 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use toml_edit::{Array, DocumentMut, Formatted, InlineTable, Item, Table, Value};
+
+/// Permission bits for `config.toml`: owner read/write only (`0600`). The file
+/// holds bcrypt password hashes under `[auth]` and may hold tokens under `[env]`,
+/// so it must not be group/world readable. Unix-only — the project targets macOS
+/// and Linux (CLAUDE.md), so no `cfg(windows)` branch is needed.
+const CONFIG_FILE_MODE: u32 = 0o600;
+
+/// Write `contents` to `path`, then restrict the file to owner-only `0600`. Used
+/// for every `config.toml` write so the secrets it carries (bcrypt hashes,
+/// `[env]` tokens) are never left group/world readable. The chmod happens AFTER
+/// the write so it applies regardless of the process umask.
+pub fn write_config_secure(path: &Path, contents: &str) -> Result<()> {
+    fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))?;
+    let perms = fs::Permissions::from_mode(CONFIG_FILE_MODE);
+    fs::set_permissions(path, perms)
+        .with_context(|| format!("failed to set permissions on {}", path.display()))?;
+    Ok(())
+}
 
 use crate::config::{
     Config, MacroSurface, MacrosConfig, OneshotOutput, ProjectConfig, ProvidersConfig,
@@ -33,9 +52,7 @@ pub fn patch_config_file(config_path: &Path, config: &Config) -> Result<()> {
 
     apply_patches(&mut doc, config);
 
-    fs::write(config_path, doc.to_string())
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
-    Ok(())
+    write_config_secure(config_path, &doc.to_string())
 }
 
 /// Save config: patch in place if the file exists, otherwise write a plain
@@ -60,9 +77,7 @@ pub fn write_config_plain(config_path: &Path, config: &Config) -> Result<()> {
     // TUI's pretty first-creation path.
     let mut doc = DocumentMut::new();
     apply_patches(&mut doc, config);
-    fs::write(config_path, doc.to_string())
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
-    Ok(())
+    write_config_secure(config_path, &doc.to_string())
 }
 
 /// Apply every section patch to `doc`. Mirrors the section sequence the TUI's
@@ -635,6 +650,55 @@ unknown_key = \"untouched\"
         assert_eq!(
             parsed.auth.users,
             vec!["alice:$2y$12$existinghashvalue000000".to_string()]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_config_plain_sets_owner_only_perms() {
+        // config.toml carries bcrypt hashes ([auth]) and possibly tokens ([env]),
+        // so every write must restrict it to 0600 (owner read/write only).
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+
+        let config = Config::default();
+        write_config_plain(&config_path, &config).expect("write_config_plain");
+
+        let mode = fs::metadata(&config_path)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "config.toml must be owner-read/write only, got {:o}",
+            mode & 0o777
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn patch_config_file_sets_owner_only_perms() {
+        // The patch path (existing file) must also re-restrict perms to 0600 so a
+        // previously-loose file is tightened on the next save.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        // Seed a world-readable file first.
+        fs::write(&config_path, "[defaults]\nprovider = \"claude\"\n").expect("seed");
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644)).expect("loosen");
+
+        let config = Config::default();
+        patch_config_file(&config_path, &config).expect("patch");
+
+        let mode = fs::metadata(&config_path)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "patching config.toml must tighten perms to 0600, got {:o}",
+            mode & 0o777
         );
     }
 

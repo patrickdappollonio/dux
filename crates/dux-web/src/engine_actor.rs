@@ -96,12 +96,26 @@ pub(crate) struct ActorLoopEnds {
     /// before the engine drop disconnects their channels.
     shutdown_flag: Arc<AtomicBool>,
     /// Live-reload hook for the login gate: the shared auth snapshot the server's
-    /// router reads, paired with the `--disable-auth` flag captured at startup.
-    /// When a config reload lands (`ApplyReloadedConfig`), the loop rebuilds the
-    /// snapshot from the new `[auth]` users so credential changes take effect
-    /// without a server restart. `None` when no gate is wired (e.g. tests that
-    /// build channels directly).
-    auth_reload: Option<(crate::auth::SharedAuth, bool)>,
+    /// router reads, the `--disable-auth` flag captured at startup, and whether
+    /// the live server bound a LOOPBACK address. When a config reload lands
+    /// (`ApplyReloadedConfig`), the loop rebuilds the snapshot from the new
+    /// `[auth]` users so credential changes take effect without a server restart;
+    /// the loopback flag lets the rebuild REFUSE a gate downgrade on a
+    /// non-loopback bind (see `AuthState::rebuild`). `None` when no gate is wired
+    /// (e.g. tests that build channels directly).
+    auth_reload: Option<AuthReloadContext>,
+}
+
+/// The login-gate live-reload context threaded into the engine loop: the shared
+/// snapshot, the startup `--disable-auth` flag, and whether the live bind is
+/// loopback (which decides whether a reload may downgrade the gate to open).
+///
+/// `pub` because the external `dux server` entry points and the auth integration
+/// tests construct it to wire `spawn_engine_thread_with_auth`.
+pub struct AuthReloadContext {
+    pub shared: crate::auth::SharedAuth,
+    pub disable_auth: bool,
+    pub loopback: bool,
 }
 
 /// Build the actor channels and split them into the caller-facing
@@ -117,7 +131,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
 /// snapshot from the new `[auth]` users.
 pub(crate) fn build_actor_channels_with_auth(
     engine: &Engine,
-    auth_reload: Option<(crate::auth::SharedAuth, bool)>,
+    auth_reload: Option<AuthReloadContext>,
 ) -> (EngineHandle, ActorLoopEnds) {
     let (req_tx, req_rx) = mpsc::unbounded_channel::<EngineRequest>();
     let (vm_tx, vm_rx) = watch::channel(view_model_json(engine));
@@ -337,7 +351,7 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
 /// the `dux server` CLI path ([`crate::run_server`]).
 pub fn spawn_engine_thread_with_auth(
     mut engine: Engine,
-    auth_reload: (crate::auth::SharedAuth, bool),
+    auth_reload: AuthReloadContext,
 ) -> (EngineHandle, JoinHandle<()>) {
     let (handle, ends) = build_actor_channels_with_auth(&engine, Some(auth_reload));
     spawn_global_workers(&mut engine);
@@ -459,16 +473,19 @@ pub(crate) fn run_engine_loop(
                         // (add/remove/change password via config or the TUI
                         // palette) take effect without a server restart. The
                         // `--disable-auth` flag captured at startup is preserved.
-                        if let Some((shared, disable_auth)) = auth_reload.as_ref()
-                            && let Ok(mut guard) = shared.write()
+                        if let Some(ctx) = auth_reload.as_ref()
+                            && let Ok(mut guard) = ctx.shared.write()
                         {
-                            // Rebuild from the new config, warning if this reload
-                            // turns the gate OFF while the server is serving
-                            // (e.g. the last user was removed).
+                            // Rebuild from the new config. On a non-loopback bind
+                            // the rebuild REFUSES a gate downgrade (last user
+                            // removed) and keeps the prior users; on loopback it
+                            // downgrades with a warning. See `AuthState::rebuild`.
+                            let prev = guard.clone();
                             *guard = crate::auth::AuthState::rebuild(
-                                guard.enabled,
+                                &prev,
                                 &engine.config.auth.users,
-                                *disable_auth,
+                                ctx.disable_auth,
+                                ctx.loopback,
                             );
                         }
                         let _ = thread_status_tx.send(WireStatus::new(

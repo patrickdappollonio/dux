@@ -47,6 +47,12 @@ pub struct AppState {
     /// Per-IP login backoff. Shared (cheap `Arc` clone) so all login requests
     /// hit the same counters.
     pub rate_limiter: RateLimiter,
+    /// How often a live, authenticated `/ws` socket re-verifies that its user
+    /// still exists (see [`handle_socket`]). The HTTP gate cannot revoke an
+    /// ALREADY-upgraded socket, so this periodic recheck closes that gap. A
+    /// constructor-injectable field so the revocation e2e can drive a short
+    /// window instead of waiting the production cadence.
+    pub ws_recheck_period: std::time::Duration,
 }
 
 /// Build the router with the login gate OFF (no `[auth]` users). Kept as the
@@ -66,22 +72,45 @@ pub fn router_with_auth(engine: EngineHandle, auth: SharedAuth) -> Router {
     build_router(engine, auth, Router::new())
 }
 
+/// Production cadence for the live `/ws` user-existence recheck. Short enough
+/// that a revoked user's open socket dies within a few seconds, long enough that
+/// the per-socket `Vec` scan under a brief read lock is negligible overhead.
+const WS_RECHECK_PERIOD: std::time::Duration = std::time::Duration::from_secs(4);
+
 /// Shared router builder. `extra_gated` is merged INTO the gated sub-router
 /// before the gate middleware is layered on, so any route it carries inherits
 /// the session gate exactly as `/ws` does. Production callers pass an empty
 /// router; a test injects a probe route to prove the gate covers arbitrary data
 /// routes, not just `/ws` (see [`tests::gated_data_route_is_401_without_session`]).
 fn build_router(engine: EngineHandle, auth: SharedAuth, extra_gated: Router<AppState>) -> Router {
+    build_router_with_recheck(engine, auth, extra_gated, WS_RECHECK_PERIOD)
+}
+
+/// Like [`build_router`] but with an injectable `/ws` recheck period so the
+/// revocation e2e can drive a short window instead of the production cadence.
+pub fn build_router_with_recheck(
+    engine: EngineHandle,
+    auth: SharedAuth,
+    extra_gated: Router<AppState>,
+    ws_recheck_period: std::time::Duration,
+) -> Router {
     let state = AppState {
         engine,
         auth,
         rate_limiter: RateLimiter::default(),
+        ws_recheck_period,
     };
 
     // In-memory session store: sessions die with the server (documented v1
     // limitation — a restart forces re-login). HttpOnly and SameSite=Strict are
     // the tower-sessions defaults but we set them explicitly so the intent is
     // visible and a future default change can't silently weaken the cookie.
+    //
+    // TODO(step 7 TLS): the `MemoryStore` never sweeps EXPIRED sessions — an
+    // expired record lingers in the map until the process exits, so a long-lived
+    // server with churn slowly accumulates dead entries. Run
+    // `tower_sessions::ExpiredDeletion` (a periodic sweep task) against the store
+    // when the persistent/TLS-fronted deployment lands, so memory stays bounded.
     let session_layer = SessionManagerLayer::new(MemoryStore::default())
         .with_name(auth::SESSION_COOKIE_NAME)
         .with_http_only(true)
@@ -153,6 +182,12 @@ async fn gate(
 /// `Host` header. `false` for a present-but-mismatched `Origin`. Browsers always
 /// send `Origin` for WS, so this only ever rejects a genuine cross-site attempt.
 /// Applies whether or not auth is enabled.
+// TODO(step 7 TLS): add a Host allowlist to defend against DNS rebinding. The
+// same-origin check below trusts the request's own `Host` header, so it does not
+// stop a rebinding attacker who points a controlled hostname at this server's IP
+// (the browser then sends a matching Origin/Host pair). Once dux terminates TLS
+// (or is fronted by an HTTPS proxy), pin the set of allowed Host values to the
+// configured public hostname(s) and reject everything else here.
 fn same_origin_allowed(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
         // No Origin: a non-browser client. Allowed (documented tradeoff).
@@ -186,6 +221,7 @@ fn origin_host(origin: &str) -> Option<String> {
 async fn ws_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
+    session: Session,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     // Origin check runs even with auth off (CSWSH defense). On rejection we
@@ -197,13 +233,49 @@ async fn ws_upgrade(
         )
             .into_response();
     }
-    ws.on_upgrade(move |socket| handle_socket(socket, state.engine))
-        .into_response()
+
+    // When auth is on, the gate already validated this session's username before
+    // the upgrade. Re-read it (same way the gate does) so the socket loop can
+    // periodically re-verify the user still exists — the HTTP gate cannot revoke
+    // an ALREADY-upgraded socket, so without this recheck a removed user's open
+    // socket would keep streaming AND accepting commands until it closes on its
+    // own. Auth off (or somehow no username) → no recheck (auth-off sockets are
+    // unaffected by the recheck machinery).
+    let recheck_user = if auth::is_enabled(&state.auth) {
+        session
+            .get::<String>(auth::SESSION_USER_KEY)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    let auth = state.auth.clone();
+    let recheck_period = state.ws_recheck_period;
+    ws.on_upgrade(move |socket| {
+        handle_socket(socket, state.engine, auth, recheck_user, recheck_period)
+    })
+    .into_response()
 }
 
 type SharedSink = Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>;
 
-async fn handle_socket(socket: WebSocket, engine: EngineHandle) {
+/// Drive one upgraded `/ws` connection.
+///
+/// `recheck_user` is `Some(username)` only when auth is enabled and the gate
+/// validated a session at upgrade; it is `None` for auth-off sockets (no
+/// recheck). When `Some`, a `recheck_period` interval re-verifies the user still
+/// exists in the live auth snapshot — the HTTP gate cannot revoke an already-
+/// upgraded socket, so this recheck closes the gap: on failure we send a Close
+/// frame and break, which kills BOTH the ViewModel/status streaming and command
+/// intake. Auth-off sockets pass `recheck_user = None` and are never rechecked.
+async fn handle_socket(
+    socket: WebSocket,
+    engine: EngineHandle,
+    auth: SharedAuth,
+    recheck_user: Option<String>,
+    recheck_period: std::time::Duration,
+) {
     let (sink, mut stream) = socket.split();
     let sink: SharedSink = Arc::new(tokio::sync::Mutex::new(sink));
 
@@ -277,7 +349,38 @@ async fn handle_socket(socket: WebSocket, engine: EngineHandle) {
     // input). React StrictMode double-mounts and session switching both trigger re-subscribes.
     let mut pty_forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
-    while let Some(Ok(msg)) = stream.next().await {
+    // Periodic user-existence recheck (only when this is an authenticated
+    // socket). The HTTP gate cannot revoke an already-upgraded socket, so this
+    // recheck closes the gap. The first tick fires immediately, so we burn it to
+    // align subsequent ticks to the period.
+    let mut recheck = tokio::time::interval(recheck_period);
+    if recheck_user.is_some() {
+        recheck.tick().await;
+    }
+
+    loop {
+        let msg = tokio::select! {
+            // Re-verify the session's user still exists. On failure, close the
+            // socket — this stops streaming AND command intake. Disabled for
+            // auth-off sockets (`recheck_user` is None).
+            _ = recheck.tick(), if recheck_user.is_some() => {
+                let still_valid = recheck_user
+                    .as_deref()
+                    .map(|u| auth::username_exists(&auth, u))
+                    .unwrap_or(false);
+                if !still_valid {
+                    // Best-effort Close frame, then break to tear down.
+                    let mut guard = sink.lock().await;
+                    let _ = guard.send(Message::Close(None)).await;
+                    break;
+                }
+                continue;
+            }
+            next = stream.next() => match next {
+                Some(Ok(msg)) => msg,
+                _ => break,
+            },
+        };
         match msg {
             Message::Binary(bytes) => {
                 if let Some(session_id) = &subscribed {

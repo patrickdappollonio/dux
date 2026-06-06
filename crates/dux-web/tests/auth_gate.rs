@@ -15,8 +15,10 @@ use dux_core::config::{DuxPaths, ProjectConfig, ProviderCommandConfig};
 use dux_core::storage::SessionStore;
 use dux_web::auth::shared_auth;
 use dux_web::bootstrap::bootstrap_engine;
-use dux_web::engine_actor::{spawn_engine_thread, spawn_engine_thread_with_auth};
-use dux_web::server::router_with_auth;
+use dux_web::engine_actor::{
+    AuthReloadContext, spawn_engine_thread, spawn_engine_thread_with_auth,
+};
+use dux_web::server::{build_router_with_recheck, router_with_auth};
 use futures_util::StreamExt;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -101,7 +103,14 @@ async fn boot_with_users(users: Vec<String>) -> (SocketAddr, tempfile::TempDir) 
     engine.config.terminal.args = vec![];
 
     let auth = shared_auth(&users, false);
-    let (handle, _join) = spawn_engine_thread_with_auth(engine, (auth.clone(), false));
+    let (handle, _join) = spawn_engine_thread_with_auth(
+        engine,
+        AuthReloadContext {
+            shared: auth.clone(),
+            disable_auth: false,
+            loopback: true,
+        },
+    );
     let app = router_with_auth(handle, auth);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -510,7 +519,14 @@ async fn reload_config_picks_up_new_user_live() {
     );
 
     let auth = shared_auth(&users_at_boot, false);
-    let (handle, _join) = spawn_engine_thread_with_auth(engine, (auth.clone(), false));
+    let (handle, _join) = spawn_engine_thread_with_auth(
+        engine,
+        AuthReloadContext {
+            shared: auth.clone(),
+            disable_auth: false,
+            loopback: true,
+        },
+    );
     let app = router_with_auth(handle, auth);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -620,7 +636,14 @@ async fn reload_config_removing_user_revokes_live_session() {
     );
 
     let auth = shared_auth(&users_at_boot, false);
-    let (handle, _join) = spawn_engine_thread_with_auth(engine, (auth.clone(), false));
+    let (handle, _join) = spawn_engine_thread_with_auth(
+        engine,
+        AuthReloadContext {
+            shared: auth.clone(),
+            disable_auth: false,
+            loopback: true,
+        },
+    );
     let app = router_with_auth(handle, auth);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -722,6 +745,11 @@ async fn reload_config_removing_user_revokes_live_session() {
 /// so `/api/me` reports `auth:disabled` instead of `401`. (The loud warning is a
 /// side effect of the rebuild; here we assert the observable gate transition the
 /// warning is meant to flag.)
+///
+/// This server binds 127.0.0.1 (loopback), so the S2 rule ALLOWS the downgrade —
+/// a non-loopback bind would instead REFUSE it (covered by the `AuthState::rebuild`
+/// unit tests). The `boot_with_users` helper passes `loopback: true`, matching the
+/// loopback listener, so this test exercises the allow-with-warning branch.
 #[tokio::test]
 async fn reload_config_removing_last_user_disables_gate_live() {
     let tmp = tempfile::tempdir().unwrap();
@@ -754,7 +782,14 @@ async fn reload_config_removing_last_user_disables_gate_live() {
         auth.read().unwrap().enabled,
         "gate must be ON before removal"
     );
-    let (handle, _join) = spawn_engine_thread_with_auth(engine, (auth.clone(), false));
+    let (handle, _join) = spawn_engine_thread_with_auth(
+        engine,
+        AuthReloadContext {
+            shared: auth.clone(),
+            disable_auth: false,
+            loopback: true,
+        },
+    );
     let app = router_with_auth(handle, auth);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -832,4 +867,197 @@ async fn wait_for_view_model(ws: &mut ClientWs) -> bool {
         }
     }
     false
+}
+
+// --- S1: a live socket dies on user revocation -----------------------------
+
+/// Boot a real server whose `/ws` user-existence recheck uses a SHORT period so
+/// the revocation test is fast and deterministic, with a real `config.toml` on
+/// disk (so `reload_config` re-reads it). Returns the bound address and the temp
+/// dir that must outlive the server. `loopback` is true (127.0.0.1), but we keep
+/// at least one user across the reload so the gate STAYS enabled — the recheck
+/// closes a per-user revocation, not a whole-gate downgrade.
+async fn boot_for_recheck(
+    initial_users: Vec<String>,
+    recheck: Duration,
+) -> (SocketAddr, std::path::PathBuf, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let paths = seed_paths(&root);
+
+    let line = initial_users
+        .iter()
+        .map(|u| format!("\"{u}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    std::fs::write(&paths.config_path, format!("[auth]\nusers = [{line}]\n")).unwrap();
+
+    let mut engine = bootstrap_engine(&paths).unwrap();
+    let users_at_boot = engine.config.auth.users.clone();
+    engine.config.providers.commands.insert(
+        "claude".to_string(),
+        ProviderCommandConfig {
+            command: "cat".to_string(),
+            args: vec![],
+            resume_args: None,
+            ..Default::default()
+        },
+    );
+
+    let auth = shared_auth(&users_at_boot, false);
+    let (handle, _join) = spawn_engine_thread_with_auth(
+        engine,
+        AuthReloadContext {
+            shared: auth.clone(),
+            disable_auth: false,
+            loopback: true,
+        },
+    );
+    let app = build_router_with_recheck(handle, auth, axum::Router::new(), recheck);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let config_path = paths.config_path.clone();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    (addr, config_path, tmp)
+}
+
+/// S1: a live, ALREADY-UPGRADED WebSocket must close when its user is revoked —
+/// the HTTP gate can't revoke an open socket, so the periodic in-socket recheck
+/// closes it. alice opens a socket and receives a frame; we remove alice (bob
+/// stays so the gate is still ON) and reload config; alice's socket must close
+/// within a few recheck windows.
+#[tokio::test]
+async fn live_ws_closes_when_user_revoked() {
+    let recheck = Duration::from_millis(200);
+    let alice = user_entry("alice", "secret-pw");
+    let bob = user_entry("bob", "bob-pw");
+    let (addr, config_path, _tmp) =
+        boot_for_recheck(vec![alice.clone(), bob.clone()], recheck).await;
+    let c = client();
+
+    // alice logs in and opens an authenticated socket, proving it streams.
+    let login = c
+        .post(format!("http://{addr}/api/login"))
+        .json(&serde_json::json!({"username":"alice","password":"secret-pw"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(login.status(), 200);
+    let cookie = session_cookie(&login).expect("cookie");
+
+    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    req.headers_mut().insert("cookie", cookie.parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req)
+        .await
+        .expect("alice's authenticated WS must connect");
+    assert!(
+        wait_for_view_model(&mut ws).await,
+        "alice's socket must stream at least one frame before revocation"
+    );
+
+    // Remove alice (keep bob → gate stays ON), reload config over bob's socket.
+    std::fs::write(&config_path, format!("[auth]\nusers = [\"{bob}\"]\n")).unwrap();
+    let bob_login = c
+        .post(format!("http://{addr}/api/login"))
+        .json(&serde_json::json!({"username":"bob","password":"bob-pw"}))
+        .send()
+        .await
+        .unwrap();
+    let bob_cookie = session_cookie(&bob_login).expect("bob cookie");
+    let mut bob_req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    bob_req
+        .headers_mut()
+        .insert("cookie", bob_cookie.parse().unwrap());
+    let (mut bob_ws, _) = tokio_tungstenite::connect_async(bob_req)
+        .await
+        .expect("bob ws");
+    let _ = bob_ws.next().await; // initial view_model
+    use futures_util::SinkExt;
+    bob_ws
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            r#"{"type":"command","command":"reload_config","args":{}}"#.into(),
+        ))
+        .await
+        .unwrap();
+
+    // alice's socket must close (the recheck sees her gone). Drain frames until
+    // the stream ends; bounded so a hang fails the test rather than blocking.
+    let closed = wait_for_socket_close(&mut ws, Duration::from_secs(8)).await;
+    assert!(
+        closed,
+        "a revoked user's already-open socket must close once the recheck runs"
+    );
+}
+
+/// S1 control: an AUTH-OFF server's socket is unaffected by the recheck
+/// machinery — `recheck_user` is `None`, so the socket keeps streaming and never
+/// self-closes. We boot with no users (gate off), open a no-Origin socket, prove
+/// it streams, then assert it does NOT close within several recheck windows.
+#[tokio::test]
+async fn auth_off_socket_unaffected_by_recheck() {
+    let recheck = Duration::from_millis(100);
+    let (addr, _config_path, _tmp) = boot_for_recheck(vec![], recheck).await;
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .expect("auth-off WS should connect");
+    assert!(
+        wait_for_view_model(&mut ws).await,
+        "auth-off socket must stream a frame"
+    );
+
+    // Wait well beyond several recheck periods; the socket must NOT close.
+    let closed = wait_for_socket_close(&mut ws, Duration::from_millis(1500)).await;
+    assert!(
+        !closed,
+        "an auth-off socket must never be closed by the recheck (recheck_user is None)"
+    );
+}
+
+/// Drain a socket until it closes (returns true) or the deadline elapses
+/// (returns false). A `Close` frame or a stream end both count as closed.
+async fn wait_for_socket_close(ws: &mut ClientWs, within: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(200), ws.next()).await {
+            Ok(None) => return true, // stream ended
+            Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))) => return true,
+            Ok(Some(Ok(_))) => {}            // some other frame; keep draining
+            Ok(Some(Err(_))) => return true, // transport error = closed
+            Err(_) => {}                     // timeout this round; loop until deadline
+        }
+    }
+    false
+}
+
+// --- Q4: blank/empty username falls through to a clean 401 ------------------
+
+/// A login with a whitespace-only or empty username must return a clean 401 (the
+/// generic failure), exercising the unknown-user dummy-verify path rather than
+/// 500ing. Both bodies are well-formed JSON, so they reach the verify; no such
+/// user exists, so the result is the same generic 401 as any bad login.
+#[tokio::test]
+async fn blank_username_login_is_clean_401() {
+    let (addr, _tmp) = boot_with_users(vec![user_entry("alice", "secret-pw")]).await;
+    let c = client();
+    for username in ["  ", ""] {
+        let resp = c
+            .post(format!("http://{addr}/api/login"))
+            .json(&serde_json::json!({"username": username, "password": "x"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            401,
+            "a blank username ({username:?}) must fall through to a clean 401"
+        );
+    }
 }
