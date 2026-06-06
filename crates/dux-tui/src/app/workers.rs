@@ -578,6 +578,9 @@ impl App {
             }
 
             EventReaction::ServerFlipPreflightReady { result, warning } => {
+                // The worker has reported back: clear the in-flight guard on BOTH
+                // arms so a later (legitimate) retry can spawn a fresh pre-flight.
+                self.server_flip_preflight_pending = false;
                 match result {
                     Ok((listeners, urls)) => {
                         // Surface the warning (if any) first, then announce the

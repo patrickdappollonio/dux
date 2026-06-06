@@ -67,9 +67,9 @@ pub fn detect_ip() -> Result<IpAddr, TailscaleUnavailable> {
 }
 
 /// Pure parser for `tailscale ip` output. Prefers the first valid CGNAT IPv4
-/// (100.64.0.0/10); when no such IPv4 is present, accepts the first global
-/// (non-loopback, non-private, non-link-local) IPv6 line. Returns `None` for
-/// empty or unparseable output.
+/// (100.64.0.0/10); when no such IPv4 is present, accepts the first IPv6 in
+/// Tailscale's `fd7a:115c:a1e0::/48` ULA range. Returns `None` for empty or
+/// unparseable output.
 pub fn parse_tailscale_ip(output: &str) -> Option<IpAddr> {
     let mut ipv6_fallback: Option<IpAddr> = None;
 
@@ -84,7 +84,7 @@ pub fn parse_tailscale_ip(output: &str) -> Option<IpAddr> {
         match ip {
             IpAddr::V4(v4) if is_tailscale_cgnat(v4) => return Some(ip),
             IpAddr::V4(_) => {}
-            IpAddr::V6(v6) if ipv6_fallback.is_none() && is_global_ipv6(v6) => {
+            IpAddr::V6(v6) if ipv6_fallback.is_none() && is_tailscale_ipv6(v6) => {
                 ipv6_fallback = Some(ip);
             }
             IpAddr::V6(_) => {}
@@ -100,19 +100,19 @@ fn is_tailscale_cgnat(addr: std::net::Ipv4Addr) -> bool {
     a == 100 && (64..=127).contains(&b)
 }
 
-/// Whether `addr` is a routable global IPv6 (not loopback, unspecified, private
-/// ULA fc00::/7, or link-local fe80::/10). Tailscale hands out addresses in the
-/// fd7a:115c:a1e0::/48 ULA space, which is private — so we deliberately do NOT
-/// require globally-unique here, only that it is not a useless local address.
-/// In practice the IPv4 CGNAT line is preferred and present, so this is a rarely
-/// exercised fallback for IPv6-only tailnets.
-fn is_global_ipv6(addr: std::net::Ipv6Addr) -> bool {
-    !addr.is_loopback() && !addr.is_unspecified() && !is_link_local_ipv6(addr)
-}
-
-/// Whether `addr` is in the IPv6 link-local range fe80::/10.
-fn is_link_local_ipv6(addr: std::net::Ipv6Addr) -> bool {
-    (addr.segments()[0] & 0xffc0) == 0xfe80
+/// Whether `addr` is in Tailscale's IPv6 ULA range `fd7a:115c:a1e0::/48`.
+///
+/// This is the EXACT block Tailscale assigns (the IPv6 mirror of the 100.64/10
+/// CGNAT v4 leg), not "any global/ULA v6" — so a plain ULA (`fc00::1`), a
+/// documentation address (`2001:db8::`), or a real global (`2606:…`) is rejected.
+/// A /48 means the first three 16-bit segments must equal `fd7a:115c:a1e0`.
+///
+/// In practice this leg is effectively unreachable: the IPv4 CGNAT line is
+/// preferred and is present on every normal tailnet, so [`parse_tailscale_ip`]
+/// only consults this fallback on an IPv6-only tailnet.
+fn is_tailscale_ipv6(addr: std::net::Ipv6Addr) -> bool {
+    let [a, b, c, ..] = addr.segments();
+    a == 0xfd7a && b == 0x115c && c == 0xa1e0
 }
 
 #[cfg(test)]
@@ -135,12 +135,38 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_global_ipv6_when_no_cgnat_ipv4() {
+    fn falls_back_to_tailscale_ipv6_when_no_cgnat_ipv4() {
         let out = "fd7a:115c:a1e0::1234\n";
         assert_eq!(
             parse_tailscale_ip(out),
             Some("fd7a:115c:a1e0::1234".parse().unwrap())
         );
+    }
+
+    #[test]
+    fn accepts_first_and_last_tailscale_ipv6_in_range() {
+        // The /48 boundary: the network address and the last address in
+        // fd7a:115c:a1e0::/48 (the host portion is the low 80 bits) are both
+        // accepted when no CGNAT v4 is present.
+        assert_eq!(
+            parse_tailscale_ip("fd7a:115c:a1e0::\n"),
+            Some("fd7a:115c:a1e0::".parse().unwrap())
+        );
+        assert_eq!(
+            parse_tailscale_ip("fd7a:115c:a1e0:ffff:ffff:ffff:ffff:ffff\n"),
+            Some("fd7a:115c:a1e0:ffff:ffff:ffff:ffff:ffff".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn rejects_ipv6_outside_the_tailscale_48() {
+        // One past the /48 (third segment a1e1), a plain ULA, a documentation
+        // address, and a real global must all be rejected — the leg accepts ONLY
+        // fd7a:115c:a1e0::/48, not "any global/ULA v6".
+        assert_eq!(parse_tailscale_ip("fd7a:115c:a1e1::\n"), None);
+        assert_eq!(parse_tailscale_ip("fc00::1\n"), None);
+        assert_eq!(parse_tailscale_ip("2001:db8::1\n"), None);
+        assert_eq!(parse_tailscale_ip("2606:4700:4700::1111\n"), None);
     }
 
     #[test]

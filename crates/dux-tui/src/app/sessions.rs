@@ -2457,8 +2457,19 @@ impl App {
     /// `WorkerEvent::ServerFlipPreflightReady`; the main loop stashes the flip on
     /// success or surfaces the (actionable) error on failure, so a port collision
     /// or a missing Tailscale daemon keeps the TUI exactly where it was.
+    ///
+    /// In-flight guarded: a second invocation while a pre-flight worker is still
+    /// pending — or while a successful flip is already stashed waiting for the run
+    /// loop to act on it — is refused instead of spawning a second worker. Without
+    /// the guard, two quick triggers would race to `bind` the same LOCAL MODE
+    /// ports and the loser would surface a confusing EADDRINUSE.
     pub(crate) fn start_web_server(&mut self) {
+        if self.server_flip_preflight_pending || self.pending_server_flip.is_some() {
+            self.set_warning("Web server start already in progress.".to_string());
+            return;
+        }
         self.set_busy("Starting the web server — your agents keep running.".to_string());
+        self.server_flip_preflight_pending = true;
         let port = self.engine.config.server.port;
         let tailscale_enabled = self.engine.config.server.tailscale_enabled;
         let tx = self.engine.worker_tx.clone();
@@ -2644,6 +2655,7 @@ mod tests {
             terminal_selection: None,
             startup_log_selection: None,
             pending_server_flip: None,
+            server_flip_preflight_pending: false,
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();
@@ -2740,6 +2752,59 @@ mod tests {
         app.start_web_server();
         assert!(app.pending_server_flip.is_none());
         assert!(app.status.message().contains("Starting the web server"));
+    }
+
+    #[test]
+    fn start_web_server_double_trigger_is_guarded() {
+        // First trigger arms the in-flight guard and shows Busy. A second trigger
+        // while the worker is still pending must be REFUSED (no second worker) with
+        // the "already in progress" status — otherwise two workers race to bind the
+        // same LOCAL MODE ports and the loser surfaces a confusing EADDRINUSE.
+        let mut app = test_app_with_sessions(Vec::new(), Vec::new());
+        app.start_web_server();
+        assert!(
+            app.server_flip_preflight_pending,
+            "first trigger arms guard"
+        );
+        assert!(app.status.message().contains("Starting the web server"));
+
+        app.start_web_server();
+        assert!(
+            app.status
+                .message()
+                .contains("Web server start already in progress"),
+            "second trigger while pending must be refused"
+        );
+        assert!(
+            app.server_flip_preflight_pending,
+            "guard stays armed after a refused retry"
+        );
+
+        // The worker event clears the guard (Err arm here) so a later retry works.
+        app.apply_reaction(EventReaction::ServerFlipPreflightReady {
+            result: Err("could not start the web server: address in use".to_string()),
+            warning: None,
+        });
+        assert!(
+            !app.server_flip_preflight_pending,
+            "guard clears when the worker event lands"
+        );
+
+        // A stashed flip (success awaiting the run loop) also blocks a re-trigger.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        app.apply_reaction(EventReaction::ServerFlipPreflightReady {
+            result: Ok((vec![listener], vec![url])),
+            warning: None,
+        });
+        assert!(app.pending_server_flip.is_some());
+        app.start_web_server();
+        assert!(
+            app.status
+                .message()
+                .contains("Web server start already in progress"),
+            "a stashed flip must also refuse a re-trigger"
+        );
     }
 
     #[test]

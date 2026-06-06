@@ -6668,6 +6668,7 @@ mod tests {
             terminal_selection: None,
             startup_log_selection: None,
             pending_server_flip: None,
+            server_flip_preflight_pending: false,
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();

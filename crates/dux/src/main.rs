@@ -224,7 +224,7 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
                 .collect::<Vec<_>>()
                 .join(", ");
             println!("dux server listening on {urls} — open it in your browser");
-            dux_web::run_server(paths, addrs, all_addrs_local, cli_disable_auth)
+            dux_web::run_server(paths, addrs, cli_disable_auth)
         }
         // T1 resolves and validates the ACME plan but does not serve it: the
         // dux-web TLS path lands in the next slice. Refuse explicitly so nothing

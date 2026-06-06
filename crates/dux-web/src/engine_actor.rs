@@ -97,25 +97,33 @@ pub(crate) struct ActorLoopEnds {
     shutdown_flag: Arc<AtomicBool>,
     /// Live-reload hook for the login gate: the shared auth snapshot the server's
     /// router reads, the `--disable-auth` flag captured at startup, and whether
-    /// the live server bound a LOOPBACK address. When a config reload lands
-    /// (`ApplyReloadedConfig`), the loop rebuilds the snapshot from the new
+    /// every live listener is HOST-ONLY (genuine loopback). When a config reload
+    /// lands (`ApplyReloadedConfig`), the loop rebuilds the snapshot from the new
     /// `[auth]` users so credential changes take effect without a server restart;
-    /// the loopback flag lets the rebuild REFUSE a gate downgrade on a
-    /// non-loopback bind (see `AuthState::rebuild`). `None` when no gate is wired
+    /// the `host_only` flag lets the rebuild REFUSE a gate downgrade on a
+    /// reachable bind (see `AuthState::rebuild`). `None` when no gate is wired
     /// (e.g. tests that build channels directly).
     auth_reload: Option<AuthReloadContext>,
 }
 
 /// The login-gate live-reload context threaded into the engine loop: the shared
-/// snapshot, the startup `--disable-auth` flag, and whether the live bind is
-/// loopback (which decides whether a reload may downgrade the gate to open).
+/// snapshot, the startup `--disable-auth` flag, and whether every live listener
+/// is HOST-ONLY loopback (which decides whether a reload may downgrade the gate
+/// to open).
+///
+/// NOTE the deliberate distinction from the startup bind gate's "local"
+/// classification: that gate treats a Tailscale bind as local (it does not need
+/// `--insecure-allow-remote`), but `host_only` is the stricter DOWNGRADE rule —
+/// it is `true` only when every listener is genuine loopback, so a Tailscale
+/// bind is `host_only = false` and a running gate cannot silently open over a
+/// shared tailnet. See `AuthState::rebuild` for the full rationale.
 ///
 /// `pub` because the external `dux server` entry points and the auth integration
 /// tests construct it to wire `spawn_engine_thread_with_auth`.
 pub struct AuthReloadContext {
     pub shared: crate::auth::SharedAuth,
     pub disable_auth: bool,
-    pub loopback: bool,
+    pub host_only: bool,
 }
 
 /// Build the actor channels and split them into the caller-facing
@@ -477,16 +485,17 @@ pub(crate) fn run_engine_loop(
                         if let Some(ctx) = auth_reload.as_ref()
                             && let Ok(mut guard) = ctx.shared.write()
                         {
-                            // Rebuild from the new config. On a non-loopback bind
-                            // the rebuild REFUSES a gate downgrade (last user
-                            // removed) and keeps the prior users; on loopback it
-                            // downgrades with a warning. See `AuthState::rebuild`.
+                            // Rebuild from the new config. On a reachable bind
+                            // (public OR Tailscale) the rebuild REFUSES a gate
+                            // downgrade (last user removed) and keeps the prior
+                            // users; on a host-only loopback bind it downgrades
+                            // with a warning. See `AuthState::rebuild`.
                             let prev = guard.clone();
                             let (next, refused) = crate::auth::AuthState::rebuild(
                                 &prev,
                                 &engine.config.auth.users,
                                 ctx.disable_auth,
-                                ctx.loopback,
+                                ctx.host_only,
                             );
                             *guard = next;
                             auth_refused = refused;
@@ -500,8 +509,9 @@ pub(crate) fn run_engine_loop(
                             WireStatus::new(
                                 "warning",
                                 "Configuration reloaded, but removing the last login user was \
-                                 refused: this server is on a non-loopback bind and will not drop \
-                                 its login gate while running. Restart the server to apply.",
+                                 refused: this server is reachable from other devices (a public \
+                                 or Tailscale bind) and will not drop its login gate while \
+                                 running. Restart the server to apply.",
                             )
                         } else {
                             WireStatus::new(

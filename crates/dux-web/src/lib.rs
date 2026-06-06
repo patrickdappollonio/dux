@@ -48,26 +48,24 @@ use crate::engine_actor::LoopControl;
 /// `addrs` (one axum task per listener, sharing the router/state). Blocking
 /// entry — builds its own tokio runtime.
 ///
-/// `all_addrs_local` is the caller's classification of whether EVERY bound
-/// address is local (loopback OR the machine's own Tailscale address). It feeds
-/// the auth-reload context's downgrade rule: the refuse-downgrade protection
-/// guards PUBLIC binds, and a Tailscale bind is local (reachable only over the
-/// operator's own WireGuard tailnet), so an all-local serve permits a reload
-/// that turns the gate off — identical to a pure loopback bind. We thread the
-/// classification rather than recomputing `addr.is_loopback()` per address
-/// precisely so a Tailscale address does NOT count as a non-loopback public bind.
+/// The auth-reload context's downgrade rule is keyed on `host_only`, computed
+/// here from the actual `addrs` using `is_loopback()` ONLY — NO Tailscale
+/// allowance. This is deliberately stricter than the startup bind gate's "local"
+/// classification (which treats a Tailscale bind as local). A Tailscale-bound
+/// server is reachable by other people's devices on the tailnet, so it is NOT
+/// host-only and a running gate must never silently downgrade to open on it. See
+/// [`auth::AuthState::rebuild`] for the full distinction.
 ///
 /// `disable_auth` mirrors the `dux server --disable-auth` flag: with it set the
 /// login gate is off even when `[auth]` users exist. The gate's shared auth
 /// snapshot is built ONCE here from the engine's loaded config users, handed to
 /// both the engine actor (so a config reload rebuilds it live) and the router.
-pub fn run_server(
-    paths: DuxPaths,
-    addrs: Vec<SocketAddr>,
-    all_addrs_local: bool,
-    disable_auth: bool,
-) -> Result<()> {
+pub fn run_server(paths: DuxPaths, addrs: Vec<SocketAddr>, disable_auth: bool) -> Result<()> {
     let engine = bootstrap::bootstrap_engine(&paths)?;
+    // host-only ⇔ EVERY listener is genuine loopback. A Tailscale (or public)
+    // address makes the server reachable off-host, so the downgrade rule must
+    // refuse a live gate-disable there.
+    let host_only = addrs.iter().all(|a| a.ip().is_loopback());
     // Build the login gate's shared state from the loaded config users (parsed
     // ONCE here, not per request). The same `Arc` is handed to the engine actor
     // (for live reload refresh) and to the router (for login/gate reads).
@@ -77,7 +75,7 @@ pub fn run_server(
         engine_actor::AuthReloadContext {
             shared: Arc::clone(&auth),
             disable_auth,
-            loopback: all_addrs_local,
+            host_only,
         },
     );
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -149,6 +147,49 @@ const SERVER_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 /// have unparked the forwarders well within this bound; this is belt-and-braces.
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Record a serve-task failure exactly once and ask the whole flip to wind down.
+///
+/// Called by every per-listener serve task whose accept loop returns an `Err`
+/// (graceful shutdown returns `Ok`, so this only fires on a genuine death). The
+/// FIRST caller wins: it stores the error and is the one that should arm the
+/// engine-loop exit; later callers (other listeners winding down behind it) no-op
+/// the error slot. Always trips the shutdown watch so the remaining listeners
+/// stop too. Returns `true` when this call was the first-error winner.
+fn record_serve_failure(
+    serve_failed: &std::sync::atomic::AtomicBool,
+    serve_error: &std::sync::Mutex<Option<anyhow::Error>>,
+    shutdown_tx: &tokio::sync::watch::Sender<bool>,
+    err: anyhow::Error,
+) -> bool {
+    let first = serve_failed
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok();
+    if first && let Ok(mut slot) = serve_error.lock() {
+        *slot = Some(err);
+    }
+    // Always wind the others down, even for a non-first caller (idempotent send).
+    let _ = shutdown_tx.send(true);
+    first
+}
+
+/// Classify a set of live std listeners for the auth-reload DOWNGRADE rule.
+///
+/// Returns `true` (host-only) only when EVERY listener's local address is
+/// genuine loopback. A Tailscale (or any non-loopback) listener makes the server
+/// reachable off-host, so it returns `false` and the live gate cannot silently
+/// downgrade to open there. This is intentionally STRICTER than the startup bind
+/// gate's "local" classification, which treats a Tailscale bind as local — see
+/// [`auth::AuthState::rebuild`]. A listener whose local address cannot be read is
+/// treated as NOT loopback (fail closed: never accidentally classify an unknown
+/// listener as host-only).
+fn resolve_host_only(listeners: &[std::net::TcpListener]) -> bool {
+    listeners.iter().all(|l| {
+        l.local_addr()
+            .map(|a| a.ip().is_loopback())
+            .unwrap_or(false)
+    })
+}
+
 /// Serve the web UI over an EXISTING engine on the CALLER's thread, returning
 /// the engine when serving stops. This is the in-process TUI↔server flip's
 /// entry point: the TUI hands its live `Engine` (PTYs running, owned on the main
@@ -179,20 +220,22 @@ pub fn serve_with_engine(
     // gate on mid-flip. The same `Arc` is threaded into both the actor (live
     // reload) and the router.
     let auth = auth::shared_auth(&engine.config.auth.users, false);
-    // The flip is ALWAYS local by construction: `local_addrs` only ever yields
-    // loopback plus the machine's own Tailscale address, never a public bind. A
-    // Tailscale bind is reachable only over the operator's own WireGuard tailnet,
-    // so it is local-classified — the auth-reload downgrade rule (which protects
-    // PUBLIC binds) treats this serve exactly like a pure loopback bind, allowing
-    // a reload that removes the last user. We therefore pass `loopback: true`
-    // unconditionally rather than recomputing from per-listener `is_loopback()`,
-    // which would wrongly flag the Tailscale listener as non-loopback.
+    // The downgrade rule is keyed on `host_only`, computed from the ACTUAL
+    // listeners: TRUE only when EVERY listener is genuine loopback. The flip's
+    // `local_addrs` may include the machine's Tailscale address — and although
+    // the startup bind gate treats that as "local", the downgrade rule must NOT:
+    // a Tailscale bind is reachable by other devices on the shared tailnet, so a
+    // running gate must never silently open there. A loopback-only flip stays
+    // host-only (a reload that removes the last user is allowed); a flip that
+    // bound the Tailscale address flips host_only false (such a reload is
+    // refused). `resolve_host_only` centralises the per-listener classification.
+    let host_only = resolve_host_only(&listeners);
     let (handle, ends) = engine_actor::build_actor_channels_with_auth(
         &engine,
         Some(engine_actor::AuthReloadContext {
             shared: Arc::clone(&auth),
             disable_auth: false,
-            loopback: true,
+            host_only,
         }),
     );
     engine_actor::spawn_global_workers(&mut engine);
@@ -226,6 +269,16 @@ pub fn serve_with_engine(
     // Set by the signal task; polled by the control closure so a SIGINT/SIGTERM
     // received while serving breaks the engine loop too (not just axum).
     let signal_quit = Arc::new(AtomicBool::new(false));
+    // Tripped by a serve task whose accept loop ERRORS while the server should
+    // still be running. Without this, one listener's accept loop could die and
+    // the remaining listeners would keep serving with no signal — the flip would
+    // never return and the operator would see a silently half-dead server. The
+    // control closure polls it (like `signal_quit`) so the engine loop exits, and
+    // the captured error is returned so the flip surfaces the failure. This
+    // mirrors `run_server`'s first-error-abort behavior.
+    let serve_failed = Arc::new(AtomicBool::new(false));
+    let serve_error: Arc<std::sync::Mutex<Option<anyhow::Error>>> =
+        Arc::new(std::sync::Mutex::new(None));
 
     // One axum serve task per listener, all sharing the same router/state and the
     // same shutdown watch. A JoinSet lets us join them all (bounded) on teardown.
@@ -233,9 +286,12 @@ pub fn serve_with_engine(
     for tokio_listener in tokio_listeners {
         let app = server::router_with_auth(handle.clone(), Arc::clone(&auth));
         let mut shutdown_rx = shutdown_rx.clone();
+        let task_shutdown_tx = shutdown_tx.clone();
+        let task_serve_failed = Arc::clone(&serve_failed);
+        let task_serve_error = Arc::clone(&serve_error);
         server_tasks.spawn_on(
             async move {
-                axum::serve(
+                let result = axum::serve(
                     tokio_listener,
                     app.into_make_service_with_connect_info::<SocketAddr>(),
                 )
@@ -247,7 +303,24 @@ pub fn serve_with_engine(
                         }
                     }
                 })
-                .await
+                .await;
+                if let Err(err) = &result {
+                    // The accept loop died while serving (graceful shutdown returns
+                    // Ok). Log loudly, then record the first error and trip both the
+                    // serve-failed flag (so the engine loop exits) and the shutdown
+                    // watch (so the OTHER listeners wind down too) — never let the
+                    // server limp on with one dead listener.
+                    dux_core::logger::error(&format!(
+                        "[server] a listener's accept loop failed; shutting the flip down: {err}"
+                    ));
+                    record_serve_failure(
+                        &task_serve_failed,
+                        &task_serve_error,
+                        &task_shutdown_tx,
+                        anyhow::anyhow!("web server listener failed: {err}"),
+                    );
+                }
+                result
             },
             runtime.handle(),
         );
@@ -266,10 +339,17 @@ pub fn serve_with_engine(
     });
 
     // Run the engine loop on the CURRENT thread. The control closure decides the
-    // exit reason: a tripped signal flag wins (QuitProcess), otherwise the
-    // caller's tick result maps straight through.
+    // exit reason: a serve failure or a tripped signal flag wins (both exit the
+    // loop), otherwise the caller's tick result maps straight through.
     let mut exit = ServerExit::ReturnToTui;
     let mut engine = engine_actor::run_engine_loop(engine, ends, || {
+        if serve_failed.load(Ordering::SeqCst) {
+            // A listener died: exit the loop. We RETURN to the TUI rather than
+            // quit the process (PTYs stay intact) and surface the captured error
+            // below so the caller knows the server could not keep serving.
+            exit = ServerExit::ReturnToTui;
+            return LoopControl::Exit;
+        }
         if signal_quit.load(Ordering::SeqCst) {
             exit = ServerExit::QuitProcess;
             return LoopControl::Exit;
@@ -338,6 +418,16 @@ pub fn serve_with_engine(
         }
     }
 
+    // If a listener's accept loop died (F5), surface the captured error rather
+    // than reporting a clean exit. The engine has already been wound down above,
+    // so the caller drops it; the TUI shows the failure instead of resuming onto
+    // a server that silently stopped serving.
+    if let Ok(mut slot) = serve_error.lock()
+        && let Some(err) = slot.take()
+    {
+        return Err(err);
+    }
+
     Ok((engine, exit))
 }
 
@@ -363,7 +453,90 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    use super::{record_serve_failure, resolve_host_only};
     use dux_core::engine::Command;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn record_serve_failure_first_caller_wins_and_triggers_shutdown() {
+        // The first serve task to die records its error, arms the flag, and trips
+        // the shutdown watch; a later caller (another listener winding down) does
+        // NOT overwrite the first error but STILL nudges shutdown. This is the F5
+        // load-bearing logic, tested directly because forcing a real axum accept
+        // loop to error mid-serve is inherently flaky.
+        let failed = AtomicBool::new(false);
+        let error: Mutex<Option<anyhow::Error>> = Mutex::new(None);
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let first = record_serve_failure(
+            &failed,
+            &error,
+            &shutdown_tx,
+            anyhow::anyhow!("listener A died"),
+        );
+        assert!(first, "the first failure must win");
+        assert!(failed.load(Ordering::SeqCst), "the flag must be armed");
+        assert!(
+            *shutdown_rx.borrow_and_update(),
+            "the shutdown watch must be tripped so other listeners wind down"
+        );
+        assert_eq!(
+            error.lock().unwrap().as_ref().unwrap().to_string(),
+            "listener A died"
+        );
+
+        // A second listener failing afterwards must NOT clobber the first error.
+        let second = record_serve_failure(
+            &failed,
+            &error,
+            &shutdown_tx,
+            anyhow::anyhow!("listener B died"),
+        );
+        assert!(!second, "a later failure is not the first-error winner");
+        assert_eq!(
+            error.lock().unwrap().as_ref().unwrap().to_string(),
+            "listener A died",
+            "the first error is preserved"
+        );
+    }
+
+    #[test]
+    fn resolve_host_only_true_for_loopback_only_listeners() {
+        // Two loopback listeners → host-only (a loopback-only flip permits the
+        // documented downgrade on reload).
+        let a = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback v4");
+        let b = std::net::TcpListener::bind("[::1]:0").expect("bind loopback v6");
+        assert!(
+            resolve_host_only(&[a, b]),
+            "loopback-only listeners must classify as host-only"
+        );
+    }
+
+    #[test]
+    fn resolve_host_only_false_when_a_non_loopback_listener_is_present() {
+        // A loopback listener PLUS a non-loopback (wildcard `0.0.0.0`, standing in
+        // for a Tailscale/public bind we can't allocate in CI) → NOT host-only,
+        // so the live gate downgrade is refused. This is the F1 guard at the
+        // resolution layer: any reachable listener flips host_only false even when
+        // a loopback listener is also present.
+        let loopback = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let wildcard = std::net::TcpListener::bind("0.0.0.0:0").expect("bind wildcard");
+        assert!(
+            !resolve_host_only(&[loopback, wildcard]),
+            "a non-loopback listener must flip host_only false"
+        );
+        // And a sole non-loopback listener is likewise not host-only.
+        let only_wildcard = std::net::TcpListener::bind("0.0.0.0:0").expect("bind wildcard");
+        assert!(!resolve_host_only(&[only_wildcard]));
+    }
+
+    #[test]
+    fn resolve_host_only_empty_is_vacuously_true() {
+        // No listeners: `all` is vacuously true. Not a real runtime case (the flip
+        // always binds at least loopback), but pins the boundary.
+        assert!(resolve_host_only(&[]));
+    }
 
     /// Light smoke test that the public dux-core API can be invoked from
     /// dux-web without TUI imports. Real architectural enforcement of the

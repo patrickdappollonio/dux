@@ -108,7 +108,7 @@ async fn boot_with_users(users: Vec<String>) -> (SocketAddr, tempfile::TempDir) 
         AuthReloadContext {
             shared: auth.clone(),
             disable_auth: false,
-            loopback: true,
+            host_only: true,
         },
     );
     let app = router_with_auth(handle, auth);
@@ -524,7 +524,7 @@ async fn reload_config_picks_up_new_user_live() {
         AuthReloadContext {
             shared: auth.clone(),
             disable_auth: false,
-            loopback: true,
+            host_only: true,
         },
     );
     let app = router_with_auth(handle, auth);
@@ -641,7 +641,7 @@ async fn reload_config_removing_user_revokes_live_session() {
         AuthReloadContext {
             shared: auth.clone(),
             disable_auth: false,
-            loopback: true,
+            host_only: true,
         },
     );
     let app = router_with_auth(handle, auth);
@@ -747,9 +747,10 @@ async fn reload_config_removing_user_revokes_live_session() {
 /// warning is meant to flag.)
 ///
 /// This server binds 127.0.0.1 (loopback), so the S2 rule ALLOWS the downgrade —
-/// a non-loopback bind would instead REFUSE it (covered by the `AuthState::rebuild`
-/// unit tests). The `boot_with_users` helper passes `loopback: true`, matching the
-/// loopback listener, so this test exercises the allow-with-warning branch.
+/// a reachable bind (public OR Tailscale) would instead REFUSE it (covered by the
+/// `AuthState::rebuild` unit tests). The `boot_with_users` helper passes
+/// `host_only: true`, matching the loopback listener, so this test exercises the
+/// allow-with-warning branch.
 #[tokio::test]
 async fn reload_config_removing_last_user_disables_gate_live() {
     let tmp = tempfile::tempdir().unwrap();
@@ -787,7 +788,7 @@ async fn reload_config_removing_last_user_disables_gate_live() {
         AuthReloadContext {
             shared: auth.clone(),
             disable_auth: false,
-            loopback: true,
+            host_only: true,
         },
     );
     let app = router_with_auth(handle, auth);
@@ -910,7 +911,7 @@ async fn boot_for_recheck(
         AuthReloadContext {
             shared: auth.clone(),
             disable_auth: false,
-            loopback: true,
+            host_only: true,
         },
     );
     let app = build_router_with_recheck(handle, auth, axum::Router::new(), recheck);

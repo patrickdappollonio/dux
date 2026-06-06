@@ -111,23 +111,34 @@ impl AuthState {
 
     /// Rebuild the snapshot on a config reload.
     ///
-    /// `prev` is the gate snapshot BEFORE this rebuild. `loopback` is whether the
-    /// LIVE server is bound to a loopback address (threaded from the resolved
-    /// bind addr at the server entry point). Removing the last user (or otherwise
-    /// clearing the credentials) flips `enabled` false, but the bind gate only
-    /// protects at STARTUP — a running server stays bound, so a previously
-    /// protected non-loopback server would silently become open. How we handle
-    /// that enabled→disabled-because-users-dropped-to-zero transition depends on
-    /// the bind:
+    /// `prev` is the gate snapshot BEFORE this rebuild. `host_only` is the
+    /// DOWNGRADE-RULE classification — NOT the same as the startup bind gate's
+    /// "local" classification. It is `true` ONLY when EVERY live listener is a
+    /// genuine loopback address (`127.0.0.1`/`::1`). A Tailscale bind makes the
+    /// server reachable from other people's devices on a shared tailnet, so even
+    /// though the startup bind gate deliberately treats Tailscale as "local"
+    /// (deciding whether a public bind needs `--insecure-allow-remote`), it is
+    /// NOT host-only for the downgrade rule: a tailnet-reachable server must
+    /// never silently drop its login gate on reload. Callers compute this from
+    /// their actual listeners (loopback only → `true`; any Tailscale or public
+    /// listener → `false`), threaded from the server entry point.
     ///
-    /// - **Non-loopback bind: REFUSE the downgrade.** The gate never downgrades
-    ///   to open on a reachable address. We KEEP the prior snapshot (users +
-    ///   enabled stay) and log a loud error. Restarting the server is the
-    ///   explicit way to run open here — the startup bind gate then demands
-    ///   `--insecure-allow-remote`.
-    /// - **Loopback bind: allow the downgrade with a warning.** A loopback
-    ///   server is only reachable from the same host, so flipping the gate off is
-    ///   the documented behavior; we still warn so the operator is not unaware.
+    /// Removing the last user (or otherwise clearing the credentials) flips
+    /// `enabled` false, but the bind gate only protects at STARTUP — a running
+    /// server stays bound, so a previously protected reachable server would
+    /// silently become open. How we handle that
+    /// enabled→disabled-because-users-dropped-to-zero transition depends on
+    /// `host_only`:
+    ///
+    /// - **Not host-only (reachable bind — public OR Tailscale): REFUSE the
+    ///   downgrade.** The gate never downgrades to open on an address other
+    ///   people can reach. We KEEP the prior snapshot (users + enabled stay) and
+    ///   log a loud error. Restarting the server is the explicit way to run open
+    ///   here — the startup bind gate then demands `--insecure-allow-remote`.
+    /// - **Host-only bind (loopback only): allow the downgrade with a warning.**
+    ///   A loopback-only server is reachable from the same host alone, so
+    ///   flipping the gate off is the documented behavior; we still warn so the
+    ///   operator is not unaware.
     ///
     /// The "users dropped to zero" rule covers the entries-present-but-all-
     /// malformed case too: `parse_users` returns empty there, so `build` reports
@@ -138,36 +149,40 @@ impl AuthState {
     /// snapshot.
     ///
     /// Returns the (possibly-kept) snapshot plus a `refused` flag: `true` only
-    /// when a non-loopback downgrade was REFUSED (the `[auth]` change was NOT
+    /// when a non-host-only downgrade was REFUSED (the `[auth]` change was NOT
     /// applied). The caller uses it to report a warn-tone reload status instead
     /// of a plain success — otherwise the refusal's "why" lives only in the log.
     pub(crate) fn rebuild(
         prev: &AuthState,
         users: &[String],
         disable_auth: bool,
-        loopback: bool,
+        host_only: bool,
     ) -> (Self, bool) {
         let next = AuthState::build(users, disable_auth);
         let downgrades_to_open = prev.enabled && !next.enabled && next.users.is_empty();
-        if downgrades_to_open && !loopback {
-            // REFUSE: the gate must not silently open a non-loopback server. Keep
-            // the prior snapshot (users + enabled) so the live server stays
-            // protected; a restart is the explicit, gated way to run open.
+        if downgrades_to_open && !host_only {
+            // REFUSE: the gate must not silently open a server other people can
+            // reach (a public bind OR a Tailscale bind — a shared tailnet means
+            // other devices, not just this host). Keep the prior snapshot (users
+            // + enabled) so the live server stays protected; a restart is the
+            // explicit, gated way to run open.
             let error = "[auth] reload would remove the last user and turn the login gate OFF, \
-                but this server is bound to a NON-LOOPBACK address. Refusing the downgrade: \
-                the previous users are kept and the gate stays ON. To run with no login on a \
-                reachable address, restart the server (the startup bind gate then requires \
-                --insecure-allow-remote).";
+                but this server is reachable from other devices (it is bound to a NON-LOOPBACK \
+                address — a public address or your Tailscale IP, which is reachable by everyone \
+                on that tailnet). Refusing the downgrade: the previous users are kept and the \
+                gate stays ON. To run with no login on a reachable address, restart the server \
+                (the startup bind gate then requires --insecure-allow-remote).";
             dux_core::logger::error(error);
             eprintln!("ERROR: {error}");
             return (prev.clone(), true);
         }
         if downgrades_to_open {
-            // Loopback: the documented downgrade is allowed; warn so the operator
-            // is aware the gate is now off.
-            let warning = "[auth] users removed — the login gate is now OFF. This loopback \
-                server is only reachable from this host, but anyone with local access can now \
-                control your agents and worktrees. Add a user to re-protect it.";
+            // Host-only (loopback only): the documented downgrade is allowed;
+            // warn so the operator is aware the gate is now off.
+            let warning = "[auth] users removed — the login gate is now OFF. This server is \
+                bound to loopback only, so it is reachable from this host alone, but anyone \
+                with local access can now control your agents and worktrees. Add a user to \
+                re-protect it.";
             dux_core::logger::warn(warning);
             eprintln!("WARNING: {warning}");
         }
@@ -637,45 +652,67 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_loopback_disables_when_last_user_removed() {
-        // LOOPBACK bind: enabled → disabled (the last user removed) is ALLOWED,
-        // with a warning side effect. Here we assert the effective transition.
+    fn rebuild_host_only_disables_when_last_user_removed() {
+        // HOST-ONLY (loopback-only) bind: enabled → disabled (the last user
+        // removed) is ALLOWED, with a warning side effect. Here we assert the
+        // effective transition.
         let prev = enabled_with_user("alice");
         let (next, refused) = AuthState::rebuild(&prev, &[], false, true);
         assert!(
             !next.enabled,
-            "on a loopback bind, removing the last user must turn the gate off"
+            "on a host-only bind, removing the last user must turn the gate off"
         );
         assert!(next.users.is_empty());
         assert!(
             !refused,
-            "a loopback downgrade is allowed, not refused — refused must be false"
+            "a host-only downgrade is allowed, not refused — refused must be false"
         );
     }
 
     #[test]
-    fn rebuild_non_loopback_refuses_last_user_removal() {
-        // NON-LOOPBACK bind: the same enabled → disabled downgrade is REFUSED.
-        // The prior snapshot is kept (users + enabled stay) so the live server
-        // never silently opens; a restart is the explicit way to run open.
+    fn rebuild_non_host_only_refuses_last_user_removal() {
+        // NOT host-only (a reachable bind): the same enabled → disabled downgrade
+        // is REFUSED. The prior snapshot is kept (users + enabled stay) so the
+        // live server never silently opens; a restart is the explicit way to run
+        // open.
         let prev = enabled_with_user("alice");
         let (next, refused) = AuthState::rebuild(&prev, &[], false, false);
         assert!(
             next.enabled,
-            "on a non-loopback bind, the gate must NOT downgrade to open"
+            "on a reachable bind, the gate must NOT downgrade to open"
         );
         assert_eq!(next.users.len(), 1, "the previous user must be kept");
         assert_eq!(next.users[0].username, "alice");
         assert!(
             refused,
-            "a refused non-loopback downgrade must signal refused = true"
+            "a refused non-host-only downgrade must signal refused = true"
         );
     }
 
     #[test]
-    fn rebuild_non_loopback_refuses_when_entries_all_malformed() {
+    fn rebuild_tailscale_bind_refuses_last_user_removal() {
+        // A Tailscale-bound server is NOT host-only: a shared tailnet means other
+        // people's devices can reach it, so the downgrade must be REFUSED exactly
+        // like any other reachable bind. This is the F1 regression guard — the
+        // startup bind gate treats Tailscale as "local", but the DOWNGRADE rule
+        // must not, so the caller passes host_only = false for a Tailscale bind.
+        let prev = enabled_with_user("alice");
+        let (next, refused) = AuthState::rebuild(&prev, &[], false, false);
+        assert!(
+            next.enabled,
+            "a Tailscale-bound server must NOT downgrade its login gate to open"
+        );
+        assert_eq!(next.users.len(), 1, "the previous user must be kept");
+        assert!(
+            refused,
+            "a Tailscale downgrade must be refused (host_only = false)"
+        );
+    }
+
+    #[test]
+    fn rebuild_non_host_only_refuses_when_entries_all_malformed() {
         // Entries present but none valid counts as "users dropped to zero": on a
-        // non-loopback bind the downgrade is still REFUSED.
+        // reachable bind the downgrade is still REFUSED.
         let prev = enabled_with_user("alice");
         let (next, refused) = AuthState::rebuild(
             &prev,
@@ -685,19 +722,19 @@ mod tests {
         );
         assert!(
             next.enabled,
-            "all-malformed entries must not open a non-loopback server"
+            "all-malformed entries must not open a reachable server"
         );
         assert_eq!(next.users.len(), 1, "the previous valid user must be kept");
         assert!(
             refused,
-            "an all-malformed non-loopback downgrade must also signal refused = true"
+            "an all-malformed non-host-only downgrade must also signal refused = true"
         );
     }
 
     #[test]
-    fn rebuild_non_loopback_allows_swapping_users() {
+    fn rebuild_non_host_only_allows_swapping_users() {
         // A reload that REPLACES the user (still one valid user remaining) is not
-        // a downgrade-to-open, so even a non-loopback bind takes the new snapshot.
+        // a downgrade-to-open, so even a reachable bind takes the new snapshot.
         let prev = enabled_with_user("alice");
         let hash = dux_core::auth::hash_password("pw").unwrap();
         let (next, refused) = AuthState::rebuild(&prev, &[format!("bob:{hash}")], false, false);

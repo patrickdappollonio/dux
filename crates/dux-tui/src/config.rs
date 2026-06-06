@@ -167,6 +167,12 @@ fn migrate_server_bind(
     let Ok(addr) = raw.trim().parse::<std::net::SocketAddr>() else {
         // Not a valid IP:port — nothing safe to migrate; let the new defaults
         // apply. (An invalid bind would have failed the resolver anyway.)
+        //
+        // NOTE this also drops a hostname `bind` (e.g. "localhost:9000"):
+        // `SocketAddr` only parses literal IP:port. That is NOT a regression —
+        // the OLD resolver also parsed `bind` with `SocketAddr::from_str` and
+        // rejected hostnames (no DNS), so a hostname bind never worked. Silently
+        // falling back to the new defaults matches the prior behavior.
         return Ok(());
     };
 

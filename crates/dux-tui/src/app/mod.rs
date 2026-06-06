@@ -162,6 +162,15 @@ pub struct App {
     /// `StartWebServer` palette action only after its (worker) pre-flight
     /// succeeds. LOCAL MODE may bind more than one address (loopback + Tailscale).
     pub(crate) pending_server_flip: Option<(Vec<std::net::TcpListener>, Vec<String>)>,
+    /// In-flight guard for the server-flip pre-flight. `start_web_server` spawns a
+    /// worker that races to `bind` the LOCAL MODE ports; two quick invocations
+    /// would both spawn workers and the second would hit a confusing EADDRINUSE.
+    /// Set true when a worker is dispatched, cleared when its
+    /// `ServerFlipPreflightReady` event lands (BOTH the Ok and Err arms). While
+    /// set — or while `pending_server_flip` is already stashed — a repeat
+    /// invocation is refused with an actionable status instead of spawning a
+    /// second worker.
+    pub(crate) server_flip_preflight_pending: bool,
 }
 
 /// How [`App::run`] returned: a plain quit, or a request to flip the current
@@ -1407,6 +1416,7 @@ impl App {
             terminal_selection: None,
             startup_log_selection: None,
             pending_server_flip: None,
+            server_flip_preflight_pending: false,
         };
         // First boot relaunches prior sessions; a resume must not — the engine
         // handed back from the web server already owns the live providers, and
