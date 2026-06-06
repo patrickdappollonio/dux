@@ -849,6 +849,223 @@ async fn reload_config_removing_last_user_disables_gate_live() {
     );
 }
 
+/// Changing a rebind-relevant `[server]` setting (here `port`) and reloading
+/// emits the warn-tone "restart the server" status, because the listeners are
+/// bound at startup and reload-config cannot rebind them. We watch the status
+/// broadcast the server itself publishes.
+#[tokio::test]
+async fn reload_config_changing_server_setting_warns_restart_needed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let paths = seed_paths(&root);
+
+    // Config on disk with one user and an explicit [server] port; reload re-reads
+    // THIS file, so changing the port on disk drives the drift.
+    let alice = user_entry("alice", "secret-pw");
+    std::fs::write(
+        &paths.config_path,
+        format!("[auth]\nusers = [\"{alice}\"]\n\n[server]\nport = 8080\n"),
+    )
+    .unwrap();
+
+    let mut engine = bootstrap_engine(&paths).unwrap();
+    let users_at_boot = engine.config.auth.users.clone();
+    engine.config.providers.commands.insert(
+        "claude".to_string(),
+        ProviderCommandConfig {
+            command: "cat".to_string(),
+            args: vec![],
+            resume_args: None,
+            ..Default::default()
+        },
+    );
+
+    let auth = shared_auth(&users_at_boot, false);
+    let (handle, _join) = spawn_engine_thread_with_auth(
+        engine,
+        AuthReloadContext {
+            shared: auth.clone(),
+            disable_auth: false,
+            host_only: true,
+        },
+    );
+    // Subscribe to the server's status broadcast BEFORE moving the handle into
+    // the router so we catch the warning the reload emits.
+    let mut status_rx = handle.subscribe_status();
+    let app = router_with_auth(handle, auth);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let c = client();
+    let login = c
+        .post(format!("http://{addr}/api/login"))
+        .json(&serde_json::json!({"username":"alice","password":"secret-pw"}))
+        .send()
+        .await
+        .unwrap();
+    let cookie = session_cookie(&login).expect("cookie");
+
+    // Change the [server] port on disk, then trigger the reload over alice's WS.
+    std::fs::write(
+        &paths.config_path,
+        format!("[auth]\nusers = [\"{alice}\"]\n\n[server]\nport = 9090\n"),
+    )
+    .unwrap();
+
+    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    req.headers_mut().insert("cookie", cookie.parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.expect("ws");
+    let _ = ws.next().await; // initial view_model
+    use futures_util::SinkExt;
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        r#"{"type":"command","command":"reload_config","args":{}}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    // Wait for the drift warning on the status stream.
+    let warned = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            match status_rx.recv().await {
+                Ok(status) => {
+                    if status.tone == "warning"
+                        && status
+                            .message
+                            .contains("Server listen/TLS settings changed")
+                    {
+                        break true;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(
+        warned,
+        "changing a [server] rebind setting + reload must warn that a restart is needed"
+    );
+}
+
+/// A reload that changes ONLY a non-server section (here adding a user) must NOT
+/// emit the restart-needed warning — it still emits the ordinary
+/// "Configuration reloaded" info, so we prove the warning is absent by asserting
+/// the info arrives without any preceding drift warning.
+#[tokio::test]
+async fn reload_config_non_server_change_does_not_warn_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let paths = seed_paths(&root);
+
+    let alice = user_entry("alice", "secret-pw");
+    std::fs::write(
+        &paths.config_path,
+        format!("[auth]\nusers = [\"{alice}\"]\n\n[server]\nport = 8080\n"),
+    )
+    .unwrap();
+
+    let mut engine = bootstrap_engine(&paths).unwrap();
+    let users_at_boot = engine.config.auth.users.clone();
+    engine.config.providers.commands.insert(
+        "claude".to_string(),
+        ProviderCommandConfig {
+            command: "cat".to_string(),
+            args: vec![],
+            resume_args: None,
+            ..Default::default()
+        },
+    );
+
+    let auth = shared_auth(&users_at_boot, false);
+    let (handle, _join) = spawn_engine_thread_with_auth(
+        engine,
+        AuthReloadContext {
+            shared: auth.clone(),
+            disable_auth: false,
+            host_only: true,
+        },
+    );
+    let mut status_rx = handle.subscribe_status();
+    let app = router_with_auth(handle, auth);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let c = client();
+    let login = c
+        .post(format!("http://{addr}/api/login"))
+        .json(&serde_json::json!({"username":"alice","password":"secret-pw"}))
+        .send()
+        .await
+        .unwrap();
+    let cookie = session_cookie(&login).expect("cookie");
+
+    // Add a user but leave [server] port unchanged.
+    let bob = user_entry("bob", "bob-pw");
+    std::fs::write(
+        &paths.config_path,
+        format!("[auth]\nusers = [\"{alice}\", \"{bob}\"]\n\n[server]\nport = 8080\n"),
+    )
+    .unwrap();
+
+    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    req.headers_mut().insert("cookie", cookie.parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.expect("ws");
+    let _ = ws.next().await; // initial view_model
+    use futures_util::SinkExt;
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        r#"{"type":"command","command":"reload_config","args":{}}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    // The "Configuration reloaded" info confirms the reload was applied. Reaching
+    // it WITHOUT seeing a drift warning first proves the warning was suppressed.
+    let outcome = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            match status_rx.recv().await {
+                Ok(status) => {
+                    if status.tone == "warning"
+                        && status
+                            .message
+                            .contains("Server listen/TLS settings changed")
+                    {
+                        break "warned";
+                    }
+                    if status.tone == "info" && status.message.contains("Configuration reloaded") {
+                        break "reloaded";
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break "closed",
+            }
+        }
+    })
+    .await
+    .unwrap_or("timeout");
+    assert_eq!(
+        outcome, "reloaded",
+        "a non-server reload must apply without the restart-needed warning"
+    );
+}
+
 /// The concrete connected client stream type from the dev-dependency
 /// `tokio-tungstenite` (axum carries a different internal version, so a generic
 /// here would be ambiguous — we pin the exact type instead).

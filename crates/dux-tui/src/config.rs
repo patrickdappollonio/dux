@@ -884,10 +884,12 @@ fn render_server_acme_config(out: &mut String, acme: &AcmeSettings) {
          # :443 serves the TLS web UI. Both ports are configurable below.\n\
          #\n\
          # Behind your own reverse proxy instead? Leave enabled = false, let the proxy\n\
-         # terminate TLS, and point [server] bind at a loopback or private address.\n\
+         # terminate TLS, and point the proxy at a loopback or private [server]\n\
+         # listen_addrs entry (or use LOCAL MODE).\n\
          #\n\
          # NOTE: ACME settings are read once when the server starts. Changing them and\n\
-         # running reload-config does NOT rebind the listeners — restart the server.\n",
+         # running reload-config does NOT rebind the listeners — dux applies the rest\n\
+         # of the reload and posts a warning telling you to restart the server.\n",
     );
     out.push_str(
         "# Turn the built-in ACME server on. Leave false to serve plain HTTP (loopback\n\
