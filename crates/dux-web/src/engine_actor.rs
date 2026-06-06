@@ -270,6 +270,15 @@ impl EngineHandle {
         self.status_tx.subscribe()
     }
 
+    /// A clone of the status broadcast SENDER, so a non-engine producer (the ACME
+    /// certificate-lifecycle task) can publish onto the SAME channel WS clients
+    /// subscribe to via [`subscribe_status`] and the engine loop's reload warnings
+    /// ride. The handle holds the same `Sender` the loop does (see
+    /// `build_actor_channels_with_auth`), so a send here reaches every subscriber.
+    pub fn status_sender(&self) -> broadcast::Sender<WireStatus> {
+        self.status_tx.clone()
+    }
+
     pub fn subscribe_commit_messages(&self) -> broadcast::Receiver<String> {
         self.commit_msg_tx.subscribe()
     }

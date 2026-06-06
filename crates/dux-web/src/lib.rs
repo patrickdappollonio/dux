@@ -90,8 +90,11 @@ pub fn run_server(paths: DuxPaths, plan: ServerPlan, disable_auth: bool) -> Resu
 
 /// The plain-HTTP serve path: one axum task per listener (loopback, Tailscale,
 /// LAN, or proxy-fronted), sharing the router/state, plus the periodic
-/// expired-session sweep. Behaviorally identical to the pre-TLS `run_server`
-/// except for the added sweep task (deferral 3).
+/// expired-session sweep. Shutdown is the SAME [`ServeShutdown`] watch lane the
+/// ACME path and the flip use: a SIGINT/SIGTERM trips the watch, and the FIRST
+/// listener to die records its error and trips the watch too, so the siblings get
+/// a graceful shutdown and the error propagates (genuine first-error wind-down —
+/// no longer a no-abort JoinSet wait). The single sweep rides the same lane.
 fn run_plain_http(paths: DuxPaths, addrs: Vec<SocketAddr>, disable_auth: bool) -> Result<()> {
     let engine = bootstrap::bootstrap_engine(&paths)?;
     // host-only ⇔ EVERY listener is genuine loopback. A Tailscale (or public)
@@ -114,10 +117,10 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<SocketAddr>, disable_auth: bool) -
         .enable_all()
         .build()?;
     runtime.block_on(async move {
-        // Drives the session sweep's lifetime: flipped to `true` once all serve
-        // tasks finish (a shutdown signal fired), so the sweep task exits with the
-        // server rather than lingering.
-        let (sweep_shutdown_tx, sweep_shutdown_rx) = tokio::sync::watch::channel(false);
+        // The shared shutdown primitive: a SIGINT/SIGTERM or a first-listener
+        // failure flips its watch, every serve task awaits it, and the sweep rides
+        // the same lane so it exits with the server rather than lingering.
+        let (shutdown, sweep_shutdown_rx) = ServeShutdown::new();
         // Build ONE app + store, clone the router across listeners (it is a cheap
         // `Arc`-backed service). The store is shared (an `Arc`), so the single
         // sweep prunes the same map every listener serves.
@@ -129,60 +132,111 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<SocketAddr>, disable_auth: bool) -
         );
         let sweep = tls::spawn_session_sweep(store, SESSION_SWEEP_PERIOD, sweep_shutdown_rx);
 
-        // Bind every address; each serve task gets its own graceful-shutdown
-        // future driven by the same signal.
+        // Translate a SIGINT/SIGTERM into a watch trip so every listener winds
+        // down gracefully (the same trigger a first-listener failure uses).
+        {
+            let shutdown = shutdown.clone();
+            tokio::spawn(async move {
+                shutdown_signal().await;
+                shutdown.trigger();
+            });
+        }
+
+        // Bind every address; each serve task's graceful-shutdown future awaits
+        // the shared watch, so any trip (signal OR a sibling's failure) winds them
+        // all down together.
         let mut tasks = tokio::task::JoinSet::new();
         for addr in addrs {
             let listener = tokio::net::TcpListener::bind(addr).await?;
             let app = app.clone();
+            let shutdown = shutdown.clone();
+            let task_shutdown = shutdown.subscribe();
             tasks.spawn(async move {
                 // Serve with connect-info so the login handler can read the peer
                 // IP for the per-IP attempt backoff.
-                axum::serve(
+                let result = axum::serve(
                     listener,
                     app.into_make_service_with_connect_info::<SocketAddr>(),
                 )
-                .with_graceful_shutdown(shutdown_signal())
-                .await
+                .with_graceful_shutdown(wait_for_shutdown(task_shutdown))
+                .await;
+                if let Err(e) = &result {
+                    // The accept loop died while serving (graceful shutdown returns
+                    // Ok). Record the first error and trip the watch so the OTHER
+                    // listeners wind down too — never let the server limp on with
+                    // one dead listener.
+                    dux_core::logger::error(&format!(
+                        "[server] a plain-HTTP listener's accept loop failed; \
+                         shutting the server down: {e}"
+                    ));
+                    shutdown.record_failure(anyhow::anyhow!("web server listener failed: {e}"));
+                }
+                result
             });
         }
-        // Wait for all serve tasks to finish (they all wind down together when a
-        // shutdown signal fires). Surface the first error if any task failed.
-        let mut first_err: Option<anyhow::Error> = None;
+        // Wait for all serve tasks to finish (they all wind down together once the
+        // watch trips). A task that PANICKED yields a JoinError here and recorded
+        // nothing, so record it and trip the watch so siblings stop too.
         while let Some(joined) = tasks.join_next().await {
-            if let Err(e) = joined
-                .map_err(anyhow::Error::from)
-                .and_then(|r| r.map_err(Into::into))
-                && first_err.is_none()
-            {
-                first_err = Some(e);
+            if let Err(join_err) = joined {
+                dux_core::logger::error(&format!(
+                    "[server] a plain-HTTP serve task panicked: {join_err} — shutting the other \
+                     listeners down so the server does not limp on half-dead."
+                ));
+                shutdown.record_failure(anyhow::anyhow!(
+                    "a plain-HTTP serve task panicked: {join_err}"
+                ));
             }
         }
         // Stop the sweep, then SIGTERM the agents (they save state for a later
         // resume), mark their sessions Detached, then exit; Drop hard-kills any
         // straggler.
-        let _ = sweep_shutdown_tx.send(true);
+        shutdown.trigger();
         let _ = sweep.await;
         handle.shutdown().await;
-        match first_err {
+        match shutdown.take_error() {
             Some(e) => Err(e),
             None => Ok::<(), anyhow::Error>(()),
         }
     })
 }
 
+/// The loud warning shown when the login gate is OFF on a built-in-TLS server.
+///
+/// An ACME server is ALWAYS public (a browser-trusted certificate on :443), so a
+/// disabled gate means anyone who can reach :443 controls the agents and
+/// filesystem. The only safe way to run this is behind an upstream auth proxy
+/// (oauth2-proxy and friends). Shared by the `dux server` startup banner (stderr)
+/// and the `run_acme` log line (so `dux.log` carries it for long-running servers),
+/// so the two can never drift. Pure so it is unit-testable.
+pub fn acme_disable_auth_warning() -> String {
+    "WARNING: --disable-auth is set and dux is serving built-in TLS on :443 with a \
+     browser-trusted certificate but NO login gate. This server is public: anyone who can \
+     reach it can control your agents and worktrees. Only do this when an upstream auth proxy \
+     (e.g. oauth2-proxy) is handling authentication in front of dux."
+        .to_string()
+}
+
 /// The ACME (built-in TLS) serve path: two public listeners. `:80` answers the
 /// HTTP-01 challenge and otherwise 308-redirects to HTTPS; `:443` serves the
 /// existing app router over TLS with the rustls-acme acceptor. A dedicated task
 /// polls the `AcmeState` so certificates acquire and renew, and the periodic
-/// session sweep runs here too. Graceful shutdown is wired through axum-server
-/// `Handle`s on the same signal lane, and the FIRST listener error aborts both,
-/// mirroring `run_plain_http`/`serve_with_engine`.
+/// session sweep runs here too. Shutdown is the SAME [`ServeShutdown`] watch lane
+/// `run_plain_http` and the flip use: a SIGINT/SIGTERM or a first-listener failure
+/// trips the watch, a watcher awaits it (no sleep-poll) and drives the
+/// axum-server `Handle`s' bounded graceful shutdown, so both listeners wind down
+/// together and the first error propagates.
 ///
 /// `host_only` is FALSE by nature here (the certs make dux reachable on the
 /// public internet), so the live auth-downgrade rule refuses to open the gate.
 fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool) -> Result<()> {
     let engine = bootstrap::bootstrap_engine(&paths)?;
+    // Mirror the startup banner into dux.log so a long-running TLS server that was
+    // launched with the gate off keeps a visible record of it — the banner only
+    // appears once on stderr at boot.
+    if disable_auth {
+        dux_core::logger::warn(&format!("[server] {}", acme_disable_auth_warning()));
+    }
     let auth = auth::shared_auth(&engine.config.auth.users, disable_auth);
     let (handle, _join) = engine_actor::spawn_engine_thread_with_auth(
         engine,
@@ -214,7 +268,11 @@ fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool) -> Result<()> {
         let acceptor = acme_state.axum_acceptor(acme_state.default_rustls_config());
 
         // Drive certificate acquisition/renewal. Without this nothing progresses.
-        let acme_task = tls::spawn_acme_event_task(acme_state);
+        // Thread the engine's status broadcast in so certificate lifecycle events
+        // (acquired/renewed, errors, stream-end) reach web clients live — the same
+        // channel the reload warnings ride — not just dux.log.
+        let acme_task =
+            tls::spawn_acme_event_task(acme_state, Some(handle.status_sender()), domains.clone());
 
         // Build the HTTPS app (Secure cookie ON) + its session store, then pin
         // every route to the configured domains (DNS-rebinding defense).
@@ -224,41 +282,39 @@ fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool) -> Result<()> {
             axum::Router::new(),
             RouterParams::tls(),
         );
+        // Pin every route to the configured domains (DNS-rebinding defense) and
+        // stamp HSTS on every response. Both are HTTPS-ONLY hardening: dux owns
+        // TLS on this path, so it is correct to tell the browser this host is
+        // HTTPS-only. The plain-HTTP/proxy/flip paths get neither.
         let https_app = tls::host_allowlist_layer(https_app, domains.clone());
+        let https_app = tls::hsts_layer(https_app);
 
-        // Sweep lifetime + shutdown lane.
-        let (sweep_shutdown_tx, sweep_shutdown_rx) = tokio::sync::watch::channel(false);
+        // The shared shutdown primitive: a SIGINT/SIGTERM or a first-listener
+        // failure flips its watch; the watcher below awaits it and drives the
+        // axum-server handles' bounded graceful shutdown. The sweep rides the same
+        // lane so it exits with the server.
+        let (shutdown, sweep_shutdown_rx) = ServeShutdown::new();
         let sweep = tls::spawn_session_sweep(store, SESSION_SWEEP_PERIOD, sweep_shutdown_rx);
 
         // axum-server graceful-shutdown handles, one per listener, both driven by
-        // the shared signal below.
+        // the shared watch below.
         let http_handle = axum_server::Handle::new();
         let https_handle = axum_server::Handle::new();
-
-        // First-error abort across BOTH listeners (mirrors run_plain_http /
-        // serve_with_engine): the first serve task to die trips this flag so the
-        // signal task can wind the other listener down too.
-        let serve_failed = Arc::new(AtomicBool::new(false));
-        let serve_error: Arc<std::sync::Mutex<Option<anyhow::Error>>> =
-            Arc::new(std::sync::Mutex::new(None));
 
         let mut tasks = tokio::task::JoinSet::new();
         {
             let http_addr = plan.http_addr;
             let h = http_handle.clone();
-            let failed = Arc::clone(&serve_failed);
-            let errslot = Arc::clone(&serve_error);
+            let shutdown = shutdown.clone();
             tasks.spawn(async move {
                 let r = tls::serve_http_challenge(http_addr, http_router, h).await;
                 if let Err(e) = &r {
                     dux_core::logger::error(&format!(
                         "[server] the :80 ACME challenge/redirect listener failed: {e}"
                     ));
-                    record_serve_failure_named(
-                        &failed,
-                        &errslot,
-                        anyhow::anyhow!("the :80 ACME challenge/redirect listener failed: {e}"),
-                    );
+                    shutdown.record_failure(anyhow::anyhow!(
+                        "the :80 ACME challenge/redirect listener failed: {e}"
+                    ));
                 }
                 r
             });
@@ -266,17 +322,12 @@ fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool) -> Result<()> {
         {
             let https_addr = plan.https_addr;
             let h = https_handle.clone();
-            let failed = Arc::clone(&serve_failed);
-            let errslot = Arc::clone(&serve_error);
+            let shutdown = shutdown.clone();
             tasks.spawn(async move {
                 let r = tls::serve_https_acme(https_addr, https_app, acceptor, h).await;
                 if let Err(e) = &r {
                     dux_core::logger::error(&format!("[server] the :443 TLS listener failed: {e}"));
-                    record_serve_failure_named(
-                        &failed,
-                        &errslot,
-                        anyhow::anyhow!("the :443 TLS listener failed: {e}"),
-                    );
+                    shutdown.record_failure(anyhow::anyhow!("the :443 TLS listener failed: {e}"));
                 }
                 r
             });
@@ -300,17 +351,24 @@ fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool) -> Result<()> {
             plan.https_addr, plan.http_addr
         ));
 
-        // Signal/abort watcher: a SIGINT/SIGTERM OR a first listener error
-        // triggers graceful shutdown on both axum-server handles.
+        // Signal/abort watcher: a SIGINT/SIGTERM OR a first listener error both
+        // flip the shared watch; this awaits it (no sleep-poll) and drives the
+        // bounded graceful shutdown on both axum-server handles. A separate task
+        // translates the OS signal into a watch trip so the two triggers converge
+        // on the same lane.
+        {
+            let shutdown = shutdown.clone();
+            tokio::spawn(async move {
+                shutdown_signal().await;
+                shutdown.trigger();
+            });
+        }
         {
             let http_handle = http_handle.clone();
             let https_handle = https_handle.clone();
-            let serve_failed = Arc::clone(&serve_failed);
+            let watch_rx = shutdown.subscribe();
             tokio::spawn(async move {
-                tokio::select! {
-                    _ = shutdown_signal() => {}
-                    _ = wait_for_flag(serve_failed) => {}
-                }
+                wait_for_shutdown(watch_rx).await;
                 // Bounded graceful shutdown so a wedged TLS client can't hang exit.
                 http_handle.graceful_shutdown(Some(ACME_GRACEFUL_SHUTDOWN));
                 https_handle.graceful_shutdown(Some(ACME_GRACEFUL_SHUTDOWN));
@@ -318,41 +376,32 @@ fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool) -> Result<()> {
         }
 
         // Wait for both serve tasks to finish. A serve task that returned `Err`
-        // already recorded itself via `record_serve_failure_named` inside the
-        // task; but a task that PANICKED yields a `JoinError` here and recorded
-        // nothing, so the failure slot would stay empty and the sibling listener
-        // would serve on. Record the JoinError too and arm the failure flag so the
-        // signal watcher winds the other listener down — consistent with
-        // `run_plain_http`, which surfaces join errors rather than swallowing them.
+        // already recorded itself via `shutdown.record_failure` inside the task;
+        // but a task that PANICKED yields a `JoinError` here and recorded nothing,
+        // so record the JoinError too and trip the watch so the sibling listener
+        // winds down — consistent with `run_plain_http`.
         while let Some(joined) = tasks.join_next().await {
             if let Err(join_err) = joined {
                 dux_core::logger::error(&format!(
                     "[server] an ACME serve task panicked: {join_err} — shutting the other \
                      listener down so the server does not limp on half-dead."
                 ));
-                record_serve_failure_named(
-                    &serve_failed,
-                    &serve_error,
-                    anyhow::anyhow!("an ACME serve task panicked: {join_err}"),
-                );
-                http_handle.graceful_shutdown(Some(ACME_GRACEFUL_SHUTDOWN));
-                https_handle.graceful_shutdown(Some(ACME_GRACEFUL_SHUTDOWN));
+                shutdown.record_failure(anyhow::anyhow!("an ACME serve task panicked: {join_err}"));
             }
         }
 
-        // Wind down the ACME poller and the sweep.
+        // Wind down the ACME poller and the sweep (the watch is already tripped,
+        // so the sweep is winding down; trip again is idempotent).
         acme_task.abort();
-        let _ = sweep_shutdown_tx.send(true);
+        shutdown.trigger();
         let _ = sweep.await;
 
         handle.shutdown().await;
 
-        if let Ok(mut slot) = serve_error.lock()
-            && let Some(e) = slot.take()
-        {
-            return Err(e);
+        match shutdown.take_error() {
+            Some(e) => Err(e),
+            None => Ok::<(), anyhow::Error>(()),
         }
-        Ok::<(), anyhow::Error>(())
     })
 }
 
@@ -360,36 +409,6 @@ fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool) -> Result<()> {
 /// in-flight requests to finish, short enough that a wedged TLS connection cannot
 /// hang process exit.
 const ACME_GRACEFUL_SHUTDOWN: Duration = Duration::from_secs(3);
-
-/// Resolve once `flag` becomes `true`, polling on a short interval. Used by the
-/// ACME signal watcher to react to a first-listener failure (the serve tasks set
-/// the flag) without a dedicated channel.
-async fn wait_for_flag(flag: Arc<AtomicBool>) {
-    loop {
-        if flag.load(Ordering::SeqCst) {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-/// Record the first serve failure for the ACME path: the first caller stores its
-/// error and arms the flag; later callers no-op the error slot. Always arms the
-/// flag so the signal watcher triggers graceful shutdown. A trimmed sibling of
-/// [`record_serve_failure`] (no shutdown watch — the ACME path uses axum-server
-/// `Handle`s instead).
-fn record_serve_failure_named(
-    serve_failed: &AtomicBool,
-    serve_error: &std::sync::Mutex<Option<anyhow::Error>>,
-    err: anyhow::Error,
-) {
-    let first = serve_failed
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok();
-    if first && let Ok(mut slot) = serve_error.lock() {
-        *slot = Some(err);
-    }
-}
 
 /// What the status-screen tick asks `serve_with_engine` to do after the current
 /// iteration. `Continue` keeps serving; `ReturnToTui` flips back to the TUI
@@ -426,29 +445,95 @@ const SERVER_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 /// have unparked the forwarders well within this bound; this is belt-and-braces.
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Record a serve-task failure exactly once and ask the whole flip to wind down.
+/// The ONE serve-shutdown primitive shared by all three serve paths
+/// (`run_plain_http`, `run_acme`, `serve_with_engine`). It bundles the
+/// first-error bookkeeping with the `watch<bool>` shutdown lane every listener
+/// awaits, so a single dying listener winds the siblings down identically
+/// everywhere:
 ///
-/// Called by every per-listener serve task whose accept loop returns an `Err`
-/// (graceful shutdown returns `Ok`, so this only fires on a genuine death). The
-/// FIRST caller wins: it stores the error and is the one that should arm the
-/// engine-loop exit; later callers (other listeners winding down behind it) no-op
-/// the error slot. Always trips the shutdown watch so the remaining listeners
-/// stop too. Returns `true` when this call was the first-error winner.
-fn record_serve_failure(
-    serve_failed: &std::sync::atomic::AtomicBool,
-    serve_error: &std::sync::Mutex<Option<anyhow::Error>>,
-    shutdown_tx: &tokio::sync::watch::Sender<bool>,
-    err: anyhow::Error,
-) -> bool {
-    let first = serve_failed
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok();
-    if first && let Ok(mut slot) = serve_error.lock() {
-        *slot = Some(err);
+/// - `failed` — armed once (compare-exchange) so the FIRST failing listener is
+///   the one that records the returned error and is reported.
+/// - `error` — the first error, surfaced to the caller after wind-down.
+/// - `shutdown_tx` — flipped to `true` on the first failure (and on a normal
+///   SIGINT/SIGTERM); every serve task's graceful-shutdown future awaits the
+///   matching receiver, so tripping it stops the whole server. Replaces the old
+///   ACME `AtomicBool` + 100ms poll AND `run_plain_http`'s no-abort JoinSet wait.
+#[derive(Clone)]
+struct ServeShutdown {
+    failed: Arc<AtomicBool>,
+    error: Arc<std::sync::Mutex<Option<anyhow::Error>>>,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl ServeShutdown {
+    fn new() -> (Self, tokio::sync::watch::Receiver<bool>) {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        (
+            Self {
+                failed: Arc::new(AtomicBool::new(false)),
+                error: Arc::new(std::sync::Mutex::new(None)),
+                shutdown_tx,
+            },
+            shutdown_rx,
+        )
     }
-    // Always wind the others down, even for a non-first caller (idempotent send).
-    let _ = shutdown_tx.send(true);
-    first
+
+    /// A fresh receiver on the shutdown lane (one per serve task).
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.shutdown_tx.subscribe()
+    }
+
+    /// Whether a serve task has already recorded a failure (polled by the flip's
+    /// engine-loop control closure to exit the loop).
+    fn is_failed(&self) -> bool {
+        self.failed.load(Ordering::SeqCst)
+    }
+
+    /// Trigger a graceful, non-error wind-down (a SIGINT/SIGTERM or the flip's
+    /// engine loop returning). Idempotent.
+    fn trigger(&self) {
+        let _ = self.shutdown_tx.send(true);
+    }
+
+    /// Take the first recorded serve error, if any. Called once after every
+    /// listener has wound down so the caller can surface a genuine death.
+    fn take_error(&self) -> Option<anyhow::Error> {
+        self.error.lock().ok().and_then(|mut slot| slot.take())
+    }
+
+    /// Record a serve-task failure exactly once and wind the whole server down.
+    ///
+    /// Called by every per-listener serve task whose accept loop returns an `Err`
+    /// (graceful shutdown returns `Ok`, so this only fires on a genuine death) and
+    /// by the ACME join-error handler. The FIRST caller wins: it stores the error
+    /// and is the one reported; later callers (other listeners winding down behind
+    /// it) no-op the error slot. Always trips the shutdown watch so the remaining
+    /// listeners stop too. Returns `true` when this call was the first-error
+    /// winner.
+    fn record_failure(&self, err: anyhow::Error) -> bool {
+        let first = self
+            .failed
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        if first && let Ok(mut slot) = self.error.lock() {
+            *slot = Some(err);
+        }
+        // Always wind the others down, even for a non-first caller (idempotent).
+        let _ = self.shutdown_tx.send(true);
+        first
+    }
+}
+
+/// Await the shared shutdown lane: resolve once the watch flips to `true` (a
+/// SIGINT/SIGTERM trigger or a first-listener failure). The receiver is consumed,
+/// so each caller passes its own [`ServeShutdown::subscribe`] handle. Replaces the
+/// ACME path's `wait_for_flag` 100ms sleep-poll with a wakeup-driven await.
+async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
+    while !*rx.borrow_and_update() {
+        if rx.changed().await.is_err() {
+            break;
+        }
+    }
 }
 
 /// Classify a set of live std listeners for the auth-reload DOWNGRADE rule.
@@ -542,22 +627,19 @@ pub fn serve_with_engine(
         out
     };
 
-    // Graceful-shutdown trigger for axum: the synchronous engine loop flips this
-    // watch to `true` on exit, and each server's shutdown future awaits it.
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    // The shared shutdown primitive — the SAME [`ServeShutdown`] the CLI serve
+    // paths use. Its watch is the graceful-shutdown lane every serve task and the
+    // sweep await; the synchronous engine loop flips it on exit, a SIGINT/SIGTERM
+    // flips it via the signal task, and a dying listener flips it via
+    // `record_failure`. The control closure polls `is_failed()` so a listener
+    // death also breaks the engine loop, and `take_error()` surfaces the death to
+    // the caller.
+    let (shutdown, sweep_shutdown_rx) = ServeShutdown::new();
     // Set by the signal task; polled by the control closure so a SIGINT/SIGTERM
-    // received while serving breaks the engine loop too (not just axum).
+    // received while serving breaks the engine loop too (not just axum). Distinct
+    // from the failure flag because a signal means QuitProcess, a failure means
+    // ReturnToTui-with-error.
     let signal_quit = Arc::new(AtomicBool::new(false));
-    // Tripped by a serve task whose accept loop ERRORS while the server should
-    // still be running. Without this, one listener's accept loop could die and
-    // the remaining listeners would keep serving with no signal — the flip would
-    // never return and the operator would see a silently half-dead server. The
-    // control closure polls it (like `signal_quit`) so the engine loop exits, and
-    // the captured error is returned so the flip surfaces the failure. This
-    // mirrors `run_server`'s first-error-abort behavior.
-    let serve_failed = Arc::new(AtomicBool::new(false));
-    let serve_error: Arc<std::sync::Mutex<Option<anyhow::Error>>> =
-        Arc::new(std::sync::Mutex::new(None));
 
     // Build ONE app + session store, shared across listeners (the router is a
     // cheap `Arc`-backed service; the store is an `Arc`). The flip is plain HTTP
@@ -571,7 +653,7 @@ pub fn serve_with_engine(
     );
     let sweep_task = {
         let _guard = runtime.enter();
-        tls::spawn_session_sweep(sweep_store, SESSION_SWEEP_PERIOD, shutdown_rx.clone())
+        tls::spawn_session_sweep(sweep_store, SESSION_SWEEP_PERIOD, sweep_shutdown_rx)
     };
 
     // One axum serve task per listener, all sharing the same router/state and the
@@ -579,47 +661,32 @@ pub fn serve_with_engine(
     let mut server_tasks = tokio::task::JoinSet::new();
     for tokio_listener in tokio_listeners {
         let app = app.clone();
-        let mut shutdown_rx = shutdown_rx.clone();
-        let task_shutdown_tx = shutdown_tx.clone();
-        let task_serve_failed = Arc::clone(&serve_failed);
-        let task_serve_error = Arc::clone(&serve_error);
+        let shutdown = shutdown.clone();
+        let task_shutdown = shutdown.subscribe();
         server_tasks.spawn_on(
             async move {
                 let result = axum::serve(
                     tokio_listener,
                     app.into_make_service_with_connect_info::<SocketAddr>(),
                 )
-                .with_graceful_shutdown(async move {
-                    // Wait until the loop flips the watch to `true`.
-                    while !*shutdown_rx.borrow_and_update() {
-                        if shutdown_rx.changed().await.is_err() {
-                            break;
-                        }
-                    }
-                })
+                .with_graceful_shutdown(wait_for_shutdown(task_shutdown))
                 .await;
                 if let Err(err) = &result {
                     // The accept loop died while serving (graceful shutdown returns
-                    // Ok). Log loudly, then record the first error and trip both the
-                    // serve-failed flag (so the engine loop exits) and the shutdown
-                    // watch (so the OTHER listeners wind down too) — never let the
-                    // server limp on with one dead listener.
+                    // Ok). Log loudly, then record the first error and trip the
+                    // watch (so the engine loop exits via `is_failed()` and the
+                    // OTHER listeners wind down too) — never let the server limp on
+                    // with one dead listener.
                     dux_core::logger::error(&format!(
                         "[server] a listener's accept loop failed; shutting the flip down: {err}"
                     ));
-                    record_serve_failure(
-                        &task_serve_failed,
-                        &task_serve_error,
-                        &task_shutdown_tx,
-                        anyhow::anyhow!("web server listener failed: {err}"),
-                    );
+                    shutdown.record_failure(anyhow::anyhow!("web server listener failed: {err}"));
                 }
                 result
             },
             runtime.handle(),
         );
     }
-    drop(shutdown_rx);
     // The router holds its own cloned handle(s); drop ours so only the serve
     // tasks keep the request side alive (matches the pre-multi-listener move).
     drop(handle);
@@ -637,7 +704,7 @@ pub fn serve_with_engine(
     // loop), otherwise the caller's tick result maps straight through.
     let mut exit = ServerExit::ReturnToTui;
     let mut engine = engine_actor::run_engine_loop(engine, ends, || {
-        if serve_failed.load(Ordering::SeqCst) {
+        if shutdown.is_failed() {
             // A listener died: exit the loop. We RETURN to the TUI rather than
             // quit the process (PTYs stay intact) and surface the captured error
             // below so the caller knows the server could not keep serving.
@@ -673,7 +740,7 @@ pub fn serve_with_engine(
     // wind down. A single bounded join over the whole set keeps a wedged client
     // connection on any listener from hanging the flip back to the TUI. The same
     // watch flip also stops the session sweep task; await it (bounded) too.
-    let _ = shutdown_tx.send(true);
+    shutdown.trigger();
     runtime.block_on(async {
         let _ = tokio::time::timeout(SERVER_JOIN_TIMEOUT, async {
             while server_tasks.join_next().await.is_some() {}
@@ -718,9 +785,7 @@ pub fn serve_with_engine(
     // than reporting a clean exit. The engine has already been wound down above,
     // so the caller drops it; the TUI shows the failure instead of resuming onto
     // a server that silently stopped serving.
-    if let Ok(mut slot) = serve_error.lock()
-        && let Some(err) = slot.take()
-    {
+    if let Some(err) = shutdown.take_error() {
         return Err(err);
     }
 
@@ -749,10 +814,25 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::{record_serve_failure, resolve_host_only};
+    use super::{ServeShutdown, acme_disable_auth_warning, resolve_host_only, wait_for_shutdown};
     use dux_core::engine::Command;
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn acme_disable_auth_warning_flags_public_no_gate() {
+        // The warning the banner prints and run_acme logs must name the risk
+        // (public, no gate) and the only safe mitigation (an upstream auth proxy).
+        let w = acme_disable_auth_warning();
+        assert!(w.contains("--disable-auth"), "must name the flag: {w}");
+        assert!(w.contains("NO login gate"), "must say the gate is off: {w}");
+        assert!(
+            w.to_lowercase().contains("public"),
+            "must call the server public: {w}"
+        );
+        assert!(
+            w.contains("auth proxy"),
+            "must point at the upstream-proxy mitigation: {w}"
+        );
+    }
 
     #[test]
     fn record_serve_failure_first_caller_wins_and_triggers_shutdown() {
@@ -760,40 +840,90 @@ mod tests {
         // the shutdown watch; a later caller (another listener winding down) does
         // NOT overwrite the first error but STILL nudges shutdown. This is the F5
         // load-bearing logic, tested directly because forcing a real axum accept
-        // loop to error mid-serve is inherently flaky.
-        let failed = AtomicBool::new(false);
-        let error: Mutex<Option<anyhow::Error>> = Mutex::new(None);
-        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        // loop to error mid-serve is inherently flaky. Now exercised through the
+        // ONE shared [`ServeShutdown`] primitive every serve path uses.
+        let (shutdown, mut shutdown_rx) = ServeShutdown::new();
 
-        let first = record_serve_failure(
-            &failed,
-            &error,
-            &shutdown_tx,
-            anyhow::anyhow!("listener A died"),
-        );
+        let first = shutdown.record_failure(anyhow::anyhow!("listener A died"));
         assert!(first, "the first failure must win");
-        assert!(failed.load(Ordering::SeqCst), "the flag must be armed");
+        assert!(shutdown.is_failed(), "the flag must be armed");
         assert!(
             *shutdown_rx.borrow_and_update(),
             "the shutdown watch must be tripped so other listeners wind down"
         );
-        assert_eq!(
-            error.lock().unwrap().as_ref().unwrap().to_string(),
-            "listener A died"
-        );
 
-        // A second listener failing afterwards must NOT clobber the first error.
-        let second = record_serve_failure(
-            &failed,
-            &error,
-            &shutdown_tx,
-            anyhow::anyhow!("listener B died"),
-        );
+        // A second listener failing afterwards must NOT clobber the first error,
+        // but still no-ops the shutdown send (idempotent).
+        let second = shutdown.record_failure(anyhow::anyhow!("listener B died"));
         assert!(!second, "a later failure is not the first-error winner");
         assert_eq!(
-            error.lock().unwrap().as_ref().unwrap().to_string(),
+            shutdown.take_error().unwrap().to_string(),
             "listener A died",
             "the first error is preserved"
+        );
+        // After taking it, the slot is empty.
+        assert!(
+            shutdown.take_error().is_none(),
+            "the error slot is drained by take_error"
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_shutdown_trigger_resolves_waiters() {
+        // The watch lane is the graceful-shutdown trigger every serve task awaits:
+        // a plain `trigger()` (a SIGINT/SIGTERM or the flip's engine loop exiting)
+        // must resolve `wait_for_shutdown` WITHOUT recording any error, so a clean
+        // stop is not mistaken for a listener death.
+        let (shutdown, _rx) = ServeShutdown::new();
+        let waiter = shutdown.subscribe();
+        shutdown.trigger();
+        // Resolves promptly (bounded so a regression fails rather than hangs).
+        tokio::time::timeout(std::time::Duration::from_secs(1), wait_for_shutdown(waiter))
+            .await
+            .expect("a triggered shutdown must resolve waiters");
+        assert!(!shutdown.is_failed(), "a clean trigger is not a failure");
+        assert!(
+            shutdown.take_error().is_none(),
+            "a clean trigger records no error"
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_shutdown_failure_winds_down_a_sibling_listener() {
+        // A genuine first-error wind-down end to end: a real bound listener serves
+        // a trivial app whose graceful-shutdown future awaits the shared watch.
+        // When a SIBLING records a failure, the watch trips and this listener's
+        // serve future resolves (Ok — graceful), proving one listener's death
+        // winds the others down. This is the run_plain_http first-error behavior
+        // exercised over a real accept loop (cheap, deterministic — no flaky
+        // mid-serve error injection needed: we trip the lane the sibling would).
+        let (shutdown, _rx) = ServeShutdown::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let app = axum::Router::new().route("/", axum::routing::get(|| async { "ok" }));
+        let task_shutdown = shutdown.subscribe();
+        let serve = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(wait_for_shutdown(task_shutdown))
+                .await
+        });
+
+        // A sibling listener died: record it. The watch trips, so the serving task
+        // above winds down gracefully.
+        let first = shutdown.record_failure(anyhow::anyhow!("sibling listener failed"));
+        assert!(first, "the first failure wins");
+
+        let joined = tokio::time::timeout(std::time::Duration::from_secs(2), serve)
+            .await
+            .expect("the sibling listener must wind down once the watch trips")
+            .expect("serve task joins");
+        assert!(
+            joined.is_ok(),
+            "a graceful shutdown returns Ok even though a sibling failed"
+        );
+        // The recorded error is still available for the caller to surface.
+        assert_eq!(
+            shutdown.take_error().unwrap().to_string(),
+            "sibling listener failed"
         );
     }
 

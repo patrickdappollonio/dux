@@ -246,6 +246,13 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
             } else {
                 format!(":{}", https_addr.port())
             };
+            // Loud warning when auth is deliberately disabled on a built-in-TLS
+            // server. Unlike the plain-HTTP arm, an ACME server is ALWAYS public
+            // (a browser-trusted certificate on :443), so there is no "local"
+            // exception — the gate-off banner fires whenever --disable-auth is set.
+            if cli_disable_auth {
+                eprintln!("{}", dux_web::acme_disable_auth_warning());
+            }
             if !*production {
                 eprintln!(
                     "NOTE: [server.acme] production = false — using the Let's Encrypt STAGING \

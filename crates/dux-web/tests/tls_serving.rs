@@ -175,6 +175,9 @@ async fn boot_tls(users: Vec<String>) -> TlsServer {
         RouterParams::tls(),
     );
     let https_app = tls::host_allowlist_layer(https_app, domains.clone());
+    // Mirror production: the HTTPS app stamps HSTS (run_acme wires hsts_layer next
+    // to host_allowlist_layer). The plain-HTTP :80 router below never gets it.
+    let https_app = tls::hsts_layer(https_app);
 
     // Build the rustls acceptor from the self-signed cert.
     let (cert_der, key_der) = self_signed();
@@ -229,7 +232,7 @@ async fn boot_tls(users: Vec<String>) -> TlsServer {
         // Drive the state so the challenge resolver is live (no network in tests;
         // it just needs polling to exist). Abort it with the server via the handle
         // teardown at the end of the test process.
-        let _acme_task = tls::spawn_acme_event_task(acme_state);
+        let _acme_task = tls::spawn_acme_event_task(acme_state, None, domains.clone());
         std::mem::forget(_acme_task); // test-lifetime task; process exit cleans up
         let h = http_handle.clone();
         tokio::spawn(async move {
@@ -311,6 +314,51 @@ async fn https_request_succeeds_over_tls() {
         .expect("HTTPS request should succeed over TLS");
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.text().await.unwrap(), "ok");
+}
+
+#[tokio::test]
+async fn hsts_header_present_on_https_response() {
+    // S2: the TLS app stamps Strict-Transport-Security on every response (dux owns
+    // TLS here, so it is correct to tell the browser this host is HTTPS-only).
+    let server = boot_tls(vec![]).await;
+    let c = https_client(&server);
+    let resp = c
+        .get(format!("{}/healthz", base_https(&server)))
+        .send()
+        .await
+        .expect("HTTPS request should succeed over TLS");
+    assert_eq!(resp.status(), 200);
+    let hsts = resp
+        .headers()
+        .get("strict-transport-security")
+        .and_then(|h| h.to_str().ok())
+        .expect("the HTTPS response must carry an HSTS header");
+    assert_eq!(
+        hsts, "max-age=63072000; includeSubDomains",
+        "HSTS must be a 2-year max-age with includeSubDomains and NO preload"
+    );
+}
+
+#[tokio::test]
+async fn hsts_header_absent_on_plain_http_redirect() {
+    // S2: the plain-HTTP :80 challenge/redirect path must NEVER carry HSTS — dux
+    // does not own TLS there, so it must not tell the browser this host is
+    // HTTPS-only. The :80 308 redirect response is the observable plain-HTTP path.
+    let server = boot_tls(vec![]).await;
+    let c = http_client(&server);
+    let resp = c
+        .get(format!(
+            "http://{TEST_DOMAIN}:{}/some/path",
+            server.http_addr.port()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 308, "the :80 fallback must 308 to HTTPS");
+    assert!(
+        resp.headers().get("strict-transport-security").is_none(),
+        "the plain-HTTP :80 path must NOT carry an HSTS header (dux does not own TLS there)"
+    );
 }
 
 #[tokio::test]

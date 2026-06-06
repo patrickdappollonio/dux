@@ -49,6 +49,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
+use dux_core::wire::WireStatus;
 use futures_util::StreamExt;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
@@ -90,7 +91,10 @@ pub struct AcmePlan {
 /// the entry was malformed (e.g. `dux.example.com/app` or `dux.example.com:8443`):
 /// returns `Err` so [`normalize_domains`] can refuse startup with a named error
 /// rather than guessing what the operator meant.
-pub fn normalize_domain(raw: &str) -> Result<Option<String>, String> {
+///
+/// Module-private: only [`normalize_domains`] (the list form) is the exported
+/// contract; the binary's URL display and every caller use the plural form.
+fn normalize_domain(raw: &str) -> Result<Option<String>, String> {
     let trimmed = raw.trim();
     let without_scheme = trimmed
         .strip_prefix("https://")
@@ -194,6 +198,55 @@ fn set_dir_private(dir: &std::path::Path) -> anyhow::Result<()> {
     })
 }
 
+/// The status-relevant classification of one ACME certificate-lifecycle event,
+/// decoupled from rustls-acme's generic `Event<EC, EA>` type so the mapping to a
+/// user-facing [`WireStatus`] is a pure, exhaustively unit-testable function. The
+/// polling loop projects each concrete event into one of these BEFORE it touches
+/// the status broadcast.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcmeStatusEvent {
+    /// A certificate was deployed (newly issued/renewed, or a valid cached one
+    /// loaded at boot). The user-visible milestone.
+    CertDeployed,
+    /// Internal cache bookkeeping (a cert or account key was persisted). Logged,
+    /// but not surfaced on the status line — it is not a lifecycle milestone.
+    CacheStore,
+    /// A lifecycle error (cache load/store, order, or parse). Renewal will retry.
+    Error(String),
+    /// The lifecycle stream ended — certificates will no longer renew.
+    StreamEnded,
+}
+
+/// Map an [`AcmeStatusEvent`] to the status-line update (if any) it should
+/// broadcast to web clients. Pure so it is exhaustively unit-tested.
+///
+/// - `CertDeployed` → info: certificates are live for `domains`.
+/// - `CacheStore` → `None`: logged only, not a user-facing milestone.
+/// - `Error` / `StreamEnded` → error: surfaced so an operator sees a failing
+///   renewal on the status line, with `dux.log` named for the detail.
+pub fn acme_status_for_event(event: &AcmeStatusEvent, domains: &[String]) -> Option<WireStatus> {
+    match event {
+        AcmeStatusEvent::CertDeployed => Some(WireStatus::new(
+            "info",
+            format!(
+                "TLS certificate acquired/renewed for {}.",
+                domains.join(", ")
+            ),
+        )),
+        AcmeStatusEvent::CacheStore => None,
+        AcmeStatusEvent::Error(e) => Some(WireStatus::new(
+            "error",
+            format!("ACME certificate error: {e} — renewal will retry; see dux.log."),
+        )),
+        AcmeStatusEvent::StreamEnded => Some(WireStatus::new(
+            "error",
+            "ACME certificate lifecycle stopped — certificates will no longer renew. \
+             Restart dux to recover automatic renewal; see dux.log."
+                .to_string(),
+        )),
+    }
+}
+
 /// Spawn the dedicated task that drives the `AcmeState` stream. rustls-acme does
 /// NO background work itself — certificate acquisition and renewal only advance
 /// while this stream is polled. Per the explicit-failure tenet every event is
@@ -201,16 +254,33 @@ fn set_dir_private(dir: &std::path::Path) -> anyhow::Result<()> {
 /// failing renewal is visible in `dux.log`), and a stream END is an error too
 /// because it means certificates will silently stop renewing.
 ///
+/// `status_tx` is the engine's `WireStatus` broadcast (the SAME channel WS clients
+/// subscribe to and the reload warnings ride). When `Some`, each event is also
+/// projected through [`acme_status_for_event`] and broadcast so the web UI shows
+/// certificate acquisition/renewal/failure live — not just `dux.log`. `None` for
+/// callers without an engine actor (tests, standalone construction).
+///
+/// `domains` is the normalized certificate name list (from [`build_acme_state`]),
+/// used only for the acquired/renewed status text.
+///
 /// Returns the `JoinHandle` so the serve path can abort it on shutdown.
-pub fn spawn_acme_event_task(mut state: DuxAcmeState) -> tokio::task::JoinHandle<()> {
+pub fn spawn_acme_event_task(
+    mut state: DuxAcmeState,
+    status_tx: Option<tokio::sync::broadcast::Sender<WireStatus>>,
+    domains: Vec<String>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            match state.next().await {
+            // Project the concrete event into the status classification first, then
+            // log AND (optionally) broadcast — the broadcast text comes from the
+            // pure mapper so log and status can never drift.
+            let event = match state.next().await {
                 Some(Ok(ok)) => {
                     dux_core::logger::info(&format!(
                         "[acme] certificate lifecycle event: {ok:?} — TLS certificates are \
                          being acquired/renewed via Let's Encrypt."
                     ));
+                    classify_event_ok(&ok)
                 }
                 Some(Err(err)) => {
                     dux_core::logger::error(&format!(
@@ -218,6 +288,7 @@ pub fn spawn_acme_event_task(mut state: DuxAcmeState) -> tokio::task::JoinHandle
                          missing certificate. Check that :80 is reachable from the internet for \
                          HTTP-01 validation and that the domain's DNS points here."
                     ));
+                    AcmeStatusEvent::Error(err.to_string())
                 }
                 None => {
                     dux_core::logger::error(
@@ -225,14 +296,71 @@ pub fn spawn_acme_event_task(mut state: DuxAcmeState) -> tokio::task::JoinHandle
                          renew. The HTTPS server keeps serving the last certificate until it \
                          expires; restart dux to recover automatic renewal.",
                     );
+                    if let Some(tx) = &status_tx
+                        && let Some(status) =
+                            acme_status_for_event(&AcmeStatusEvent::StreamEnded, &domains)
+                    {
+                        let _ = tx.send(status);
+                    }
                     break;
                 }
+            };
+            if let Some(tx) = &status_tx
+                && let Some(status) = acme_status_for_event(&event, &domains)
+            {
+                let _ = tx.send(status);
             }
         }
     })
 }
 
+/// Classify a rustls-acme `EventOk` into the status-relevant [`AcmeStatusEvent`].
+/// A deploy (new or cached) is the user-visible milestone; a cache store is
+/// internal bookkeeping.
+fn classify_event_ok(ok: &rustls_acme::EventOk) -> AcmeStatusEvent {
+    use rustls_acme::EventOk;
+    match ok {
+        EventOk::DeployedCachedCert | EventOk::DeployedNewCert => AcmeStatusEvent::CertDeployed,
+        EventOk::CertCacheStore | EventOk::AccountCacheStore => AcmeStatusEvent::CacheStore,
+    }
+}
+
 // ── :80 challenge + redirect router ────────────────────────────────────────
+
+/// Strip a `:port` from a (trimmed, non-empty) `Host` value, bracket-aware for
+/// IPv6, returning the bare host (IPv6 kept bracketed). The ONE host-port parser
+/// shared by [`redirect_target`] (the `:80` redirect Location) and
+/// [`normalize_host_for_match`] (the allowlist comparison), so the redirect target
+/// and the accepted Host can never disagree on what the authority is.
+///
+/// - bracketed IPv6 (`[::1]` / `[::1]:80`) → the bracketed literal, port dropped;
+///   a missing closing bracket is malformed (`None`).
+/// - bare host / IPv4 with a trailing all-digit `:port` → the host, port dropped.
+/// - an unbracketed multi-colon value (an unbracketed IPv6) is malformed (`None`).
+/// - anything else → unchanged.
+fn strip_host_port(host: &str) -> Option<String> {
+    if let Some(rest) = host.strip_prefix('[') {
+        // Bracketed IPv6: keep through the closing bracket, drop a trailing :port.
+        let close = rest.find(']')?;
+        Some(format!("[{}]", &rest[..close]))
+    } else {
+        // Bare host or IPv4. A trailing :port is the part after the LAST colon
+        // when that tail is all digits. A host with multiple colons but no
+        // brackets is malformed (an unbracketed IPv6) — reject it.
+        match host.rsplit_once(':') {
+            Some((left, right))
+                if right.chars().all(|c| c.is_ascii_digit()) && !right.is_empty() =>
+            {
+                if left.contains(':') {
+                    return None; // unbracketed IPv6 with port — malformed
+                }
+                Some(left.to_string())
+            }
+            Some((left, _)) if left.contains(':') => None, // unbracketed IPv6
+            _ => Some(host.to_string()),
+        }
+    }
+}
 
 /// Compute the HTTPS redirect target for a plaintext `:80` request. Pure so it is
 /// exhaustively unit-tested.
@@ -246,37 +374,14 @@ pub fn spawn_acme_event_task(mut state: DuxAcmeState) -> tokio::task::JoinHandle
 /// Returns `None` for a missing or syntactically unusable host so the caller can
 /// answer `400` instead of emitting a `Location` pointing at an attacker-chosen
 /// or empty authority.
-pub fn redirect_target(host_header: Option<&str>, https_port: u16, uri: &Uri) -> Option<String> {
+///
+/// Module-private: only the `:80` redirect handler in this module calls it.
+fn redirect_target(host_header: Option<&str>, https_port: u16, uri: &Uri) -> Option<String> {
     let host = host_header?.trim();
     if host.is_empty() {
         return None;
     }
-    // Strip any :port from the Host. IPv6 literals are bracketed (`[::1]` or
-    // `[::1]:80`); split the port off AFTER the closing bracket. A bare host with
-    // a single colon and digits after it is `host:port`.
-    let host_no_port = if let Some(rest) = host.strip_prefix('[') {
-        // Bracketed IPv6: keep through the closing bracket, drop a trailing :port.
-        let close = rest.find(']')?;
-        // Re-add the brackets; ignore whatever follows the bracket (an optional
-        // :port).
-        format!("[{}]", &rest[..close])
-    } else {
-        // Bare host or IPv4. A trailing :port is the part after the LAST colon
-        // when that tail is all digits. A host with multiple colons but no
-        // brackets is malformed (an unbracketed IPv6) — reject it.
-        match host.rsplit_once(':') {
-            Some((left, right))
-                if right.chars().all(|c| c.is_ascii_digit()) && !right.is_empty() =>
-            {
-                if left.contains(':') {
-                    return None; // unbracketed IPv6 with port — malformed
-                }
-                left.to_string()
-            }
-            Some((left, _)) if left.contains(':') => return None, // unbracketed IPv6
-            _ => host.to_string(),
-        }
-    };
+    let host_no_port = strip_host_port(host)?;
     if host_no_port.is_empty() || host_no_port == "[]" {
         return None;
     }
@@ -363,20 +468,23 @@ pub fn build_http_challenge_router(
 /// The set of Host values a request may carry when dux terminates TLS. Built from
 /// the SAME normalized domains used for issuance, so the cert names and the
 /// accepted Hosts can never drift.
+///
+/// Module-private: it is an implementation detail of [`host_allowlist_layer`] and
+/// [`build_http_challenge_router`]; callers wire the allowlist through those.
 #[derive(Debug, Clone)]
-pub struct DomainAllowlist {
+struct DomainAllowlist {
     domains: Vec<String>,
 }
 
 impl DomainAllowlist {
     /// `domains` MUST already be normalized (via [`normalize_domains`]).
-    pub fn new(domains: Vec<String>) -> Self {
+    fn new(domains: Vec<String>) -> Self {
         Self { domains }
     }
 
     /// Whether a raw `Host` header value is allowed: strip any `:port`, drop a
     /// trailing dot, lowercase, then membership-test against the normalized set.
-    pub fn allows(&self, host_header: &str) -> bool {
+    fn allows(&self, host_header: &str) -> bool {
         let Some(host) = normalize_host_for_match(host_header) else {
             return false;
         };
@@ -385,30 +493,15 @@ impl DomainAllowlist {
 }
 
 /// Normalize an incoming `Host` header for allowlist comparison: strip a `:port`
-/// (bracket-aware for IPv6), drop a single trailing dot, lowercase. Mirrors the
-/// host-stripping in [`redirect_target`] so the two paths agree.
+/// (bracket-aware for IPv6, via the shared [`strip_host_port`]), drop a single
+/// trailing dot, lowercase. Sharing [`strip_host_port`] with [`redirect_target`]
+/// guarantees the allowlist and the redirect agree on the authority.
 fn normalize_host_for_match(host_header: &str) -> Option<String> {
     let host = host_header.trim();
     if host.is_empty() {
         return None;
     }
-    let host_no_port = if let Some(rest) = host.strip_prefix('[') {
-        let close = rest.find(']')?;
-        format!("[{}]", &rest[..close])
-    } else {
-        match host.rsplit_once(':') {
-            Some((left, right))
-                if right.chars().all(|c| c.is_ascii_digit()) && !right.is_empty() =>
-            {
-                if left.contains(':') {
-                    return None;
-                }
-                left.to_string()
-            }
-            Some((left, _)) if left.contains(':') => return None,
-            _ => host.to_string(),
-        }
-    };
+    let host_no_port = strip_host_port(host)?;
     let lowered = host_no_port.to_ascii_lowercase();
     let no_dot = lowered.strip_suffix('.').unwrap_or(&lowered);
     if no_dot.is_empty() {
@@ -450,6 +543,42 @@ pub fn host_allowlist_layer(router: Router, domains: Vec<String>) -> Router {
         allowlist,
         host_allowlist_middleware,
     ))
+}
+
+// ── HSTS (HTTPS-only) ──────────────────────────────────────────────────────
+
+/// The `Strict-Transport-Security` value dux sends on the TLS path: a two-year
+/// `max-age` with `includeSubDomains`, but NO `preload`.
+///
+/// - `max-age=63072000` — 2 years, the de-facto value preload lists require, long
+///   enough that a returning browser keeps upgrading to HTTPS on its own.
+/// - `includeSubDomains` — every name under the served domain is HTTPS-only too.
+/// - NO `preload` — preload is an irreversible, browser-vendor-list commitment
+///   that an operator must opt into deliberately, never something dux asserts on
+///   their behalf.
+pub const HSTS_HEADER_VALUE: &str = "max-age=63072000; includeSubDomains";
+
+/// Middleware that stamps `Strict-Transport-Security` on every response. Used
+/// ONLY on the HTTPS app dux serves over its own TLS (the ACME path), never on the
+/// plain-HTTP/proxy/flip paths: HSTS instructs the browser to refuse plain HTTP to
+/// this host, which is only correct when dux actually terminates TLS. On a
+/// proxy-fronted or loopback deployment dux does not own TLS, so it must not make
+/// that promise.
+async fn hsts_middleware(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        axum::http::header::STRICT_TRANSPORT_SECURITY,
+        axum::http::HeaderValue::from_static(HSTS_HEADER_VALUE),
+    );
+    response
+}
+
+/// Wrap a router with the HSTS header middleware. Applied to the HTTPS app ONLY
+/// (the `RouterParams::tls()` path), next to [`host_allowlist_layer`] in
+/// `run_acme`. NEVER applied to the plain-HTTP/proxy/flip apps, where dux does not
+/// own TLS and must not tell the browser this host is HTTPS-only.
+pub fn hsts_layer(router: Router) -> Router {
+    router.layer(axum::middleware::from_fn(hsts_middleware))
 }
 
 // ── Session sweep (deferral 3) ─────────────────────────────────────────────
@@ -749,6 +878,36 @@ mod tests {
         assert!(normalize_domains(&raw).is_err());
     }
 
+    // ── strip_host_port (shared by redirect + allowlist) ──────────────────
+
+    #[test]
+    fn strip_host_port_handles_bare_ipv6_and_brackets() {
+        // Bare host / IPv4: trailing all-digit port dropped, else unchanged.
+        assert_eq!(
+            strip_host_port("dux.example.com"),
+            Some("dux.example.com".to_string())
+        );
+        assert_eq!(
+            strip_host_port("dux.example.com:443"),
+            Some("dux.example.com".to_string())
+        );
+        assert_eq!(
+            strip_host_port("10.0.0.1:8443"),
+            Some("10.0.0.1".to_string())
+        );
+        // Bracketed IPv6 keeps the brackets, drops the port.
+        assert_eq!(strip_host_port("[::1]"), Some("[::1]".to_string()));
+        assert_eq!(
+            strip_host_port("[2001:db8::1]:80"),
+            Some("[2001:db8::1]".to_string())
+        );
+        // Unbracketed IPv6 (with or without a port) is malformed.
+        assert_eq!(strip_host_port("2001:db8::1"), None);
+        assert_eq!(strip_host_port("2001:db8::1:443"), None);
+        // A missing closing bracket is malformed.
+        assert_eq!(strip_host_port("[::1"), None);
+    }
+
     // ── redirect_target ───────────────────────────────────────────────────
 
     fn uri(s: &str) -> Uri {
@@ -902,6 +1061,122 @@ mod tests {
         tx.send(true).unwrap();
         let joined = tokio::time::timeout(Duration::from_secs(1), handle).await;
         assert!(joined.is_ok(), "the sweep task must exit on shutdown");
+    }
+
+    // ── ACME lifecycle → status mapping (O1) ──────────────────────────────
+
+    #[test]
+    fn acme_status_cert_deployed_is_info_naming_domains() {
+        let status = acme_status_for_event(
+            &AcmeStatusEvent::CertDeployed,
+            &["dux.example.com".to_string(), "api.example.com".to_string()],
+        )
+        .expect("a cert deploy must produce a status");
+        assert_eq!(status.tone, "info");
+        assert!(
+            status.message.contains("acquired/renewed"),
+            "must read as a lifecycle milestone: {}",
+            status.message
+        );
+        assert!(
+            status.message.contains("dux.example.com")
+                && status.message.contains("api.example.com"),
+            "must name the covered domains: {}",
+            status.message
+        );
+    }
+
+    #[test]
+    fn acme_status_cache_store_is_silent() {
+        // Internal cache bookkeeping is logged, not surfaced on the status line.
+        assert!(
+            acme_status_for_event(
+                &AcmeStatusEvent::CacheStore,
+                &["dux.example.com".to_string()]
+            )
+            .is_none(),
+            "a cache-store event must not produce a user-facing status"
+        );
+    }
+
+    #[test]
+    fn acme_status_error_is_error_tone_with_retry_note() {
+        let status = acme_status_for_event(
+            &AcmeStatusEvent::Error("order: bad auth".to_string()),
+            &["dux.example.com".to_string()],
+        )
+        .expect("an error must produce a status");
+        assert_eq!(status.tone, "error");
+        assert!(
+            status.message.contains("order: bad auth"),
+            "must carry the cause: {}",
+            status.message
+        );
+        assert!(
+            status.message.contains("retry") && status.message.contains("dux.log"),
+            "must say renewal retries and point at dux.log: {}",
+            status.message
+        );
+    }
+
+    #[test]
+    fn acme_status_stream_ended_is_error_tone() {
+        let status = acme_status_for_event(&AcmeStatusEvent::StreamEnded, &[])
+            .expect("stream-end must produce a status");
+        assert_eq!(status.tone, "error");
+        assert!(
+            status.message.to_lowercase().contains("no longer renew"),
+            "must warn renewal has stopped: {}",
+            status.message
+        );
+    }
+
+    #[test]
+    fn classify_event_ok_maps_deploy_vs_cache() {
+        use rustls_acme::EventOk;
+        assert_eq!(
+            classify_event_ok(&EventOk::DeployedNewCert),
+            AcmeStatusEvent::CertDeployed
+        );
+        assert_eq!(
+            classify_event_ok(&EventOk::DeployedCachedCert),
+            AcmeStatusEvent::CertDeployed
+        );
+        assert_eq!(
+            classify_event_ok(&EventOk::CertCacheStore),
+            AcmeStatusEvent::CacheStore
+        );
+        assert_eq!(
+            classify_event_ok(&EventOk::AccountCacheStore),
+            AcmeStatusEvent::CacheStore
+        );
+    }
+
+    // ── HSTS ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn hsts_layer_stamps_the_header_on_every_response() {
+        use tower::ServiceExt; // for `oneshot`
+        let app = hsts_layer(Router::new().route("/", axum::routing::get(|| async { "ok" })));
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let hsts = resp
+            .headers()
+            .get(axum::http::header::STRICT_TRANSPORT_SECURITY)
+            .and_then(|h| h.to_str().ok())
+            .expect("hsts_layer must stamp the header");
+        assert_eq!(hsts, HSTS_HEADER_VALUE);
+        // The value is a 2-year max-age, includeSubDomains, and NO preload.
+        assert!(hsts.contains("max-age=63072000"));
+        assert!(hsts.contains("includeSubDomains"));
+        assert!(!hsts.contains("preload"), "must NOT assert preload: {hsts}");
     }
 
     // ── build_acme_state cache-dir hardening ──────────────────────────────
