@@ -26,6 +26,7 @@ pub mod resource_stats;
 pub mod startup;
 pub mod statusline;
 pub mod storage;
+pub mod tailscale;
 pub mod theme;
 pub mod viewmodel;
 pub mod welcome;

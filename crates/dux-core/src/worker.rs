@@ -319,6 +319,17 @@ pub enum WorkerEvent {
         target: String,
         result: Result<(), String>,
     },
+    /// The in-process web-server flip pre-flight finished on a worker thread.
+    /// LOCAL MODE resolution (loopback:port + optional Tailscale:port) plus the
+    /// actual `TcpListener::bind` of each address runs off the UI thread because
+    /// it shells out to `tailscale ip`. On success the bound listeners and their
+    /// display URLs are carried back so the main loop can stash the flip; on
+    /// failure the formatted error is surfaced and the TUI stays up. `warning` is
+    /// a non-fatal note to show (e.g. Tailscale enabled but not detected).
+    ServerFlipPreflightReady {
+        result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
+        warning: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug)]

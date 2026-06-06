@@ -168,6 +168,17 @@ pub enum EventReaction {
     /// the `PtyClient` (killing the child); the App clears
     /// `active_terminal_id` if it matches and clamps the terminal cursor.
     DeleteTerminalView(Box<DeleteTerminalView>),
+
+    // -- Web-server flip pre-flight (App owns the listeners + flip state). --
+    /// The worker that ran Tailscale detection + bound the LOCAL MODE listeners
+    /// finished. The Engine has no domain state to mutate here — the listeners
+    /// and flip are TUI concerns — so this passes straight through to the App,
+    /// which stashes `pending_server_flip` (on `Ok`) or surfaces the error, and
+    /// shows the non-fatal `warning` when present.
+    ServerFlipPreflightReady {
+        result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
+        warning: Option<String>,
+    },
 }
 
 /// Result of `Engine::detach_conflicting_worktree_session` — the App caller
@@ -1437,6 +1448,11 @@ impl Engine {
                     "Could not open {target}: {err}"
                 ))),
             },
+            WorkerEvent::ServerFlipPreflightReady { result, warning } => {
+                // No engine domain state to mutate — the listeners and the flip
+                // are TUI concerns. Hand them straight to the App.
+                EventReaction::ServerFlipPreflightReady { result, warning }
+            }
         }
     }
 }
@@ -1590,6 +1606,7 @@ mod tests {
             EventReaction::BeginDeleteSessionView(_) => "BeginDeleteSessionView",
             EventReaction::DispatchAgentLaunchView(_) => "DispatchAgentLaunchView",
             EventReaction::DeleteTerminalView(_) => "DeleteTerminalView",
+            EventReaction::ServerFlipPreflightReady { .. } => "ServerFlipPreflightReady",
         }
     }
 

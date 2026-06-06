@@ -207,7 +207,17 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
     patch_table_str(doc, "editor", "default", &config.editor.default);
 
     // --- [server] ---
-    patch_table_str(doc, "server", "bind", &config.server.bind);
+    // `bind` is DEPRECATED: it is migrated away on load and is never re-emitted
+    // here, so a patch/recover/plain write produces the new port/listen_addrs
+    // shape only.
+    patch_table_u16(doc, "server", "port", config.server.port);
+    patch_table_bool(
+        doc,
+        "server",
+        "tailscale_enabled",
+        config.server.tailscale_enabled,
+    );
+    patch_table_string_array(doc, "server", "listen_addrs", &config.server.listen_addrs);
     patch_table_bool(
         doc,
         "server",
@@ -640,15 +650,24 @@ unknown_key = \"untouched\"
         let config_path = dir.path().join("config.toml");
 
         let mut config = Config::default();
-        config.server.bind = "0.0.0.0:9000".to_string();
+        config.server.port = 9000;
+        config.server.tailscale_enabled = false;
+        config.server.listen_addrs = vec!["0.0.0.0:9000".to_string()];
         config.server.insecure_allow_remote = true;
 
         write_config_plain(&config_path, &config).expect("write_config_plain");
 
         let saved = fs::read_to_string(&config_path).expect("read back");
         let parsed: Config = toml::from_str(&saved).expect("reparse");
-        assert_eq!(parsed.server.bind, "0.0.0.0:9000");
+        assert_eq!(parsed.server.port, 9000);
+        assert!(!parsed.server.tailscale_enabled);
+        assert_eq!(parsed.server.listen_addrs, vec!["0.0.0.0:9000".to_string()]);
         assert!(parsed.server.insecure_allow_remote);
+        // The deprecated `bind` key is never re-emitted by the patcher.
+        assert!(
+            !saved.contains("bind ="),
+            "patcher must not emit bind: {saved}"
+        );
     }
 
     #[test]
