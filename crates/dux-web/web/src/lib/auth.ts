@@ -6,11 +6,19 @@
 // on (parsing a `/api/me` body into a phase, turning a `Retry-After` header into
 // a user-facing message, and choosing the right error string per HTTP status).
 
-// The four auth phases the SPA can be in. "checking" is the boot state while the
+// The auth phases the SPA can be in. "checking" is the boot state while the
 // first `/api/me` round-trip is in flight; the app shell does not render until it
 // resolves to "disabled" or "authed" (so the WS connect always precedes the
-// terminal's first subscribe — see store.ts).
-export type AuthPhase = "checking" | "disabled" | "anonymous" | "authed"
+// terminal's first subscribe — see store.ts). "unreachable" is the boot state
+// when that round-trip fails at the network level (server down/restarting): the
+// store auto-retries with capped backoff and the UI shows a reconnect affordance
+// rather than masquerading the outage as a login prompt — see `bootAuth`.
+export type AuthPhase =
+  | "checking"
+  | "disabled"
+  | "anonymous"
+  | "authed"
+  | "unreachable"
 
 export interface AuthState {
   phase: AuthPhase
@@ -88,3 +96,20 @@ export function loginErrorMessage(status: number, retryAfterSecs?: number): stri
 // (fetch rejects: server down, connection dropped). Distinct from an HTTP error
 // status, which `loginErrorMessage` handles.
 export const LOGIN_NETWORK_MESSAGE = "Could not reach the server. Please try again."
+
+// The capped-backoff schedule (milliseconds) for the boot `/api/me` auto-retry
+// when the server is unreachable: 2s, 4s, 8s, then 10s forever. `attempt` is the
+// zero-based count of retries already made; the returned delay is how long to
+// wait before the NEXT attempt. Pure so the cadence is unit-testable without a
+// timer. Kept deliberately short and simple (no jitter, no unbounded growth) —
+// the goal is "recover quickly once the server is back" for a single-tenant dev
+// tool, not to protect a fleet from a thundering herd.
+const UNREACHABLE_BACKOFF_MS = [2000, 4000, 8000]
+const UNREACHABLE_BACKOFF_MAX_MS = 10000
+
+export function unreachableRetryDelay(attempt: number): number {
+  return UNREACHABLE_BACKOFF_MS[attempt] ?? UNREACHABLE_BACKOFF_MAX_MS
+}
+
+// The status shown while the boot probe is failing and retrying.
+export const UNREACHABLE_MESSAGE = "Can't reach dux — retrying…"

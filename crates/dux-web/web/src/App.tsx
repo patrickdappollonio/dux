@@ -50,7 +50,8 @@ import { Toaster } from "@/components/ui/sonner"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import { paletteShortcutLabel } from "@/lib/platform"
-import { logout, setPaletteOpen, useDux } from "@/lib/store"
+import { UNREACHABLE_MESSAGE } from "@/lib/auth"
+import { logout, retryBoot, setPaletteOpen, useDux } from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
 
 function InsetHeader() {
@@ -295,15 +296,40 @@ function BootSpinner() {
   )
 }
 
+// Shown when the boot `/api/me` probe network-fails (server down/restarting).
+// The store is already auto-retrying with capped backoff; this is the honest
+// "we can't reach the server" state — NOT a login screen, which would imply auth
+// is the problem (it may be an auth-OFF deployment mid-restart). The duck mark
+// keeps it on-brand; the spinner signals the retry is live; "Retry now" lets an
+// impatient user skip the current backoff window. A successful retry leaves this
+// state on its own (the phase flips to disabled/authed/anonymous).
+function UnreachableScreen() {
+  return (
+    <div className="flex min-h-svh flex-col items-center justify-center gap-4 bg-background p-4 text-center">
+      <img src="/dux-logo.png" alt="dux" className="size-12 rounded-lg" />
+      <div className="flex items-center gap-2 text-muted-foreground">
+        <BrailleSpinner className="text-primary" />
+        <span className="text-sm">{UNREACHABLE_MESSAGE}</span>
+      </div>
+      <Button variant="outline" size="sm" onClick={() => retryBoot()}>
+        Retry now
+      </Button>
+    </div>
+  )
+}
+
 function App() {
   const { auth } = useDux()
   const isMobile = useIsMobile()
 
-  // Top-level auth branch, BEFORE the shell. "checking" → spinner; "anonymous" →
-  // the login screen ONLY (no sidebar, no WS-dependent UI); "disabled"/"authed" →
-  // today's app exactly.
+  // Top-level auth branch, BEFORE the shell. "checking" → spinner; "unreachable"
+  // → the retrying reconnect screen; "anonymous" → the login screen ONLY (no
+  // sidebar, no WS-dependent UI); "disabled"/"authed" → today's app exactly.
   if (auth.phase === "checking") {
     return <BootSpinner />
+  }
+  if (auth.phase === "unreachable") {
+    return <UnreachableScreen />
   }
   if (auth.phase === "anonymous") {
     return <LoginScreen />

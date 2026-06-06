@@ -9,6 +9,7 @@ import {
   LOGIN_NETWORK_MESSAGE,
   parseRetryAfter,
   phaseFromMe,
+  unreachableRetryDelay,
 } from "./auth"
 import { ordersMatch } from "./reorder"
 import type { StatusLineState } from "./statusLine"
@@ -76,10 +77,12 @@ export interface DuxState {
   conn: ConnState
   // The login/auth-state machine. Starts "checking" while the boot `/api/me`
   // round-trip is in flight; resolves to "disabled" (auth off — today's UX),
-  // "authed" (a valid session), or "anonymous" (auth on, no session → the login
-  // screen). The app shell only renders once the phase leaves "checking", so the
-  // WS connect (issued the moment we learn auth is off or we're authed) always
-  // precedes the terminal's first subscribe. See `bootAuth` below.
+  // "authed" (a valid session), "anonymous" (auth on, no session → the login
+  // screen), or "unreachable" (the boot probe network-failed → the retrying
+  // reconnect screen; the store auto-retries). The app shell only renders once
+  // the phase is "disabled" or "authed", so the WS connect (issued the moment we
+  // learn auth is off or we're authed) always precedes the terminal's first
+  // subscribe. See `bootAuth` below.
   auth: AuthState
   selectedTarget: SelectedTarget | null
   // Derived from `selectedTarget`: the owning session id. Session-scoped UI
@@ -536,9 +539,23 @@ socket.onProjectPathInspection = (path, currentBranch, warning, error) => {
 //     non-OPEN socket) until after this connect is issued.
 //   - 401 → "anonymous"; the login screen renders and NO socket connect happens
 //     until a successful login.
-// Network failure (server unreachable at boot) falls back to "anonymous" so the
-// login screen shows rather than a stuck spinner; a successful login then probes
-// the real auth state again.
+//   - the fetch itself REJECTS (server down/restarting, including an auth-OFF
+//     deployment mid-flip) → "unreachable", and we auto-retry with capped
+//     backoff. We deliberately do NOT fall back to "anonymous" here: a login
+//     form whose submit would also network-fail is a worse UX than an honest
+//     "can't reach the server, retrying" state, and an auth-OFF deployment has
+//     no login at all. A retry that resolves proceeds exactly like a fresh boot
+//     (disabled/authed → connect; 401 → anonymous), so the user never has to
+//     reload by hand.
+//
+// The retry loop is a module-level timer (the popstate/socket precedent), NOT a
+// React effect — `bootAuth` reschedules itself on each failure and clears the
+// timer the moment a probe resolves. `retryAttempt` counts failures so the
+// backoff schedule (see `unreachableRetryDelay`) advances; a successful probe
+// resets it so a later outage starts the cadence over.
+let bootRetryTimer: ReturnType<typeof setTimeout> | null = null
+let bootRetryAttempt = 0
+
 async function bootAuth(): Promise<void> {
   try {
     const resp = await fetch("/api/me", { credentials: "same-origin" })
@@ -546,16 +563,47 @@ async function bootAuth(): Promise<void> {
     if (resp.status === 200) {
       body = (await resp.json().catch(() => null)) as MeBody | null
     }
+    // A probe resolved: cancel any pending retry and reset the cadence.
+    if (bootRetryTimer !== null) {
+      clearTimeout(bootRetryTimer)
+      bootRetryTimer = null
+    }
+    bootRetryAttempt = 0
     const { phase, username } = phaseFromMe(resp.status, body)
     setState({ auth: { phase, username, error: null, pending: false } })
     if (phase === "disabled" || phase === "authed") {
       socket.connect()
     }
   } catch {
+    // Network failure: show the honest unreachable state and schedule a retry.
     setState({
-      auth: { phase: "anonymous", username: null, error: null, pending: false },
+      auth: { phase: "unreachable", username: null, error: null, pending: false },
     })
+    scheduleBootRetry()
   }
+}
+
+// Arm the next auto-retry of `bootAuth` after the capped-backoff delay for the
+// current attempt count. Guarded so overlapping triggers (e.g. a manual "Retry
+// now" while a timer is already armed) don't stack timers.
+function scheduleBootRetry(): void {
+  if (bootRetryTimer !== null) return
+  const delay = unreachableRetryDelay(bootRetryAttempt)
+  bootRetryAttempt += 1
+  bootRetryTimer = setTimeout(() => {
+    bootRetryTimer = null
+    void bootAuth()
+  }, delay)
+}
+
+// Manual "Retry now" from the unreachable screen. Cancel the pending backoff
+// timer and probe immediately; `bootAuth` reschedules if it fails again.
+export function retryBoot(): void {
+  if (bootRetryTimer !== null) {
+    clearTimeout(bootRetryTimer)
+    bootRetryTimer = null
+  }
+  void bootAuth()
 }
 
 void bootAuth()
@@ -602,11 +650,63 @@ export async function login(username: string, password: string): Promise<void> {
   }
 }
 
+// The patch that wipes every piece of session-scoped state back to its initial
+// value. Logout MUST apply this so the previous user's data does not leak into
+// the next login's connect window: the app shell is unmounted while anonymous,
+// but the store is a module-level singleton that survives a logout/login cycle,
+// so a stale ViewModel, selection, draft, or open dialog would otherwise flash
+// (or worse, expose another user's data) the instant the next session connects
+// and before the first fresh ViewModel arrives. Auth is reset separately by the
+// caller; everything below is the session-scoped surface. `pendingOrders` is
+// folded in explicitly here so it is never left dangling either.
+function clearSessionScopedState(): Partial<DuxState> {
+  return {
+    viewModel: null,
+    selectedTarget: null,
+    selectedSessionId: null,
+    currentDiff: null,
+    commitTarget: null,
+    commitDraft: "",
+    statusLine: { tone: "info", message: "" },
+    // Every dialog/modal target, reset to closed.
+    deleteTarget: null,
+    deleteTerminalTarget: null,
+    discardTarget: null,
+    renameTarget: null,
+    renameDraft: "",
+    changeProviderTarget: null,
+    projectInfoTarget: null,
+    projectSettingsTarget: null,
+    globalEnvOpen: false,
+    attachWorktreeTarget: null,
+    attachWorktreeEntries: [],
+    attachWorktreeLoading: false,
+    checkoutDefaultBranchTarget: null,
+    removeProjectTarget: null,
+    addProjectOpen: false,
+    projectPathInspection: null,
+    // The new-agent / fork / from-PR name dialog group.
+    createAgentTarget: null,
+    createAgentDraft: "",
+    createAgentRandomize: false,
+    createAgentGeneratedName: null,
+    createAgentNamePending: false,
+    createAgentPrInput: "",
+    paletteOpen: false,
+    mobileScreen: "home",
+    // Optimistic reorder overlays — explicitly cleared (was incidental before).
+    pendingSessionOrder: null,
+    pendingProjectOrder: null,
+  }
+}
+
 // Log out: tell the server to destroy the session, deliberately disconnect the
 // socket (suppressing the reconnect loop — `socket.close()` sets the
-// closed-by-user flag), and drop to the login screen. The server call is
-// best-effort: even if it fails we still tear down the client-side session view,
-// since the cookie is HttpOnly and the gate re-checks every request anyway.
+// closed-by-user flag), wipe all session-scoped state (so nothing from this user
+// leaks into the next login — see `clearSessionScopedState`), and drop to the
+// login screen. The server call is best-effort: even if it fails we still tear
+// down the client-side session view, since the cookie is HttpOnly and the gate
+// re-checks every request anyway.
 export async function logout(): Promise<void> {
   socket.close()
   try {
@@ -615,6 +715,7 @@ export async function logout(): Promise<void> {
     // Ignore — the local teardown below is what matters for the UI.
   }
   setState({
+    ...clearSessionScopedState(),
     auth: { phase: "anonymous", username: null, error: null, pending: false },
   })
 }

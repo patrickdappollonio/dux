@@ -104,6 +104,59 @@ describe("store auth boot", () => {
   })
 })
 
+describe("store boot unreachable", () => {
+  // A network-failed boot probe must NOT masquerade as a login prompt; it lands
+  // in the dedicated "unreachable" phase (the App renders the retrying reconnect
+  // screen for it). An empty fetch queue makes the mock throw, simulating the
+  // server being down at boot.
+  it("settles in unreachable when the boot probe network-fails", async () => {
+    // Don't queue a boot response — the mock throws, so bootAuth() catches.
+    const mod = await import("./store")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().auth.phase).not.toBe("checking")
+    })
+    expect(currentPhase(mod)).toBe("unreachable")
+  })
+
+  // `retryBoot()` is the manual "Retry now" affordance: it probes immediately,
+  // bypassing the backoff timer. We test the transition this way (rather than
+  // fighting fake timers against the module-load boot + vi.waitFor polling, per
+  // the plan's documented fallback): a retry that succeeds proceeds exactly like
+  // a fresh boot — an authed body flips to "authed" and connects.
+  it("retryBoot() recovers to authed and connects when the server returns", async () => {
+    const mod = await import("./store")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().auth.phase).toBe("unreachable")
+    })
+
+    fetchQueue.push({ status: 200, body: { username: "alice" } })
+    mod.retryBoot()
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().auth.phase).not.toBe("unreachable")
+    })
+
+    expect(currentPhase(mod)).toBe("authed")
+    expect(currentUsername(mod)).toBe("alice")
+  })
+
+  // A retry that resolves to a 401 (auth on, no session) drops to the login
+  // screen — the same "fresh boot" resolution, just the anonymous branch.
+  it("retryBoot() drops to anonymous when the server answers 401", async () => {
+    const mod = await import("./store")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().auth.phase).toBe("unreachable")
+    })
+
+    fetchQueue.push({ status: 401 })
+    mod.retryBoot()
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().auth.phase).not.toBe("unreachable")
+    })
+
+    expect(currentPhase(mod)).toBe("anonymous")
+  })
+})
+
 describe("store login()", () => {
   it("flips to authed on a 200 with the username", async () => {
     const mod = await loadStoreAfterBoot(401)
@@ -160,6 +213,40 @@ describe("store logout()", () => {
 
     expect(currentPhase(mod)).toBe("anonymous")
     expect(currentUsername(mod)).toBeNull()
+  })
+
+  // Logout must wipe ALL session-scoped state so the previous user's data never
+  // leaks into the next login's connect window (the store is a module-level
+  // singleton that survives the logout/login cycle). Seed a few session-scoped
+  // fields, then assert they are reset after logout.
+  it("clears session-scoped state on logout", async () => {
+    const mod = await loadStoreAfterBoot(200, { username: "alice" })
+    expect(currentPhase(mod)).toBe("authed")
+
+    // Seed session-scoped state via the store's own setters (no socket round-trip
+    // needed — these mutate state synchronously).
+    mod.selectSession("session-1")
+    mod.openCommit("session-1")
+    mod.setCommitDraft("a draft commit message")
+    expect(mod.getSnapshot().selectedTarget).not.toBeNull()
+    expect(mod.getSnapshot().selectedSessionId).toBe("session-1")
+    expect(mod.getSnapshot().commitTarget).toBe("session-1")
+    expect(mod.getSnapshot().commitDraft).toBe("a draft commit message")
+
+    fetchQueue.push({ status: 204 })
+    await mod.logout()
+
+    const snap = mod.getSnapshot()
+    expect(snap.viewModel).toBeNull()
+    expect(snap.selectedTarget).toBeNull()
+    expect(snap.selectedSessionId).toBeNull()
+    expect(snap.commitTarget).toBeNull()
+    expect(snap.commitDraft).toBe("")
+    expect(snap.statusLine).toEqual({ tone: "info", message: "" })
+    expect(snap.mobileScreen).toBe("home")
+    expect(snap.paletteOpen).toBe(false)
+    expect(snap.pendingSessionOrder).toBeNull()
+    expect(snap.pendingProjectOrder).toBeNull()
   })
 })
 

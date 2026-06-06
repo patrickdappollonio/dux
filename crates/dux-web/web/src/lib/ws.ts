@@ -64,8 +64,16 @@ export class DuxSocket {
     this.url = url
   }
 
+  // A deliberate, user-initiated entry into the connection — boot (auth off /
+  // authed) and every login() share this path. Reset the reconnect bookkeeping
+  // (attempts + backoff) so a fresh connect never inherits an exhausted counter
+  // from a prior session: without this, logging in after the boot loop already
+  // failed would start one open() and immediately give up. Mirrors reconnect(),
+  // which is the same kind of deliberate re-entry.
   connect(): void {
     this.closedByUser = false
+    this.attempts = 0
+    this.reconnectDelay = RECONNECT_MIN_MS
     this.open()
   }
 
