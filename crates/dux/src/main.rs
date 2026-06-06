@@ -336,6 +336,18 @@ fn parse_server_args(mut args: impl Iterator<Item = String>) -> ParsedServerArgs
             .map_err(|_| format!("{name} expects a port number 0-65535, got \"{raw}\""))
     }
 
+    // Pull a port-valued flag's value and parse it in one step, so the three
+    // port arms (`--port`/`--http-port`/`--https-port`) collapse to a single line
+    // each that only differs in the field they assign.
+    fn take_port(
+        name: &str,
+        inline: Option<String>,
+        args: &mut impl Iterator<Item = String>,
+    ) -> Result<u16, String> {
+        let raw = take_value(name, inline, args)?;
+        parse_port(name, &raw)
+    }
+
     while let Some(arg) = args.next() {
         // Split `--flag=value` once; bare flags have no `=`.
         let (flag, inline) = match arg.split_once('=') {
@@ -350,11 +362,8 @@ fn parse_server_args(mut args: impl Iterator<Item = String>) -> ParsedServerArgs
             "--no-acme" => out.no_acme = true,
             "--no-tailscale" => out.no_tailscale = true,
             "--dangerously-listen-http" => out.dangerously_listen_http = true,
-            "--port" => match take_value("--port", inline, &mut args) {
-                Ok(v) => match parse_port("--port", &v) {
-                    Ok(p) => out.port = Some(p),
-                    Err(e) => return ParsedServerArgs::Error(e),
-                },
+            "--port" => match take_port("--port", inline, &mut args) {
+                Ok(p) => out.port = Some(p),
                 Err(e) => return ParsedServerArgs::Error(e),
             },
             "--listen" => match take_value("--listen", inline, &mut args) {
@@ -378,18 +387,12 @@ fn parse_server_args(mut args: impl Iterator<Item = String>) -> ParsedServerArgs
                 Ok(v) => out.acme_email = Some(v),
                 Err(e) => return ParsedServerArgs::Error(e),
             },
-            "--http-port" => match take_value("--http-port", inline, &mut args) {
-                Ok(v) => match parse_port("--http-port", &v) {
-                    Ok(p) => out.http_port = Some(p),
-                    Err(e) => return ParsedServerArgs::Error(e),
-                },
+            "--http-port" => match take_port("--http-port", inline, &mut args) {
+                Ok(p) => out.http_port = Some(p),
                 Err(e) => return ParsedServerArgs::Error(e),
             },
-            "--https-port" => match take_value("--https-port", inline, &mut args) {
-                Ok(v) => match parse_port("--https-port", &v) {
-                    Ok(p) => out.https_port = Some(p),
-                    Err(e) => return ParsedServerArgs::Error(e),
-                },
+            "--https-port" => match take_port("--https-port", inline, &mut args) {
+                Ok(p) => out.https_port = Some(p),
                 Err(e) => return ParsedServerArgs::Error(e),
             },
             other => {

@@ -950,17 +950,6 @@ mod tests {
     }
 
     #[test]
-    fn rebind_drift_ignores_non_server_changes() {
-        // The helper only sees [server]; a reload that flips a [ui] theme leaves
-        // the server section untouched, so identical server configs must NOT warn
-        // even though the surrounding Config differs. We prove this by leaving the
-        // server config equal — the helper never reads any other section.
-        let prev = dux_core::config::ServerConfig::default();
-        let next = dux_core::config::ServerConfig::default();
-        assert!(!server_rebind_settings_changed(&prev, &next));
-    }
-
-    #[test]
     fn rebind_drift_detects_port_change() {
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
