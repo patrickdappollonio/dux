@@ -1,34 +1,178 @@
 //! axum router + the `/ws` handler bridging the browser to the engine actor.
+//!
+//! ## Route structure and the auth gate
+//!
+//! Routes split into OPEN and GATED groups so every future data route lands
+//! behind the gate by construction:
+//!
+//! - OPEN: static assets, `/healthz`, `/api/login`, `/api/me`, `/api/logout`.
+//!   The SPA must load (and call `/api/me`) to render the login screen, so these
+//!   cannot require a session. `/api/logout` is idempotent, so it is open too.
+//! - GATED: `/ws` (and any future data route added to the gated sub-router).
+//!   When auth is on, the gate middleware rejects with `401` BEFORE the WS
+//!   upgrade, so the browser sees a clean HTTP response rather than a socket that
+//!   opens and immediately closes.
+//!
+//! The Origin check on `/ws` runs REGARDLESS of auth (cross-site WebSocket
+//! hijacking defense): a browser attaches the page's `Origin`, and we only allow
+//! same-host origins. Non-browser clients (no `Origin`) are allowed — documented
+//! tradeoff: a CLI/test client is trusted to not be a hijacked browser tab.
 
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::extract::{Request, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use futures_util::{SinkExt, StreamExt};
+use tower_sessions::cookie::SameSite;
+use tower_sessions::cookie::time::Duration as CookieDuration;
+use tower_sessions::{Expiry, MemoryStore, Session, SessionManagerLayer};
 
+use crate::auth::{self, RateLimiter, SharedAuth};
 use crate::engine_actor::EngineHandle;
 use crate::protocol::{BranchWarningView, ClientMessage, ServerMessage};
 
 #[derive(Clone)]
 pub struct AppState {
     pub engine: EngineHandle,
+    /// Parsed credentials + gate flag, shared so a config reload can rebuild it
+    /// (see `engine_actor`). Read briefly by the login/me handlers and the gate.
+    pub auth: SharedAuth,
+    /// Per-IP login backoff. Shared (cheap `Arc` clone) so all login requests
+    /// hit the same counters.
+    pub rate_limiter: RateLimiter,
 }
 
-/// Build the axum router serving the embedded web UI, a health check, and the `/ws` endpoint.
+/// Build the router with the login gate OFF (no `[auth]` users). Kept as the
+/// zero-argument entry the existing test harnesses and any no-auth caller use;
+/// it delegates to [`router_with_auth`] with an empty, disabled [`AuthState`].
 pub fn router(engine: EngineHandle) -> Router {
-    let state = AppState { engine };
-    Router::new()
-        .route("/healthz", get(|| async { "ok" }))
+    router_with_auth(engine, auth::shared_auth(&[], false))
+}
+
+/// Build the axum router with an explicit shared auth snapshot.
+///
+/// `auth` carries the parsed credentials and the gate flag; when it reports the
+/// gate disabled, the gate middleware passes everything through (today's UX). The
+/// session layer is always installed (it is inert when no session is created), so
+/// turning auth on via a config reload needs no router rebuild.
+pub fn router_with_auth(engine: EngineHandle, auth: SharedAuth) -> Router {
+    let state = AppState {
+        engine,
+        auth,
+        rate_limiter: RateLimiter::default(),
+    };
+
+    // In-memory session store: sessions die with the server (documented v1
+    // limitation — a restart forces re-login). HttpOnly and SameSite=Strict are
+    // the tower-sessions defaults but we set them explicitly so the intent is
+    // visible and a future default change can't silently weaken the cookie.
+    let session_layer = SessionManagerLayer::new(MemoryStore::default())
+        .with_name(auth::SESSION_COOKIE_NAME)
+        .with_http_only(true)
+        .with_same_site(SameSite::Strict)
+        // TODO(step 7 TLS): set `.with_secure(true)` once dux terminates TLS (or
+        // is always fronted by an HTTPS proxy). Until then a Secure cookie would
+        // never be sent over the plain-HTTP loopback/dev deployment, locking
+        // everyone out.
+        .with_secure(false)
+        .with_expiry(Expiry::OnInactivity(CookieDuration::days(
+            auth::SESSION_INACTIVITY_DAYS,
+        )));
+
+    // GATED routes: the gate middleware runs before these. Future data routes go
+    // here so they inherit the session requirement automatically.
+    let gated = Router::new()
         .route("/ws", get(ws_upgrade))
+        .route_layer(middleware::from_fn_with_state(state.clone(), gate));
+
+    // OPEN routes: reachable without a session so the SPA can boot and log in.
+    Router::new()
+        .merge(gated)
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/api/login", post(auth::login))
+        .route("/api/logout", post(auth::logout))
+        .route("/api/me", get(auth::me))
         .fallback(crate::web_assets::static_handler)
+        .layer(session_layer)
         .with_state(state)
 }
 
-async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+/// Gate middleware for the protected sub-router. When auth is enabled, a valid
+/// session is required; otherwise the request is rejected with `401` BEFORE the
+/// WS upgrade. When auth is disabled, every request passes (today's UX).
+async fn gate(
+    State(state): State<AppState>,
+    session: Session,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !auth::is_enabled(&state.auth) {
+        return next.run(request).await;
+    }
+    match session.get::<String>(auth::SESSION_USER_KEY).await {
+        Ok(Some(_)) => next.run(request).await,
+        _ => StatusCode::UNAUTHORIZED.into_response(),
+    }
+}
+
+/// Whether a WebSocket upgrade passes the same-host Origin check (cross-site
+/// WebSocket hijacking defense). `true` when the request carries no `Origin`
+/// (non-browser clients — CLIs, tests, native apps — don't send one, and the
+/// tradeoff is documented) or when the `Origin`'s `host[:port]` matches the
+/// `Host` header. `false` for a present-but-mismatched `Origin`. Browsers always
+/// send `Origin` for WS, so this only ever rejects a genuine cross-site attempt.
+/// Applies whether or not auth is enabled.
+fn same_origin_allowed(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
+        // No Origin: a non-browser client. Allowed (documented tradeoff).
+        return true;
+    };
+    let origin = origin.to_str().ok().and_then(origin_host);
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map(|h| h.to_string());
+
+    matches!((origin, host), (Some(o), Some(h)) if o == h)
+}
+
+/// Extract the `host[:port]` authority from an `Origin` header value
+/// (`scheme://host[:port]`), so it can be compared against the `Host` header.
+fn origin_host(origin: &str) -> Option<String> {
+    let after_scheme = origin.split_once("://").map(|(_, rest)| rest)?;
+    // Strip any path/query that shouldn't appear in an Origin but be defensive.
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    if authority.is_empty() {
+        None
+    } else {
+        Some(authority.to_string())
+    }
+}
+
+async fn ws_upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // Origin check runs even with auth off (CSWSH defense). On rejection we
+    // return a 403 and never upgrade.
+    if !same_origin_allowed(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            "cross-origin WebSocket upgrade rejected",
+        )
+            .into_response();
+    }
     ws.on_upgrade(move |socket| handle_socket(socket, state.engine))
+        .into_response()
 }
 
 type SharedSink = Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>;

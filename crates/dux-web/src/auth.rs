@@ -1,0 +1,477 @@
+//! Web-surface authentication: the session-backed login gate.
+//!
+//! ## Why not `axum-login`?
+//!
+//! The locked design names `axum-login` and `tower-sessions` as candidates. For
+//! a SINGLE credential backend (bcrypt against config-loaded users) and three
+//! routes (`/api/login`, `/api/logout`, `/api/me`), `axum-login` does not pay
+//! its way: it would have us implement its `AuthnBackend` trait plus carry an
+//! `AuthSession` extractor and a user-store abstraction that all ultimately wrap
+//! `tower-sessions` anyway. We get a smaller, more legible surface by using
+//! `tower-sessions` directly with a small login handler — so that is what this
+//! module does. `tower-sessions` is the floor (no hand-rolled session crypto).
+//!
+//! ## State plumbing and live reload
+//!
+//! Credentials are parsed from config ONCE at startup into [`AuthState`] (an
+//! A1-review obligation: parsing per request would amplify malformed-entry logs
+//! and burn CPU). The parsed state lives behind a shared `Arc<RwLock<AuthState>>`
+//! ([`SharedAuth`]) so the engine actor can REBUILD it when a config reload lands
+//! (see `engine_actor::run_engine_loop`), letting `reload-config` pick up user
+//! changes without a server restart. The login handler reads a cheap clone of the
+//! current state under a brief read lock — never holding the guard across an
+//! `.await`.
+
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
+
+use axum::Json;
+use axum::extract::{ConnectInfo, State};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use serde::{Deserialize, Serialize};
+use tower_sessions::Session;
+
+use crate::server::AppState;
+
+/// Session key holding the logged-in username. Its presence is the "logged in"
+/// marker — there is no separate boolean, so the session can never be in the
+/// inconsistent "marked logged in but no user" state.
+pub(crate) const SESSION_USER_KEY: &str = "username";
+
+/// Cookie name for the session. A product-specific name (rather than the
+/// `tower-sessions` default `"id"`) avoids collisions when several apps share a
+/// host during development.
+pub(crate) const SESSION_COOKIE_NAME: &str = "dux_session";
+
+/// Inactivity window after which an idle session expires and the user must log
+/// in again. Seven days balances "don't nag an active operator" against "a
+/// forgotten open tab shouldn't stay authenticated forever". Sessions also die
+/// with the server (the `MemoryStore` is in-memory) — a restart forces re-login.
+pub(crate) const SESSION_INACTIVITY_DAYS: i64 = 7;
+
+/// A single parsed credential, OWNED (unlike `dux_core::auth::ParsedUser`, which
+/// borrows from the config strings). We re-serialize to the `"name:hash"` shape
+/// `dux_core::auth::verify_credentials` expects, so the one bcrypt-verify-per-call
+/// implementation (with its timing mitigation) stays the single source of truth.
+#[derive(Clone, Debug)]
+pub struct OwnedUser {
+    pub username: String,
+    pub hash: String,
+}
+
+/// The login gate's parsed, owned credential snapshot.
+///
+/// Built ONCE at startup from the config users plus the `--disable-auth` flag,
+/// then rebuilt in place on config reload. `enabled` mirrors
+/// `dux_core::auth::auth_enabled`: the gate is on only when auth is not disabled
+/// AND at least one entry parsed valid.
+#[derive(Clone, Debug, Default)]
+pub struct AuthState {
+    pub enabled: bool,
+    pub users: Vec<OwnedUser>,
+}
+
+impl AuthState {
+    /// Build the auth snapshot from raw config `users` entries and the
+    /// `--disable-auth` flag, emitting the entries-present-but-none-valid startup
+    /// warning (A1-review obligation) when applicable.
+    ///
+    /// The warning fires when the operator clearly INTENDED auth (they wrote
+    /// `[auth]` entries) but every entry failed to parse, so the gate silently
+    /// stays OFF — a loopback fail-open footgun. We surface it on BOTH the logger
+    /// (dux.log) and stderr because an operator launching `dux server` watches the
+    /// terminal, while a longer-running server is diagnosed from the log.
+    pub fn build(users: &[String], disable_auth: bool) -> Self {
+        let parsed = dux_core::auth::parse_users(users);
+        let owned: Vec<OwnedUser> = parsed
+            .iter()
+            .map(|u| OwnedUser {
+                username: u.username.to_string(),
+                hash: u.hash.to_string(),
+            })
+            .collect();
+
+        if !disable_auth && !users.is_empty() && owned.is_empty() {
+            let warning = "auth is OFF despite [auth] entries — every entry failed to parse. \
+                 Fix the \"username:bcrypt-hash\" lines in config.toml (or pass --disable-auth \
+                 to make running without a login gate explicit).";
+            dux_core::logger::warn(warning);
+            eprintln!("WARNING: {warning}");
+        }
+
+        let enabled = !disable_auth && !owned.is_empty();
+        AuthState {
+            enabled,
+            users: owned,
+        }
+    }
+
+    /// Re-serialize the owned users to the `"name:hash"` shape that
+    /// `dux_core::auth::verify_credentials` consumes, so verification (one bcrypt
+    /// op per call, with the unknown-user timing mitigation) stays in core.
+    fn as_config_entries(&self) -> Vec<String> {
+        self.users
+            .iter()
+            .map(|u| format!("{}:{}", u.username, u.hash))
+            .collect()
+    }
+}
+
+/// Shared, swappable auth snapshot. Read by the login handler and the WS gate;
+/// rebuilt by the engine actor on config reload. A `std::sync::RwLock` is enough:
+/// reads are brief (clone the small state out, drop the guard before any await),
+/// and the only writer is the engine loop applying a reload.
+pub type SharedAuth = Arc<RwLock<AuthState>>;
+
+/// Build a [`SharedAuth`] from config users and the disable flag.
+pub fn shared_auth(users: &[String], disable_auth: bool) -> SharedAuth {
+    Arc::new(RwLock::new(AuthState::build(users, disable_auth)))
+}
+
+/// Whether the gate is currently enabled (brief read lock).
+pub(crate) fn is_enabled(auth: &SharedAuth) -> bool {
+    auth.read().map(|s| s.enabled).unwrap_or(false)
+}
+
+// --- Per-IP login attempt backoff -----------------------------------------
+
+/// Failed logins allowed per IP within [`RATE_WINDOW`] before the IP is told to
+/// back off with `429`.
+pub(crate) const RATE_LIMIT_MAX_FAILURES: u32 = 5;
+
+/// Sliding window for the per-IP failure counter.
+pub(crate) const RATE_WINDOW: Duration = Duration::from_secs(60);
+
+/// Coarse, best-effort, MEMORY-ONLY per-IP login backoff.
+///
+/// This is deliberately simple: a map of `IP -> (failure count, window start)`.
+/// After [`RATE_LIMIT_MAX_FAILURES`] failed attempts inside [`RATE_WINDOW`] the
+/// IP receives `429 Too Many Requests` with `Retry-After` until the window
+/// rolls over. A SUCCESSFUL login clears the IP's counter, so a legitimate user
+/// who eventually types the right password is never left throttled.
+///
+/// Limitations (documented, for the council to weigh): it is per-process (a
+/// restart resets it), it keys on the peer address only (a NAT or proxy shares
+/// one bucket; behind a reverse proxy the peer is the proxy — `X-Forwarded-For`
+/// is intentionally NOT trusted here), and it is not a substitute for an
+/// upstream WAF. It exists to blunt trivial online password guessing, not to be
+/// a complete anti-bruteforce system. The window/limit are constructor-injectable
+/// so tests can drive the threshold deterministically without sleeping.
+#[derive(Clone)]
+pub struct RateLimiter {
+    max_failures: u32,
+    window: Duration,
+    buckets: Arc<RwLock<HashMap<IpAddr, Bucket>>>,
+}
+
+#[derive(Clone, Copy)]
+struct Bucket {
+    failures: u32,
+    window_start: Instant,
+}
+
+impl RateLimiter {
+    pub fn new(max_failures: u32, window: Duration) -> Self {
+        Self {
+            max_failures,
+            window,
+            buckets: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// If the IP is currently over its failure budget, returns the number of
+    /// seconds the caller should advise via `Retry-After`. Returns `None` when
+    /// the IP may attempt a login.
+    fn retry_after_secs(&self, ip: IpAddr) -> Option<u64> {
+        let mut buckets = self.buckets.write().ok()?;
+        let bucket = buckets.get_mut(&ip)?;
+        let elapsed = bucket.window_start.elapsed();
+        if elapsed >= self.window {
+            // Window rolled over: reset and allow.
+            bucket.failures = 0;
+            bucket.window_start = Instant::now();
+            return None;
+        }
+        if bucket.failures >= self.max_failures {
+            let remaining = self.window.saturating_sub(elapsed);
+            Some(remaining.as_secs().max(1))
+        } else {
+            None
+        }
+    }
+
+    /// Record a failed attempt for the IP, starting or extending its window.
+    fn record_failure(&self, ip: IpAddr) {
+        let Ok(mut buckets) = self.buckets.write() else {
+            return;
+        };
+        let now = Instant::now();
+        let bucket = buckets.entry(ip).or_insert(Bucket {
+            failures: 0,
+            window_start: now,
+        });
+        if bucket.window_start.elapsed() >= self.window {
+            bucket.failures = 0;
+            bucket.window_start = now;
+        }
+        bucket.failures = bucket.failures.saturating_add(1);
+    }
+
+    /// Clear an IP's counter after a successful login so a legitimate user is
+    /// never throttled once they get in.
+    fn clear(&self, ip: IpAddr) {
+        if let Ok(mut buckets) = self.buckets.write() {
+            buckets.remove(&ip);
+        }
+    }
+}
+
+impl Default for RateLimiter {
+    fn default() -> Self {
+        Self::new(RATE_LIMIT_MAX_FAILURES, RATE_WINDOW)
+    }
+}
+
+// --- Login / logout / me handlers -----------------------------------------
+
+#[derive(Deserialize)]
+pub struct LoginRequest {
+    username: String,
+    password: String,
+}
+
+#[derive(Serialize)]
+struct LoginResponse {
+    username: String,
+}
+
+/// Generic, user-enumeration-safe failure body. We never reveal whether the
+/// username exists — the same message covers "no such user" and "wrong password".
+const LOGIN_FAILED_MESSAGE: &str = "Invalid username or password.";
+
+/// `POST /api/login` — verify credentials, mint a session, rotate the session id.
+///
+/// When auth is OFF the endpoint is a no-op success (the SPA never shows a login
+/// form in that mode, but a stray POST shouldn't 500). On success we
+/// `cycle_id()` BEFORE inserting the username so the post-login session id is
+/// fresh — anti-session-fixation: an id an attacker may have planted pre-login is
+/// discarded. Failures increment the per-IP backoff and return a generic `401`.
+pub async fn login(
+    State(state): State<AppState>,
+    session: Session,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(body): Json<LoginRequest>,
+) -> axum::response::Response {
+    // Snapshot the auth state under a brief read lock; never hold the guard
+    // across the awaits below.
+    let (enabled, entries) = {
+        let guard = match state.auth.read() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "auth state poisoned").into_response();
+            }
+        };
+        (guard.enabled, guard.as_config_entries())
+    };
+
+    if !enabled {
+        // Auth disabled: nothing to verify. Report success without a session so
+        // the SPA's optimistic flows don't error.
+        return (
+            StatusCode::OK,
+            Json(LoginResponse {
+                username: body.username,
+            }),
+        )
+            .into_response();
+    }
+
+    let ip = peer.ip();
+
+    // Backoff check BEFORE doing the (expensive) bcrypt verify, so a throttled IP
+    // can't keep us burning CPU.
+    if let Some(retry_after) = state.rate_limiter.retry_after_secs(ip) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", retry_after.to_string())],
+            "Too many failed login attempts. Try again later.",
+        )
+            .into_response();
+    }
+
+    let ok = dux_core::auth::verify_credentials(&entries, &body.username, &body.password);
+    if !ok {
+        state.rate_limiter.record_failure(ip);
+        return (StatusCode::UNAUTHORIZED, LOGIN_FAILED_MESSAGE).into_response();
+    }
+
+    // Anti-fixation: rotate the id BEFORE associating the user with the session.
+    if let Err(e) = session.cycle_id().await {
+        dux_core::logger::error(&format!("failed to rotate session id on login: {e}"));
+        return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
+    }
+    if let Err(e) = session.insert(SESSION_USER_KEY, &body.username).await {
+        dux_core::logger::error(&format!("failed to persist session on login: {e}"));
+        return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
+    }
+
+    state.rate_limiter.clear(ip);
+
+    (
+        StatusCode::OK,
+        Json(LoginResponse {
+            username: body.username,
+        }),
+    )
+        .into_response()
+}
+
+/// `POST /api/logout` — destroy the session. Idempotent: logging out when not
+/// logged in (or with auth off) still returns `204`, so the endpoint can live
+/// outside the gate.
+pub async fn logout(session: Session) -> axum::response::Response {
+    if let Err(e) = session.flush().await {
+        dux_core::logger::warn(&format!("failed to flush session on logout: {e}"));
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum MeResponse {
+    /// Auth is configured off entirely; the SPA skips the login screen.
+    Disabled { auth: &'static str },
+    /// Auth is on and the request carries a valid session.
+    Authed { username: String },
+}
+
+/// `GET /api/me` — report the caller's auth state so the SPA can decide whether
+/// to render the login screen, the app shell, or skip auth entirely.
+///
+/// Three outcomes the SPA must distinguish:
+/// - auth OFF        → `200 {"auth":"disabled"}`
+/// - auth ON, session→ `200 {"username":"..."}`
+/// - auth ON, none   → `401`
+pub async fn me(State(state): State<AppState>, session: Session) -> axum::response::Response {
+    if !is_enabled(&state.auth) {
+        return (
+            StatusCode::OK,
+            Json(MeResponse::Disabled { auth: "disabled" }),
+        )
+            .into_response();
+    }
+    match session.get::<String>(SESSION_USER_KEY).await {
+        Ok(Some(username)) => {
+            (StatusCode::OK, Json(MeResponse::Authed { username })).into_response()
+        }
+        _ => StatusCode::UNAUTHORIZED.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn build_disabled_when_no_users() {
+        let state = AuthState::build(&[], false);
+        assert!(!state.enabled);
+        assert!(state.users.is_empty());
+    }
+
+    #[test]
+    fn build_enabled_with_one_valid_user() {
+        let hash = dux_core::auth::hash_password("pw").unwrap();
+        let state = AuthState::build(&[format!("alice:{hash}")], false);
+        assert!(state.enabled);
+        assert_eq!(state.users.len(), 1);
+        assert_eq!(state.users[0].username, "alice");
+    }
+
+    #[test]
+    fn build_disabled_when_flag_set_even_with_users() {
+        let hash = dux_core::auth::hash_password("pw").unwrap();
+        let state = AuthState::build(&[format!("alice:{hash}")], true);
+        assert!(!state.enabled);
+        // Users are still parsed (so a later reload that clears the flag works),
+        // but the gate is off.
+        assert_eq!(state.users.len(), 1);
+    }
+
+    #[test]
+    fn build_disabled_when_all_entries_malformed() {
+        // Entries present but none valid: the gate stays OFF. (The startup warning
+        // is emitted as a side effect; here we assert the effective state, which
+        // is the A1 obligation's minimum bar.)
+        let state = AuthState::build(&["garbage".to_string(), ":nohash".to_string()], false);
+        assert!(!state.enabled);
+        assert!(state.users.is_empty());
+    }
+
+    #[test]
+    fn as_config_entries_round_trips_through_core_verify() {
+        let hash = dux_core::auth::hash_password("hunter2").unwrap();
+        let state = AuthState::build(&[format!("alice:{hash}")], false);
+        let entries = state.as_config_entries();
+        assert!(dux_core::auth::verify_credentials(
+            &entries, "alice", "hunter2"
+        ));
+        assert!(!dux_core::auth::verify_credentials(
+            &entries, "alice", "wrong"
+        ));
+    }
+
+    #[test]
+    fn rate_limiter_blocks_after_max_failures_and_resets_on_success() {
+        let limiter = RateLimiter::new(3, Duration::from_secs(60));
+        let addr = ip("10.0.0.1");
+
+        // Under the budget: allowed.
+        for _ in 0..3 {
+            assert!(limiter.retry_after_secs(addr).is_none());
+            limiter.record_failure(addr);
+        }
+        // Now over the budget: blocked with a positive retry-after.
+        let retry = limiter.retry_after_secs(addr).expect("should be throttled");
+        assert!(retry >= 1);
+
+        // A success clears the bucket, so the IP can try again immediately.
+        limiter.clear(addr);
+        assert!(limiter.retry_after_secs(addr).is_none());
+    }
+
+    #[test]
+    fn rate_limiter_window_rollover_allows_again() {
+        // A zero-length window means every check sees the window as elapsed, so
+        // the limiter never blocks — proves the rollover branch resets the count.
+        let limiter = RateLimiter::new(1, Duration::from_millis(0));
+        let addr = ip("10.0.0.2");
+        limiter.record_failure(addr);
+        limiter.record_failure(addr);
+        assert!(
+            limiter.retry_after_secs(addr).is_none(),
+            "an elapsed window must reset the counter and allow attempts"
+        );
+    }
+
+    #[test]
+    fn rate_limiter_keys_per_ip() {
+        let limiter = RateLimiter::new(1, Duration::from_secs(60));
+        let a = ip("10.0.0.3");
+        let b = ip("10.0.0.4");
+        limiter.record_failure(a);
+        limiter.record_failure(a);
+        assert!(limiter.retry_after_secs(a).is_some(), "a is throttled");
+        assert!(
+            limiter.retry_after_secs(b).is_none(),
+            "b has its own bucket and is unaffected"
+        );
+    }
+}

@@ -95,6 +95,13 @@ pub(crate) struct ActorLoopEnds {
     /// The inline `Shutdown` request trips this so forwarders exit promptly even
     /// before the engine drop disconnects their channels.
     shutdown_flag: Arc<AtomicBool>,
+    /// Live-reload hook for the login gate: the shared auth snapshot the server's
+    /// router reads, paired with the `--disable-auth` flag captured at startup.
+    /// When a config reload lands (`ApplyReloadedConfig`), the loop rebuilds the
+    /// snapshot from the new `[auth]` users so credential changes take effect
+    /// without a server restart. `None` when no gate is wired (e.g. tests that
+    /// build channels directly).
+    auth_reload: Option<(crate::auth::SharedAuth, bool)>,
 }
 
 /// Build the actor channels and split them into the caller-facing
@@ -102,6 +109,16 @@ pub(crate) struct ActorLoopEnds {
 /// points (the dedicated engine thread and the in-process flip) call this so
 /// the channel topology is defined in exactly one place.
 pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopEnds) {
+    build_actor_channels_with_auth(engine, None)
+}
+
+/// Like [`build_actor_channels`], but threads the live login-gate reload hook
+/// into the loop ends so a config reload rebuilds the server's shared auth
+/// snapshot from the new `[auth]` users.
+pub(crate) fn build_actor_channels_with_auth(
+    engine: &Engine,
+    auth_reload: Option<(crate::auth::SharedAuth, bool)>,
+) -> (EngineHandle, ActorLoopEnds) {
     let (req_tx, req_rx) = mpsc::unbounded_channel::<EngineRequest>();
     let (vm_tx, vm_rx) = watch::channel(view_model_json(engine));
     let (status_tx, _status_rx) = broadcast::channel::<WireStatus>(256);
@@ -121,6 +138,7 @@ pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopE
             status_tx,
             commit_msg_tx,
             shutdown_flag,
+            auth_reload,
         },
     )
 }
@@ -314,6 +332,23 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
     (handle, join)
 }
 
+/// Like [`spawn_engine_thread`], but threads the login-gate reload hook into the
+/// loop so a config reload rebuilds the server's shared auth snapshot. Used by
+/// the `dux server` CLI path ([`crate::run_server`]).
+pub fn spawn_engine_thread_with_auth(
+    mut engine: Engine,
+    auth_reload: (crate::auth::SharedAuth, bool),
+) -> (EngineHandle, JoinHandle<()>) {
+    let (handle, ends) = build_actor_channels_with_auth(&engine, Some(auth_reload));
+    spawn_global_workers(&mut engine);
+
+    let join = thread::spawn(move || {
+        let _engine = run_engine_loop(engine, ends, || LoopControl::Continue);
+    });
+
+    (handle, join)
+}
+
 /// The shared engine request/drain loop. Runs on the CALLER's thread (a spawned
 /// std thread for `dux server`, the main thread for the in-process flip) and
 /// owns `engine` for the loop's duration, returning it on exit so the flip can
@@ -334,6 +369,7 @@ pub(crate) fn run_engine_loop(
         status_tx: thread_status_tx,
         commit_msg_tx: thread_commit_tx,
         shutdown_flag,
+        auth_reload,
     } = ends;
     // Subscribes waiting for their provider to come up via the worker-event drain.
     let mut pending: Vec<PendingSubscribe> = Vec::new();
@@ -418,6 +454,19 @@ pub(crate) fn run_engine_loop(
             if let EventReaction::ApplyReloadedConfig(config) = reaction {
                 match engine.apply_reloaded_config(*config) {
                     Ok(()) => {
+                        // Rebuild the login gate's shared snapshot from the
+                        // freshly-applied `[auth]` users so credential changes
+                        // (add/remove/change password via config or the TUI
+                        // palette) take effect without a server restart. The
+                        // `--disable-auth` flag captured at startup is preserved.
+                        if let Some((shared, disable_auth)) = auth_reload.as_ref()
+                            && let Ok(mut guard) = shared.write()
+                        {
+                            *guard = crate::auth::AuthState::build(
+                                &engine.config.auth.users,
+                                *disable_auth,
+                            );
+                        }
                         let _ = thread_status_tx.send(WireStatus::new(
                             "info",
                             "Configuration reloaded. New settings are active.",

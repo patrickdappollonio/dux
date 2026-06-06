@@ -173,5 +173,5 @@ fn run_server(mut args: impl Iterator<Item = String>) -> Result<()> {
     }
 
     println!("dux server listening on http://{addr} — open it in your browser");
-    dux_web::run_server(paths, addr)
+    dux_web::run_server(paths, addr, cli_disable_auth)
 }

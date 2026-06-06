@@ -5,6 +5,7 @@
 //! Dependency isolation is enforced by the `dep-isolation` CI job, which
 //! runs `cargo tree -p dux-web` and fails if any TUI-only crate appears.
 
+pub mod auth;
 pub mod bootstrap;
 pub mod engine_actor;
 pub mod protocol;
@@ -33,18 +34,33 @@ pub use dux_core::config::resolve_server_bind as resolve_bind;
 
 /// Boot the engine on its own thread and serve the web UI on `addr` (loopback for now).
 /// Blocking entry — builds its own tokio runtime.
-pub fn run_server(paths: DuxPaths, addr: SocketAddr) -> Result<()> {
+///
+/// `disable_auth` mirrors the `dux server --disable-auth` flag: with it set the
+/// login gate is off even when `[auth]` users exist. The gate's shared auth
+/// snapshot is built ONCE here from the engine's loaded config users, handed to
+/// both the engine actor (so a config reload rebuilds it live) and the router.
+pub fn run_server(paths: DuxPaths, addr: SocketAddr, disable_auth: bool) -> Result<()> {
     let engine = bootstrap::bootstrap_engine(&paths)?;
-    let (handle, _join) = engine_actor::spawn_engine_thread(engine);
+    // Build the login gate's shared state from the loaded config users (parsed
+    // ONCE here, not per request). The same `Arc` is handed to the engine actor
+    // (for live reload refresh) and to the router (for login/gate reads).
+    let auth = auth::shared_auth(&engine.config.auth.users, disable_auth);
+    let (handle, _join) =
+        engine_actor::spawn_engine_thread_with_auth(engine, (Arc::clone(&auth), disable_auth));
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     runtime.block_on(async move {
-        let app = server::router(handle.clone());
+        let app = server::router_with_auth(handle.clone(), auth);
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
-            .await?;
+        // Serve with connect-info so the login handler can read the peer IP for
+        // the per-IP attempt backoff.
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
         // SIGTERM the agents (they save state for a later resume), mark their
         // sessions Detached, then exit; Drop hard-kills any straggler.
         handle.shutdown().await;
@@ -107,7 +123,15 @@ pub fn serve_with_engine(
     listener: std::net::TcpListener,
     mut on_tick: impl FnMut() -> ServerTick,
 ) -> Result<(Engine, ServerExit)> {
-    let (handle, ends) = engine_actor::build_actor_channels(&engine);
+    // The flip never disables auth (there is no TUI `--disable-auth` path), and
+    // the flip preset's engine config typically has no `[auth]` users, so the
+    // gate is off and the UX is unchanged. Building the snapshot from the live
+    // engine config still means a user added to config + reload-config turns the
+    // gate on mid-flip. The same `Arc` is threaded into both the actor (live
+    // reload) and the router.
+    let auth = auth::shared_auth(&engine.config.auth.users, false);
+    let (handle, ends) =
+        engine_actor::build_actor_channels_with_auth(&engine, Some((Arc::clone(&auth), false)));
     engine_actor::spawn_global_workers(&mut engine);
 
     // Grab the teardown flag before the handle moves into the router. We trip it
@@ -136,18 +160,21 @@ pub fn serve_with_engine(
     // received while serving breaks the engine loop too (not just axum).
     let signal_quit = Arc::new(AtomicBool::new(false));
 
-    let app = server::router(handle);
+    let app = server::router_with_auth(handle, auth);
     let server_task = runtime.spawn(async move {
-        axum::serve(tokio_listener, app)
-            .with_graceful_shutdown(async move {
-                // Wait until the loop flips the watch to `true`.
-                while !*shutdown_rx.borrow_and_update() {
-                    if shutdown_rx.changed().await.is_err() {
-                        break;
-                    }
+        axum::serve(
+            tokio_listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            // Wait until the loop flips the watch to `true`.
+            while !*shutdown_rx.borrow_and_update() {
+                if shutdown_rx.changed().await.is_err() {
+                    break;
                 }
-            })
-            .await
+            }
+        })
+        .await
     });
 
     // Signal task: trip the flag on SIGINT/SIGTERM so the control closure exits
