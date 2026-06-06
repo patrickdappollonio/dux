@@ -136,6 +136,20 @@ pub(crate) fn is_enabled(auth: &SharedAuth) -> bool {
     auth.read().map(|s| s.enabled).unwrap_or(false)
 }
 
+/// Whether `username` is still a configured user in the CURRENT auth snapshot
+/// (brief read lock; a `Vec` scan, NO bcrypt). Used by the gate and `/api/me` to
+/// re-verify a live session on every request so removing a user (config edit or
+/// TUI palette + `reload-config`) immediately revokes that user's session —
+/// presence of a session cookie is not enough; the user must still exist.
+///
+/// Returns `false` when the lock is poisoned: a poisoned auth snapshot can't be
+/// trusted to authorize, so we fail closed.
+pub(crate) fn username_exists(auth: &SharedAuth, username: &str) -> bool {
+    auth.read()
+        .map(|s| s.users.iter().any(|u| u.username == username))
+        .unwrap_or(false)
+}
+
 // --- Per-IP login attempt backoff -----------------------------------------
 
 /// Failed logins allowed per IP within [`RATE_WINDOW`] before the IP is told to
@@ -145,6 +159,19 @@ pub(crate) const RATE_LIMIT_MAX_FAILURES: u32 = 5;
 /// Sliding window for the per-IP failure counter.
 pub(crate) const RATE_WINDOW: Duration = Duration::from_secs(60);
 
+/// Hard cap on the number of per-IP buckets retained at once. `/api/login` is
+/// pre-auth reachable, so an attacker controlling an IPv6 `/64` (or any large
+/// address pool) can rotate source addresses and mint a fresh bucket per failed
+/// attempt — unbounded memory growth on exactly the non-loopback deployments
+/// auth enables. We bound the map: 4096 distinct active attackers is far beyond
+/// any legitimate concurrent-login load, and even a full map is a few hundred KB.
+/// When the cap is reached and a NEW IP must be inserted, the STALEST bucket
+/// (oldest `window_start`) is evicted. Best-effort by design: under a flood the
+/// evicted IPs simply lose their accumulated count and start fresh, which only
+/// ever loosens throttling (never blocks a legitimate user), and the per-IP
+/// bcrypt cost still rate-limits each individual attempt.
+pub(crate) const RATE_LIMIT_MAX_BUCKETS: usize = 4096;
+
 /// Coarse, best-effort, MEMORY-ONLY per-IP login backoff.
 ///
 /// This is deliberately simple: a map of `IP -> (failure count, window start)`.
@@ -153,17 +180,35 @@ pub(crate) const RATE_WINDOW: Duration = Duration::from_secs(60);
 /// rolls over. A SUCCESSFUL login clears the IP's counter, so a legitimate user
 /// who eventually types the right password is never left throttled.
 ///
+/// ## Bounding the map (best-effort)
+///
+/// The map is kept bounded so a pre-auth caller rotating source addresses can't
+/// grow it without limit (an IPv6 `/64` is 2^64 addresses):
+/// - **Opportunistic eviction:** whenever a request inserts a NEW ip,
+///   `record_failure` first sweeps out every bucket whose window has fully
+///   elapsed. The sweep is O(n) but only runs on the rarer new-ip insert path
+///   (a repeat offender's bucket already exists, so it skips the sweep), making
+///   it amortized-rare under normal traffic and self-limiting under a flood
+///   (each unique source pays one sweep, reclaiming all the previous floods'
+///   expired entries).
+/// - **Hard cap:** if the map is still at [`RATE_LIMIT_MAX_BUCKETS`] after the
+///   sweep (i.e. everything is within-window), the stalest bucket (oldest
+///   `window_start`) is dropped to make room. Evicting the stalest entry costs
+///   the attacker the least and protects the freshest live throttles.
+///
 /// Limitations (documented, for the council to weigh): it is per-process (a
 /// restart resets it), it keys on the peer address only (a NAT or proxy shares
 /// one bucket; behind a reverse proxy the peer is the proxy — `X-Forwarded-For`
 /// is intentionally NOT trusted here), and it is not a substitute for an
 /// upstream WAF. It exists to blunt trivial online password guessing, not to be
-/// a complete anti-bruteforce system. The window/limit are constructor-injectable
-/// so tests can drive the threshold deterministically without sleeping.
+/// a complete anti-bruteforce system. The window/limit/cap are
+/// constructor-injectable so tests can drive the thresholds deterministically
+/// without sleeping.
 #[derive(Clone)]
 pub struct RateLimiter {
     max_failures: u32,
     window: Duration,
+    max_buckets: usize,
     buckets: Arc<RwLock<HashMap<IpAddr, Bucket>>>,
 }
 
@@ -175,9 +220,17 @@ struct Bucket {
 
 impl RateLimiter {
     pub fn new(max_failures: u32, window: Duration) -> Self {
+        Self::with_cap(max_failures, window, RATE_LIMIT_MAX_BUCKETS)
+    }
+
+    /// Like [`RateLimiter::new`] but with an injectable bucket cap so tests can
+    /// exercise the eviction path with a tiny map instead of allocating 4096
+    /// entries.
+    pub fn with_cap(max_failures: u32, window: Duration, max_buckets: usize) -> Self {
         Self {
             max_failures,
             window,
+            max_buckets: max_buckets.max(1),
             buckets: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -204,11 +257,38 @@ impl RateLimiter {
     }
 
     /// Record a failed attempt for the IP, starting or extending its window.
+    ///
+    /// On the NEW-ip path (the only path that can grow the map) this first sweeps
+    /// expired buckets, then enforces the hard cap by evicting the stalest entry
+    /// if still full. A repeat offender's bucket already exists, so the common
+    /// hot path skips both — see [`RateLimiter`] for the bounding rationale.
     fn record_failure(&self, ip: IpAddr) {
         let Ok(mut buckets) = self.buckets.write() else {
             return;
         };
         let now = Instant::now();
+
+        // Bound the map only when this attempt would insert a NEW ip: a repeat
+        // offender reuses its bucket and never grows the map, so it skips the
+        // O(n) work entirely.
+        if !buckets.contains_key(&ip) {
+            // Opportunistic eviction: drop every bucket whose window has fully
+            // elapsed (those are dead weight — `retry_after_secs` would reset
+            // them on next sight anyway).
+            buckets.retain(|_, b| b.window_start.elapsed() < self.window);
+
+            // Hard cap: if every surviving bucket is still within its window,
+            // evict the stalest (oldest `window_start`) to make room.
+            if buckets.len() >= self.max_buckets
+                && let Some(stalest) = buckets
+                    .iter()
+                    .min_by_key(|(_, b)| b.window_start)
+                    .map(|(ip, _)| *ip)
+            {
+                buckets.remove(&stalest);
+            }
+        }
+
         let bucket = buckets.entry(ip).or_insert(Bucket {
             failures: 0,
             window_start: now,
@@ -218,6 +298,13 @@ impl RateLimiter {
             bucket.window_start = now;
         }
         bucket.failures = bucket.failures.saturating_add(1);
+    }
+
+    /// Current number of retained buckets. Test-only visibility into the map
+    /// size so the eviction/cap tests can assert it shrinks/stays bounded.
+    #[cfg(test)]
+    fn bucket_count(&self) -> usize {
+        self.buckets.read().map(|b| b.len()).unwrap_or(0)
     }
 
     /// Clear an IP's counter after a successful login so a legitimate user is
@@ -355,6 +442,11 @@ enum MeResponse {
 /// - auth OFF        → `200 {"auth":"disabled"}`
 /// - auth ON, session→ `200 {"username":"..."}`
 /// - auth ON, none   → `401`
+///
+/// Mirrors the gate's user-existence re-check: a session whose username has been
+/// removed from the current snapshot reports `401` (and its orphaned session is
+/// flushed), not the stale username — so the SPA falls back to the login screen
+/// the moment the operator revokes the user, matching the gate's behavior.
 pub async fn me(State(state): State<AppState>, session: Session) -> axum::response::Response {
     if !is_enabled(&state.auth) {
         return (
@@ -364,8 +456,14 @@ pub async fn me(State(state): State<AppState>, session: Session) -> axum::respon
             .into_response();
     }
     match session.get::<String>(SESSION_USER_KEY).await {
-        Ok(Some(username)) => {
+        Ok(Some(username)) if username_exists(&state.auth, &username) => {
             (StatusCode::OK, Json(MeResponse::Authed { username })).into_response()
+        }
+        Ok(Some(_)) => {
+            // Username no longer configured (removed + reloaded): flush the
+            // orphaned session and report unauthenticated.
+            let _ = session.flush().await;
+            StatusCode::UNAUTHORIZED.into_response()
         }
         _ => StatusCode::UNAUTHORIZED.into_response(),
     }
@@ -472,6 +570,51 @@ mod tests {
         assert!(
             limiter.retry_after_secs(b).is_none(),
             "b has its own bucket and is unaffected"
+        );
+    }
+
+    #[test]
+    fn rate_limiter_evicts_stale_buckets_on_new_ip_insert() {
+        // A zero-length window means every existing bucket reads as fully
+        // elapsed, so the opportunistic sweep on the next new-ip insert must
+        // reclaim them — the map should not grow unboundedly with expired
+        // entries. We use a generous cap so the SWEEP (not the hard cap) is what
+        // shrinks the map.
+        let limiter = RateLimiter::with_cap(5, Duration::from_millis(0), 4096);
+
+        // Seed several distinct IPs; each is immediately stale (window is 0).
+        for i in 0..10u8 {
+            limiter.record_failure(ip(&format!("10.1.0.{i}")));
+        }
+        // Each new-ip insert swept the prior stale entries first, so the map
+        // never accumulates: after the last insert only that one bucket remains.
+        assert_eq!(
+            limiter.bucket_count(),
+            1,
+            "stale buckets must be swept when a new ip is inserted"
+        );
+
+        // Inserting one more new ip proves the shrink again (sweep leaves only
+        // the freshly inserted bucket).
+        limiter.record_failure(ip("10.1.0.250"));
+        assert_eq!(limiter.bucket_count(), 1, "the sweep keeps the map bounded");
+    }
+
+    #[test]
+    fn rate_limiter_enforces_hard_cap_when_all_buckets_live() {
+        // A long window means nothing expires, so the SWEEP can't help — the
+        // hard cap must kick in. A tiny injectable cap keeps the test fast.
+        let cap = 3;
+        let limiter = RateLimiter::with_cap(5, Duration::from_secs(3600), cap);
+
+        // Insert more distinct IPs than the cap; all are within-window.
+        for i in 0..(cap as u16 + 5) {
+            limiter.record_failure(ip(&format!("10.2.{}.{}", i / 256, i % 256)));
+        }
+        assert_eq!(
+            limiter.bucket_count(),
+            cap,
+            "the map must never exceed the hard cap even when nothing expires"
         );
     }
 }

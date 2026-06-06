@@ -583,6 +583,140 @@ async fn reload_config_picks_up_new_user_live() {
     );
 }
 
+/// Removing a user from config + `reload_config` revokes that user's LIVE
+/// session without a server restart: their existing cookie stops authorizing the
+/// gated `/ws` upgrade (401) and `/api/me` reports 401 (not the stale username).
+/// The gate and `/api/me` re-verify the session's username against the current
+/// auth snapshot on every request, so the live-reload that drops the user takes
+/// effect immediately.
+#[tokio::test]
+async fn reload_config_removing_user_revokes_live_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let paths = seed_paths(&root);
+
+    // Two users on disk: alice (whose session we'll revoke) and bob (kept, so
+    // the gate stays ENABLED after the reload — proving revocation is per-user,
+    // not "auth turned off").
+    let alice = user_entry("alice", "secret-pw");
+    let bob = user_entry("bob", "bob-pw");
+    std::fs::write(
+        &paths.config_path,
+        format!("[auth]\nusers = [\"{alice}\", \"{bob}\"]\n"),
+    )
+    .unwrap();
+
+    let mut engine = bootstrap_engine(&paths).unwrap();
+    let users_at_boot = engine.config.auth.users.clone();
+    assert_eq!(users_at_boot, vec![alice.clone(), bob.clone()]);
+    engine.config.providers.commands.insert(
+        "claude".to_string(),
+        ProviderCommandConfig {
+            command: "cat".to_string(),
+            args: vec![],
+            resume_args: None,
+            ..Default::default()
+        },
+    );
+
+    let auth = shared_auth(&users_at_boot, false);
+    let (handle, _join) = spawn_engine_thread_with_auth(engine, (auth.clone(), false));
+    let app = router_with_auth(handle, auth);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let c = client();
+
+    // alice logs in and gets a working session: /api/me 200 and a cookie'd /ws
+    // upgrade succeeds.
+    let login = c
+        .post(format!("http://{addr}/api/login"))
+        .json(&serde_json::json!({"username":"alice","password":"secret-pw"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(login.status(), 200);
+    let cookie = session_cookie(&login).expect("cookie");
+
+    let me = c
+        .get(format!("http://{addr}/api/me"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(me.status(), 200, "alice's session must work before removal");
+
+    // Remove alice from config (keep bob), then trigger reload over bob's
+    // authenticated WS (alice's session is what we're revoking, so we can't use
+    // it to send the reload command reliably; bob drives it).
+    std::fs::write(&paths.config_path, format!("[auth]\nusers = [\"{bob}\"]\n")).unwrap();
+
+    let bob_login = c
+        .post(format!("http://{addr}/api/login"))
+        .json(&serde_json::json!({"username":"bob","password":"bob-pw"}))
+        .send()
+        .await
+        .unwrap();
+    let bob_cookie = session_cookie(&bob_login).expect("bob cookie");
+    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("cookie", bob_cookie.parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.expect("ws");
+    let _ = ws.next().await; // initial view_model
+    use futures_util::SinkExt;
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        r#"{"type":"command","command":"reload_config","args":{}}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    // Poll until alice's /api/me reports 401 (the reload re-read config, the
+    // engine applied it, and the loop rebuilt the shared auth snapshot WITHOUT
+    // alice — the gate's per-request username re-check now fails).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let mut alice_revoked = false;
+    while tokio::time::Instant::now() < deadline {
+        let resp = c
+            .get(format!("http://{addr}/api/me"))
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap();
+        if resp.status() == 401 {
+            alice_revoked = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    assert!(
+        alice_revoked,
+        "alice's /api/me must report 401 after she is removed and config is reloaded"
+    );
+
+    // And her cookie no longer authorizes the gated /ws upgrade.
+    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    req.headers_mut().insert("cookie", cookie.parse().unwrap());
+    let err = tokio_tungstenite::connect_async(req)
+        .await
+        .expect_err("removed user's WS upgrade must be rejected without a restart");
+    match err {
+        tokio_tungstenite::tungstenite::Error::Http(resp) => assert_eq!(
+            resp.status(),
+            401,
+            "the gate must 401 a removed user's live session"
+        ),
+        other => panic!("expected 401 after user removal, got {other:?}"),
+    }
+}
+
 /// The concrete connected client stream type from the dev-dependency
 /// `tokio-tungstenite` (axum carries a different internal version, so a generic
 /// here would be ambiguous — we pin the exact type instead).

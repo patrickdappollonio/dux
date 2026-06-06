@@ -2,8 +2,10 @@
 //!
 //! ## Route structure and the auth gate
 //!
-//! Routes split into OPEN and GATED groups so every future data route lands
-//! behind the gate by construction:
+//! Routes split into OPEN and GATED groups. The split is a CONVENTION, not a
+//! compile-time guarantee — nothing stops a route from being misplaced into the
+//! open group — so add every new data route to the `gated` sub-router below to
+//! keep it behind the gate:
 //!
 //! - OPEN: static assets, `/healthz`, `/api/login`, `/api/me`, `/api/logout`.
 //!   The SPA must load (and call `/api/me`) to render the login screen, so these
@@ -61,6 +63,15 @@ pub fn router(engine: EngineHandle) -> Router {
 /// session layer is always installed (it is inert when no session is created), so
 /// turning auth on via a config reload needs no router rebuild.
 pub fn router_with_auth(engine: EngineHandle, auth: SharedAuth) -> Router {
+    build_router(engine, auth, Router::new())
+}
+
+/// Shared router builder. `extra_gated` is merged INTO the gated sub-router
+/// before the gate middleware is layered on, so any route it carries inherits
+/// the session gate exactly as `/ws` does. Production callers pass an empty
+/// router; a test injects a probe route to prove the gate covers arbitrary data
+/// routes, not just `/ws` (see [`tests::gated_data_route_is_401_without_session`]).
+fn build_router(engine: EngineHandle, auth: SharedAuth, extra_gated: Router<AppState>) -> Router {
     let state = AppState {
         engine,
         auth,
@@ -84,10 +95,12 @@ pub fn router_with_auth(engine: EngineHandle, auth: SharedAuth) -> Router {
             auth::SESSION_INACTIVITY_DAYS,
         )));
 
-    // GATED routes: the gate middleware runs before these. Future data routes go
-    // here so they inherit the session requirement automatically.
+    // GATED routes: the gate middleware runs before these. By convention, add
+    // every new data route here so it inherits the session requirement — the
+    // structure can't stop a route from being misplaced into the open group.
     let gated = Router::new()
         .route("/ws", get(ws_upgrade))
+        .merge(extra_gated)
         .route_layer(middleware::from_fn_with_state(state.clone(), gate));
 
     // OPEN routes: reachable without a session so the SPA can boot and log in.
@@ -105,17 +118,36 @@ pub fn router_with_auth(engine: EngineHandle, auth: SharedAuth) -> Router {
 /// Gate middleware for the protected sub-router. When auth is enabled, a valid
 /// session is required; otherwise the request is rejected with `401` BEFORE the
 /// WS upgrade. When auth is disabled, every request passes (today's UX).
+///
+/// Session PRESENCE is not sufficient: the session's username must STILL exist
+/// in the current [`auth::AuthState`]. An operator who removes a user (config
+/// edit or TUI palette) then reloads config expects that user's live session to
+/// stop working immediately, without a server restart. So when auth is on we
+/// re-check the username against the current snapshot on every request (a `Vec`
+/// scan under a brief read lock — no bcrypt; see [`auth::username_exists`]) and,
+/// if it is gone, flush the now-orphaned session and reject with `401`.
 async fn gate(
     State(state): State<AppState>,
     session: Session,
     request: Request,
     next: Next,
 ) -> Response {
+    // Auth disabled: the user-existence re-check does not apply; every request
+    // passes (today's UX).
     if !auth::is_enabled(&state.auth) {
         return next.run(request).await;
     }
     match session.get::<String>(auth::SESSION_USER_KEY).await {
-        Ok(Some(_)) => next.run(request).await,
+        Ok(Some(username)) if auth::username_exists(&state.auth, &username) => {
+            next.run(request).await
+        }
+        Ok(Some(_)) => {
+            // The session names a user who no longer exists (removed + reloaded):
+            // destroy the orphaned session so its cookie can't keep retrying, and
+            // treat the request as unauthenticated.
+            let _ = session.flush().await;
+            StatusCode::UNAUTHORIZED.into_response()
+        }
         _ => StatusCode::UNAUTHORIZED.into_response(),
     }
 }
@@ -634,6 +666,60 @@ async fn inspect_project_path(path: String) -> ServerMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tower::ServiceExt; // for `oneshot`
+
+    /// Boot a minimal headless engine handle for routing-only tests. The handle
+    /// just needs to exist — the gated request 401s before it ever reaches the
+    /// engine.
+    fn test_engine_handle(tmp: &std::path::Path) -> crate::engine_actor::EngineHandle {
+        let paths = dux_core::config::DuxPaths {
+            root: tmp.to_path_buf(),
+            config_path: tmp.join("config.toml"),
+            sessions_db_path: tmp.join("sessions.sqlite3"),
+            worktrees_root: tmp.join("worktrees"),
+            lock_path: tmp.join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        let engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        handle
+    }
+
+    /// A representative data route added to the GATED sub-router must 401 without
+    /// a session when auth is on — proving the gate covers arbitrary gated data
+    /// routes, not only `/ws`. This is the reviewer's regression test: it injects
+    /// a probe route through `build_router`'s test seam so a future data route
+    /// placed in the gated group is provably protected.
+    #[tokio::test]
+    async fn gated_data_route_is_401_without_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+
+        // Auth ON (one user) so the gate enforces a session.
+        let hash = dux_core::auth::hash_password("pw").unwrap();
+        let auth = auth::shared_auth(&[format!("alice:{hash}")], false);
+
+        // Inject a dummy gated data route through the test seam.
+        let probe: Router<AppState> =
+            Router::new().route("/api/_test_gated", get(|| async { "secret" }));
+        let app = build_router(handle, auth, probe);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/_test_gated")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "a gated data route must reject an unauthenticated request before reaching its handler"
+        );
+    }
 
     fn run_git(cwd: &std::path::Path, args: &[&str]) {
         let out = std::process::Command::new("git")
