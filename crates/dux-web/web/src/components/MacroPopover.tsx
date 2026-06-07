@@ -1,9 +1,10 @@
 import { useState } from "react"
-import { SquareSlash } from "lucide-react"
+import { SquarePen, SquareSlash } from "lucide-react"
 
 import {
   Command,
   CommandEmpty,
+  CommandGroup,
   CommandInput,
   CommandItem,
   CommandList,
@@ -17,7 +18,6 @@ import { Button } from "@/components/ui/button"
 import { macrosForTarget } from "@/lib/macros"
 import { openMacrosDialog, runMacro, useDux } from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
-import { paletteShortcutLabel } from "@/lib/platform"
 
 // A small quick-picker for sending a text macro to the focused target. Mirrors
 // the TUI's Ctrl-\ macro bar: a filterable list of macros restricted to the
@@ -46,50 +46,55 @@ export function MacroPopover({ target }: { target: SelectedTarget }) {
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
+      {/* Ellipsis on the label signals the button opens a menu of choices
+          (unlike the fullscreen button, which acts immediately). */}
       <PopoverTrigger
-        render={
-          <Button variant="secondary" aria-label="Run a macro" />
-        }
+        render={<Button variant="secondary" aria-label="Run a macro" />}
       >
         <SquareSlash />
-        Macros
+        Macros…
       </PopoverTrigger>
       <PopoverContent align="end" className="w-72 p-0">
         {allMacros.length === 0 ? (
-          <div className="p-3 text-sm text-muted-foreground">
-            No macros yet — open Edit macros from the command palette (
-            {paletteShortcutLabel()}).
+          <div className="px-3 py-6 text-center text-sm text-muted-foreground">
+            No macros found — start by creating one!
           </div>
         ) : macros.length === 0 ? (
-          <div className="p-3 text-sm text-muted-foreground">
+          <div className="px-3 py-6 text-center text-sm text-muted-foreground">
             No macros for this target kind — add one via Edit macros below.
           </div>
         ) : (
           <Command>
             <CommandInput placeholder="Search macros…" autoFocus />
+            {/* CommandGroup's padding puts breathing room between the search
+                field and the first result, matching the gap above the Edit
+                macros footer below. */}
             <CommandList>
               <CommandEmpty>No matching macros.</CommandEmpty>
-              {macros.map((macro) => (
-                <CommandItem
-                  key={macro.name}
-                  value={macro.name}
-                  className="cursor-pointer"
-                  onSelect={() => handleRun(macro.name)}
-                >
-                  {macro.name}
-                </CommandItem>
-              ))}
+              <CommandGroup>
+                {macros.map((macro) => (
+                  <CommandItem
+                    key={macro.name}
+                    value={macro.name}
+                    className="cursor-pointer"
+                    onSelect={() => handleRun(macro.name)}
+                  >
+                    {macro.name}
+                  </CommandItem>
+                ))}
+              </CommandGroup>
             </CommandList>
           </Command>
         )}
         <button
           type="button"
-          className="w-full border-t px-3 py-2 text-left text-xs text-muted-foreground hover:text-foreground"
+          className="flex w-full items-center gap-2 border-t px-3 py-2 text-left text-xs text-muted-foreground hover:text-foreground"
           onClick={() => {
             setOpen(false)
             openMacrosDialog()
           }}
         >
+          <SquarePen className="size-3.5 shrink-0" />
           Edit macros…
         </button>
       </PopoverContent>
