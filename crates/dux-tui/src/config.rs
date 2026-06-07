@@ -507,6 +507,32 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             )),
             value_fn: |c| FieldValue::Bool(c.server.insecure_allow_remote),
         },
+        ConfigEntry::Field {
+            key: "color",
+            comment: Some(CommentSource::Static(
+                "# Colored, vite-style console output for `dux server`. One of:\n\
+                 #   \"auto\"   — color only when stdout is a real terminal, NO_COLOR is\n\
+                 #              unset/empty, and TERM is not \"dumb\" (piped output stays\n\
+                 #              plain ASCII, so logs and `| tee` capture cleanly).\n\
+                 #   \"always\" — force color even when piped.\n\
+                 #   \"never\"  — plain text always.\n\
+                 # An unrecognized value falls back to \"auto\" with a warning. The in-app\n\
+                 # \"start web server\" flip keeps its themed status screen — this only\n\
+                 # affects the `dux server` CLI.",
+            )),
+            value_fn: |c| FieldValue::Str(c.server.color.clone()),
+        },
+        ConfigEntry::Field {
+            key: "access_log",
+            comment: Some(CommentSource::Static(
+                "# Print a per-request access log line (method, path, status, latency) to\n\
+                 # the `dux server` console. The /healthz probe is always skipped so a\n\
+                 # health checker does not flood the log. This output is console-ONLY and\n\
+                 # never written to dux.log, so piping `dux server`'s stdout captures the\n\
+                 # access log. Set false to silence it.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.server.access_log),
+        },
         ConfigEntry::Blank,
         ConfigEntry::ServerAcme,
         ConfigEntry::Auth,
@@ -1128,6 +1154,8 @@ mod tests {
             "renderer must not emit the deprecated bind key"
         );
         assert!(rendered.contains("insecure_allow_remote = false"));
+        assert!(rendered.contains("color = \"auto\""));
+        assert!(rendered.contains("access_log = true"));
         assert!(rendered.contains("[server.acme]"));
         assert!(rendered.contains("enabled = false"));
         assert!(rendered.contains("domains = []"));

@@ -224,6 +224,8 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "insecure_allow_remote",
         config.server.insecure_allow_remote,
     );
+    patch_table_str(doc, "server", "color", &config.server.color);
+    patch_table_bool(doc, "server", "access_log", config.server.access_log);
 
     // --- [server.acme] ---
     patch_acme(doc, &config.server.acme);
@@ -654,6 +656,8 @@ unknown_key = \"untouched\"
         config.server.tailscale_enabled = false;
         config.server.listen_addrs = vec!["0.0.0.0:9000".to_string()];
         config.server.insecure_allow_remote = true;
+        config.server.color = "never".to_string();
+        config.server.access_log = false;
 
         write_config_plain(&config_path, &config).expect("write_config_plain");
 
@@ -663,6 +667,8 @@ unknown_key = \"untouched\"
         assert!(!parsed.server.tailscale_enabled);
         assert_eq!(parsed.server.listen_addrs, vec!["0.0.0.0:9000".to_string()]);
         assert!(parsed.server.insecure_allow_remote);
+        assert_eq!(parsed.server.color, "never");
+        assert!(!parsed.server.access_log);
         // The deprecated `bind` key is never re-emitted by the patcher.
         assert!(
             !saved.contains("bind ="),

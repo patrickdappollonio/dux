@@ -160,6 +160,17 @@ pub struct ServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind: Option<String>,
     pub insecure_allow_remote: bool,
+    /// Colored, vite-style console output for `dux server`. One of `"auto"`
+    /// (default — color only when stdout is a terminal, `NO_COLOR` is unset, and
+    /// `TERM` is not `dumb`), `"always"` (force color), or `"never"` (plain text).
+    /// An unrecognized value is treated as `"auto"` with a warning. The TUI flip's
+    /// status screen is unaffected — this only governs the `dux server` CLI.
+    pub color: String,
+    /// Whether `dux server` prints a per-request access log line (method, path,
+    /// status, latency) to its console. The `/healthz` probe is always skipped.
+    /// Default true. The access log is console-only (never written to `dux.log`),
+    /// so piping `dux server`'s stdout captures it.
+    pub access_log: bool,
     pub acme: AcmeSettings,
 }
 
@@ -373,6 +384,8 @@ impl Default for ServerConfig {
             listen_addrs: Vec::new(),
             bind: None,
             insecure_allow_remote: false,
+            color: "auto".to_string(),
+            access_log: true,
             acme: AcmeSettings::default(),
         }
     }

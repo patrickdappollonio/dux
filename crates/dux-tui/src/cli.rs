@@ -292,6 +292,18 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         defaults.server.insecure_allow_remote,
         current.server.insecure_allow_remote,
     );
+    diff_str(
+        &mut changes,
+        "server.color",
+        &defaults.server.color,
+        &current.server.color,
+    );
+    diff_bool(
+        &mut changes,
+        "server.access_log",
+        defaults.server.access_log,
+        current.server.access_log,
+    );
 
     // [server.acme]
     diff_bool(
