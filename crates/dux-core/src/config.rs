@@ -48,6 +48,28 @@ impl MacroSurface {
         }
     }
 
+    /// The canonical config/wire string for this surface, matching the
+    /// `#[serde(rename_all = "lowercase")]` representation. Use this anywhere a
+    /// `MacroSurface` crosses into TOML or JSON so the casing stays in one place.
+    pub fn as_config_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Terminal => "terminal",
+            Self::Both => "both",
+        }
+    }
+
+    /// Parse the canonical config/wire string back into a `MacroSurface`.
+    /// Returns `None` for an unrecognized value.
+    pub fn from_config_str(s: &str) -> Option<Self> {
+        match s {
+            "agent" => Some(Self::Agent),
+            "terminal" => Some(Self::Terminal),
+            "both" => Some(Self::Both),
+            _ => None,
+        }
+    }
+
     /// Cycle to the next variant: Agent -> Terminal -> Both -> Agent.
     pub fn next(self) -> Self {
         match self {

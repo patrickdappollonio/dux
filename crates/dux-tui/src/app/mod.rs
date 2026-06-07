@@ -2242,14 +2242,16 @@ impl App {
                 .macros
                 .entries
                 .iter()
-                .filter(|(_, entry)| entry.surface.matches(surface))
+                .filter(|(_, entry)| {
+                    dux_core::macros::macro_matches_surface(entry.surface, surface)
+                })
                 .map(|(name, entry)| (name.as_str(), entry.text.as_str()))
                 .collect();
         }
         let mut name_matches = Vec::new();
         let mut text_matches = Vec::new();
         for (name, entry) in &self.engine.config.macros.entries {
-            if !entry.surface.matches(surface) {
+            if !dux_core::macros::macro_matches_surface(entry.surface, surface) {
                 continue;
             }
             if name.to_lowercase().contains(&needle) {

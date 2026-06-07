@@ -28,34 +28,6 @@ fn configure_project_text_input_mut(prompt: &mut PromptState) -> Option<&mut Tex
 /// the user pastes large amounts of text while the agent is starting.
 const LOADING_INPUT_BUF_MAX: usize = 64;
 
-/// Build the byte payload for a macro send. Newlines are translated to
-/// Alt+Enter (ESC followed by CR) so that multi-line macros are entered
-/// as a single multi-line prompt rather than submitting at each newline.
-/// Handles `\r\n`, `\n`, and bare `\r` uniformly.
-pub(crate) fn macro_payload_bytes(text: &str) -> Vec<u8> {
-    const ALT_ENTER: &[u8] = b"\x1b\r";
-    let bytes = text.as_bytes();
-    let mut payload = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\r' if bytes.get(i + 1) == Some(&b'\n') => {
-                payload.extend_from_slice(ALT_ENTER);
-                i += 2;
-            }
-            b'\n' | b'\r' => {
-                payload.extend_from_slice(ALT_ENTER);
-                i += 1;
-            }
-            b => {
-                payload.push(b);
-                i += 1;
-            }
-        }
-    }
-    payload
-}
-
 /// Append `bytes` to `buf`, keeping at most `max` trailing bytes. Used to
 /// bound `loading_input_buf` so it cannot grow without bound when the user
 /// pastes large content during the agent loading phase.
@@ -1120,7 +1092,7 @@ impl App {
                 let filtered = self.filtered_macros(&query);
                 if let Some(&(name, text)) = filtered.get(selected) {
                     if let Some(provider) = self.selected_terminal_surface_client() {
-                        let payload = macro_payload_bytes(text);
+                        let payload = dux_core::macros::macro_payload_bytes(text);
                         let _ = provider.write_bytes(&payload);
                     }
                     let name = name.to_string();
@@ -14107,35 +14079,6 @@ cyan = "#00ffff"
             !rendered.contains("[200") && !rendered.contains("[201"),
             "macro text must not be wrapped in bracket-paste markers; got: {rendered:?}"
         );
-    }
-
-    #[test]
-    fn macro_payload_translates_newlines_to_alt_enter() {
-        use crate::app::input::macro_payload_bytes;
-
-        // Plain text with no newlines passes through byte-for-byte.
-        assert_eq!(macro_payload_bytes("hello").as_slice(), b"hello");
-
-        // Bare LF (\n) becomes ESC + CR.
-        assert_eq!(macro_payload_bytes("a\nb").as_slice(), b"a\x1b\rb");
-
-        // Bare CR (\r) becomes ESC + CR.
-        assert_eq!(macro_payload_bytes("a\rb").as_slice(), b"a\x1b\rb");
-
-        // CRLF collapses to a single ESC + CR (not two).
-        assert_eq!(macro_payload_bytes("a\r\nb").as_slice(), b"a\x1b\rb");
-
-        // Multiple newlines each become their own ESC + CR.
-        assert_eq!(
-            macro_payload_bytes("a\nb\nc").as_slice(),
-            b"a\x1b\rb\x1b\rc"
-        );
-
-        // Trailing and leading newlines are also translated.
-        assert_eq!(macro_payload_bytes("\na\n").as_slice(), b"\x1b\ra\x1b\r");
-
-        // Empty input yields empty payload.
-        assert!(macro_payload_bytes("").is_empty());
     }
 
     #[test]

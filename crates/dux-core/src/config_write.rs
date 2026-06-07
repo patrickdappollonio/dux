@@ -56,7 +56,7 @@ pub fn write_config_secure(path: &Path, contents: &str) -> Result<()> {
 }
 
 use crate::config::{
-    AcmeSettings, Config, MacroSurface, MacrosConfig, OneshotOutput, ProjectConfig, ProvidersConfig,
+    AcmeSettings, Config, MacrosConfig, OneshotOutput, ProjectConfig, ProvidersConfig,
 };
 
 /// Patch an EXISTING `config.toml` in place, preserving the user's comments,
@@ -467,14 +467,9 @@ fn patch_macros(doc: &mut DocumentMut, macros: &MacrosConfig) {
     for (name, entry) in &macros.entries {
         let mut inline = InlineTable::new();
         inline.insert("text", Value::String(Formatted::new(entry.text.clone())));
-        let surface_str = match entry.surface {
-            MacroSurface::Agent => "agent",
-            MacroSurface::Terminal => "terminal",
-            MacroSurface::Both => "both",
-        };
         inline.insert(
             "surface",
-            Value::String(Formatted::new(surface_str.to_string())),
+            Value::String(Formatted::new(entry.surface.as_config_str().to_string())),
         );
         table[name] = toml_edit::value(Value::InlineTable(inline));
     }
