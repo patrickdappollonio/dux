@@ -1,4 +1,5 @@
 import { Sparkles } from "lucide-react"
+import { shouldShowChangedFiles } from "@/lib/changedFiles"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -20,7 +21,13 @@ export function CommitDialog() {
   const { commitTarget, commitDraft, viewModel } = useDux()
 
   const isOpen = commitTarget !== null
-  const stagedCount = viewModel?.changed_files.staged.length ?? 0
+  // Only trust the global staged list when it belongs to THIS dialog's session
+  // (the same cross-tab guard the changed-files pane uses), so "Generate with
+  // AI" never lights up off another session's stale staged count.
+  const watchedSessionId = viewModel?.changed_files.watched_session_id ?? null
+  const stagedCount = shouldShowChangedFiles(watchedSessionId, commitTarget)
+    ? (viewModel?.changed_files.staged.length ?? 0)
+    : 0
 
   function handleCommit() {
     if (!commitTarget || !commitDraft.trim()) return

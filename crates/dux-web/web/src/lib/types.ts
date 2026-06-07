@@ -118,6 +118,11 @@ export interface ChangedFileView {
 export interface ChangedFiles {
   staged: ChangedFileView[]
   unstaged: ChangedFileView[]
+  /** The session id these lists belong to (the currently watched worktree), or
+   * `null` when nothing is watched. The changed-files UI renders these lists
+   * only when this matches the locally selected session — otherwise it shows a
+   * loading state rather than another session's files (cross-tab safety). */
+  watched_session_id: string | null
 }
 
 export type DiffLineKind = "context" | "insert" | "delete"

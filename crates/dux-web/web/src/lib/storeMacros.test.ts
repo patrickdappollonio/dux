@@ -48,7 +48,7 @@ function vmWithMacros(macros: MacroView[]): ViewModel {
   return {
     projects: [],
     sessions: [],
-    changed_files: { staged: [], unstaged: [] },
+    changed_files: { staged: [], unstaged: [], watched_session_id: null },
     global_env: {},
     available_providers: [],
     welcome_tips: [],

@@ -65,6 +65,7 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { shouldShowChangedFiles } from "@/lib/changedFiles"
 import { projectBranchDisplay } from "@/lib/projectBranch"
 import type { ProjectBranchDisplay } from "@/lib/projectBranch"
 import { partitionProjects } from "@/lib/projects"
@@ -707,8 +708,18 @@ function TerminalScreen() {
   const project = session
     ? viewModel?.projects.find((p) => p.id === session.project_id)
     : undefined
-  const changed = viewModel?.changed_files ?? { staged: [], unstaged: [] }
-  const changeCount = changed.staged.length + changed.unstaged.length
+  const changed = viewModel?.changed_files ?? {
+    staged: [],
+    unstaged: [],
+    watched_session_id: null,
+  }
+  // Only count changes when the global watch matches this client's selection —
+  // otherwise the badge could briefly show another session's count (the same
+  // cross-tab guard the changed-files pane uses).
+  const watchedSessionId = viewModel?.changed_files.watched_session_id ?? null
+  const changeCount = shouldShowChangedFiles(watchedSessionId, selectedSessionId)
+    ? changed.staged.length + changed.unstaged.length
+    : 0
 
   // Defensive fallback: the agent exited (TerminalPane reset the selection) or
   // the target was pruned while we sat here. Show the hub content rather than a

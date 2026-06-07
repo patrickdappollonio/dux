@@ -380,6 +380,16 @@ socket.onConn = (conn) => {
   // showing an order the server never persisted. Snap back to authoritative.
   const patch = conn === "closed" || conn === "failed" ? clearPendingOrders() : {}
   setState({ conn, ...patch })
+  // Re-establish the server-side changed-files watch on every (re)connect. The
+  // watch is server state that a dropped connection discards, so a reconnect
+  // would otherwise leave the pane empty until the next manual selection. This
+  // mirrors how the focused terminal re-attaches after a reconnect — it re-issues
+  // its `subscribe` so the new server-side provider streams again.
+  if (conn === "open" && state.selectedSessionId !== null) {
+    socket.sendCommand("watch_changed_files", {
+      session_id: state.selectedSessionId,
+    })
+  }
   // When the socket gives up (the reconnect loop exhausted its attempts) while
   // we believe we're authed, the cause may be a session that expired or was
   // revoked server-side: the gated `/ws` upgrade now 401s, which the browser
@@ -790,6 +800,10 @@ export function selectSession(id: string | null): void {
     // is the out-of-band clear path (e.g. an agent exit) — see
     // `unwindMobileSpoke`. Desktop stays on "home", so the unwind no-ops there.
     setState({ selectedTarget: null, selectedSessionId: null })
+    // Tell the server to stop watching any worktree (a null id clears the global
+    // changed-files watch). Without this the poller keeps reading the previously
+    // selected session's worktree.
+    socket.sendCommand("watch_changed_files", { session_id: null })
     unwindMobileSpoke()
     return
   }
@@ -797,6 +811,11 @@ export function selectSession(id: string | null): void {
     selectedTarget: { kind: "agent", sessionId: id },
     selectedSessionId: id,
   })
+  // Point the server-side changed-files watch at this session's worktree. The
+  // engine's changed-files state is global and only set by whoever asks, so the
+  // web must send this on selection (otherwise the pane stays empty — the TUI
+  // was the only thing that ever set it).
+  socket.sendCommand("watch_changed_files", { session_id: id })
 }
 
 // Select one of a session's companion terminals as the streamed target. The
@@ -806,6 +825,9 @@ export function selectTerminal(terminalId: string, sessionId: string): void {
     selectedTarget: { kind: "terminal", terminalId, sessionId },
     selectedSessionId: sessionId,
   })
+  // The watched worktree is the SESSION's, so watch the parent session even when
+  // a companion terminal is the streamed target.
+  socket.sendCommand("watch_changed_files", { session_id: sessionId })
 }
 
 // Ask the server to spawn a new companion terminal for a session. The server

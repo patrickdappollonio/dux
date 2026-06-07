@@ -1,5 +1,5 @@
 import { useMemo, useState, useSyncExternalStore } from "react"
-import { Check, Hash, MousePointerClick, Search, Undo2 } from "lucide-react"
+import { Check, Hash, Loader2, MousePointerClick, Search, Undo2 } from "lucide-react"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Badge } from "@/components/ui/badge"
@@ -38,7 +38,7 @@ import {
   languageForPath,
   subscribeHighlighter,
 } from "@/lib/highlight"
-import { filterChangedFiles } from "@/lib/changedFiles"
+import { filterChangedFiles, shouldShowChangedFiles } from "@/lib/changedFiles"
 import {
   closeDiff,
   openCommit,
@@ -220,7 +220,31 @@ export function ChangedFiles() {
     )
   }
 
-  const changed = viewModel?.changed_files ?? { staged: [], unstaged: [] }
+  // The changed-files lists are GLOBAL engine state tagged with the session they
+  // belong to. Only trust them when they match this client's selection; until
+  // the server's watch catches up (selection just changed, or a reconnect is
+  // re-establishing it) show a loading state rather than another session's files.
+  const watchedSessionId = viewModel?.changed_files.watched_session_id ?? null
+  const ready = shouldShowChangedFiles(watchedSessionId, selectedSessionId)
+  if (!ready) {
+    return (
+      <Empty className="h-full border-0">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <Loader2 className="animate-spin" />
+          </EmptyMedia>
+          <EmptyTitle>Loading changes…</EmptyTitle>
+          <EmptyDescription>Fetching this session's changes.</EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    )
+  }
+
+  const changed = viewModel?.changed_files ?? {
+    staged: [],
+    unstaged: [],
+    watched_session_id: null,
+  }
   const hasChanges = changed.staged.length > 0 || changed.unstaged.length > 0
 
   const filtering = query.trim() !== ""

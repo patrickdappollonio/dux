@@ -514,6 +514,79 @@ async fn get_diff_returns_hunks_for_a_changed_file() {
     assert!(!v["error"].is_null(), "error should be set: {err_frame}");
 }
 
+/// Anti-regression for the empty web changed-files pane: the web never set
+/// `watched_worktree`, so the poller read `None` forever and the ViewModel's
+/// `changed_files` stayed empty. Sending `watch_changed_files` for a session
+/// whose worktree has changes must make a subsequent ViewModel frame carry
+/// non-empty `changed_files` tagged with the watched session id. The
+/// `boot_with_repo` session `s1` has an uncommitted edit to `f.txt`, so it is
+/// an unstaged change.
+#[tokio::test]
+async fn watch_changed_files_populates_view_model_changed_files() {
+    let (addr, _tmp) = boot_with_repo().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+
+    // The initial ViewModel frame should have an EMPTY changed-files list and no
+    // watched session — the exact pre-fix state.
+    let initial = tokio::time::timeout(Duration::from_secs(3), ws.next())
+        .await
+        .expect("timeout")
+        .expect("stream end")
+        .expect("ws error")
+        .into_text()
+        .expect("text");
+    assert!(
+        initial.contains("\"type\":\"view_model\""),
+        "expected view_model: {initial}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&initial).expect("parse initial frame");
+    assert!(
+        v["data"]["changed_files"]["unstaged"]
+            .as_array()
+            .is_some_and(|a| a.is_empty()),
+        "expected empty unstaged before watch: {initial}"
+    );
+    assert!(
+        v["data"]["changed_files"]["watched_session_id"].is_null(),
+        "expected no watched session before watch: {initial}"
+    );
+
+    // Ask the server to watch session s1's worktree.
+    ws.send(Message::Text(
+        r#"{"type":"command","command":"watch_changed_files","args":{"session_id":"s1"}}"#.into(),
+    ))
+    .await
+    .unwrap();
+
+    // A subsequent ViewModel frame must carry the unstaged f.txt change tagged
+    // with the watched session id.
+    let mut populated = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    while tokio::time::Instant::now() < deadline && !populated {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+            && let Ok(t) = m.into_text()
+            && t.contains("\"type\":\"view_model\"")
+        {
+            let v: serde_json::Value = serde_json::from_str(&t).expect("parse frame");
+            let watched = v["data"]["changed_files"]["watched_session_id"].as_str();
+            let unstaged = v["data"]["changed_files"]["unstaged"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            if watched == Some("s1") && unstaged.iter().any(|f| f["path"].as_str() == Some("f.txt"))
+            {
+                populated = true;
+            }
+        }
+    }
+    assert!(
+        populated,
+        "never saw a ViewModel frame with the watched session's changed files"
+    );
+}
+
 #[tokio::test]
 async fn client_receives_view_model_on_connect() {
     let (addr, _tmp) = boot().await;
