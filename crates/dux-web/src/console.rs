@@ -541,6 +541,17 @@ pub enum LoginRow {
     Enabled { count: usize },
     /// The gate is OFF via `--disable-auth` — a loud red warning.
     Disabled,
+    /// No login is required because there are zero valid users (the gate is OFF
+    /// per `auth_enabled`, but this is NOT `--disable-auth`). The tone tracks how
+    /// reachable the server is:
+    /// - `reachable: false` → loopback-only, a calm muted "local only" note.
+    /// - `reachable: true` → a non-loopback leg is bound, a ⚠ warning.
+    ///
+    /// `public` only refines the warning text: a required non-loopback leg (an
+    /// explicit `listen_addrs` public/LAN entry) gets the stronger wording, while
+    /// a best-effort (Tailscale local-mode) leg gets the Tailscale-specific one.
+    /// Ignored when `reachable` is false.
+    NoLoginRequired { reachable: bool, public: bool },
 }
 
 /// Everything the post-bind banner needs. Built by the serve path from the
@@ -623,6 +634,33 @@ fn render_banner(color: bool, banner: &Banner) -> Vec<String> {
                 format!("  {RED}{}{RESET} {text}", Tone::Error.glyph())
             } else {
                 format!("  error {text}")
+            }
+        }
+        LoginRow::NoLoginRequired { reachable, public } => {
+            if !reachable {
+                // Loopback-only: calm, muted. The gate is off but nothing off-host
+                // can reach it, so this is the expected local-dev shape.
+                let text = "No login required (local only) — add a login user to require sign-in";
+                if color {
+                    format!("  {DIM}{} {text}{RESET}", Tone::Info.glyph())
+                } else {
+                    format!("  info {text}")
+                }
+            } else {
+                // A non-loopback leg is bound: warn. Public/LAN (required) gets the
+                // stronger wording; a best-effort Tailscale leg gets its own.
+                let text = if *public {
+                    "No login required — this server is reachable on a public/LAN address with NO \
+                     login. Add a login user or front it with an auth proxy."
+                } else {
+                    "No login required — anyone on your Tailscale network can connect. Add a login \
+                     user to require sign-in."
+                };
+                if color {
+                    format!("  {YELLOW}{}{RESET} {text}", Tone::Warn.glyph())
+                } else {
+                    format!("  warn {text}")
+                }
             }
         }
     };
@@ -946,6 +984,67 @@ mod tests {
         assert!(
             color.contains(RED),
             "disabled-auth row must be red in color mode"
+        );
+    }
+
+    #[test]
+    fn banner_no_login_loopback_is_muted_local_only() {
+        let mut b = sample_banner();
+        b.login = LoginRow::NoLoginRequired {
+            reachable: false,
+            public: false,
+        };
+        let plain = render_banner(false, &b).join("\n");
+        assert!(
+            plain.contains("No login required (local only)"),
+            "loopback-only must say local only: {plain}"
+        );
+        // Never the old lie about an enabled gate or the loud disabled warning.
+        assert!(!plain.contains("login enabled"));
+        assert!(!plain.contains("DISABLED"));
+        let color = render_banner(true, &b).join("\n");
+        assert!(
+            color.contains(DIM) && !color.contains(YELLOW) && !color.contains(RED),
+            "local-only row is muted (DIM), not a warning: {color}"
+        );
+    }
+
+    #[test]
+    fn banner_no_login_tailscale_is_yellow_warning() {
+        let mut b = sample_banner();
+        b.login = LoginRow::NoLoginRequired {
+            reachable: true,
+            public: false,
+        };
+        let plain = render_banner(false, &b).join("\n");
+        assert!(
+            plain.contains("Tailscale network"),
+            "tailscale wording: {plain}"
+        );
+        assert!(plain.starts_with("dux") || plain.contains("warn"));
+        let color = render_banner(true, &b).join("\n");
+        assert!(
+            color.contains(YELLOW),
+            "reachable no-login row is a yellow warning: {color}"
+        );
+    }
+
+    #[test]
+    fn banner_no_login_public_is_stronger_yellow_warning() {
+        let mut b = sample_banner();
+        b.login = LoginRow::NoLoginRequired {
+            reachable: true,
+            public: true,
+        };
+        let plain = render_banner(false, &b).join("\n");
+        assert!(
+            plain.contains("public/LAN address") && plain.contains("auth proxy"),
+            "public wording must name the public/LAN reach and the proxy mitigation: {plain}"
+        );
+        let color = render_banner(true, &b).join("\n");
+        assert!(
+            color.contains(YELLOW),
+            "public no-login row is a yellow warning: {color}"
         );
     }
 

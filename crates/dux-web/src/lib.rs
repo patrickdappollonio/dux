@@ -231,15 +231,16 @@ async fn bind_plan_addrs(addrs: &[PlanAddr]) -> Result<(Vec<BoundListener>, Vec<
 /// - a required non-loopback leg (an explicit `listen_addrs` public/LAN entry) →
 ///   "Listen"
 ///
-/// The login row is green ("login enabled — N user(s)") or a loud red disabled
-/// warning. Best-effort bind degradations (a busy Tailscale address) become ⚠
-/// rows. Pure (over `(SocketAddr, bool)` pairs, not the live listeners) so it is
+/// The login row is green ("login enabled — N user(s)"), a loud red disabled
+/// warning, or — with zero valid users — a "No login required" row whose tone is
+/// derived from the legs' reachability (see [`login_row`]/[`reachability`]).
+/// Best-effort bind degradations (a busy Tailscale address) become ⚠ rows. Pure
+/// (over `(SocketAddr, bool)` pairs, not the live listeners) so it is
 /// unit-testable without binding sockets.
 fn plain_http_banner(
     version: &str,
     bound: &[(SocketAddr, bool)],
     disable_auth: bool,
-    host_only: bool,
     user_count: usize,
     bind_warnings: &[String],
 ) -> Banner {
@@ -263,26 +264,70 @@ fn plain_http_banner(
     Banner {
         version: version.to_string(),
         mode: "plain HTTP".to_string(),
-        listeners,
-        login: login_row(disable_auth, host_only, user_count),
+        login: login_row(disable_auth, reachability(bound), user_count),
         warnings: bind_warnings.to_vec(),
+        listeners,
     }
 }
 
+/// How far the server can be reached, classified from the BOUND legs (each an
+/// `(addr, required)` pair where `required` is true for explicit `listen_addrs`
+/// public/LAN entries and false for best-effort Tailscale local-mode legs).
+/// Worst-wins: any required non-loopback leg makes it `Public`; otherwise any
+/// best-effort non-loopback leg makes it `Tailscale`; otherwise `LoopbackOnly`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reachability {
+    /// Every bound leg is genuine loopback — nothing off-host can reach it.
+    LoopbackOnly,
+    /// A best-effort (Tailscale local-mode) non-loopback leg is bound, and no
+    /// public/LAN leg is.
+    Tailscale,
+    /// A required non-loopback leg (an explicit `listen_addrs` public/LAN entry)
+    /// is bound.
+    Public,
+}
+
+fn reachability(bound: &[(SocketAddr, bool)]) -> Reachability {
+    let mut result = Reachability::LoopbackOnly;
+    for (addr, required) in bound {
+        if addr.ip().is_loopback() {
+            continue;
+        }
+        if *required {
+            return Reachability::Public;
+        }
+        result = Reachability::Tailscale;
+    }
+    result
+}
+
 /// The banner's login-state row. `--disable-auth` is a loud red warning; an
-/// enabled gate is green with the user count. Auth-off WITHOUT `--disable-auth`
-/// only happens on a host-only (loopback) bind with no users (the startup bind
-/// gate forbids it otherwise), so it reads as the enabled row with a zero count
-/// would mislead — instead we surface the disabled state plainly via the count.
-fn login_row(disable_auth: bool, host_only: bool, user_count: usize) -> LoginRow {
+/// enabled gate (≥1 valid user) is green with the count.
+///
+/// Zero valid users means the gate is OFF (per `auth::auth_enabled`) WITHOUT
+/// `--disable-auth` — the truthful row is "No login required", never an enabled
+/// 0-user row (the old behavior, which lied about a protecting gate). Its tone
+/// tracks reachability: a loopback-only bind is the calm local-dev case; a
+/// non-loopback leg is a warning, stronger for a public/LAN leg than for a
+/// best-effort Tailscale one.
+fn login_row(disable_auth: bool, reach: Reachability, user_count: usize) -> LoginRow {
     if disable_auth {
         LoginRow::Disabled
-    } else if user_count == 0 && host_only {
-        // No users on a loopback-only bind: the gate is OFF but this is the
-        // documented local-dev case, not the scary --disable-auth path. Show it as
-        // a 0-user enabled row so the operator still sees the gate is not
-        // protecting anything.
-        LoginRow::Enabled { count: 0 }
+    } else if user_count == 0 {
+        match reach {
+            Reachability::LoopbackOnly => LoginRow::NoLoginRequired {
+                reachable: false,
+                public: false,
+            },
+            Reachability::Tailscale => LoginRow::NoLoginRequired {
+                reachable: true,
+                public: false,
+            },
+            Reachability::Public => LoginRow::NoLoginRequired {
+                reachable: true,
+                public: true,
+            },
+        }
     } else {
         LoginRow::Enabled { count: user_count }
     }
@@ -327,7 +372,6 @@ fn run_plain_http(
             &version,
             &banner_legs,
             disable_auth,
-            host_only,
             user_count,
             &bind_warnings,
         ));
@@ -452,8 +496,10 @@ pub fn acme_disable_auth_warning() -> String {
 /// Encrypt and flags `[STAGING]` when `production` is false; the single listener
 /// row is the certificate's primary domain over HTTPS (with the non-default port
 /// suffix when `https_port != 443`) plus the `:80` redirect note. An ACME server
-/// is always public, so the login row is the enabled count or the loud
-/// `--disable-auth` warning. Pure so it is unit-testable.
+/// is always public, so the login row passes `Reachability::Public` — it is the
+/// enabled count or the loud `--disable-auth` warning in practice (the resolver
+/// refuses ACME without auth-or-explicit-disable, so the public "No login
+/// required" branch is unreachable here). Pure so it is unit-testable.
 fn acme_banner(
     version: &str,
     domains: &[String],
@@ -478,13 +524,14 @@ fn acme_banner(
         url: format!("https://{primary}{suffix}/"),
         note: Some("(plain HTTP on :80 redirects here & answers ACME challenges)".to_string()),
     }];
-    // ACME is always public (host_only = false), so login_row never picks the
-    // 0-user loopback branch — it is the enabled count or the disabled warning.
+    // ACME is always public, so the row is the enabled count, the disabled
+    // warning, or — only if it ever reached zero users without --disable-auth,
+    // which the ACME resolver forbids — the public "No login required" warning.
     Banner {
         version: version.to_string(),
         mode,
         listeners,
-        login: login_row(disable_auth, false, user_count),
+        login: login_row(disable_auth, Reachability::Public, user_count),
         warnings: vec![],
     }
 }
@@ -1147,8 +1194,9 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::{
-        ServeShutdown, acme_banner, acme_disable_auth_warning, bind_plan_addrs, login_row,
-        plain_http_banner, resolve_host_only, tailscale_bind_warning, wait_for_shutdown,
+        Reachability, ServeShutdown, acme_banner, acme_disable_auth_warning, bind_plan_addrs,
+        login_row, plain_http_banner, reachability, resolve_host_only, tailscale_bind_warning,
+        wait_for_shutdown,
     };
     use crate::console::LoginRow;
     use dux_core::config::PlanAddr;
@@ -1270,27 +1318,95 @@ mod tests {
 
     #[test]
     fn login_row_disabled_when_auth_flag_set() {
-        assert!(matches!(login_row(true, true, 0), LoginRow::Disabled));
-        // --disable-auth wins even on a public bind with users present.
-        assert!(matches!(login_row(true, false, 3), LoginRow::Disabled));
+        // --disable-auth wins regardless of reachability or user count.
+        assert!(matches!(
+            login_row(true, Reachability::LoopbackOnly, 0),
+            LoginRow::Disabled
+        ));
+        assert!(matches!(
+            login_row(true, Reachability::Public, 3),
+            LoginRow::Disabled
+        ));
     }
 
     #[test]
     fn login_row_enabled_with_count() {
-        match login_row(false, false, 2) {
+        // ≥1 valid user is the green enabled row, reachability irrelevant.
+        match login_row(false, Reachability::Public, 2) {
             LoginRow::Enabled { count } => assert_eq!(count, 2),
+            other => panic!("expected enabled, got {other:?}"),
+        }
+        match login_row(false, Reachability::LoopbackOnly, 1) {
+            LoginRow::Enabled { count } => assert_eq!(count, 1),
             other => panic!("expected enabled, got {other:?}"),
         }
     }
 
     #[test]
-    fn login_row_zero_users_loopback_is_enabled_zero() {
-        // No users on a loopback-only bind: shown as a 0-user enabled row (the
-        // documented local-dev case, not the scary --disable-auth path).
-        match login_row(false, true, 0) {
-            LoginRow::Enabled { count } => assert_eq!(count, 0),
-            other => panic!("expected enabled(0), got {other:?}"),
-        }
+    fn login_row_zero_users_loopback_is_no_login_required_muted() {
+        // Zero users on a loopback-only bind: the gate is OFF, so the honest row
+        // is the calm muted "No login required (local only)" — never an enabled
+        // 0-user row (which would lie about a protecting gate).
+        assert!(matches!(
+            login_row(false, Reachability::LoopbackOnly, 0),
+            LoginRow::NoLoginRequired {
+                reachable: false,
+                public: false,
+            }
+        ));
+    }
+
+    #[test]
+    fn login_row_zero_users_tailscale_is_no_login_required_warning() {
+        // A best-effort Tailscale leg is reachable off-host → warning, but not the
+        // stronger public wording (public: false).
+        assert!(matches!(
+            login_row(false, Reachability::Tailscale, 0),
+            LoginRow::NoLoginRequired {
+                reachable: true,
+                public: false,
+            }
+        ));
+    }
+
+    #[test]
+    fn login_row_zero_users_public_is_no_login_required_public_warning() {
+        // A required public/LAN leg is reachable → the strongest "No login
+        // required" warning (public: true).
+        assert!(matches!(
+            login_row(false, Reachability::Public, 0),
+            LoginRow::NoLoginRequired {
+                reachable: true,
+                public: true,
+            }
+        ));
+    }
+
+    #[test]
+    fn reachability_worst_wins_across_legs() {
+        // Loopback-only.
+        assert_eq!(
+            reachability(&[(addr("127.0.0.1:8080"), true)]),
+            Reachability::LoopbackOnly
+        );
+        // A best-effort non-loopback leg → Tailscale.
+        assert_eq!(
+            reachability(&[
+                (addr("127.0.0.1:8080"), true),
+                (addr("100.64.0.5:8080"), false)
+            ]),
+            Reachability::Tailscale
+        );
+        // A required non-loopback leg wins over a Tailscale one (worst-wins).
+        assert_eq!(
+            reachability(&[
+                (addr("100.64.0.5:8080"), false),
+                (addr("0.0.0.0:8080"), true)
+            ]),
+            Reachability::Public
+        );
+        // Empty (vacuously loopback-only).
+        assert_eq!(reachability(&[]), Reachability::LoopbackOnly);
     }
 
     #[test]
@@ -1300,7 +1416,7 @@ mod tests {
             (addr("100.64.0.5:8080"), false), // best-effort → Tailscale
             (addr("203.0.113.7:8080"), true), // required non-loopback → Listen
         ];
-        let banner = plain_http_banner("0.1.0", &legs, false, false, 1, &[]);
+        let banner = plain_http_banner("0.1.0", &legs, false, 1, &[]);
         assert_eq!(banner.mode, "plain HTTP");
         assert_eq!(banner.listeners.len(), 3);
         assert_eq!(banner.listeners[0].label, "Local (loopback)");
@@ -1314,16 +1430,56 @@ mod tests {
     fn plain_http_banner_carries_degradation_warnings() {
         let legs = vec![(addr("127.0.0.1:8080"), true)];
         let warnings = vec!["Tailscale: 100.64.0.1:8080 busy — serving without it".to_string()];
-        let banner = plain_http_banner("0.1.0", &legs, false, true, 0, &warnings);
+        let banner = plain_http_banner("0.1.0", &legs, false, 0, &warnings);
         assert_eq!(banner.warnings, warnings);
-        // Zero users on a loopback bind → enabled(0), never disabled.
-        assert!(matches!(banner.login, LoginRow::Enabled { count: 0 }));
+        // Zero users on a loopback-only bind → the muted "No login required (local
+        // only)" row, never an enabled 0-user row and never disabled.
+        assert!(matches!(
+            banner.login,
+            LoginRow::NoLoginRequired {
+                reachable: false,
+                public: false,
+            }
+        ));
+    }
+
+    #[test]
+    fn plain_http_banner_zero_users_public_leg_is_public_warning() {
+        // A required public/LAN leg with zero users → the strongest "No login
+        // required" warning, derived from the bound legs.
+        let legs = vec![(addr("127.0.0.1:8080"), true), (addr("0.0.0.0:8080"), true)];
+        let banner = plain_http_banner("0.1.0", &legs, false, 0, &[]);
+        assert!(matches!(
+            banner.login,
+            LoginRow::NoLoginRequired {
+                reachable: true,
+                public: true,
+            }
+        ));
+    }
+
+    #[test]
+    fn plain_http_banner_zero_users_tailscale_leg_is_tailscale_warning() {
+        // A best-effort Tailscale leg with zero users → the warning row, but not
+        // the stronger public wording.
+        let legs = vec![
+            (addr("127.0.0.1:8080"), true),
+            (addr("100.64.0.5:8080"), false),
+        ];
+        let banner = plain_http_banner("0.1.0", &legs, false, 0, &[]);
+        assert!(matches!(
+            banner.login,
+            LoginRow::NoLoginRequired {
+                reachable: true,
+                public: false,
+            }
+        ));
     }
 
     #[test]
     fn plain_http_banner_disabled_auth_row() {
         let legs = vec![(addr("0.0.0.0:8080"), true)];
-        let banner = plain_http_banner("0.1.0", &legs, true, false, 0, &[]);
+        let banner = plain_http_banner("0.1.0", &legs, true, 0, &[]);
         assert!(matches!(banner.login, LoginRow::Disabled));
     }
 
