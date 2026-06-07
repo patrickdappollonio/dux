@@ -68,7 +68,11 @@ export function CommandPalette() {
   const commandGroups = groupPaletteCommands(paletteCommands)
 
   return (
-    <CommandDialog open={paletteOpen} onOpenChange={setPaletteOpen}>
+    <CommandDialog
+      open={paletteOpen}
+      onOpenChange={setPaletteOpen}
+      className="sm:max-w-2xl"
+    >
       <CommandInput placeholder="Type a command or search sessions…" />
       <CommandList>
         <CommandEmpty>No results found.</CommandEmpty>
