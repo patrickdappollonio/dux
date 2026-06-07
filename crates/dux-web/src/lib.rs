@@ -42,7 +42,6 @@ use std::time::Duration;
 use anyhow::Result;
 use dux_core::config::{DuxPaths, PlanAddr, ServerPlan};
 use dux_core::engine::Engine;
-use dux_core::wire::WireStatus;
 
 use crate::engine_actor::LoopControl;
 use crate::server::RouterParams;
@@ -91,9 +90,8 @@ pub fn run_server(paths: DuxPaths, plan: ServerPlan, disable_auth: bool) -> Resu
 
 /// The warning shown when a BEST-EFFORT (Tailscale) listener cannot bind because
 /// something else already holds that address. Names the address, the cause, and
-/// BOTH remedies (stop the other process, or change the port). Shared by the
-/// `dux.log` WARN line and the warn-tone status broadcast so the two cannot drift.
-/// Pure so it is unit-testable.
+/// BOTH remedies (stop the other process, or change the port). Emitted as a
+/// `dux.log` WARN line. Pure so it is unit-testable.
 fn tailscale_bind_warning(addr: SocketAddr, err: &std::io::Error) -> String {
     format!(
         "could not bind the Tailscale address {addr}: {err} — something else is already \
@@ -118,20 +116,22 @@ struct BoundListener {
 ///   error (with address context) so the serve aborts. This is the
 ///   explicit-failure tenet: the operator named this address.
 /// - BEST-EFFORT (the Tailscale leg of LOCAL MODE): a bind failure logs a WARN
-///   naming the address, the cause, and both remedies, collects the SAME text as
-///   a warning to surface to web clients, and CONTINUES without that listener.
+///   naming the address, the cause, and both remedies, collects the SAME text in
+///   the returned warnings vec, and CONTINUES without that listener.
 ///
 /// If NOTHING binds (every address failed) the whole serve is fatal — there is
 /// nothing left to serve. Returns the bound listeners (with their addresses) and
-/// the best-effort warnings to broadcast.
+/// the best-effort warnings (the caller logs them to `dux.log`; they are not
+/// re-broadcast — see [`run_plain_http`] for why a startup broadcast reaches no
+/// clients). The returned vec is retained because the bind tests assert on it.
 async fn bind_plan_addrs(addrs: &[PlanAddr]) -> Result<(Vec<BoundListener>, Vec<String>)> {
     let mut bound = Vec::with_capacity(addrs.len());
     let mut warnings = Vec::new();
     for plan_addr in addrs {
-        let addr = plan_addr.addr;
+        let addr = plan_addr.addr();
         match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => bound.push(BoundListener { addr, listener }),
-            Err(err) if plan_addr.required => {
+            Err(err) if plan_addr.is_required() => {
                 // The operator named this address; refuse to serve silently
                 // without it. Log with address context, then propagate the error.
                 dux_core::logger::error(&format!(
@@ -173,10 +173,14 @@ async fn bind_plan_addrs(addrs: &[PlanAddr]) -> Result<(Vec<BoundListener>, Vec<
 ///
 /// A BEST-EFFORT (Tailscale) address whose bind fails (a third-party process
 /// already holds it) does NOT abort the serve: it warns loudly to `dux.log` and
-/// to web clients (a warn-tone status broadcast) and the server keeps serving the
-/// remaining (bound) addresses. `host_only` is computed from the addresses that
-/// ACTUALLY bound, so a dropped Tailscale leg leaves a loopback-only (host-only)
-/// server.
+/// the server keeps serving the remaining (bound) addresses. The warning is NOT
+/// re-broadcast to web clients — the status broadcast has no replay, and clients
+/// only subscribe when their WS connects, which is always after this startup bind,
+/// so a startup broadcast would reach zero receivers. `dux.log` and the CLI
+/// startup banner (which flags a best-effort leg) are the delivery surfaces for
+/// the `dux server` path; the TUI palette flip delivers through its own status
+/// line, unchanged. `host_only` is computed from the addresses that ACTUALLY
+/// bound, so a dropped Tailscale leg leaves a loopback-only (host-only) server.
 fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, disable_auth: bool) -> Result<()> {
     let engine = bootstrap::bootstrap_engine(&paths)?;
     let auth = auth::shared_auth(&engine.config.auth.users, disable_auth);
@@ -188,7 +192,10 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, disable_auth: bool) -> 
         // failed REQUIRED bind aborts here (with the address logged + in the
         // error); a failed BEST-EFFORT (Tailscale) bind is dropped with a warning
         // and the server proceeds on the rest.
-        let (bound, bind_warnings) = bind_plan_addrs(&addrs).await?;
+        // Best-effort (Tailscale) bind warnings are emitted to dux.log inside
+        // `bind_plan_addrs`; the returned vec is not re-delivered here (see the
+        // doc comment above for why a startup broadcast would reach no clients).
+        let (bound, _bind_warnings) = bind_plan_addrs(&addrs).await?;
 
         // host-only ⇔ EVERY *bound* listener is genuine loopback. A Tailscale (or
         // public) address that bound makes the server reachable off-host, so the
@@ -223,16 +230,6 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, disable_auth: bool) -> 
             RouterParams::plain_http(),
         );
         let sweep = tls::spawn_session_sweep(store, SESSION_SWEEP_PERIOD, sweep_shutdown_rx);
-
-        // Surface any best-effort (Tailscale) bind warnings to web clients on the
-        // SAME status broadcast the reload warnings and ACME lifecycle events ride,
-        // so a browser session sees the degraded-to-loopback notice (dux.log
-        // already has it from `bind_plan_addrs`).
-        for warning in &bind_warnings {
-            let _ = handle
-                .status_sender()
-                .send(WireStatus::new("warning", warning.clone()));
-        }
 
         // Translate a SIGINT/SIGTERM into a watch trip so every listener winds
         // down gracefully (the same trigger a first-listener failure uses).

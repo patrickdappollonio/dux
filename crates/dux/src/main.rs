@@ -206,29 +206,40 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
             // needs the SocketAddr, so project it out.
             let is_local =
                 |a: &std::net::SocketAddr| a.ip().is_loopback() || Some(a.ip()) == tailscale_ip;
-            let all_addrs_local = addrs.iter().all(|p| is_local(&p.addr));
+            let all_addrs_local = addrs.iter().all(|p| is_local(&p.addr()));
 
             // Loud warning when auth is deliberately disabled on a reachable
             // (public) address: --disable-auth turned the gate off. Only an
             // upstream auth proxy makes this safe.
             if cli_disable_auth && !all_addrs_local {
-                for plan_addr in addrs.iter().filter(|p| !is_local(&p.addr)) {
+                for plan_addr in addrs.iter().filter(|p| !is_local(&p.addr())) {
                     eprintln!(
                         "WARNING: --disable-auth is set and dux is binding {}, a non-loopback \
                          address, with NO login gate. Anyone who can reach this address can control \
                          your agents and worktrees. Only do this when an upstream auth proxy is \
                          handling authentication in front of dux.",
-                        plan_addr.addr
+                        plan_addr.addr()
                     );
                 }
             }
 
-            // A best-effort (Tailscale) leg may fail to bind at serve time and
-            // degrade to loopback; note that in the banner so the printed URL list
-            // is understood as the intended set, not a guarantee.
+            // The banner prints the PLANNED addresses — binding happens later in
+            // dux-web. A best-effort (Tailscale) leg may fail to bind there and
+            // degrade to loopback, so mark it inline: a guaranteed (required) URL
+            // prints bare, while a best-effort URL carries a caveat that points at
+            // dux.log, where the actual bind outcome is recorded.
             let urls = addrs
                 .iter()
-                .map(|p| format!("http://{}", p.addr))
+                .map(|p| {
+                    if p.is_required() {
+                        format!("http://{}", p.addr())
+                    } else {
+                        format!(
+                            "http://{} (Tailscale, best-effort — see dux.log if it does not answer)",
+                            p.addr()
+                        )
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             println!("dux server listening on {urls} — open it in your browser");

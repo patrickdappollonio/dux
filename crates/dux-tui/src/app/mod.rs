@@ -2887,14 +2887,14 @@ fn preflight_server_listeners(
     let mut urls = Vec::with_capacity(addrs.len());
     let mut warnings = Vec::new();
     for plan_addr in addrs {
-        let addr = plan_addr.addr;
+        let addr = plan_addr.addr();
         match std::net::TcpListener::bind(addr) {
             Ok(listener) => {
                 let bound = listener.local_addr().unwrap_or(addr);
                 urls.push(format!("http://{bound}"));
                 listeners.push(listener);
             }
-            Err(err) if plan_addr.required => {
+            Err(err) if plan_addr.is_required() => {
                 // Loopback (required): the flip cannot serve without it. Log the
                 // failing address to dux.log, then fail the pre-flight so the TUI
                 // surfaces the error and stays up.

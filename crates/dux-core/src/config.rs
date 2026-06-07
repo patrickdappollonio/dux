@@ -1031,8 +1031,8 @@ fn is_executable_file(path: &Path) -> bool {
 ///   loudly and serves on the remaining (bound) addresses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlanAddr {
-    pub addr: std::net::SocketAddr,
-    pub required: bool,
+    addr: std::net::SocketAddr,
+    required: bool,
 }
 
 impl PlanAddr {
@@ -1051,6 +1051,18 @@ impl PlanAddr {
             addr,
             required: false,
         }
+    }
+
+    /// The socket address this listener targets.
+    pub fn addr(&self) -> std::net::SocketAddr {
+        self.addr
+    }
+
+    /// Whether a bind failure on this address is fatal. `false` is only
+    /// constructible via [`PlanAddr::best_effort`], so the best-effort invariant
+    /// is enforced by the type rather than by call-site discipline.
+    pub fn is_required(&self) -> bool {
+        self.required
     }
 }
 
@@ -1083,7 +1095,7 @@ pub fn local_addrs(port: u16, tailscale_ip: Option<std::net::IpAddr>) -> Vec<Pla
         let ts = std::net::SocketAddr::new(ip, port);
         // Guard against a Tailscale IP that is itself loopback (shouldn't happen,
         // but keeps the list deduplicated and the listener count honest).
-        if !addrs.iter().any(|p| p.addr == ts) {
+        if !addrs.iter().any(|p| p.addr() == ts) {
             addrs.push(PlanAddr::best_effort(ts));
         }
     }
@@ -1314,7 +1326,7 @@ pub fn resolve_server_plan(
                 ip = addr.ip()
             );
         }
-        if !addrs.iter().any(|p| p.addr == addr) {
+        if !addrs.iter().any(|p| p.addr() == addr) {
             addrs.push(PlanAddr::required(addr));
         }
         // A listen entry is LOCAL when it is loopback OR equals the detected
@@ -1410,8 +1422,11 @@ mod local_addrs_tests {
                 PlanAddr::best_effort("100.101.102.103:9090".parse().unwrap()),
             ]
         );
-        assert!(addrs[0].required, "loopback must be required");
-        assert!(!addrs[1].required, "the Tailscale leg must be best-effort");
+        assert!(addrs[0].is_required(), "loopback must be required");
+        assert!(
+            !addrs[1].is_required(),
+            "the Tailscale leg must be best-effort"
+        );
     }
 
     #[test]
