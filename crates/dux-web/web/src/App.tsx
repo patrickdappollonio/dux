@@ -17,6 +17,7 @@ import { RenameSessionDialog } from "@/components/RenameSessionDialog"
 import { CheckoutDefaultBranchDialog } from "@/components/CheckoutDefaultBranchDialog"
 import { DeleteSessionDialog } from "@/components/DeleteSessionDialog"
 import { GlobalEnvDialog } from "@/components/GlobalEnvDialog"
+import { MacrosDialog } from "@/components/MacrosDialog"
 import { MobileShell } from "@/components/MobileShell"
 import { PrBanner } from "@/components/PrBanner"
 import { ProjectInfoDialog } from "@/components/ProjectInfoDialog"
@@ -212,6 +213,7 @@ function GlobalOverlays() {
       <ConfirmDeleteTerminalDialog />
       <ConfirmDiscardFileDialog />
       <GlobalEnvDialog />
+      <MacrosDialog />
       <ProjectInfoDialog />
       <ProjectSettingsDialog />
       <AddProjectDialog />

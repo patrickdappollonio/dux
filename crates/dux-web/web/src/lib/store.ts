@@ -20,6 +20,7 @@ import type {
   ConnState,
   DirEntryView,
   FileDiff,
+  MacroView,
   ProjectWorktreeEntryView,
   ViewModel,
 } from "./types"
@@ -181,6 +182,13 @@ export interface DuxState {
   //     fake a phantom "generating" state.
   createAgentNamePending: boolean
   paletteOpen: boolean
+  // The macro-editor dialog. `macrosDialogOpen` gates the modal; `macrosDraft`
+  // is the working copy of the whole macro list the user edits before saving
+  // (the save is wholesale — `update_macros` replaces the entire `[macros]`
+  // map, mirroring the TUI editor). Seeded from `viewModel.macros` on open so
+  // there is no set-state-in-effect. Empty draft when closed.
+  macrosDialogOpen: boolean
+  macrosDraft: MacroView[]
   // Which screen the mobile shell is showing. Always "home" on desktop, which
   // ignores it. Only the mobile UI advances it past "home".
   mobileScreen: MobileScreen
@@ -259,6 +267,8 @@ let state: DuxState = {
   createAgentNamePending: false,
   createAgentPrInput: "",
   paletteOpen: false,
+  macrosDialogOpen: false,
+  macrosDraft: [],
   mobileScreen: "home",
   pendingSessionOrder: null,
   pendingProjectOrder: null,
@@ -693,6 +703,8 @@ function clearSessionScopedState(): Partial<DuxState> {
     createAgentNamePending: false,
     createAgentPrInput: "",
     paletteOpen: false,
+    macrosDialogOpen: false,
+    macrosDraft: [],
     mobileScreen: "home",
     // Optimistic reorder overlays — explicitly cleared (was incidental before).
     pendingSessionOrder: null,
@@ -1295,6 +1307,46 @@ export function reorderProjects(orderedIds: string[]): void {
 
 export function setPaletteOpen(open: boolean): void {
   setState({ paletteOpen: open })
+}
+
+// Run a macro by name against a target (an agent session id or a companion
+// terminal id). The engine resolves the macro's text, enforces the surface gate,
+// applies the newline transform, and writes to the target's PTY — the web only
+// names the target + macro. The verbose `Sent macro "<name>".` confirmation
+// rides the existing status lane (toast), so there is nothing to do here.
+export function runMacro(targetId: string, name: string): void {
+  socket.sendCommand("run_macro", { target_id: targetId, name })
+}
+
+// Open the macro-editor dialog, seeding the draft from the current ViewModel
+// macros (a fresh copy so edits don't mutate the shared model). Runs in the
+// click/palette handler that opens the dialog — never an effect.
+export function openMacrosDialog(): void {
+  const macros = state.viewModel?.macros ?? []
+  setState({
+    macrosDialogOpen: true,
+    macrosDraft: macros.map((m) => ({ ...m })),
+  })
+}
+
+export function closeMacrosDialog(): void {
+  setState({ macrosDialogOpen: false, macrosDraft: [] })
+}
+
+// Replace the working draft (the dialog manages the whole list locally before a
+// wholesale save). A fresh array so the snapshot changes referentially.
+export function setMacrosDraft(macros: MacroView[]): void {
+  setState({ macrosDraft: macros })
+}
+
+// Persist the draft wholesale via `update_macros`. The server validates
+// (empty/duplicate names, empty text, unknown surface) and reports the outcome
+// on the status lane; a config reload refreshes `viewModel.macros`. The dialog
+// closes optimistically — a rejection surfaces as an error toast, and reopening
+// re-seeds from the (unchanged) ViewModel.
+export function saveMacros(macros: MacroView[]): void {
+  socket.sendCommand("update_macros", { entries: macros })
+  closeMacrosDialog()
 }
 
 // Mobile hub-&-spoke navigation. Moving INTO a spoke ("terminal" or "changes")

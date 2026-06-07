@@ -388,9 +388,12 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::EditMacros,
         name: "edit-macros",
         description: "Edit text macros for interactive mode",
-        // TUI-only: macros are an interactive-mode (PTY key-forwarding) feature
-        // with no web equivalent.
-        surface: PaletteSurface::Tui,
+        // Both: editing macros is GLOBAL config (the whole `[macros]` map), not a
+        // per-target action — exactly the app-menu-shaped command a user searches
+        // the palette for. The web opens its macro-editor dialog (list/add/edit/
+        // delete; saves wholesale via `update_macros`). Running a macro is the
+        // per-target action and stays OFF the palette (the terminal-pane popover).
+        surface: PaletteSurface::Both,
     },
     PaletteCommand {
         action: Action::DebugInput,
@@ -510,6 +513,7 @@ mod tests {
         let expected = [
             "add-project",
             "configure-global-env",
+            "edit-macros",
             "reload-config",
             "sort-agents-by-created",
             "sort-agents-by-name",

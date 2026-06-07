@@ -15,6 +15,7 @@
 import {
   openAddProject,
   openGlobalEnv,
+  openMacrosDialog,
   socket,
   sortAgents,
   toggleDiffLineNumbers,
@@ -25,6 +26,7 @@ import {
 export const PALETTE_HANDLERS: Record<string, () => void> = {
   "add-project": () => openAddProject(),
   "configure-global-env": () => openGlobalEnv(),
+  "edit-macros": () => openMacrosDialog(),
   "reload-config": () => socket.sendCommand("reload_config", {}),
   "sort-agents-by-created": () => sortAgents("created"),
   "sort-agents-by-name": () => sortAgents("name"),

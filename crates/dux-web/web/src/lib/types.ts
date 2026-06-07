@@ -7,6 +7,22 @@
 
 export type SessionStatus = "active" | "detached" | "exited"
 
+// A macro's surface restriction, matching the Rust `MacroSurface` serde casing
+// ("agent" | "terminal" | "both"). "agent" macros show only on a focused agent
+// pane, "terminal" only on a focused companion terminal, "both" on either.
+export type MacroSurface = "agent" | "terminal" | "both"
+
+// A single text macro projected from the server's `[macros]` config, mirroring
+// the Rust `MacroView`. Order in `ViewModel.macros` matches the config order.
+// `text` is exposed (the web session is authenticated) so the editor dialog can
+// show and edit it; the terminal-pane popover runs one via the `run_macro`
+// command, which resolves the text + the newline transform engine-side.
+export interface MacroView {
+  name: string
+  text: string
+  surface: MacroSurface
+}
+
 export interface ProjectView {
   id: string
   name: string
@@ -148,6 +164,11 @@ export interface ViewModel {
    * `dux_core::palette` (the Web/Both subset). Each `id` is the dashed command
    * name; `paletteRegistry` maps it to a store handler. */
   palette_commands: PaletteCommandView[]
+  /** Text macros from `[macros]` in `config.toml`, in config order. The
+   * terminal-pane popover filters these by the focused target's surface and
+   * runs one via the `run_macro` command; the macro-editor dialog lists/edits
+   * them. Defaults to `[]` for older snapshots that predate the field. */
+  macros: MacroView[]
 }
 
 export interface PaletteCommandView {
@@ -198,6 +219,21 @@ export type ServerMessage =
       warning: BranchWarningView | null
       error: string | null
     }
+
+// Argument shapes for the macro `command` frames (sent via `socket.sendCommand`,
+// which wraps them in `{ type: "command", command, args }`). They mirror the
+// Rust `WireCommand::RunMacro` / `WireCommand::UpdateMacros` payloads. The
+// server is authoritative: it resolves `run_macro`'s text + surface gate +
+// newline transform engine-side, and validates `update_macros` (empty/duplicate
+// names, empty text, unknown surface) before persisting wholesale.
+export interface RunMacroArgs {
+  target_id: string
+  name: string
+}
+
+export interface UpdateMacrosArgs {
+  entries: MacroView[]
+}
 
 // Client -> server JSON text frames, tagged by `type`.
 export type ClientMessage =

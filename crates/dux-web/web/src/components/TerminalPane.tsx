@@ -4,10 +4,12 @@ import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
 import { Maximize2, Minimize2 } from "lucide-react"
 import { AccessoryBar } from "@/components/AccessoryBar"
+import { MacroPopover } from "@/components/MacroPopover"
 import { Button } from "@/components/ui/button"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { applyModifiers, arrowSeq, ESC, TAB } from "@/lib/termkeys"
 import { selectSession, socket, useDux } from "@/lib/store"
+import type { SelectedTarget } from "@/lib/store"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 
 interface TerminalPaneProps {
@@ -83,6 +85,16 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
       ? (session?.has_output ?? false)
       : (session?.terminals.find((t) => t.id === id)?.has_output ?? false)
   const providerName = session?.provider
+  // The macro popover's target. For an agent the streamed id IS the session id;
+  // for a terminal it is the terminal id, and the owning session id comes from
+  // the resolved `session` (falls back to the prop, though a focused terminal
+  // always resolves a session). Mirrors the store's `SelectedTarget` shape so
+  // the popover filters macros by the focused surface and runs against the
+  // right PTY.
+  const macroTarget: SelectedTarget =
+    kind === "agent"
+      ? { kind: "agent", sessionId: id }
+      : { kind: "terminal", terminalId: id, sessionId: session?.id ?? id }
   // Latch readiness: once the PTY has emitted output we keep the spinner hidden,
   // even if a later view model reports `has_output: false` (e.g. an exited
   // agent). Adjusting state during render is the React-sanctioned latch pattern
@@ -326,23 +338,36 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
       <div ref={hostRef} className="h-full w-full p-2">
         <div ref={containerRef} className="h-full w-full" />
       </div>
-      {/* Fullscreen toggle: embedded mode already forwards every key the
-          browser will give a page; fullscreen + keyboard lock additionally
-          captures reserved shortcuts (Ctrl+T, Ctrl+W, …) on Chromium. */}
-      <Button
-        variant="secondary"
-        size="icon"
-        onClick={() => void toggleFullscreen()}
-        title={
-          isFullscreen
-            ? "Exit fullscreen (hold Esc also works)"
-            : "Fullscreen — captures browser-reserved shortcuts like Ctrl+T"
-        }
-        aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-        className="absolute top-3 right-3 z-10 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
-      >
-        {isFullscreen ? <Minimize2 /> : <Maximize2 />}
-      </Button>
+      {/* Pane chrome buttons. Grouped in ONE absolutely-positioned overlay (a
+          sibling of the xterm host, NOT inside the unpadded containerRef xterm
+          opens into) so they never change the terminal's box measurement — see
+          the hostRef comment. The macro button stays visible (it's a primary
+          affordance, like the TUI's macro bar), while the fullscreen toggle
+          keeps its hover/focus reveal. On mobile the macro button must stay
+          tappable, so it is opacity-100 there regardless of hover. */}
+      <div className="absolute top-3 right-3 z-10 flex gap-2">
+        {/* The popover trigger renders a secondary icon Button (see
+            MacroPopover); it must remain reachable on touch, so it does not
+            hide on blur. */}
+        <MacroPopover target={macroTarget} />
+        {/* Fullscreen toggle: embedded mode already forwards every key the
+            browser will give a page; fullscreen + keyboard lock additionally
+            captures reserved shortcuts (Ctrl+T, Ctrl+W, …) on Chromium. */}
+        <Button
+          variant="secondary"
+          size="icon"
+          onClick={() => void toggleFullscreen()}
+          title={
+            isFullscreen
+              ? "Exit fullscreen (hold Esc also works)"
+              : "Fullscreen — captures browser-reserved shortcuts like Ctrl+T"
+          }
+          aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+          className="opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
+        >
+          {isFullscreen ? <Minimize2 /> : <Maximize2 />}
+        </Button>
+      </div>
       {!everReady ? (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <div className="flex items-center gap-2 rounded-lg border bg-card px-4 py-3 text-card-foreground">
