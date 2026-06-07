@@ -3,33 +3,21 @@ import { useState } from "react"
 import { paletteShortcutLabel } from "@/lib/platform"
 import { useDux } from "@/lib/store"
 
-// The dux welcome screen, mirroring the TUI's idle agent pane: the braille
-// duck over the block-letter logo, with one playful tip underneath. Art is
-// ported verbatim from crates/dux-tui/src/app/render.rs (ASCII_LOGO_ALT and
-// ASCII_LOGO) so both surfaces share a face.
-const DUCK_ART = `⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣤⠤⣄⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠔⠉⠀⠀⢸⢰⢸⢰⢰⠉⠢⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡔⢰⠀⢸⢰⢸⢸⢸⢸⢸⢸⢸⢸⢈⢦⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⣰⢠⢸⠤⣤⠤⢸⢸⢸⢸⢸⠤⠤⢐⢸⢸⡆⠀⠀⠀⠀⠀⠀⠀
-⢠⠀⠀⠀⠀⠀⠀⠀⠀⢹⢸⢸⢸⢸⢸⣤⢰⢲⢤⣄⢸⢸⢸⢸⢸⡇⠀⠀⠀⠀⠀⠀⠀
-⠀⠙⡄⠀⠀⠀⠀⠀⠀⠀⣄⢸⢰⣶⣿⣤⣤⣶⣤⣤⣬⣷⡤⢸⣰⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠈⢦⠀⠀⠀⠀⠀⠀⠈⢦⢸⢈⠛⠿⣿⣼⣼⠿⠛⠁⢸⡼⠀⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠸⠉⢻⣍⠉⠤⣀⣠⣤⣾⢸⣿⣿⣿⣶⣾⣾⣿⣿⢸⢸⠓⠤⣄⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠈⠒⠭⣀⢸⢸⢈⢈⢸⢸⢸⠙⠻⢸⢸⢸⠿⠛⢸⢸⢸⢸⢸⢈⠑⢄⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⣼⢸⢸⢈⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⣠⠤⠒⠁⢸⣦⠀⠀⠀
-⠀⠀⠀⠀⠀⣿⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢩⡂⢸⢸⣀⣴⣿⠀⠀⠀
-⠀⠀⠀⠀⠀⠹⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢉⠉⠉⠁⢸⠃⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⢳⢨⠘⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⢸⣴⢸⢸⢸⢸⡟⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠳⣀⢠⢨⢘⢘⢸⢸⢸⢸⢸⢸⢸⢸⣤⣿⢸⢸⢸⣀⠛⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠀⠀⠀⠀⠀⠀⠀⠀`
-
-const TEXT_LOGO = `       ░██
-       ░██
- ░████████ ░██    ░██ ░██    ░██
-░██    ░██ ░██    ░██  ░██  ░██
-░██    ░██ ░██    ░██   ░█████
-░██   ░███ ░██   ░███  ░██  ░██
- ░█████░██  ░█████░██ ░██    ░██ `
+// The dux welcome screen, mirroring the TUI's idle agent pane: the duck mark
+// over the block-letter logo, with one playful tip underneath. The duck is the
+// real PNG logo (the same `/dux-logo.png` the login/unreachable screens use);
+// the block-letter wordmark is ported VERBATIM from crates/dux-tui/src/app/
+// render.rs (ASCII_LOGO), trailing padding included so the lines stay a clean
+// 33-column rectangle and center properly.
+const TEXT_LOGO = [
+  "       ░██                       ",
+  "       ░██                       ",
+  " ░████████ ░██    ░██ ░██    ░██ ",
+  "░██    ░██ ░██    ░██  ░██  ░██  ",
+  "░██    ░██ ░██    ░██   ░█████   ",
+  "░██   ░███ ░██   ░███  ░██  ░██  ",
+  " ░█████░██  ░█████░██ ░██    ░██ ",
+].join("\n")
 
 // Tips come from the server's ViewModel — the single source of truth is crates/dux-core/src/welcome.rs (WELCOME_TIPS). Add new tips THERE, with both surface variants.
 
@@ -69,13 +57,13 @@ export function Welcome() {
       : null
 
   return (
-    <div className="flex h-full w-full select-none flex-col items-center justify-center gap-1 overflow-hidden">
-      <pre
+    <div className="flex h-full w-full select-none flex-col items-center justify-center gap-3 overflow-hidden">
+      <img
+        src="/dux-logo.png"
+        alt=""
         aria-hidden
-        className="font-mono text-[11px] leading-[1.15] text-amber-500/70"
-      >
-        {DUCK_ART}
-      </pre>
+        className="size-28 object-contain"
+      />
       <pre
         aria-label="dux"
         className="font-mono text-[11px] leading-[1.15] text-muted-foreground"
