@@ -25,9 +25,15 @@
       }
       .wrap { max-width: 28rem; }
       pre {
+        /* inline-block + left-aligned content centers the art as a block
+           (via the body's text-align: center) while keeping every line's
+           internal columns aligned — a plain block pre would center each
+           line independently and shear the letters. */
+        display: inline-block;
+        text-align: left;
         margin: 0 0 1.5rem;
         color: #a1a1aa;
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-family: ui-monospace, SFMono-Regular, Menlo, "DejaVu Sans Mono", monospace;
         font-size: 11px;
         line-height: 1.15;
       }
@@ -50,11 +56,13 @@
   </head>
   <body>
     <div class="wrap">
-      <pre aria-label="dux">       _
-     __| |_   ___  __
-    / _` | | | \ \/ /
-   | (_| | |_| |>  <
-    \__,_|\__,_/_/\_\</pre>
+      <pre aria-label="dux">       ░██
+       ░██
+ ░████████ ░██    ░██ ░██    ░██
+░██    ░██ ░██    ░██  ░██  ░██
+░██    ░██ ░██    ░██   ░█████
+░██   ░███ ░██   ░███  ░██  ░██
+ ░█████░██  ░█████░██ ░██    ░██ </pre>
       <h1>dux is unreachable</h1>
       <p>
         The dux server may be down, or this device may be offline. Reconnect to

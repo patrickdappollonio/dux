@@ -17,7 +17,7 @@
 
 // Bump this version to invalidate the cached offline page (e.g. when offline.html
 // changes). Old versioned caches are pruned in `activate`.
-const CACHE = "dux-offline-v1";
+const CACHE = "dux-offline-v2";
 const OFFLINE_URL = "/offline.html";
 
 self.addEventListener("install", (event) => {
