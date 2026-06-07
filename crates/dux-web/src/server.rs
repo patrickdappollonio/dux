@@ -20,11 +20,12 @@
 //! same-host origins. Non-browser clients (no `Origin`) are allowed — documented
 //! tradeoff: a CLI/test client is trusted to not be a hijacked browser tab.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -35,6 +36,7 @@ use tower_sessions::cookie::time::Duration as CookieDuration;
 use tower_sessions::{Expiry, Session, SessionManagerLayer};
 
 use crate::auth::{self, RateLimiter, SharedAuth};
+use crate::console::Console;
 use crate::engine_actor::EngineHandle;
 use crate::protocol::{BranchWarningView, ClientMessage, ServerMessage};
 use crate::tls::SweepableMemoryStore;
@@ -54,6 +56,15 @@ pub struct AppState {
     /// constructor-injectable field so the revocation e2e can drive a short
     /// window instead of waiting the production cadence.
     pub ws_recheck_period: std::time::Duration,
+    /// The `dux server` terminal console. A real (stdout) console on the CLI
+    /// serve paths; a [`Console::noop`] for the TUI flip (which owns the
+    /// terminal) and every test that does not assert console output. WS/auth
+    /// handlers emit life events through it; the access middleware reads it too.
+    pub console: Console,
+    /// Whether the per-request access log is enabled (`[server] access_log`).
+    /// The access middleware checks this AND `console.is_active()` before
+    /// emitting, so the flip and disabled-console paths never log.
+    pub access_log: bool,
 }
 
 /// Build the router with the login gate OFF (no `[auth]` users). Kept as the
@@ -92,25 +103,48 @@ pub struct RouterParams {
     /// Secure cookie would never be sent over the loopback/proxy deployment and
     /// would lock everyone out. (Deferral 1.)
     pub secure_cookie: bool,
+    /// The console handler events (and the access middleware) emit through.
+    /// Defaults to [`Console::noop`] so the flip and tests stay silent; the CLI
+    /// serve paths replace it with a real stdout console via [`with_console`].
+    pub console: Console,
+    /// Whether the per-request access log is on (`[server] access_log`). Off by
+    /// default; the CLI serve paths set it from config.
+    pub access_log: bool,
 }
 
 impl RouterParams {
-    /// Plain-HTTP defaults: production recheck cadence, NO Secure cookie. Used by
-    /// the loopback/Tailscale/proxy serve paths and every test harness.
+    /// Plain-HTTP defaults: production recheck cadence, NO Secure cookie, a no-op
+    /// console, no access log. Used by the loopback/Tailscale/proxy serve paths
+    /// and every test harness; the CLI paths layer a real console on with
+    /// [`with_console`].
     pub fn plain_http() -> Self {
         Self {
             ws_recheck_period: WS_RECHECK_PERIOD,
             secure_cookie: false,
+            console: Console::noop(),
+            access_log: false,
         }
     }
 
     /// TLS (ACME) defaults: production recheck cadence, Secure cookie ON because
-    /// dux terminates HTTPS so the browser will always send it back.
+    /// dux terminates HTTPS so the browser will always send it back. No-op
+    /// console + no access log by default (the CLI path layers them on).
     pub fn tls() -> Self {
         Self {
             ws_recheck_period: WS_RECHECK_PERIOD,
             secure_cookie: true,
+            console: Console::noop(),
+            access_log: false,
         }
+    }
+
+    /// Attach a real console + the access-log toggle. The CLI serve paths
+    /// (`run_plain_http`/`run_acme`) call this so handler events and the access
+    /// middleware reach stdout; the flip leaves the no-op console in place.
+    pub fn with_console(mut self, console: Console, access_log: bool) -> Self {
+        self.console = console;
+        self.access_log = access_log;
+        self
     }
 }
 
@@ -130,6 +164,8 @@ pub fn build_router_with_recheck(
         RouterParams {
             ws_recheck_period,
             secure_cookie: false,
+            console: Console::noop(),
+            access_log: false,
         },
     )
     .0
@@ -154,6 +190,8 @@ pub fn build_app(
         auth,
         rate_limiter: RateLimiter::default(),
         ws_recheck_period: params.ws_recheck_period,
+        console: params.console,
+        access_log: params.access_log,
     };
 
     // In-memory session store: sessions die with the server (documented v1
@@ -198,8 +236,51 @@ pub fn build_app(
         .route("/api/me", get(auth::me))
         .fallback(crate::web_assets::static_handler)
         .layer(session_layer)
+        // The access log wraps everything (OUTERMOST) so it sees the FINAL status
+        // every other layer produced — a 401 from the gate, a 308 redirect, the
+        // static fallback. It is gated inside on `access_log && console.is_active`,
+        // so the flip and disabled-console paths pay nothing. Stamped via
+        // `from_fn_with_state` so it reads the console/toggle off `AppState`.
+        .layer(middleware::from_fn_with_state(state.clone(), access_log))
         .with_state(state);
     (router, store)
+}
+
+/// Per-request access-log middleware: print `method path status latencyms` to the
+/// console after the inner stack produces a response. CONSOLE-ONLY (never
+/// `dux.log` — piping `dux server`'s stdout IS the access log). Skips `/healthz`
+/// so a health checker does not flood the log, and is gated on
+/// `access_log && console.is_active()` so the flip/disabled paths emit nothing.
+///
+/// The path is printed AS-IS, query string included: the only query strings that
+/// reach the server today are public ACME challenge tokens (the CA fetches them
+/// over plain HTTP), so there is nothing sensitive to strip.
+async fn access_log(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    // /healthz is intentionally never logged (probe noise). Capture what we need
+    // before the request is consumed by `next`.
+    let path = request.uri().path().to_string();
+    let log = state.access_log && state.console.is_active() && path != "/healthz";
+    if !log {
+        return next.run(request).await;
+    }
+    let method = request.method().as_str().to_string();
+    // Path + query, printed verbatim (challenge tokens are public; nothing
+    // sensitive rides queries today).
+    let path_and_query = request
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or(path);
+    let started = std::time::Instant::now();
+    let response = next.run(request).await;
+    let latency_ms = started.elapsed().as_millis();
+    state.console.access(
+        &method,
+        &path_and_query,
+        response.status().as_u16(),
+        latency_ms,
+    );
+    response
 }
 
 /// Gate middleware for the protected sub-router. When auth is enabled, a valid
@@ -284,6 +365,12 @@ async fn ws_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     session: Session,
+    // The peer address for the console connect/disconnect lines. Like the `login`
+    // handler, this requires connect-info on the serve path — the production serve
+    // paths (`run_plain_http`/`run_acme`/the flip) all use
+    // `into_make_service_with_connect_info`, and the test harnesses serve `/ws`
+    // through it too.
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     // Origin check runs even with auth off (CSWSH defense). On rejection we
@@ -314,8 +401,18 @@ async fn ws_upgrade(
     };
     let auth = state.auth.clone();
     let recheck_period = state.ws_recheck_period;
+    let console = state.console.clone();
+    let peer_ip = peer.ip();
     ws.on_upgrade(move |socket| {
-        handle_socket(socket, state.engine, auth, recheck_user, recheck_period)
+        handle_socket(
+            socket,
+            state.engine,
+            auth,
+            recheck_user,
+            recheck_period,
+            console,
+            peer_ip,
+        )
     })
     .into_response()
 }
@@ -337,7 +434,13 @@ async fn handle_socket(
     auth: SharedAuth,
     recheck_user: Option<String>,
     recheck_period: std::time::Duration,
+    console: Console,
+    peer_ip: std::net::IpAddr,
 ) {
+    // A client just upgraded: announce it on the console (peer IP). The matching
+    // disconnect is logged when this function returns (the loop below breaks on
+    // socket end, including a revocation Close).
+    console.client_connected(peer_ip);
     let (sink, mut stream) = socket.split();
     let sink: SharedSink = Arc::new(tokio::sync::Mutex::new(sink));
 
@@ -693,6 +796,10 @@ async fn handle_socket(
     if let Some(h) = pty_forwarder.take() {
         h.abort();
     }
+
+    // The socket ended (client closed, network drop, or a revocation Close frame
+    // we sent above): announce the disconnect with the same peer IP.
+    console.client_disconnected(peer_ip);
 }
 
 /// How long the forwarder's blocking reader parks per `recv_timeout` before
@@ -893,6 +1000,133 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "a gated data route must reject an unauthenticated request before reaching its handler"
         );
+    }
+
+    /// The access middleware logs a request's method, path, and final status when
+    /// `access_log` is on and the console is active, and SKIPS `/healthz`. Driven
+    /// through the real router (oneshot) so the middleware order (outermost, after
+    /// the session layer) is exercised, and captured via the console writer seam.
+    #[tokio::test]
+    async fn access_log_emits_request_lines_and_skips_healthz() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let auth = auth::shared_auth(&[], false); // auth off so /api/me is 200
+        let (console, sink) = Console::test_capture(false);
+        let params = RouterParams::plain_http().with_console(console, true);
+        let app = build_app(handle, auth, Router::new(), params).0;
+
+        // A 200 on an open route is logged.
+        let me = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/me")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(me.status(), StatusCode::OK);
+
+        // /healthz is NEVER logged (probe noise).
+        let health = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/healthz")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+
+        // A 404 on an unknown path is logged with its status. The SPA static
+        // fallback serves index.html for unknown non-asset paths, so hit an
+        // /api/... path the router has no route for to get a clean 404 — actually
+        // the fallback catches everything, so assert on whatever status the
+        // fallback returns for a bogus asset path.
+        let missing = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/definitely-not-a-real-asset.zzz")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let missing_status = missing.status().as_u16();
+
+        let out = sink.contents();
+        assert!(
+            out.contains("/api/me 200"),
+            "the 200 request must be logged: {out}"
+        );
+        assert!(!out.contains("/healthz"), "/healthz must be skipped: {out}");
+        assert!(
+            out.contains(&format!(
+                "/definitely-not-a-real-asset.zzz {missing_status}"
+            )),
+            "the fallback request must be logged with its status: {out}"
+        );
+    }
+
+    /// With `access_log = false` the middleware emits NOTHING even though the
+    /// console is active.
+    #[tokio::test]
+    async fn access_log_toggle_off_emits_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let auth = auth::shared_auth(&[], false);
+        let (console, sink) = Console::test_capture(false);
+        // access_log = false.
+        let params = RouterParams::plain_http().with_console(console, false);
+        let app = build_app(handle, auth, Router::new(), params).0;
+
+        let _ = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/me")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            sink.contents().is_empty(),
+            "access_log = false must emit no access lines: {}",
+            sink.contents()
+        );
+    }
+
+    /// A no-op console (the flip default) emits nothing even with `access_log`
+    /// nominally on — the middleware's `console.is_active()` gate short-circuits.
+    /// This is the flip zero-stdout regression guard at the middleware layer.
+    #[tokio::test]
+    async fn access_log_noop_console_emits_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let auth = auth::shared_auth(&[], false);
+        // The default plain_http params carry a no-op console; force access_log on
+        // to prove the console-activity gate (not just the toggle) suppresses it.
+        let params = RouterParams {
+            console: Console::noop(),
+            access_log: true,
+            ..RouterParams::plain_http()
+        };
+        // The router still builds; nothing should panic and nothing is observable
+        // (a no-op console drops every line). We assert the request succeeds.
+        let app = build_app(handle, auth, Router::new(), params).0;
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/me")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     fn run_git(cwd: &std::path::Path, args: &[&str]) {

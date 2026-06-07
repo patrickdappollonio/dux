@@ -485,6 +485,9 @@ pub(crate) async fn login(
     // Backoff check BEFORE doing the (expensive) bcrypt verify, so a throttled IP
     // can't keep us burning CPU.
     if let Some(retry_after) = state.rate_limiter.retry_after_secs(ip) {
+        // Console: rate-limited attempt (IP only — never the attempted username,
+        // per the auth-slice log-hygiene rule).
+        state.console.login_rate_limited(ip);
         return (
             StatusCode::TOO_MANY_REQUESTS,
             [("retry-after", retry_after.to_string())],
@@ -513,6 +516,10 @@ pub(crate) async fn login(
     };
     if !ok {
         state.rate_limiter.record_failure(ip);
+        // Console: failed login (IP ONLY — never the attempted username, per the
+        // auth-slice log-hygiene rule: a username in the log is an enumeration
+        // leak).
+        state.console.login_failed(ip);
         return (StatusCode::UNAUTHORIZED, LOGIN_FAILED_MESSAGE).into_response();
     }
 
@@ -528,6 +535,10 @@ pub(crate) async fn login(
 
     state.rate_limiter.clear(ip);
 
+    // Console: successful login. The username IS logged on success (the operator
+    // wants to know who got in — this is not an enumeration leak).
+    state.console.login_ok(&body.username, ip);
+
     (
         StatusCode::OK,
         Json(LoginResponse {
@@ -540,9 +551,19 @@ pub(crate) async fn login(
 /// `POST /api/logout` — destroy the session. Idempotent: logging out when not
 /// logged in (or with auth off) still returns `204`, so the endpoint can live
 /// outside the gate.
-pub(crate) async fn logout(session: Session) -> axum::response::Response {
+pub(crate) async fn logout(
+    State(state): State<AppState>,
+    session: Session,
+) -> axum::response::Response {
+    // Read the username BEFORE flushing so the console can name who logged out
+    // (the session was already authenticated, so this is not an enumeration
+    // leak). `None` for an unauthenticated/auth-off logout — nothing to announce.
+    let username = session.get::<String>(SESSION_USER_KEY).await.ok().flatten();
     if let Err(e) = session.flush().await {
         dux_core::logger::warn(&format!("failed to flush session on logout: {e}"));
+    }
+    if let Some(username) = username {
+        state.console.logout(&username);
     }
     StatusCode::NO_CONTENT.into_response()
 }

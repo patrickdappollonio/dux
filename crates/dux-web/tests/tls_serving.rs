@@ -162,6 +162,7 @@ async fn boot_tls(users: Vec<String>) -> TlsServer {
             shared: auth.clone(),
             disable_auth: false,
             host_only: false,
+            console: dux_web::console::Console::noop(),
         },
     );
 
@@ -232,7 +233,12 @@ async fn boot_tls(users: Vec<String>) -> TlsServer {
         // Drive the state so the challenge resolver is live (no network in tests;
         // it just needs polling to exist). Abort it with the server via the handle
         // teardown at the end of the test process.
-        let _acme_task = tls::spawn_acme_event_task(acme_state, None, domains.clone());
+        let _acme_task = tls::spawn_acme_event_task(
+            acme_state,
+            None,
+            dux_web::console::Console::noop(),
+            domains.clone(),
+        );
         std::mem::forget(_acme_task); // test-lifetime task; process exit cleans up
         let h = http_handle.clone();
         tokio::spawn(async move {

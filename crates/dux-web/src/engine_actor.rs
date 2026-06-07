@@ -124,6 +124,12 @@ pub struct AuthReloadContext {
     pub shared: crate::auth::SharedAuth,
     pub disable_auth: bool,
     pub host_only: bool,
+    /// The `dux server` terminal console. A config reload (and its drift warning)
+    /// is echoed here so an operator watching the terminal sees it in the
+    /// vite-style output, not just the WS status broadcast. A [`Console::noop`]
+    /// for the flip/tests emits nothing. Defaults to noop via
+    /// [`AuthReloadContext::with_console`] when a caller does not set it.
+    pub console: crate::console::Console,
 }
 
 /// True when a config reload changed any `[server]`/`[server.acme]` setting that
@@ -568,6 +574,13 @@ pub(crate) fn run_engine_loop(
                                 "Configuration reloaded. New settings are active.",
                             )
                         };
+                        // Echo the reload outcome on the CLI console too (a refusal
+                        // reads as a warning, a clean reload as info); the WS
+                        // broadcast carries the same text. A no-op console (flip/
+                        // tests) emits nothing.
+                        if let Some(ctx) = auth_reload.as_ref() {
+                            ctx.console.reload(&status.message, auth_refused);
+                        }
                         let _ = thread_status_tx.send(status);
 
                         // The new config WAS applied to the engine, but the
@@ -577,11 +590,12 @@ pub(crate) fn run_engine_loop(
                         // is a separate concern from the auth-refusal status
                         // above, so it rides as its own warn-tone status.
                         if server_settings_changed {
-                            let _ = thread_status_tx.send(WireStatus::new(
-                                "warning",
-                                "Server listen/TLS settings changed in config — restart the \
-                                 server to apply them.",
-                            ));
+                            let drift = "Server listen/TLS settings changed in config — restart \
+                                 the server to apply them.";
+                            if let Some(ctx) = auth_reload.as_ref() {
+                                ctx.console.reload(drift, true);
+                            }
+                            let _ = thread_status_tx.send(WireStatus::new("warning", drift));
                         }
                     }
                     Err(e) => {

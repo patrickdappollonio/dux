@@ -196,21 +196,24 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
         }
     };
 
-    // Print the startup banner / warnings from the resolved plan, then hand the
-    // WHOLE plan to dux-web, which serves plain HTTP or built-in TLS accordingly.
+    // Pre-bind warnings stay on STDERR: they fire BEFORE dux-web binds, so an
+    // operator still sees them even if a bind then fails. The informational
+    // startup banner (URLs, mode, login state, degraded legs) is printed POST-bind
+    // by dux-web's vite-style console, which knows what actually bound — so it is
+    // truthful and carries no "best-effort, see dux.log" hedging. Refusals were
+    // already printed on stderr above before we got here.
     match &plan {
         dux_core::config::ServerPlan::PlainHttp { addrs } => {
             // An address is LOCAL when it is loopback OR the detected Tailscale
-            // address; only PUBLIC addresses are gated and warned about. The plan
-            // carries each address tagged required/best-effort; the banner only
-            // needs the SocketAddr, so project it out.
+            // address; only PUBLIC addresses get the deliberate-no-gate warning.
             let is_local =
                 |a: &std::net::SocketAddr| a.ip().is_loopback() || Some(a.ip()) == tailscale_ip;
             let all_addrs_local = addrs.iter().all(|p| is_local(&p.addr()));
 
             // Loud warning when auth is deliberately disabled on a reachable
             // (public) address: --disable-auth turned the gate off. Only an
-            // upstream auth proxy makes this safe.
+            // upstream auth proxy makes this safe. Fires pre-bind (stderr); the
+            // post-bind banner ALSO carries a login-DISABLED row.
             if cli_disable_auth && !all_addrs_local {
                 for plan_addr in addrs.iter().filter(|p| !is_local(&p.addr())) {
                     eprintln!(
@@ -222,70 +225,26 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
                     );
                 }
             }
-
-            // The banner prints the PLANNED addresses — binding happens later in
-            // dux-web. A best-effort (Tailscale) leg may fail to bind there and
-            // degrade to loopback, so mark it inline: a guaranteed (required) URL
-            // prints bare, while a best-effort URL carries a caveat that points at
-            // dux.log, where the actual bind outcome is recorded.
-            let urls = addrs
-                .iter()
-                .map(|p| {
-                    if p.is_required() {
-                        format!("http://{}", p.addr())
-                    } else {
-                        format!(
-                            "http://{} (Tailscale, best-effort — see dux.log if it does not answer)",
-                            p.addr()
-                        )
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            println!("dux server listening on {urls} — open it in your browser");
         }
-        dux_core::config::ServerPlan::Acme {
-            https_addr,
-            domains,
-            production,
-            ..
-        } => {
-            // Normalize the same way the TLS path does so the banner shows the
-            // hostname the certificate will actually carry. Fall back to the raw
-            // first domain if normalization somehow fails (the resolver already
-            // validated there is ≥1 domain; build_acme_state re-validates).
-            let primary = dux_web::tls::normalize_domains(domains)
-                .ok()
-                .and_then(|d| d.into_iter().next())
-                .unwrap_or_else(|| domains.first().cloned().unwrap_or_default());
-            let suffix = if https_addr.port() == 443 {
-                String::new()
-            } else {
-                format!(":{}", https_addr.port())
-            };
+        dux_core::config::ServerPlan::Acme { .. } => {
             // Loud warning when auth is deliberately disabled on a built-in-TLS
-            // server. Unlike the plain-HTTP arm, an ACME server is ALWAYS public
-            // (a browser-trusted certificate on :443), so there is no "local"
-            // exception — the gate-off banner fires whenever --disable-auth is set.
+            // server. An ACME server is ALWAYS public (a browser-trusted cert on
+            // :443), so the gate-off warning fires whenever --disable-auth is set.
+            // Fires pre-bind (stderr); the post-bind banner ALSO carries a
+            // login-DISABLED row, and the staging note now rides the banner's mode
+            // line as "[STAGING]".
             if cli_disable_auth {
                 eprintln!("{}", dux_web::acme_disable_auth_warning());
             }
-            if !*production {
-                eprintln!(
-                    "NOTE: [server.acme] production = false — using the Let's Encrypt STAGING \
-                     environment. Certificates will NOT be trusted by browsers; set production = \
-                     true once the staging flow succeeds."
-                );
-            }
-            println!(
-                "dux server listening with built-in TLS on https://{primary}{suffix}/ — \
-                 plain HTTP on :80 redirects here and answers ACME HTTP-01 challenges. \
-                 Open it in your browser once the certificate is issued."
-            );
         }
     }
 
-    dux_web::run_server(paths, plan, cli_disable_auth)
+    dux_web::run_server(
+        paths,
+        plan,
+        cli_disable_auth,
+        env!("CARGO_PKG_VERSION").to_string(),
+    )
 }
 
 /// Outcome of parsing `dux server` arguments. Separated from `run_server` so the

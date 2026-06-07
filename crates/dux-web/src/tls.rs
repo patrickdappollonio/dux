@@ -260,6 +260,12 @@ pub fn acme_status_for_event(event: &AcmeStatusEvent, domains: &[String]) -> Opt
 /// certificate acquisition/renewal/failure live — not just `dux.log`. `None` for
 /// callers without an engine actor (tests, standalone construction).
 ///
+/// `console` is the `dux server` terminal console (a [`crate::console::Console`]):
+/// each surfaced event is ALSO echoed there so an operator watching the terminal
+/// sees the certificate lifecycle in the vite-style output. A no-op console (the
+/// flip/tests) emits nothing. The console line and the `WireStatus` carry the
+/// SAME text (from the pure mapper) so the surfaces can never drift.
+///
 /// `domains` is the normalized certificate name list (from [`build_acme_state`]),
 /// used only for the acquired/renewed status text.
 ///
@@ -267,13 +273,27 @@ pub fn acme_status_for_event(event: &AcmeStatusEvent, domains: &[String]) -> Opt
 pub fn spawn_acme_event_task(
     mut state: DuxAcmeState,
     status_tx: Option<tokio::sync::broadcast::Sender<WireStatus>>,
+    console: crate::console::Console,
     domains: Vec<String>,
 ) -> tokio::task::JoinHandle<()> {
+    // Echo a surfaced status to BOTH the WireStatus broadcast and the console, so
+    // the web UI and the terminal stay in lock-step with dux.log.
+    fn surface(
+        status_tx: &Option<tokio::sync::broadcast::Sender<WireStatus>>,
+        console: &crate::console::Console,
+        status: WireStatus,
+    ) {
+        console.acme(status.tone == "error", &status.message);
+        if let Some(tx) = status_tx {
+            let _ = tx.send(status);
+        }
+    }
+
     tokio::spawn(async move {
         loop {
             // Project the concrete event into the status classification first, then
-            // log AND (optionally) broadcast — the broadcast text comes from the
-            // pure mapper so log and status can never drift.
+            // log AND surface — the surfaced text comes from the pure mapper so the
+            // log, the status broadcast, and the console can never drift.
             let event = match state.next().await {
                 Some(Ok(ok)) => {
                     dux_core::logger::info(&format!(
@@ -296,19 +316,16 @@ pub fn spawn_acme_event_task(
                          renew. The HTTPS server keeps serving the last certificate until it \
                          expires; restart dux to recover automatic renewal.",
                     );
-                    if let Some(tx) = &status_tx
-                        && let Some(status) =
-                            acme_status_for_event(&AcmeStatusEvent::StreamEnded, &domains)
+                    if let Some(status) =
+                        acme_status_for_event(&AcmeStatusEvent::StreamEnded, &domains)
                     {
-                        let _ = tx.send(status);
+                        surface(&status_tx, &console, status);
                     }
                     break;
                 }
             };
-            if let Some(tx) = &status_tx
-                && let Some(status) = acme_status_for_event(&event, &domains)
-            {
-                let _ = tx.send(status);
+            if let Some(status) = acme_status_for_event(&event, &domains) {
+                surface(&status_tx, &console, status);
             }
         }
     })

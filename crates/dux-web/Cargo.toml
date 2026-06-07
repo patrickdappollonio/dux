@@ -12,6 +12,8 @@ tokio.workspace = true
 axum.workspace = true
 futures-util.workspace = true
 libc.workspace = true
+# Wall-clock `HH:MM:SS` timestamps for the vite-style server console (console.rs).
+chrono.workspace = true
 tower-sessions.workspace = true
 rustls-acme.workspace = true
 axum-server.workspace = true
@@ -31,7 +33,6 @@ tempfile.workspace = true
 # `__rustls-tls` adds the rustls WS connector so the TLS e2e can open wss:// over
 # the self-signed cert (and connect to the loopback IP SAN, avoiding any DNS).
 tokio-tungstenite = { workspace = true, features = ["__rustls-tls"] }
-chrono.workspace = true
 tower = { version = "0.5", features = ["util"] }
 # `rustls-tls` lets the e2e trust the self-signed cert via add_root_certificate
 # and map the test domain to the loopback listener via resolve().

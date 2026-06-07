@@ -109,6 +109,7 @@ async fn boot_with_users(users: Vec<String>) -> (SocketAddr, tempfile::TempDir) 
             shared: auth.clone(),
             disable_auth: false,
             host_only: true,
+            console: dux_web::console::Console::noop(),
         },
     );
     let app = router_with_auth(handle, auth);
@@ -174,7 +175,12 @@ async fn no_users_ws_open_without_auth() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
@@ -525,6 +531,7 @@ async fn reload_config_picks_up_new_user_live() {
             shared: auth.clone(),
             disable_auth: false,
             host_only: true,
+            console: dux_web::console::Console::noop(),
         },
     );
     let app = router_with_auth(handle, auth);
@@ -642,6 +649,7 @@ async fn reload_config_removing_user_revokes_live_session() {
             shared: auth.clone(),
             disable_auth: false,
             host_only: true,
+            console: dux_web::console::Console::noop(),
         },
     );
     let app = router_with_auth(handle, auth);
@@ -789,6 +797,7 @@ async fn reload_config_removing_last_user_disables_gate_live() {
             shared: auth.clone(),
             disable_auth: false,
             host_only: true,
+            console: dux_web::console::Console::noop(),
         },
     );
     let app = router_with_auth(handle, auth);
@@ -887,6 +896,7 @@ async fn reload_config_changing_server_setting_warns_restart_needed() {
             shared: auth.clone(),
             disable_auth: false,
             host_only: true,
+            console: dux_web::console::Console::noop(),
         },
     );
     // Subscribe to the server's status broadcast BEFORE moving the handle into
@@ -993,6 +1003,7 @@ async fn reload_config_non_server_change_does_not_warn_restart() {
             shared: auth.clone(),
             disable_auth: false,
             host_only: true,
+            console: dux_web::console::Console::noop(),
         },
     );
     let mut status_rx = handle.subscribe_status();
@@ -1129,6 +1140,7 @@ async fn boot_for_recheck(
             shared: auth.clone(),
             disable_auth: false,
             host_only: true,
+            console: dux_web::console::Console::noop(),
         },
     );
     let app = build_router_with_recheck(handle, auth, axum::Router::new(), recheck);
