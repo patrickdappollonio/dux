@@ -7,6 +7,7 @@ import { AttachWorktreeDialog } from "@/components/AttachWorktreeDialog"
 import { AppSidebar } from "@/components/Sidebar"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
+import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { CommandPalette } from "@/components/CommandPalette"
 import { ChangeProviderDialog } from "@/components/ChangeProviderDialog"
 import { CommitDialog } from "@/components/CommitDialog"
@@ -117,15 +118,16 @@ function InsetHeader() {
             <span className="max-w-32 truncate text-xs text-muted-foreground">
               {auth.username}
             </span>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Log out"
-              title="Log out"
-              onClick={() => void logout()}
-            >
-              <LogOut />
-            </Button>
+            <SimpleTooltip content="Log out">
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label="Log out"
+                onClick={() => void logout()}
+              >
+                <LogOut />
+              </Button>
+            </SimpleTooltip>
           </div>
         ) : null}
       </div>

@@ -1,5 +1,6 @@
 import { useEffect } from "react"
 
+import { SimpleTooltip } from "@/components/SimpleTooltip"
 import {
   Dialog,
   DialogContent,
@@ -71,14 +72,15 @@ export function ProjectInfoDialog() {
         </InfoRow>
         <InfoRow label="Current branch">
           {branch ? (
-            <span
-              className={`font-mono ${
-                branch.warn ? "text-amber-500" : ""
-              }`}
-              title={branch.tooltip ?? undefined}
-            >
-              {branch.branch}
-            </span>
+            <SimpleTooltip content={branch.tooltip ?? undefined}>
+              <span
+                className={`font-mono ${
+                  branch.warn ? "text-amber-500" : ""
+                }`}
+              >
+                {branch.branch}
+              </span>
+            </SimpleTooltip>
           ) : (
             <span className="text-muted-foreground">Unknown</span>
           )}

@@ -1,6 +1,7 @@
 import { useMemo, useState, useSyncExternalStore } from "react"
 import { Check, Hash, MousePointerClick, Search, Undo2 } from "lucide-react"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
+import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -117,16 +118,17 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
           files). Destructive-tinted, hover-reveal on desktop / always-visible
           ≥44px on touch, same as the Stage button. */}
       {action === "stage" && (
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label={`Discard changes to ${file.path}`}
-          title="Discard changes"
-          className="shrink-0 text-destructive opacity-100 hover:text-destructive max-md:size-11 md:opacity-0 md:group-hover:opacity-100"
-          onClick={handleDiscard}
-        >
-          <Undo2 />
-        </Button>
+        <SimpleTooltip content="Discard changes">
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={`Discard changes to ${file.path}`}
+            className="shrink-0 text-destructive opacity-100 hover:text-destructive max-md:size-11 md:opacity-0 md:group-hover:opacity-100"
+            onClick={handleDiscard}
+          >
+            <Undo2 />
+          </Button>
+        </SimpleTooltip>
       )}
 
       {/* Stage / Unstage action. Hover-reveal works on desktop, but touch has
@@ -347,25 +349,27 @@ export function ChangedFiles() {
           className="data-[side=right]:w-[92vw] data-[side=right]:sm:max-w-3xl"
         >
           <SheetHeader className="flex-row items-center justify-between gap-2 pr-14">
-            <SheetTitle
-              className="truncate font-mono text-sm"
-              title={currentDiff?.path ?? ""}
+            <SimpleTooltip content={currentDiff?.path ?? ""}>
+              <SheetTitle className="truncate font-mono text-sm">
+                {currentDiff?.path ?? ""}
+              </SheetTitle>
+            </SimpleTooltip>
+            <SimpleTooltip
+              content={showDiffLineNumbers ? "Hide line numbers" : "Show line numbers"}
             >
-              {currentDiff?.path ?? ""}
-            </SheetTitle>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className={
-                showDiffLineNumbers ? "shrink-0 text-primary" : "shrink-0 text-muted-foreground"
-              }
-              aria-label="Toggle line numbers"
-              aria-pressed={showDiffLineNumbers}
-              title={showDiffLineNumbers ? "Hide line numbers" : "Show line numbers"}
-              onClick={toggleDiffLineNumbers}
-            >
-              <Hash />
-            </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className={
+                  showDiffLineNumbers ? "shrink-0 text-primary" : "shrink-0 text-muted-foreground"
+                }
+                aria-label="Toggle line numbers"
+                aria-pressed={showDiffLineNumbers}
+                onClick={toggleDiffLineNumbers}
+              >
+                <Hash />
+              </Button>
+            </SimpleTooltip>
           </SheetHeader>
           <div className="min-h-0 flex-1 overflow-auto px-4 pb-4">
             <DiffBody state={currentDiff} showLineNumbers={showDiffLineNumbers} />

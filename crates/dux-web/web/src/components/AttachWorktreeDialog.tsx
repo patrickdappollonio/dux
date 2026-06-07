@@ -2,6 +2,7 @@ import { useState } from "react"
 import { FolderGit2 } from "lucide-react"
 
 import { BrailleSpinner } from "@/components/BrailleSpinner"
+import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -112,19 +113,20 @@ function AttachWorktreeBody({ projectId }: { projectId: string }) {
                   Already has an agent
                 </div>
                 {attached.map((entry) => (
-                  <div
+                  <SimpleTooltip
                     key={entry.worktree_path}
-                    className="flex min-h-11 cursor-not-allowed items-center gap-2 px-3 py-2 text-left text-sm opacity-50 md:min-h-0"
-                    title={entry.reason ?? undefined}
+                    content={entry.reason ?? undefined}
                   >
-                    <FolderGit2 className="size-4 shrink-0 text-muted-foreground" />
-                    <span className="flex-1 truncate">
-                      {pathTail(entry.worktree_path)}
-                    </span>
-                    <Badge variant="outline" className="shrink-0 font-mono">
-                      {entry.branch_name}
-                    </Badge>
-                  </div>
+                    <div className="flex min-h-11 cursor-not-allowed items-center gap-2 px-3 py-2 text-left text-sm opacity-50 md:min-h-0">
+                      <FolderGit2 className="size-4 shrink-0 text-muted-foreground" />
+                      <span className="flex-1 truncate">
+                        {pathTail(entry.worktree_path)}
+                      </span>
+                      <Badge variant="outline" className="shrink-0 font-mono">
+                        {entry.branch_name}
+                      </Badge>
+                    </div>
+                  </SimpleTooltip>
                 ))}
               </>
             ) : null}

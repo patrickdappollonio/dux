@@ -38,6 +38,7 @@ import {
 } from "lucide-react"
 import type * as React from "react"
 
+import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StatusBadge } from "@/components/StatusBadge"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -152,9 +153,9 @@ function TerminalSubItem({
         onClick={() => selectTerminal(terminal.id, sessionId)}
       >
         <SquareTerminal />
-        <span className="flex-1 truncate" title={terminal.label}>
-          {title}
-        </span>
+        <SimpleTooltip content={terminal.label} side="right">
+          <span className="flex-1 truncate">{title}</span>
+        </SimpleTooltip>
       </SidebarMenuSubButton>
       {/* ⋯ menu replaces the bare ✕, matching the session rows' pattern: Stream
           selects this terminal (the macro popover lives on the pane, one click
@@ -496,14 +497,15 @@ function ProjectItem({
                 convention and explains itself via the title tooltip. Omitted
                 entirely for empty/unknown branches (e.g. path_missing). */}
             {branch ? (
-              <span
-                className={`min-w-0 truncate font-mono text-xs ${
-                  branch.warn ? "text-amber-500" : "text-muted-foreground"
-                }`}
-                title={branch.tooltip ?? undefined}
-              >
-                {branch.branch}
-              </span>
+              <SimpleTooltip content={branch.tooltip ?? undefined} side="right">
+                <span
+                  className={`min-w-0 truncate font-mono text-xs ${
+                    branch.warn ? "text-amber-500" : "text-muted-foreground"
+                  }`}
+                >
+                  {branch.branch}
+                </span>
+              </SimpleTooltip>
             ) : null}
           </span>
           {/* Session count badge sits inline, right after the name — omitted

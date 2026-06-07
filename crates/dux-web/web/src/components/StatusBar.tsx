@@ -1,6 +1,7 @@
 import { CircleX, TriangleAlert } from "lucide-react"
 
 import { BrailleSpinner } from "@/components/BrailleSpinner"
+import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 import { reconnect, useDux } from "@/lib/store"
 import { statusPresentation } from "@/lib/statusLine"
@@ -55,9 +56,9 @@ function StatusLine() {
       {icon === "error" ? (
         <CircleX className="size-3.5 shrink-0" aria-hidden />
       ) : null}
-      <span className="truncate" title={statusLine.message}>
-        {statusLine.message}
-      </span>
+      <SimpleTooltip content={statusLine.message}>
+        <span className="truncate">{statusLine.message}</span>
+      </SimpleTooltip>
     </div>
   )
 }

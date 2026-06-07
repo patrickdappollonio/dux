@@ -45,6 +45,7 @@ import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
 import { PrBanner } from "@/components/PrBanner"
+import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StatusBadge } from "@/components/StatusBadge"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -220,9 +221,9 @@ function TerminalRow({
         onClick={() => selectTerminalAndOpen(terminal.id, sessionId)}
       >
         <SquareTerminal />
-        <span className="flex-1 truncate text-left" title={terminal.label}>
-          {title}
-        </span>
+        <SimpleTooltip content={terminal.label}>
+          <span className="flex-1 truncate text-left">{title}</span>
+        </SimpleTooltip>
       </Button>
       <Button
         variant="ghost"
@@ -404,14 +405,15 @@ function ProjectBlock({
                 branches are warning-tinted (amber) with an explanatory title.
                 Omitted entirely for empty/unknown branches (e.g. path_missing). */}
             {branch ? (
-              <span
-                className={`min-w-0 truncate font-mono text-xs ${
-                  branch.warn ? "text-amber-500" : "text-muted-foreground"
-                }`}
-                title={branch.tooltip ?? undefined}
-              >
-                {branch.branch}
-              </span>
+              <SimpleTooltip content={branch.tooltip ?? undefined}>
+                <span
+                  className={`min-w-0 truncate font-mono text-xs ${
+                    branch.warn ? "text-amber-500" : "text-muted-foreground"
+                  }`}
+                >
+                  {branch.branch}
+                </span>
+              </SimpleTooltip>
             ) : null}
           </span>
           {sessions.length > 0 ? (

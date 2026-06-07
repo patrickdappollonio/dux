@@ -1,6 +1,7 @@
 import { useState } from "react"
 import { ListPlus, Pencil, Trash2 } from "lucide-react"
 
+import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -95,27 +96,29 @@ function MacrosEditor({ initial }: { initial: MacroView[] }) {
                   {SURFACE_LABEL[macro.surface] ?? macro.surface}
                 </Badge>
                 <div className="ml-auto flex gap-1">
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label={`Edit ${macro.name}`}
-                    title="Edit"
-                    onClick={() => {
-                      setDeleteIndex(null)
-                      setMode({ kind: "form", index })
-                    }}
-                  >
-                    <Pencil />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label={`Delete ${macro.name}`}
-                    title="Delete"
-                    onClick={() => setDeleteIndex(index)}
-                  >
-                    <Trash2 />
-                  </Button>
+                  <SimpleTooltip content="Edit">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={`Edit ${macro.name}`}
+                      onClick={() => {
+                        setDeleteIndex(null)
+                        setMode({ kind: "form", index })
+                      }}
+                    >
+                      <Pencil />
+                    </Button>
+                  </SimpleTooltip>
+                  <SimpleTooltip content="Delete">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={`Delete ${macro.name}`}
+                      onClick={() => setDeleteIndex(index)}
+                    >
+                      <Trash2 />
+                    </Button>
+                  </SimpleTooltip>
                 </div>
               </div>
               <p className="truncate font-mono text-xs text-muted-foreground">

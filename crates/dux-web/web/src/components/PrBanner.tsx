@@ -1,5 +1,6 @@
 import { GitPullRequest } from "lucide-react"
 
+import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { prBannerClass, prStateLabel } from "@/lib/pr"
 import { cn } from "@/lib/utils"
 import type { PrView } from "@/lib/types"
@@ -14,21 +15,22 @@ import type { PrView } from "@/lib/types"
 export function PrBanner({ pr }: { pr: PrView }) {
   const state = prStateLabel(pr.state)
   return (
-    <a
-      href={pr.url}
-      target="_blank"
-      rel="noopener noreferrer"
-      className={cn(
-        "flex h-8 shrink-0 items-center gap-2 border-y px-3 text-xs transition-colors",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-        prBannerClass(pr.state)
-      )}
-      title={`#${pr.number} · ${pr.title}`}
-    >
-      <GitPullRequest className="size-3.5 shrink-0" />
-      <span className="shrink-0 font-mono font-semibold">#{pr.number}</span>
-      <span className="shrink-0 capitalize opacity-80">{state}</span>
-      <span className="truncate text-foreground/80">{pr.title}</span>
-    </a>
+    <SimpleTooltip content={`#${pr.number} · ${pr.title}`}>
+      <a
+        href={pr.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={cn(
+          "flex h-8 shrink-0 items-center gap-2 border-y px-3 text-xs transition-colors",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          prBannerClass(pr.state)
+        )}
+      >
+        <GitPullRequest className="size-3.5 shrink-0" />
+        <span className="shrink-0 font-mono font-semibold">#{pr.number}</span>
+        <span className="shrink-0 capitalize opacity-80">{state}</span>
+        <span className="truncate text-foreground/80">{pr.title}</span>
+      </a>
+    </SimpleTooltip>
   )
 }
