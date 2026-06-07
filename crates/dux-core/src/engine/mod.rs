@@ -684,7 +684,14 @@ impl Engine {
                 if let Some(worktree_path) = path
                     && let Ok((staged, unstaged)) = crate::git::changed_files(&worktree_path)
                     && tx
-                        .send(WorkerEvent::ChangedFilesReady { staged, unstaged })
+                        .send(WorkerEvent::ChangedFilesReady {
+                            staged,
+                            unstaged,
+                            // Tag the event with the worktree it was computed for so a
+                            // poll that finished after the watch moved gets dropped
+                            // instead of clobbering the current session's files.
+                            worktree: worktree_path.clone(),
+                        })
                         .is_err()
                 {
                     return LoopControl::Break; // receiver dropped, app is shutting down

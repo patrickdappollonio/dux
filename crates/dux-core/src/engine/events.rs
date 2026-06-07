@@ -985,10 +985,33 @@ impl Engine {
                 let outcome = self.process_agent_launch_failed(*boxed);
                 EventReaction::AgentLaunchFailedView(Box::new(outcome))
             }
-            WorkerEvent::ChangedFilesReady { staged, unstaged } => {
-                self.staged_files = staged;
-                self.unstaged_files = unstaged;
-                EventReaction::ClampFilesCursor
+            WorkerEvent::ChangedFilesReady {
+                staged,
+                unstaged,
+                worktree,
+            } => {
+                // Stale-poll race / CF1 watched_session_id invariant: the poller
+                // snapshots the watched worktree, releases the lock, then computes
+                // `git::changed_files` off-thread. If the watch moved to a
+                // different session (or was cleared) while this poll was in
+                // flight, applying these lists would leave the ViewModel showing
+                // another worktree's files under the current `watched_session_id`
+                // — which CF1's cross-tab guard would then wrongly accept. Only
+                // apply when the event's worktree still matches the watch; drop
+                // it otherwise.
+                let still_watched = self
+                    .watched_worktree
+                    .lock()
+                    .ok()
+                    .and_then(|guard| guard.clone())
+                    .is_some_and(|current| current == worktree);
+                if still_watched {
+                    self.staged_files = staged;
+                    self.unstaged_files = unstaged;
+                    EventReaction::ClampFilesCursor
+                } else {
+                    EventReaction::Nothing
+                }
             }
             WorkerEvent::CommitMessageGenerated(msg) => EventReaction::CommitMessageGenerated(msg),
             WorkerEvent::CommitMessageFailed(err) => EventReaction::CommitMessageFailed(err),
@@ -1730,6 +1753,81 @@ mod tests {
         // Session store should not contain "s1" since no upsert happened.
         let loaded = engine.session_store.load_sessions().expect("load");
         assert!(loaded.iter().all(|s| s.id != "s1"));
+    }
+
+    // ── ChangedFilesReady (stale-poll race / CF1 invariant) ──────────────
+
+    fn sample_changed_file(path: &str) -> crate::model::ChangedFile {
+        crate::model::ChangedFile {
+            status: "M".to_string(),
+            path: path.to_string(),
+            additions: 1,
+            deletions: 0,
+            binary: false,
+        }
+    }
+
+    #[test]
+    fn changed_files_ready_matching_worktree_applies_and_clamps() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = PathBuf::from("/tmp/wt-current");
+        *engine.watched_worktree.lock().unwrap() = Some(worktree.clone());
+
+        let reaction = engine.process_worker_event(WorkerEvent::ChangedFilesReady {
+            staged: vec![sample_changed_file("staged.txt")],
+            unstaged: vec![sample_changed_file("unstaged.txt")],
+            worktree,
+        });
+
+        // The view follow-up that repaints the TUI's changed-files pane.
+        assert!(matches!(reaction, EventReaction::ClampFilesCursor));
+        assert_eq!(engine.staged_files.len(), 1);
+        assert_eq!(engine.staged_files[0].path, "staged.txt");
+        assert_eq!(engine.unstaged_files.len(), 1);
+        assert_eq!(engine.unstaged_files[0].path, "unstaged.txt");
+    }
+
+    #[test]
+    fn changed_files_ready_stale_worktree_is_dropped() {
+        let (mut engine, _tmp) = test_engine();
+        // Watch has since moved to a different worktree.
+        *engine.watched_worktree.lock().unwrap() = Some(PathBuf::from("/tmp/wt-now"));
+        // Seed existing lists so we can prove they are left untouched.
+        engine.staged_files = vec![sample_changed_file("keep-staged.txt")];
+        engine.unstaged_files = vec![sample_changed_file("keep-unstaged.txt")];
+
+        let reaction = engine.process_worker_event(WorkerEvent::ChangedFilesReady {
+            staged: vec![sample_changed_file("stale-staged.txt")],
+            unstaged: vec![sample_changed_file("stale-unstaged.txt")],
+            // Computed for the worktree we have since stopped watching.
+            worktree: PathBuf::from("/tmp/wt-stale"),
+        });
+
+        // Dropped: no view follow-up, and engine state is unchanged.
+        assert!(matches!(reaction, EventReaction::Nothing));
+        assert_eq!(engine.staged_files.len(), 1);
+        assert_eq!(engine.staged_files[0].path, "keep-staged.txt");
+        assert_eq!(engine.unstaged_files.len(), 1);
+        assert_eq!(engine.unstaged_files[0].path, "keep-unstaged.txt");
+    }
+
+    #[test]
+    fn changed_files_ready_dropped_when_watch_cleared() {
+        let (mut engine, _tmp) = test_engine();
+        // No worktree watched (the watch was cleared, e.g. no session focused).
+        assert!(engine.watched_worktree.lock().unwrap().is_none());
+        engine.staged_files = vec![sample_changed_file("keep.txt")];
+
+        let reaction = engine.process_worker_event(WorkerEvent::ChangedFilesReady {
+            staged: vec![sample_changed_file("stale.txt")],
+            unstaged: vec![sample_changed_file("stale.txt")],
+            worktree: PathBuf::from("/tmp/wt-stale"),
+        });
+
+        assert!(matches!(reaction, EventReaction::Nothing));
+        assert_eq!(engine.staged_files.len(), 1);
+        assert_eq!(engine.staged_files[0].path, "keep.txt");
+        assert!(engine.unstaged_files.is_empty());
     }
 
     // ── PrStatusReady ────────────────────────────────────────────────────

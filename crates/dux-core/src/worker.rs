@@ -220,6 +220,13 @@ pub enum WorkerEvent {
     ChangedFilesReady {
         staged: Vec<ChangedFile>,
         unstaged: Vec<ChangedFile>,
+        /// The worktree these lists were computed for. The poller snapshots the
+        /// watched worktree, releases the lock, then runs `git::changed_files`
+        /// off-thread; by the time this event lands the watch may have moved to
+        /// a different session. Tagging the event lets the engine drop a stale
+        /// poll instead of overwriting the current session's files with a
+        /// different worktree's contents.
+        worktree: PathBuf,
     },
     CommitMessageGenerated(String),
     CommitMessageFailed(String),
