@@ -228,13 +228,16 @@ pub enum Command {
     UpdateMacros { macros: crate::config::MacrosConfig },
 
     /// Point the changed-files watch at a session's worktree (or clear it with
-    /// `None`). Mirrors the engine half of the TUI's `reload_changed_files`:
-    /// resolves the session, sets `watched_worktree` + `watched_session_id`, and
-    /// fills the staged/unstaged lists immediately so the pane populates on the
-    /// next tick. Returns `EventReaction::Nothing` — the refreshed ViewModel
-    /// broadcast is the feedback (no status toast on every selection). The web
-    /// sends this when a browser selects a session so the global poller knows
-    /// which worktree the client is viewing.
+    /// `None`). Mirrors the engine half of the TUI's `reload_changed_files`, but
+    /// keeps git OFF the engine actor thread: resolves the session, sets
+    /// `watched_worktree` + `watched_session_id`, and empties the lists
+    /// synchronously (cheap), then spawns a one-shot worker to compute the
+    /// staged/unstaged lists off-thread. The worker's `ChangedFilesReady` event
+    /// populates the pane a few ticks later via the normal drain. Returns
+    /// `EventReaction::Nothing` — the refreshed ViewModel broadcast is the
+    /// feedback (no status toast on every selection). The web sends this when a
+    /// browser selects a session so the global poller knows which worktree the
+    /// client is viewing.
     WatchChangedFiles { session_id: Option<String> },
 }
 
@@ -673,7 +676,16 @@ impl Engine {
             }
 
             Command::WatchChangedFiles { session_id } => {
-                self.watch_session_worktree(session_id.as_deref());
+                // Cheap on the actor thread: resolve + set the watch (no git),
+                // then compute changed files OFF-thread in a one-shot worker. The
+                // `ChangedFilesReady` event lands via the normal drain (it
+                // path-checks the worktree, so a moved watch drops a stale
+                // result) → ViewModel update → broadcast. On clear (`None`),
+                // `set_watched_session` already emptied the lists synchronously,
+                // so the ViewModel reflects the cleared pane immediately.
+                if let Some(worktree) = self.set_watched_session(session_id.as_deref()) {
+                    self.spawn_changed_files_refresh(worktree);
+                }
                 Ok(EventReaction::Nothing)
             }
         }
@@ -1394,7 +1406,8 @@ mod tests {
         ));
     }
 
-    // ── Engine::watch_session_worktree + Command::WatchChangedFiles ──────────
+    // ── Engine::set_watched_session + spawn_changed_files_refresh +
+    //    Command::WatchChangedFiles ─────────────────────────────────────────
 
     /// A temp git repo with one STAGED change (`staged.txt` added to the index)
     /// and one UNSTAGED change (`unstaged.txt` is a new, untracked file) so a
@@ -1430,33 +1443,53 @@ mod tests {
         session
     }
 
+    fn sample_changed_file(path: &str) -> crate::model::ChangedFile {
+        crate::model::ChangedFile {
+            status: "M".to_string(),
+            path: path.to_string(),
+            additions: 1,
+            deletions: 0,
+            binary: false,
+        }
+    }
+
+    /// Block on the engine's worker channel for the next `ChangedFilesReady`
+    /// event (the one-shot refresh worker sends exactly one), then feed it back
+    /// through `process_worker_event` so the engine adopts the computed lists —
+    /// exactly what the actor loop / TUI drain does. Panics if no such event
+    /// arrives within a few seconds.
+    fn drain_changed_files_refresh(engine: &mut Engine) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let event = engine
+                .worker_rx
+                .recv_timeout(remaining)
+                .expect("ChangedFilesReady within deadline");
+            if matches!(event, WorkerEvent::ChangedFilesReady { .. }) {
+                engine.process_worker_event(event);
+                return;
+            }
+        }
+    }
+
     #[test]
-    fn watch_session_worktree_populates_lists_and_records_id() {
+    fn set_watched_session_records_id_clears_lists_and_returns_path() {
         let repo = watch_test_repo();
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(session_in_repo("s1", repo.path()));
+        // Seed stale lists so we can prove the cheap set EMPTIES them (the
+        // watched_session_id invariant: never show the previous watch's files).
+        engine.staged_files = vec![sample_changed_file("stale.txt")];
+        engine.unstaged_files = vec![sample_changed_file("stale.txt")];
 
-        // Empty before any watch — the exact regression the web hit.
+        let path = engine.set_watched_session(Some("s1"));
+
+        // Cheap: no git ran, the lists are EMPTY, and the worktree is returned.
+        assert_eq!(path.as_deref(), Some(repo.path()));
+        assert_eq!(engine.watched_session_id.as_deref(), Some("s1"));
         assert!(engine.staged_files.is_empty());
         assert!(engine.unstaged_files.is_empty());
-        assert!(engine.watched_session_id.is_none());
-
-        engine.watch_session_worktree(Some("s1"));
-
-        assert_eq!(engine.watched_session_id.as_deref(), Some("s1"));
-        assert!(
-            engine.staged_files.iter().any(|f| f.path == "staged.txt"),
-            "staged list should contain staged.txt: {:?}",
-            engine.staged_files
-        );
-        assert!(
-            engine
-                .unstaged_files
-                .iter()
-                .any(|f| f.path == "unstaged.txt"),
-            "unstaged list should contain unstaged.txt: {:?}",
-            engine.unstaged_files
-        );
         // The poller's shared watched-worktree handle now points at the repo.
         assert_eq!(
             engine.watched_worktree.lock().unwrap().as_deref(),
@@ -1465,15 +1498,15 @@ mod tests {
     }
 
     #[test]
-    fn watch_session_worktree_none_clears_everything() {
+    fn set_watched_session_none_clears_everything_and_returns_none() {
         let repo = watch_test_repo();
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(session_in_repo("s1", repo.path()));
-        engine.watch_session_worktree(Some("s1"));
-        assert!(!engine.staged_files.is_empty());
+        engine.staged_files = vec![sample_changed_file("a.txt")];
 
-        engine.watch_session_worktree(None);
+        let path = engine.set_watched_session(None);
 
+        assert!(path.is_none());
         assert!(engine.watched_session_id.is_none());
         assert!(engine.staged_files.is_empty());
         assert!(engine.unstaged_files.is_empty());
@@ -1481,16 +1514,17 @@ mod tests {
     }
 
     #[test]
-    fn watch_session_worktree_unknown_id_clears_and_does_not_panic() {
+    fn set_watched_session_unknown_id_clears_and_returns_none() {
         let repo = watch_test_repo();
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(session_in_repo("s1", repo.path()));
-        engine.watch_session_worktree(Some("s1"));
-        assert!(!engine.staged_files.is_empty());
+        let _ = engine.set_watched_session(Some("s1"));
+        engine.staged_files = vec![sample_changed_file("a.txt")];
 
         // A stale/unknown id must clear (so it never shows another session's files).
-        engine.watch_session_worktree(Some("ghost"));
+        let path = engine.set_watched_session(Some("ghost"));
 
+        assert!(path.is_none());
         assert!(engine.watched_session_id.is_none());
         assert!(engine.staged_files.is_empty());
         assert!(engine.unstaged_files.is_empty());
@@ -1498,7 +1532,39 @@ mod tests {
     }
 
     #[test]
-    fn watch_command_updates_engine_state_and_returns_nothing() {
+    fn spawn_changed_files_refresh_emits_ready_with_computed_lists() {
+        let repo = watch_test_repo();
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(session_in_repo("s1", repo.path()));
+        // Arm the watch (cheap) so the ChangedFilesReady drain accepts the event.
+        let path = engine.set_watched_session(Some("s1")).expect("path");
+
+        engine.spawn_changed_files_refresh(path);
+
+        // The one-shot worker posts ChangedFilesReady tagged with the worktree.
+        let event = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("ChangedFilesReady");
+        match event {
+            WorkerEvent::ChangedFilesReady {
+                staged,
+                unstaged,
+                worktree,
+            } => {
+                assert_eq!(worktree.as_path(), repo.path());
+                assert!(staged.iter().any(|f| f.path == "staged.txt"), "{staged:?}");
+                assert!(
+                    unstaged.iter().any(|f| f.path == "unstaged.txt"),
+                    "{unstaged:?}"
+                );
+            }
+            _ => panic!("expected ChangedFilesReady"),
+        }
+    }
+
+    #[test]
+    fn watch_command_arms_watch_and_queues_refresh_worker() {
         let repo = watch_test_repo();
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(session_in_repo("s1", repo.path()));
@@ -1508,14 +1574,27 @@ mod tests {
                 session_id: Some("s1".to_string()),
             })
             .expect("apply");
+        // The actor thread did only the cheap set + spawn: Nothing, watch armed,
+        // lists EMPTY (population is now async via the worker, not inline).
         assert!(matches!(reaction, EventReaction::Nothing));
         assert_eq!(engine.watched_session_id.as_deref(), Some("s1"));
-        assert!(!engine.staged_files.is_empty());
-        assert!(!engine.unstaged_files.is_empty());
+        assert!(engine.staged_files.is_empty());
+        assert!(engine.unstaged_files.is_empty());
+
+        // The off-thread worker computed and queued the lists; draining it (as
+        // the actor loop would) populates the engine.
+        drain_changed_files_refresh(&mut engine);
+        assert!(engine.staged_files.iter().any(|f| f.path == "staged.txt"));
+        assert!(
+            engine
+                .unstaged_files
+                .iter()
+                .any(|f| f.path == "unstaged.txt")
+        );
     }
 
     #[test]
-    fn view_model_changed_files_empty_before_watch_populated_after() {
+    fn view_model_changed_files_empty_before_watch_populated_after_drain() {
         let repo = watch_test_repo();
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(session_in_repo("s1", repo.path()));
@@ -1527,8 +1606,24 @@ mod tests {
         assert!(before.changed_files.unstaged.is_empty());
         assert!(before.changed_files.watched_session_id.is_none());
 
-        engine.watch_session_worktree(Some("s1"));
+        // The command arms the watch (id visible immediately) but population is
+        // now async: the ViewModel shows the watched id with EMPTY lists until
+        // the worker event drains.
+        engine
+            .apply(Command::WatchChangedFiles {
+                session_id: Some("s1".to_string()),
+            })
+            .expect("apply");
+        let armed = engine.view_model();
+        assert_eq!(
+            armed.changed_files.watched_session_id.as_deref(),
+            Some("s1")
+        );
+        assert!(armed.changed_files.staged.is_empty());
+        assert!(armed.changed_files.unstaged.is_empty());
 
+        // After the worker lands the lists are populated and still tagged.
+        drain_changed_files_refresh(&mut engine);
         let after = engine.view_model();
         assert_eq!(
             after.changed_files.watched_session_id.as_deref(),

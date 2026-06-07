@@ -2420,10 +2420,18 @@ impl App {
 
     pub(crate) fn reload_changed_files(&mut self) {
         let session_id = self.selected_session().map(|s| s.id.clone());
-        // The engine half (watch the worktree + compute staged/unstaged) now
-        // lives on `Engine` so the web layer can drive it too; the App keeps its
-        // view follow-ups (cursor clamp, opportunistic PR check).
-        self.engine.watch_session_worktree(session_id.as_deref());
+        // The engine sets the watch (cheap, no git) and returns the worktree to
+        // compute changed files for. The web computes this off-thread (the actor
+        // thread serves every client), but the TUI is single-user on its own App
+        // thread, so it computes inline: `set_watched_session` empties the lists,
+        // then the inline read refills them within this same synchronous call —
+        // no visible flicker.
+        let worktree = self.engine.set_watched_session(session_id.as_deref());
+        if let Some(path) = worktree {
+            let (staged, unstaged) = git::changed_files(&path).unwrap_or_default();
+            self.engine.staged_files = staged;
+            self.engine.unstaged_files = unstaged;
+        }
         self.clamp_files_cursor();
         // Opportunistically check PR status for the newly-selected session.
         if let Some(sid) = session_id {

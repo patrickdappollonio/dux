@@ -2891,6 +2891,22 @@ mod tests {
         // No synchronous status — the ViewModel broadcast is the feedback.
         assert!(outcome.status.is_none());
 
+        // The watch is armed immediately, but the changed-files compute now runs
+        // OFF the engine actor thread: the lists are empty until the one-shot
+        // worker's ChangedFilesReady event drains (as the actor loop does).
+        let armed = engine.view_model();
+        assert_eq!(
+            armed.changed_files.watched_session_id.as_deref(),
+            Some("s1")
+        );
+        assert!(armed.changed_files.unstaged.is_empty());
+
+        let event = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("ChangedFilesReady");
+        engine.process_worker_event(event);
+
         let vm = engine.view_model();
         assert_eq!(vm.changed_files.watched_session_id.as_deref(), Some("s1"));
         assert!(
@@ -2913,8 +2929,16 @@ mod tests {
                 session_id: Some("s1".to_string()),
             })
             .expect("apply_wire");
+        // Drain the off-thread refresh so the lists are populated before we clear.
+        let event = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("ChangedFilesReady");
+        engine.process_worker_event(event);
         assert!(!engine.view_model().changed_files.unstaged.is_empty());
 
+        // Clearing is synchronous: `set_watched_session(None)` empties the lists
+        // on the actor thread (no worker), so the ViewModel reflects it at once.
         engine
             .apply_wire(WireCommand::WatchChangedFiles { session_id: None })
             .expect("apply_wire");

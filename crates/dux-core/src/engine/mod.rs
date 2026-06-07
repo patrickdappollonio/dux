@@ -109,7 +109,7 @@ pub struct Engine {
     /// global `staged_files`/`unstaged_files` belong to. A web client viewing a
     /// DIFFERENT session than this global watch shows a loading state rather than
     /// the wrong session's files (cross-tab safety). Written exclusively by
-    /// [`Engine::watch_session_worktree`].
+    /// [`Engine::set_watched_session`].
     pub watched_session_id: Option<String>,
     pub has_active_processes: Arc<AtomicBool>,
     /// Set of currently-running operations. See `InFlightKey` for the
@@ -622,22 +622,29 @@ impl Engine {
         );
     }
 
-    /// Point the changed-files watch at a session's worktree, or clear it.
+    /// Point the changed-files watch at a session's worktree, or clear it. This
+    /// is the CHEAP half (no git): it only resolves the session and updates the
+    /// watch state, returning the worktree to compute changed files for (if any).
     ///
-    /// This is the engine half of the TUI's `App::reload_changed_files`: it sets
+    /// It is the engine half of the TUI's `App::reload_changed_files`: it sets
     /// `watched_worktree` (which the background poller reads every 2–10s) and
-    /// immediately computes the staged/unstaged lists once so the pane fills on
-    /// the next tick rather than waiting for the poll. The web layer calls this
-    /// when a browser selects a session (the TUI never set it for the web, which
-    /// is why the web changed-files pane stayed empty).
+    /// `watched_session_id`, then ALWAYS empties the staged/unstaged lists so the
+    /// pane never shows the PREVIOUS watch's files between this call and the
+    /// compute landing (preserving the `watched_session_id` cross-tab invariant).
+    /// The web layer calls this when a browser selects a session (the TUI never
+    /// set it for the web, which is why the web changed-files pane stayed empty).
     ///
-    /// - `None` → clear the watch and the lists (no session focused).
-    /// - `Some(id)` for a known session → watch its worktree, record the id, and
-    ///   fill the lists (a `git::changed_files` error yields empty lists, the
-    ///   same `unwrap_or_default` behavior the TUI uses).
-    /// - `Some(id)` for an UNKNOWN session → clear (same as `None`), so a stale
-    ///   id never leaves another session's files showing.
-    pub fn watch_session_worktree(&mut self, session_id: Option<&str>) {
+    /// IMPORTANT: the actual changed-files compute (`git::changed_files`) must NOT
+    /// be done on the engine actor thread — it shells out to several git
+    /// subprocesses and would freeze every web client on a slow repo / git-lock
+    /// stall. The web path follows this call with `spawn_changed_files_refresh`
+    /// (off-thread); the single-user TUI computes inline on its own App thread.
+    ///
+    /// - `None` (or an UNKNOWN id) → clear the watch and the lists, return `None`.
+    /// - `Some(id)` for a known session → watch its worktree, record the id, empty
+    ///   the lists, and return `Some(worktree)` to compute changed files for.
+    #[must_use]
+    pub fn set_watched_session(&mut self, session_id: Option<&str>) -> Option<PathBuf> {
         let resolved = session_id.and_then(|id| {
             self.sessions
                 .iter()
@@ -650,11 +657,37 @@ impl Engine {
             *guard = worktree.clone();
         }
         self.watched_session_id = resolved.map(|(id, _)| id);
-        let (staged, unstaged) = worktree
-            .and_then(|p| crate::git::changed_files(&p).ok())
-            .unwrap_or_default();
-        self.staged_files = staged;
-        self.unstaged_files = unstaged;
+        // Always clear so the pane shows "no changes yet" (never the previous
+        // watch's stale files) until the off-thread/inline compute lands.
+        self.staged_files = Vec::new();
+        self.unstaged_files = Vec::new();
+        worktree
+    }
+
+    /// Compute the changed files for `worktree` OFF the engine actor thread and
+    /// post them back as a `ChangedFilesReady` event. The one-shot worker mirrors
+    /// `spawn_pr_check_for_session`'s spawn shape and the changed-files poller's
+    /// git call. The event carries the `worktree` it was computed for, so the
+    /// `ChangedFilesReady` drain in `process_worker_event` automatically drops a
+    /// result whose watch has since moved (the 4faf872 stale-poll guard).
+    ///
+    /// A `git::changed_files` error yields empty lists (matching the TUI's
+    /// `unwrap_or_default`) so the pane resolves to "no changes" rather than
+    /// hanging. The web layer calls this right after `set_watched_session`; the
+    /// TUI does NOT (it computes inline — single user, single thread).
+    pub fn spawn_changed_files_refresh(&self, worktree: PathBuf) {
+        let label = format!("changed-files-refresh:{}", worktree.display());
+        self.spawn_loop_worker(LoopWorkerSpec { label }, move |tx| {
+            let (staged, unstaged) = crate::git::changed_files(&worktree).unwrap_or_default();
+            let _ = tx.send(WorkerEvent::ChangedFilesReady {
+                staged,
+                unstaged,
+                worktree: worktree.clone(),
+            });
+            // One-shot: compute once and stop. The drain side is race-safe
+            // (it path-checks `worktree` against the live watch).
+            LoopControl::Break
+        });
     }
 
     pub fn spawn_changed_files_poller(&self) {
