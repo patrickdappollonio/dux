@@ -307,8 +307,14 @@ export function getSnapshot(): DuxState {
 export const socket = new DuxSocket(`ws://${location.host}/ws`)
 
 socket.onViewModel = (vm) => {
+  // Normalize at the boundary: `macros` is the newest ViewModel field, so an
+  // older server snapshot that predates it arrives with the key absent. Default
+  // it to `[]` here (the parse site) so the typed-required `viewModel.macros` is
+  // a real array for every consumer — making the types.ts "defaults to []"
+  // claim structurally true rather than relying on each read site to guard.
+  const normalized: ViewModel = { ...vm, macros: vm.macros ?? [] }
   setState({
-    viewModel: vm,
+    viewModel: normalized,
     // Retire each optimistic order overlay once the server's order matches it;
     // until then keep showing the overlay so the row doesn't snap back during
     // the round-trip. A stale (non-matching) overlay is kept — a later ViewModel
@@ -1331,12 +1337,6 @@ export function openMacrosDialog(): void {
 
 export function closeMacrosDialog(): void {
   setState({ macrosDialogOpen: false, macrosDraft: [] })
-}
-
-// Replace the working draft (the dialog manages the whole list locally before a
-// wholesale save). A fresh array so the snapshot changes referentially.
-export function setMacrosDraft(macros: MacroView[]): void {
-  setState({ macrosDraft: macros })
 }
 
 // Persist the draft wholesale via `update_macros`. The server validates

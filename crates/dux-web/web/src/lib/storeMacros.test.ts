@@ -68,6 +68,28 @@ async function loadStore() {
   return mod
 }
 
+describe("store ViewModel macros normalization", () => {
+  it("defaults a missing macros key to [] at the boundary", async () => {
+    const mod = await loadStore()
+    // Simulate an older server snapshot that predates the `macros` field: the
+    // key is absent on the wire. `onViewModel` must normalize it to a real
+    // array so every consumer (and the typed-required field) holds true.
+    const legacy = vmWithMacros([]) as Partial<ViewModel>
+    delete legacy.macros
+    mod.socket.onViewModel(legacy as ViewModel)
+    expect(mod.getSnapshot().viewModel?.macros).toEqual([])
+  })
+
+  it("passes a present macros array through unchanged", async () => {
+    const mod = await loadStore()
+    const macros: MacroView[] = [
+      { name: "Review", text: "review this", surface: "agent" },
+    ]
+    mod.socket.onViewModel(vmWithMacros(macros))
+    expect(mod.getSnapshot().viewModel?.macros).toEqual(macros)
+  })
+})
+
 describe("store macros dialog", () => {
   const seed: MacroView[] = [
     { name: "Review", text: "review this", surface: "agent" },
@@ -102,14 +124,6 @@ describe("store macros dialog", () => {
     const snap = mod.getSnapshot()
     expect(snap.macrosDialogOpen).toBe(false)
     expect(snap.macrosDraft).toEqual([])
-  })
-
-  it("setMacrosDraft replaces the working list", async () => {
-    const mod = await loadStore()
-    mod.openMacrosDialog()
-    const next: MacroView[] = [{ name: "X", text: "y", surface: "both" }]
-    mod.setMacrosDraft(next)
-    expect(mod.getSnapshot().macrosDraft).toEqual(next)
   })
 })
 

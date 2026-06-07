@@ -167,7 +167,8 @@ export interface ViewModel {
   /** Text macros from `[macros]` in `config.toml`, in config order. The
    * terminal-pane popover filters these by the focused target's surface and
    * runs one via the `run_macro` command; the macro-editor dialog lists/edits
-   * them. Defaults to `[]` for older snapshots that predate the field. */
+   * them. Required, but `store.onViewModel` normalizes a missing key to `[]`
+   * (an older snapshot predating the field) so this is always a real array. */
   macros: MacroView[]
 }
 
