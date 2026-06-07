@@ -1017,9 +1017,47 @@ fn is_executable_file(path: &Path) -> bool {
     metadata.permissions().mode() & 0o111 != 0
 }
 
-/// LOCAL MODE bind addresses: loopback on `port`, plus the machine's Tailscale
-/// address on `port` when one was detected. This is the SHARED resolution for
-/// both the palette flip and the `dux server` empty-`listen_addrs` fallback.
+/// One address in a [`ServerPlan::PlainHttp`] plan, tagged with whether binding
+/// it is REQUIRED or merely BEST-EFFORT.
+///
+/// - `required: true` — a deliberate listener (loopback, or any explicit
+///   `listen_addrs` entry). A bind failure here is FATAL per the explicit-failure
+///   tenet: the operator asked for this address, so refusing to serve it silently
+///   would hide their intent.
+/// - `required: false` — an opportunistic add-on. Today this is ONLY the
+///   Tailscale leg of LOCAL MODE: it is auto-added when a Tailscale address is
+///   detected, mirroring how tailscale-NOT-detected already degrades to loopback
+///   with a warning. A bind failure here must NOT block the server — it warns
+///   loudly and serves on the remaining (bound) addresses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlanAddr {
+    pub addr: std::net::SocketAddr,
+    pub required: bool,
+}
+
+impl PlanAddr {
+    /// A required (deliberate) listener — its bind failure is fatal.
+    pub fn required(addr: std::net::SocketAddr) -> Self {
+        Self {
+            addr,
+            required: true,
+        }
+    }
+
+    /// A best-effort (opportunistic) listener — its bind failure degrades to a
+    /// warning and the server continues on the remaining addresses.
+    pub fn best_effort(addr: std::net::SocketAddr) -> Self {
+        Self {
+            addr,
+            required: false,
+        }
+    }
+}
+
+/// LOCAL MODE bind addresses: loopback on `port` (REQUIRED), plus the machine's
+/// Tailscale address on `port` when one was detected (BEST-EFFORT). This is the
+/// SHARED resolution for both the palette flip and the `dux server`
+/// empty-`listen_addrs` fallback.
 ///
 /// It deliberately takes NO `listen_addrs` and NO safety flags: local mode is a
 /// mode, not an address. Loopback is always safe (only this machine reaches it);
@@ -1028,17 +1066,25 @@ fn is_executable_file(path: &Path) -> bool {
 /// calls this and therefore can never open a public listener — that is enforced
 /// structurally by this signature, not by a refusal branch.
 ///
+/// The Tailscale leg is BEST-EFFORT: a third-party process already holding the
+/// Tailscale `ip:port` must not block the whole serve — it degrades to
+/// loopback-only with a warning, exactly as tailscale-not-DETECTED already does.
+/// Loopback is REQUIRED: if even loopback cannot bind there is nothing to serve.
+///
 /// `tailscale_ip` is the already-fetched address (the caller runs detection on a
 /// worker / at CLI startup); `None` means "Tailscale off or not detected" and
 /// yields loopback only.
-pub fn local_addrs(port: u16, tailscale_ip: Option<std::net::IpAddr>) -> Vec<std::net::SocketAddr> {
-    let mut addrs = vec![std::net::SocketAddr::from(([127, 0, 0, 1], port))];
+pub fn local_addrs(port: u16, tailscale_ip: Option<std::net::IpAddr>) -> Vec<PlanAddr> {
+    let mut addrs = vec![PlanAddr::required(std::net::SocketAddr::from((
+        [127, 0, 0, 1],
+        port,
+    )))];
     if let Some(ip) = tailscale_ip {
         let ts = std::net::SocketAddr::new(ip, port);
         // Guard against a Tailscale IP that is itself loopback (shouldn't happen,
         // but keeps the list deduplicated and the listener count honest).
-        if !addrs.contains(&ts) {
-            addrs.push(ts);
+        if !addrs.iter().any(|p| p.addr == ts) {
+            addrs.push(PlanAddr::best_effort(ts));
         }
     }
     addrs
@@ -1054,8 +1100,11 @@ pub fn local_addrs(port: u16, tailscale_ip: Option<std::net::IpAddr>) -> Vec<std
 pub enum ServerPlan {
     /// Plain HTTP on one or more addresses (multi-listener). TLS is either absent
     /// (loopback dev / Tailscale / LAN testing) or terminated by an upstream
-    /// proxy. The addresses are deduplicated and listed in a stable order.
-    PlainHttp { addrs: Vec<std::net::SocketAddr> },
+    /// proxy. The addresses are deduplicated and listed in a stable order, each
+    /// tagged [`PlanAddr::required`] (a deliberate listener whose bind failure is
+    /// fatal) or [`PlanAddr::best_effort`] (the Tailscale leg of LOCAL MODE, whose
+    /// bind failure degrades to a warning and serves the remaining addresses).
+    PlainHttp { addrs: Vec<PlanAddr> },
     /// Built-in ACME: serve the HTTP-01 challenge + HTTPS redirect on
     /// `http_addr`, serve TLS on `https_addr`. `cache_dir` holds the ACME
     /// account and certificate PRIVATE KEYS.
@@ -1117,8 +1166,10 @@ pub struct ServerCliOverrides {
 ///   ≥1 domain and (`auth_enabled` OR `auth_explicitly_disabled`); binds
 ///   `0.0.0.0:http_port` + `0.0.0.0:https_port`.
 /// - ACME OFF → PlainHttp:
-///   - EMPTY `listen_addrs` (and no `--listen`) → LOCAL MODE: loopback:port plus
-///     the Tailscale address:port when detected. Always safe; no gates.
+///   - EMPTY `listen_addrs` (and no `--listen`) → LOCAL MODE: loopback:port
+///     (REQUIRED) plus the Tailscale address:port when detected (BEST-EFFORT — a
+///     bind failure there degrades to loopback with a warning). Always safe; no
+///     gates.
 ///   - NON-EMPTY → FULL WEB MODE: parse each entry as a SocketAddr (hostnames
 ///     rejected, no DNS). Classify each local (loopback OR == the Tailscale IP)
 ///     vs public. If ANY entry is public, the public-bind gates apply to the
@@ -1240,8 +1291,11 @@ pub fn resolve_server_plan(
         });
     }
 
-    // FULL WEB MODE: parse + classify each entry.
-    let mut addrs: Vec<std::net::SocketAddr> = Vec::with_capacity(listen_addrs.len());
+    // FULL WEB MODE: parse + classify each entry. Every explicit listen_addrs
+    // entry is REQUIRED — the operator named it deliberately, so a bind failure
+    // there stays fatal (explicit-failure tenet). Only LOCAL MODE's auto-added
+    // Tailscale leg is best-effort.
+    let mut addrs: Vec<PlanAddr> = Vec::with_capacity(listen_addrs.len());
     let mut public: Vec<std::net::SocketAddr> = Vec::new();
     for raw in listen_addrs {
         let addr: std::net::SocketAddr = raw.parse().map_err(|_| {
@@ -1260,8 +1314,8 @@ pub fn resolve_server_plan(
                 ip = addr.ip()
             );
         }
-        if !addrs.contains(&addr) {
-            addrs.push(addr);
+        if !addrs.iter().any(|p| p.addr == addr) {
+            addrs.push(PlanAddr::required(addr));
         }
         // A listen entry is LOCAL when it is loopback OR equals the detected
         // Tailscale address (reachable only over the operator's own tailnet).
@@ -1332,25 +1386,32 @@ fn resolve_acme_cache_dir(cfg_cache_dir: Option<&str>, config_dir: &Path) -> Res
 
 #[cfg(test)]
 mod local_addrs_tests {
-    use super::local_addrs;
+    use super::{PlanAddr, local_addrs};
 
     #[test]
     fn loopback_only_when_no_tailscale() {
         let addrs = local_addrs(8080, None);
-        assert_eq!(addrs, vec!["127.0.0.1:8080".parse().unwrap()]);
+        assert_eq!(
+            addrs,
+            vec![PlanAddr::required("127.0.0.1:8080".parse().unwrap())]
+        );
     }
 
     #[test]
-    fn loopback_plus_tailscale_when_present() {
+    fn loopback_required_tailscale_best_effort_when_present() {
+        // Loopback is REQUIRED (a bind failure is fatal); the auto-added Tailscale
+        // leg is BEST-EFFORT (a bind failure degrades to loopback + a warning).
         let ts = "100.101.102.103".parse().unwrap();
         let addrs = local_addrs(9090, Some(ts));
         assert_eq!(
             addrs,
             vec![
-                "127.0.0.1:9090".parse().unwrap(),
-                "100.101.102.103:9090".parse().unwrap(),
+                PlanAddr::required("127.0.0.1:9090".parse().unwrap()),
+                PlanAddr::best_effort("100.101.102.103:9090".parse().unwrap()),
             ]
         );
+        assert!(addrs[0].required, "loopback must be required");
+        assert!(!addrs[1].required, "the Tailscale leg must be best-effort");
     }
 
     #[test]
@@ -1360,8 +1421,8 @@ mod local_addrs_tests {
         assert_eq!(
             addrs,
             vec![
-                "127.0.0.1:8080".parse().unwrap(),
-                "[fd7a:115c:a1e0::1]:8080".parse().unwrap(),
+                PlanAddr::required("127.0.0.1:8080".parse().unwrap()),
+                PlanAddr::best_effort("[fd7a:115c:a1e0::1]:8080".parse().unwrap()),
             ]
         );
     }
@@ -1371,7 +1432,9 @@ mod local_addrs_tests {
 mod resolve_server_plan_tests {
     use std::path::{Path, PathBuf};
 
-    use super::{AcmeSettings, ServerCliOverrides, ServerConfig, ServerPlan, resolve_server_plan};
+    use super::{
+        AcmeSettings, PlanAddr, ServerCliOverrides, ServerConfig, ServerPlan, resolve_server_plan,
+    };
 
     fn cfg_dir() -> PathBuf {
         PathBuf::from("/home/user/.config/dux")
@@ -1434,10 +1497,32 @@ mod resolve_server_plan_tests {
         )
     }
 
+    /// FULL WEB MODE expectation: every address is a REQUIRED listener (an
+    /// explicit `listen_addrs` entry the operator named, so a bind failure is
+    /// fatal).
     fn plain(addrs: &[&str]) -> ServerPlan {
         ServerPlan::PlainHttp {
-            addrs: addrs.iter().map(|s| s.parse().unwrap()).collect(),
+            addrs: addrs
+                .iter()
+                .map(|s| PlanAddr::required(s.parse().unwrap()))
+                .collect(),
         }
+    }
+
+    /// LOCAL MODE expectation: loopback is REQUIRED, the auto-added Tailscale leg
+    /// is BEST-EFFORT. Pass the loopback address(es) first and the Tailscale
+    /// address (if any) as the best-effort tail.
+    fn plain_local(required: &[&str], best_effort: &[&str]) -> ServerPlan {
+        let mut addrs: Vec<PlanAddr> = required
+            .iter()
+            .map(|s| PlanAddr::required(s.parse().unwrap()))
+            .collect();
+        addrs.extend(
+            best_effort
+                .iter()
+                .map(|s| PlanAddr::best_effort(s.parse().unwrap())),
+        );
+        ServerPlan::PlainHttp { addrs }
     }
 
     // ── LOCAL MODE (empty listen_addrs) ───────────────────────────────────
@@ -1455,11 +1540,17 @@ mod resolve_server_plan_tests {
 
     #[test]
     fn local_mode_includes_tailscale_when_detected() {
+        // LOCAL MODE: loopback is REQUIRED, the detected Tailscale leg is added as
+        // BEST-EFFORT (a busy Tailscale port degrades to loopback + a warning
+        // rather than failing the serve).
         let cfg = server_listen(&[], false, AcmeSettings::default());
         let ts = "100.101.102.103".parse().unwrap();
         let plan = resolve_ts(&cfg, false, false, ServerCliOverrides::default(), Some(ts))
             .expect("local mode + tailscale ok");
-        assert_eq!(plan, plain(&["127.0.0.1:8080", "100.101.102.103:8080"]));
+        assert_eq!(
+            plan,
+            plain_local(&["127.0.0.1:8080"], &["100.101.102.103:8080"])
+        );
     }
 
     #[test]

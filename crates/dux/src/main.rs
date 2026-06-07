@@ -201,28 +201,34 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
     match &plan {
         dux_core::config::ServerPlan::PlainHttp { addrs } => {
             // An address is LOCAL when it is loopback OR the detected Tailscale
-            // address; only PUBLIC addresses are gated and warned about.
+            // address; only PUBLIC addresses are gated and warned about. The plan
+            // carries each address tagged required/best-effort; the banner only
+            // needs the SocketAddr, so project it out.
             let is_local =
                 |a: &std::net::SocketAddr| a.ip().is_loopback() || Some(a.ip()) == tailscale_ip;
-            let all_addrs_local = addrs.iter().all(is_local);
+            let all_addrs_local = addrs.iter().all(|p| is_local(&p.addr));
 
             // Loud warning when auth is deliberately disabled on a reachable
             // (public) address: --disable-auth turned the gate off. Only an
             // upstream auth proxy makes this safe.
             if cli_disable_auth && !all_addrs_local {
-                for addr in addrs.iter().filter(|a| !is_local(a)) {
+                for plan_addr in addrs.iter().filter(|p| !is_local(&p.addr)) {
                     eprintln!(
-                        "WARNING: --disable-auth is set and dux is binding {addr}, a non-loopback \
+                        "WARNING: --disable-auth is set and dux is binding {}, a non-loopback \
                          address, with NO login gate. Anyone who can reach this address can control \
                          your agents and worktrees. Only do this when an upstream auth proxy is \
-                         handling authentication in front of dux."
+                         handling authentication in front of dux.",
+                        plan_addr.addr
                     );
                 }
             }
 
+            // A best-effort (Tailscale) leg may fail to bind at serve time and
+            // degrade to loopback; note that in the banner so the printed URL list
+            // is understood as the intended set, not a guarantee.
             let urls = addrs
                 .iter()
-                .map(|a| format!("http://{a}"))
+                .map(|p| format!("http://{}", p.addr))
                 .collect::<Vec<_>>()
                 .join(", ");
             println!("dux server listening on {urls} — open it in your browser");

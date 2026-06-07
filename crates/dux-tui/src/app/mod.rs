@@ -2867,27 +2867,59 @@ pub(crate) fn sync_config_projects_with_store(
 /// it on a worker thread and hands the result here — this function does no
 /// blocking work beyond the (fast, local) `TcpListener::bind`.
 ///
+/// Required vs best-effort mirrors the CLI serve path: loopback is REQUIRED, so a
+/// bind failure there is FATAL (the pre-flight fails, the TUI stays up, and the
+/// failing address is logged); the Tailscale leg is BEST-EFFORT, so a bind
+/// failure there is DROPPED with a warning (named in the returned `warnings`) and
+/// the flip proceeds loopback-only. This matches how a Tailscale address that was
+/// never DETECTED already degrades to loopback with a warning.
+///
 /// Each display URL reflects the listener's `local_addr`, so an ephemeral `:0`
-/// port resolves to the real port the user can open. On any bind failure the
-/// whole pre-flight fails (and the TUI stays up); already-bound listeners drop.
+/// port resolves to the real port the user can open. Returns `(listeners, urls,
+/// warnings)`; on a REQUIRED bind failure the whole pre-flight fails and
+/// already-bound listeners drop.
 fn preflight_server_listeners(
     port: u16,
     tailscale_ip: Option<std::net::IpAddr>,
-) -> Result<(Vec<std::net::TcpListener>, Vec<String>)> {
+) -> Result<(Vec<std::net::TcpListener>, Vec<String>, Vec<String>)> {
     let addrs = dux_core::config::local_addrs(port, tailscale_ip);
     let mut listeners = Vec::with_capacity(addrs.len());
     let mut urls = Vec::with_capacity(addrs.len());
-    for addr in addrs {
-        let listener = std::net::TcpListener::bind(addr).map_err(|err| {
-            anyhow::anyhow!(
-                "could not start the web server: {err} (is something already listening on {addr}?)"
-            )
-        })?;
-        let bound = listener.local_addr().unwrap_or(addr);
-        urls.push(format!("http://{bound}"));
-        listeners.push(listener);
+    let mut warnings = Vec::new();
+    for plan_addr in addrs {
+        let addr = plan_addr.addr;
+        match std::net::TcpListener::bind(addr) {
+            Ok(listener) => {
+                let bound = listener.local_addr().unwrap_or(addr);
+                urls.push(format!("http://{bound}"));
+                listeners.push(listener);
+            }
+            Err(err) if plan_addr.required => {
+                // Loopback (required): the flip cannot serve without it. Log the
+                // failing address to dux.log, then fail the pre-flight so the TUI
+                // surfaces the error and stays up.
+                dux_core::logger::error(&format!(
+                    "[server] could not start the web server: {err} \
+                     (is something already listening on {addr}?)"
+                ));
+                return Err(anyhow::anyhow!(
+                    "could not start the web server: {err} \
+                     (is something already listening on {addr}?)"
+                ));
+            }
+            Err(err) => {
+                // Tailscale leg (best-effort): drop it, warn, serve loopback-only.
+                let warning = format!(
+                    "Could not bind the Tailscale address {addr}: {err} — something else is \
+                     already listening there; serving on loopback only. Stop that process or \
+                     change [server] port to also serve on Tailscale."
+                );
+                dux_core::logger::warn(&format!("[server] {warning}"));
+                warnings.push(warning);
+            }
+        }
     }
-    Ok((listeners, urls))
+    Ok((listeners, urls, warnings))
 }
 
 fn validate_project_records(source: &str, projects: &[crate::config::ProjectConfig]) -> Result<()> {
@@ -3079,10 +3111,11 @@ mod tests {
         // Port 0 lets the OS pick a free port; the display URL must reflect the
         // ACTUAL bound port (via local_addr), not the configured ":0". With no
         // Tailscale address, LOCAL MODE binds loopback only.
-        let (listeners, urls) =
+        let (listeners, urls, warnings) =
             preflight_server_listeners(0, None).expect("loopback bind should succeed");
         assert_eq!(listeners.len(), 1, "no tailscale → loopback only");
         assert_eq!(urls.len(), 1);
+        assert!(warnings.is_empty(), "no tailscale leg → no warnings");
 
         let bound = listeners[0]
             .local_addr()
@@ -3103,7 +3136,7 @@ mod tests {
         // Even with a public listen_addrs configured, the flip path is unaffected
         // because it does not consult that field at all — this test documents the
         // local-only guarantee by exercising the only inputs the flip can take.
-        let (listeners, _urls) =
+        let (listeners, _urls, _warnings) =
             preflight_server_listeners(0, None).expect("loopback-only pre-flight succeeds");
         assert!(
             listeners
@@ -3115,16 +3148,61 @@ mod tests {
 
     #[test]
     fn preflight_reports_port_already_in_use() {
-        // Hold a loopback port, then ask the pre-flight to bind the same one.
+        // Hold a loopback port, then ask the pre-flight to bind the same one. The
+        // loopback leg is REQUIRED, so the pre-flight FAILS (the flip is refused).
         let held = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a port");
         let addr = held.local_addr().expect("held addr");
 
         let err = preflight_server_listeners(addr.port(), None)
-            .expect_err("binding an in-use port must fail pre-flight");
+            .expect_err("binding an in-use loopback port must fail pre-flight");
         let text = format!("{err:#}");
         assert!(
             text.contains("could not start the web server") && text.contains(&addr.to_string()),
             "collision error should name the address: {text}"
+        );
+    }
+
+    #[test]
+    fn preflight_best_effort_tailscale_bind_failure_degrades_to_loopback() {
+        // Reproduce the real-world bug: a third-party process already holds the
+        // Tailscale ip:port while loopback:port is free. The "Tailscale" leg is
+        // best-effort, so the pre-flight must SUCCEED on loopback only, drop the
+        // failed leg, and carry a warning naming the busy address.
+        //
+        // The whole 127.0.0.0/8 range is loopback on Linux, so a SECOND loopback
+        // address (127.0.0.2) stands in for the Tailscale IP: hold 127.0.0.2:P,
+        // leave 127.0.0.1:P free. local_addrs builds required(127.0.0.1:P) +
+        // best_effort(127.0.0.2:P) — distinct addresses (no dedupe), so the bind
+        // path is exercised exactly as production would hit it.
+        let held = std::net::TcpListener::bind("127.0.0.2:0").expect("hold a second-loopback port");
+        let held_addr = held.local_addr().expect("held addr");
+        let port = held_addr.port();
+        let ts_ip: std::net::IpAddr = "127.0.0.2".parse().unwrap();
+
+        let (listeners, urls, warnings) = preflight_server_listeners(port, Some(ts_ip))
+            .expect("a busy Tailscale leg must NOT fail the pre-flight");
+
+        // Only the required loopback leg bound; the best-effort Tailscale leg was
+        // dropped. Every bound listener is genuine loopback → host-only.
+        assert_eq!(listeners.len(), 1, "the best-effort leg must be dropped");
+        assert_eq!(urls.len(), 1, "only the bound listener gets a URL");
+        let bound = listeners[0].local_addr().expect("bound addr");
+        assert_eq!(bound.ip(), std::net::Ipv4Addr::LOCALHOST);
+        assert!(
+            urls.iter().all(|u| u.contains("127.0.0.1")),
+            "the URL list must exclude the failed Tailscale address: {urls:?}"
+        );
+        // The warning names the busy address and the degrade-to-loopback outcome.
+        assert_eq!(warnings.len(), 1, "exactly one bind warning: {warnings:?}");
+        assert!(
+            warnings[0].contains(&held_addr.to_string()),
+            "the warning must name the busy Tailscale address: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].to_lowercase().contains("loopback"),
+            "the warning must say it degraded to loopback: {}",
+            warnings[0]
         );
     }
 

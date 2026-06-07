@@ -2477,7 +2477,7 @@ impl App {
             // Detect the Tailscale address off the UI thread (the CLI call is the
             // reason this runs on a worker). When detection fails but the user
             // opted in, carry a non-fatal warning naming the config key.
-            let (tailscale_ip, warning) = if tailscale_enabled {
+            let (tailscale_ip, detect_warning) = if tailscale_enabled {
                 match dux_core::tailscale::detect_ip() {
                     Ok(ip) => (Some(ip), None),
                     Err(reason) => (
@@ -2493,10 +2493,43 @@ impl App {
                 (None, None)
             };
 
-            let result =
-                preflight_server_listeners(port, tailscale_ip).map_err(|err| format!("{err:#}"));
-            let _ = tx.send(WorkerEvent::ServerFlipPreflightReady { result, warning });
+            // The pre-flight returns its own best-effort (Tailscale BIND-failure)
+            // warnings; combine them with the detection warning into the single
+            // `warning` the event carries, so a busy Tailscale port and a missing
+            // Tailscale daemon both surface the same way (serving loopback-only).
+            let result = match preflight_server_listeners(port, tailscale_ip) {
+                Ok((listeners, urls, bind_warnings)) => {
+                    let warning = combine_flip_warnings(detect_warning, bind_warnings);
+                    let _ = tx.send(WorkerEvent::ServerFlipPreflightReady {
+                        result: Ok((listeners, urls)),
+                        warning,
+                    });
+                    return;
+                }
+                Err(err) => Err(format!("{err:#}")),
+            };
+            // A required (loopback) bind failed: surface the error; the detection
+            // warning (if any) is moot because the flip is not happening.
+            let _ = tx.send(WorkerEvent::ServerFlipPreflightReady {
+                result,
+                warning: detect_warning,
+            });
         });
+    }
+}
+
+/// Merge the optional Tailscale-detection warning with any best-effort
+/// bind-failure warnings the pre-flight produced into the single `warning` the
+/// flip event carries. Both describe the same degraded-to-loopback outcome, so
+/// they are joined with a space; returns `None` when there is nothing to say.
+fn combine_flip_warnings(detect: Option<String>, binds: Vec<String>) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    parts.extend(detect);
+    parts.extend(binds);
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
     }
 }
 
@@ -2857,6 +2890,39 @@ mod tests {
                 .message()
                 .contains("could not start the web server")
         );
+    }
+
+    #[test]
+    fn combine_flip_warnings_none_when_empty() {
+        assert_eq!(combine_flip_warnings(None, Vec::new()), None);
+    }
+
+    #[test]
+    fn combine_flip_warnings_passes_detection_warning_through() {
+        let detect = Some("Tailscale not detected — serving on loopback only.".to_string());
+        let combined = combine_flip_warnings(detect, Vec::new()).expect("warning present");
+        assert!(combined.contains("Tailscale not detected"));
+    }
+
+    #[test]
+    fn combine_flip_warnings_merges_detection_and_bind_failures() {
+        // A best-effort Tailscale BIND failure (the new bug) joins the detection
+        // warning into a single string so both reach the status line.
+        let detect = Some("detect warning.".to_string());
+        let binds = vec!["bind warning A.".to_string(), "bind warning B.".to_string()];
+        let combined = combine_flip_warnings(detect, binds).expect("warning present");
+        assert!(combined.contains("detect warning."));
+        assert!(combined.contains("bind warning A."));
+        assert!(combined.contains("bind warning B."));
+    }
+
+    #[test]
+    fn combine_flip_warnings_bind_only() {
+        // When Tailscale WAS detected but the bind to it failed, there is no
+        // detection warning — only the bind-failure warning surfaces.
+        let binds = vec!["the Tailscale port is busy.".to_string()];
+        let combined = combine_flip_warnings(None, binds).expect("warning present");
+        assert_eq!(combined, "the Tailscale port is busy.");
     }
 
     #[test]

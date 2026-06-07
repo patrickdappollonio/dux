@@ -471,7 +471,9 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
                  # dux detects this machine's Tailscale address (via the `tailscale ip`\n\
                  # CLI) and also listens there, so tailnet devices can open the web UI.\n\
                  # If the CLI is missing or the daemon is down, dux WARNS and serves on\n\
-                 # loopback only — it never blocks. Set false to skip detection and\n\
+                 # loopback only — it never blocks. Likewise, if the Tailscale port is\n\
+                 # already in use by another process, dux WARNS and serves on loopback\n\
+                 # only rather than failing to start. Set false to skip detection and\n\
                  # silence that warning.\n\
                  # NOTE: a shared tailnet means OTHER people's devices can reach dux.\n\
                  # Configure [auth] users below so the login gate protects it.",

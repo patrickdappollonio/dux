@@ -40,24 +40,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use dux_core::config::{DuxPaths, ServerPlan};
+use dux_core::config::{DuxPaths, PlanAddr, ServerPlan};
 use dux_core::engine::Engine;
+use dux_core::wire::WireStatus;
 
 use crate::engine_actor::LoopControl;
 use crate::server::RouterParams;
 use crate::tls::{AcmePlan, SESSION_SWEEP_PERIOD};
 
 /// Boot the engine on its own thread and serve the web UI on every address in
-/// `addrs` (one axum task per listener, sharing the router/state). Blocking
+/// the plan (one axum task per listener, sharing the router/state). Blocking
 /// entry — builds its own tokio runtime.
 ///
-/// The auth-reload context's downgrade rule is keyed on `host_only`, computed
-/// here from the actual `addrs` using `is_loopback()` ONLY — NO Tailscale
-/// allowance. This is deliberately stricter than the startup bind gate's "local"
-/// classification (which treats a Tailscale bind as local). A Tailscale-bound
-/// server is reachable by other people's devices on the tailnet, so it is NOT
-/// host-only and a running gate must never silently downgrade to open on it. See
-/// [`auth::AuthState::rebuild`] for the full distinction.
+/// The auth-reload context's downgrade rule is keyed on `host_only`, computed in
+/// [`run_plain_http`] from the addresses that ACTUALLY bound using `is_loopback()`
+/// ONLY — NO Tailscale allowance. This is deliberately stricter than the startup
+/// bind gate's "local" classification (which treats a Tailscale bind as local). A
+/// Tailscale-bound server is reachable by other people's devices on the tailnet,
+/// so it is NOT host-only and a running gate must never silently downgrade to open
+/// on it. See [`auth::AuthState::rebuild`] for the full distinction.
 ///
 /// `disable_auth` mirrors the `dux server --disable-auth` flag: with it set the
 /// login gate is off even when `[auth]` users exist. The gate's shared auth
@@ -88,6 +89,80 @@ pub fn run_server(paths: DuxPaths, plan: ServerPlan, disable_auth: bool) -> Resu
     }
 }
 
+/// The warning shown when a BEST-EFFORT (Tailscale) listener cannot bind because
+/// something else already holds that address. Names the address, the cause, and
+/// BOTH remedies (stop the other process, or change the port). Shared by the
+/// `dux.log` WARN line and the warn-tone status broadcast so the two cannot drift.
+/// Pure so it is unit-testable.
+fn tailscale_bind_warning(addr: SocketAddr, err: &std::io::Error) -> String {
+    format!(
+        "could not bind the Tailscale address {addr}: {err} — something else is already \
+         listening there; serving on the remaining address(es) only. Stop that process or \
+         change [server].port to also serve on Tailscale."
+    )
+}
+
+/// A successfully bound listener paired with its requested address (so the URL
+/// list and `host_only` are computed from what ACTUALLY bound, not what was
+/// requested).
+#[derive(Debug)]
+struct BoundListener {
+    addr: SocketAddr,
+    listener: tokio::net::TcpListener,
+}
+
+/// Bind every [`PlanAddr`], honoring its required/best-effort tag.
+///
+/// - REQUIRED (loopback, every explicit `listen_addrs` entry): a bind failure is
+///   FATAL — it logs a `logger::error` with the failing address and returns the
+///   error (with address context) so the serve aborts. This is the
+///   explicit-failure tenet: the operator named this address.
+/// - BEST-EFFORT (the Tailscale leg of LOCAL MODE): a bind failure logs a WARN
+///   naming the address, the cause, and both remedies, collects the SAME text as
+///   a warning to surface to web clients, and CONTINUES without that listener.
+///
+/// If NOTHING binds (every address failed) the whole serve is fatal — there is
+/// nothing left to serve. Returns the bound listeners (with their addresses) and
+/// the best-effort warnings to broadcast.
+async fn bind_plan_addrs(addrs: &[PlanAddr]) -> Result<(Vec<BoundListener>, Vec<String>)> {
+    let mut bound = Vec::with_capacity(addrs.len());
+    let mut warnings = Vec::new();
+    for plan_addr in addrs {
+        let addr = plan_addr.addr;
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => bound.push(BoundListener { addr, listener }),
+            Err(err) if plan_addr.required => {
+                // The operator named this address; refuse to serve silently
+                // without it. Log with address context, then propagate the error.
+                dux_core::logger::error(&format!(
+                    "[server] could not bind the listen address {addr}: {err} — something else \
+                     is already listening there. Stop that process or change the configured \
+                     address/port."
+                ));
+                return Err(anyhow::anyhow!(
+                    "could not bind the listen address {addr}: {err} \
+                     (is something already listening there?)"
+                ));
+            }
+            Err(err) => {
+                // Best-effort (Tailscale) leg: warn loudly, keep serving the rest.
+                let warning = tailscale_bind_warning(addr, &err);
+                dux_core::logger::warn(&format!("[server] {warning}"));
+                warnings.push(warning);
+            }
+        }
+    }
+    if bound.is_empty() {
+        // Every address failed (e.g. a single required loopback that was busy is
+        // handled above; this guards the all-best-effort edge and future shapes).
+        anyhow::bail!(
+            "could not bind any of the requested server addresses; nothing left to serve. \
+             Check that the configured ports are free."
+        );
+    }
+    Ok((bound, warnings))
+}
+
 /// The plain-HTTP serve path: one axum task per listener (loopback, Tailscale,
 /// LAN, or proxy-fronted), sharing the router/state, plus the periodic
 /// expired-session sweep. Shutdown is the SAME [`ServeShutdown`] watch lane the
@@ -95,28 +170,45 @@ pub fn run_server(paths: DuxPaths, plan: ServerPlan, disable_auth: bool) -> Resu
 /// listener to die records its error and trips the watch too, so the siblings get
 /// a graceful shutdown and the error propagates (genuine first-error wind-down —
 /// no longer a no-abort JoinSet wait). The single sweep rides the same lane.
-fn run_plain_http(paths: DuxPaths, addrs: Vec<SocketAddr>, disable_auth: bool) -> Result<()> {
+///
+/// A BEST-EFFORT (Tailscale) address whose bind fails (a third-party process
+/// already holds it) does NOT abort the serve: it warns loudly to `dux.log` and
+/// to web clients (a warn-tone status broadcast) and the server keeps serving the
+/// remaining (bound) addresses. `host_only` is computed from the addresses that
+/// ACTUALLY bound, so a dropped Tailscale leg leaves a loopback-only (host-only)
+/// server.
+fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, disable_auth: bool) -> Result<()> {
     let engine = bootstrap::bootstrap_engine(&paths)?;
-    // host-only ⇔ EVERY listener is genuine loopback. A Tailscale (or public)
-    // address makes the server reachable off-host, so the downgrade rule must
-    // refuse a live gate-disable there.
-    let host_only = addrs.iter().all(|a| a.ip().is_loopback());
-    // Build the login gate's shared state from the loaded config users (parsed
-    // ONCE here, not per request). The same `Arc` is handed to the engine actor
-    // (for live reload refresh) and to the router (for login/gate reads).
     let auth = auth::shared_auth(&engine.config.auth.users, disable_auth);
-    let (handle, _join) = engine_actor::spawn_engine_thread_with_auth(
-        engine,
-        engine_actor::AuthReloadContext {
-            shared: Arc::clone(&auth),
-            disable_auth,
-            host_only,
-        },
-    );
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     runtime.block_on(async move {
+        // Bind every address first, honoring the required/best-effort tags. A
+        // failed REQUIRED bind aborts here (with the address logged + in the
+        // error); a failed BEST-EFFORT (Tailscale) bind is dropped with a warning
+        // and the server proceeds on the rest.
+        let (bound, bind_warnings) = bind_plan_addrs(&addrs).await?;
+
+        // host-only ⇔ EVERY *bound* listener is genuine loopback. A Tailscale (or
+        // public) address that bound makes the server reachable off-host, so the
+        // downgrade rule must refuse a live gate-disable there. Computed from what
+        // bound so a dropped Tailscale leg correctly leaves a host-only server.
+        let host_only = bound.iter().all(|b| b.addr.ip().is_loopback());
+
+        // Spawn the engine on its own std thread (it runs the synchronous engine
+        // loop, not a tokio task) now that `host_only` is known from the BOUND
+        // addresses. The shared auth `Arc` goes to both the actor (live reload
+        // refresh) and the router (login/gate reads).
+        let (handle, _join) = engine_actor::spawn_engine_thread_with_auth(
+            engine,
+            engine_actor::AuthReloadContext {
+                shared: Arc::clone(&auth),
+                disable_auth,
+                host_only,
+            },
+        );
+
         // The shared shutdown primitive: a SIGINT/SIGTERM or a first-listener
         // failure flips its watch, every serve task awaits it, and the sweep rides
         // the same lane so it exits with the server rather than lingering.
@@ -132,6 +224,16 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<SocketAddr>, disable_auth: bool) -
         );
         let sweep = tls::spawn_session_sweep(store, SESSION_SWEEP_PERIOD, sweep_shutdown_rx);
 
+        // Surface any best-effort (Tailscale) bind warnings to web clients on the
+        // SAME status broadcast the reload warnings and ACME lifecycle events ride,
+        // so a browser session sees the degraded-to-loopback notice (dux.log
+        // already has it from `bind_plan_addrs`).
+        for warning in &bind_warnings {
+            let _ = handle
+                .status_sender()
+                .send(WireStatus::new("warning", warning.clone()));
+        }
+
         // Translate a SIGINT/SIGTERM into a watch trip so every listener winds
         // down gracefully (the same trigger a first-listener failure uses).
         {
@@ -142,12 +244,11 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<SocketAddr>, disable_auth: bool) -
             });
         }
 
-        // Bind every address; each serve task's graceful-shutdown future awaits
-        // the shared watch, so any trip (signal OR a sibling's failure) winds them
-        // all down together.
+        // Serve every BOUND address; each serve task's graceful-shutdown future
+        // awaits the shared watch, so any trip (signal OR a sibling's failure)
+        // winds them all down together.
         let mut tasks = tokio::task::JoinSet::new();
-        for addr in addrs {
-            let listener = tokio::net::TcpListener::bind(addr).await?;
+        for BoundListener { listener, .. } in bound {
             let app = app.clone();
             let shutdown = shutdown.clone();
             let task_shutdown = shutdown.subscribe();
@@ -310,10 +411,11 @@ fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool) -> Result<()> {
                 let r = tls::serve_http_challenge(http_addr, http_router, h).await;
                 if let Err(e) = &r {
                     dux_core::logger::error(&format!(
-                        "[server] the :80 ACME challenge/redirect listener failed: {e}"
+                        "[server] the ACME challenge/redirect listener on {http_addr} failed: {e} \
+                         — is something already listening there?"
                     ));
                     shutdown.record_failure(anyhow::anyhow!(
-                        "the :80 ACME challenge/redirect listener failed: {e}"
+                        "the ACME challenge/redirect listener on {http_addr} failed: {e}"
                     ));
                 }
                 r
@@ -326,8 +428,13 @@ fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool) -> Result<()> {
             tasks.spawn(async move {
                 let r = tls::serve_https_acme(https_addr, https_app, acceptor, h).await;
                 if let Err(e) = &r {
-                    dux_core::logger::error(&format!("[server] the :443 TLS listener failed: {e}"));
-                    shutdown.record_failure(anyhow::anyhow!("the :443 TLS listener failed: {e}"));
+                    dux_core::logger::error(&format!(
+                        "[server] the TLS listener on {https_addr} failed: {e} \
+                         — is something already listening there?"
+                    ));
+                    shutdown.record_failure(anyhow::anyhow!(
+                        "the TLS listener on {https_addr} failed: {e}"
+                    ));
                 }
                 r
             });
@@ -616,13 +723,35 @@ pub fn serve_with_engine(
         .build()?;
 
     // The std listeners travel through the flip (the TUI bound them BEFORE tearing
-    // down, so there is no rebind race); tokio needs them non-blocking.
+    // down, so there is no rebind race); tokio needs them non-blocking. Adoption
+    // failures here are rare (the bind already succeeded in the preflight), but log
+    // the failing address before propagating so a flip that cannot start the server
+    // leaves a forensic record in dux.log, not just a TUI status line.
     let tokio_listeners = {
         let _guard = runtime.enter();
         let mut out = Vec::with_capacity(listeners.len());
         for listener in listeners {
-            listener.set_nonblocking(true)?;
-            out.push(tokio::net::TcpListener::from_std(listener)?);
+            let addr = listener
+                .local_addr()
+                .map(|a| a.to_string())
+                .unwrap_or_else(|_| "<unknown address>".to_string());
+            if let Err(err) = listener.set_nonblocking(true) {
+                dux_core::logger::error(&format!(
+                    "[server] could not adopt the pre-bound flip listener on {addr} \
+                     (set_nonblocking failed): {err}"
+                ));
+                return Err(err.into());
+            }
+            match tokio::net::TcpListener::from_std(listener) {
+                Ok(l) => out.push(l),
+                Err(err) => {
+                    dux_core::logger::error(&format!(
+                        "[server] could not adopt the pre-bound flip listener on {addr} \
+                         (tokio from_std failed): {err}"
+                    ));
+                    return Err(err.into());
+                }
+            }
         }
         out
     };
@@ -814,8 +943,103 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::{ServeShutdown, acme_disable_auth_warning, resolve_host_only, wait_for_shutdown};
+    use super::{
+        ServeShutdown, acme_disable_auth_warning, bind_plan_addrs, resolve_host_only,
+        tailscale_bind_warning, wait_for_shutdown,
+    };
+    use dux_core::config::PlanAddr;
     use dux_core::engine::Command;
+
+    #[test]
+    fn tailscale_bind_warning_names_addr_cause_and_both_remedies() {
+        // The warning must name the busy address, the cause, and BOTH remedies
+        // (stop the other process, or change the port) so an operator can act.
+        let addr = "100.64.0.1:8080".parse().unwrap();
+        let err = std::io::Error::new(std::io::ErrorKind::AddrInUse, "address already in use");
+        let w = tailscale_bind_warning(addr, &err);
+        assert!(w.contains("100.64.0.1:8080"), "must name the address: {w}");
+        assert!(
+            w.contains("address already in use"),
+            "must name the cause: {w}"
+        );
+        assert!(
+            w.contains("Stop that process"),
+            "must offer the stop-the-process remedy: {w}"
+        );
+        assert!(
+            w.contains("[server].port"),
+            "must offer the change-the-port remedy: {w}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_plan_addrs_drops_best_effort_failure_and_keeps_required() {
+        // The real-world bug: a third-party process holds the best-effort
+        // (Tailscale) address while the required (loopback) address is free. The
+        // bind must SUCCEED on the required leg, DROP the failed best-effort leg,
+        // and return a warning naming it. host-only-from-bound is the caller's
+        // concern; here we prove the bound set excludes the failed address.
+        //
+        // 127.0.0.2 stands in for the Tailscale IP (all of 127.0.0.0/8 is loopback
+        // on Linux), held on an ephemeral port; 127.0.0.1 on a separate free port
+        // is the required leg. The bind-failure path doesn't care that it's not a
+        // real Tailscale address — only that the entry is best-effort.
+        let held = std::net::TcpListener::bind("127.0.0.2:0").expect("hold a best-effort addr");
+        let held_addr = held.local_addr().expect("held addr");
+        let free = std::net::TcpListener::bind("127.0.0.1:0").expect("probe a free port");
+        let required_addr = free.local_addr().expect("free addr");
+        drop(free); // release it so bind_plan_addrs can take it
+
+        let plan = vec![
+            PlanAddr::required(required_addr),
+            PlanAddr::best_effort(held_addr),
+        ];
+        let (bound, warnings) = bind_plan_addrs(&plan)
+            .await
+            .expect("a busy best-effort leg must not fail the serve");
+
+        assert_eq!(bound.len(), 1, "only the required leg binds");
+        assert_eq!(
+            bound[0].addr, required_addr,
+            "the bound leg is the required one"
+        );
+        assert!(
+            bound.iter().all(|b| b.addr.ip().is_loopback()),
+            "every bound addr is loopback → host-only"
+        );
+        assert_eq!(
+            warnings.len(),
+            1,
+            "exactly one best-effort warning: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains(&held_addr.to_string()),
+            "the warning names the busy best-effort address: {}",
+            warnings[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_plan_addrs_required_failure_is_fatal_and_names_the_addr() {
+        // A REQUIRED address that is already held must FAIL the whole bind with the
+        // address in the error message (the explicit-failure tenet — the operator
+        // named this address). dux.log also gets a logger::error (not asserted here
+        // because the test logger is process-global; the message text is the
+        // contract we pin).
+        let held = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a required addr");
+        let held_addr = held.local_addr().expect("held addr");
+
+        let plan = vec![PlanAddr::required(held_addr)];
+        let err = bind_plan_addrs(&plan)
+            .await
+            .expect_err("a busy required address must be fatal");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("could not bind the listen address")
+                && text.contains(&held_addr.to_string()),
+            "the fatal error must name the busy required address: {text}"
+        );
+    }
 
     #[test]
     fn acme_disable_auth_warning_flags_public_no_gate() {
