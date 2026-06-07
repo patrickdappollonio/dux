@@ -236,51 +236,101 @@ pub fn build_app(
         .route("/api/me", get(auth::me))
         .fallback(crate::web_assets::static_handler)
         .layer(session_layer)
-        // The access log wraps everything (OUTERMOST) so it sees the FINAL status
-        // every other layer produced — a 401 from the gate, a 308 redirect, the
-        // static fallback. It is gated inside on `access_log && console.is_active`,
+        // The access log is the OUTERMOST layer OF THIS app, so it sees the final
+        // status every layer it wraps produced — a 401 from the gate, the static
+        // fallback's status. It is gated inside on `access_log && console.is_active`,
         // so the flip and disabled-console paths pay nothing. Stamped via
         // `from_fn_with_state` so it reads the console/toggle off `AppState`.
+        //
+        // CAVEAT on the TLS (:443) path: `run_acme` wraps the host-allowlist and
+        // HSTS layers OUTSIDE this app (see `tls::host_allowlist_layer`), so a
+        // foreign-Host probe is 421'd by the allowlist BEFORE it reaches this
+        // middleware — those 421s are deliberately NOT access-logged on :443, which
+        // keeps a rebinding-probe flood out of the log. (The `:80`
+        // challenge/redirect router DOES log its 421s: there the access log is the
+        // true outermost layer — see `tls::build_http_challenge_router`.)
         .layer(middleware::from_fn_with_state(state.clone(), access_log))
         .with_state(state);
     (router, store)
 }
 
-/// Per-request access-log middleware: print `method path status latencyms` to the
-/// console after the inner stack produces a response. CONSOLE-ONLY (never
-/// `dux.log` — piping `dux server`'s stdout IS the access log). Skips `/healthz`
-/// so a health checker does not flood the log, and is gated on
-/// `access_log && console.is_active()` so the flip/disabled paths emit nothing.
+/// Per-request access-log middleware for the main app: print
+/// `method path status latencyms` to the console after the inner stack produces a
+/// response. Reads the console + toggle off [`AppState`] and delegates to the
+/// shared [`log_request`] core (the SAME core the `:80` challenge/redirect router
+/// uses via [`access_log_layer`], so both surfaces log identically).
+async fn access_log(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    log_request(&state.console, state.access_log, request, next).await
+}
+
+/// The shared access-log core. CONSOLE-ONLY (never `dux.log` — piping
+/// `dux server`'s stdout IS the access log). Skips `/healthz` so a health checker
+/// does not flood the log, and is gated on `access_log && console.is_active()` so
+/// the flip/disabled paths emit nothing.
 ///
 /// The path is printed AS-IS, query string included: the only query strings that
 /// reach the server today are public ACME challenge tokens (the CA fetches them
 /// over plain HTTP), so there is nothing sensitive to strip.
-async fn access_log(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    // /healthz is intentionally never logged (probe noise). Capture what we need
-    // before the request is consumed by `next`.
-    let path = request.uri().path().to_string();
-    let log = state.access_log && state.console.is_active() && path != "/healthz";
+async fn log_request(
+    console: &Console,
+    access_log: bool,
+    request: Request,
+    next: Next,
+) -> Response {
+    // Check the cheap gates BEFORE allocating anything: a disabled access log or a
+    // no-op console pays nothing per request. /healthz is intentionally never
+    // logged (probe noise) — compared against the borrowed path, no allocation.
+    let log = access_log && console.is_active() && request.uri().path() != "/healthz";
     if !log {
         return next.run(request).await;
     }
     let method = request.method().as_str().to_string();
     // Path + query, printed verbatim (challenge tokens are public; nothing
-    // sensitive rides queries today).
-    let path_and_query = request
-        .uri()
+    // sensitive rides queries today). Falls back to the bare path when there is no
+    // path-and-query form.
+    let uri = request.uri();
+    let path_and_query = uri
         .path_and_query()
         .map(|pq| pq.as_str().to_string())
-        .unwrap_or(path);
+        .unwrap_or_else(|| uri.path().to_string());
     let started = std::time::Instant::now();
     let response = next.run(request).await;
     let latency_ms = started.elapsed().as_millis();
-    state.console.access(
+    console.access(
         &method,
         &path_and_query,
         response.status().as_u16(),
         latency_ms,
     );
     response
+}
+
+/// The console + access-log toggle carried as middleware state for routers that
+/// have no [`AppState`] — namely the `:80` ACME challenge/redirect router (see
+/// [`access_log_layer`]). Cheap to clone (the `Console` is `Arc`-backed).
+#[derive(Clone)]
+struct AccessLogState {
+    console: Console,
+    access_log: bool,
+}
+
+/// Wrap a router with the shared access-log middleware, carrying the console +
+/// toggle explicitly (no [`AppState`] required). Used to give the `:80`
+/// challenge/redirect router the SAME access log as the main app, so a challenge
+/// fetch, a 308 redirect, a 421 foreign-Host rejection, or a 400 all log one line
+/// like any other request. Gated identically (`access_log && console.is_active()`),
+/// so the flip and disabled-console paths emit nothing.
+pub fn access_log_layer(router: Router, console: Console, access_log: bool) -> Router {
+    let state = AccessLogState {
+        console,
+        access_log,
+    };
+    router.layer(middleware::from_fn_with_state(
+        state,
+        |State(state): State<AccessLogState>, request: Request, next: Next| async move {
+            log_request(&state.console, state.access_log, request, next).await
+        },
+    ))
 }
 
 /// Gate middleware for the protected sub-router. When auth is enabled, a valid

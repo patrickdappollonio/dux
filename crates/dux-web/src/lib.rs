@@ -554,8 +554,13 @@ fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool, version: String
 
         // The :80 challenge service borrows the SAME state's resolver, so build
         // the challenge router BEFORE moving the state into the polling task.
-        let http_router =
-            tls::build_http_challenge_router(&acme_state, https_port, domains.clone());
+        let http_router = tls::build_http_challenge_router(
+            &acme_state,
+            https_port,
+            domains.clone(),
+            console.clone(),
+            access_log,
+        );
         let acceptor = acme_state.axum_acceptor(acme_state.default_rustls_config());
 
         // Drive certificate acquisition/renewal. Without this nothing progresses.

@@ -228,8 +228,13 @@ async fn boot_tls(users: Vec<String>) -> TlsServer {
             cache_dir: tmp.path().join("acme-cache"),
         };
         let (acme_state, norm_domains) = tls::build_acme_state(&plan).expect("build acme state");
-        let http_router =
-            tls::build_http_challenge_router(&acme_state, https_addr.port(), norm_domains);
+        let http_router = tls::build_http_challenge_router(
+            &acme_state,
+            https_addr.port(),
+            norm_domains,
+            dux_web::console::Console::noop(),
+            false,
+        );
         // Drive the state so the challenge resolver is live (no network in tests;
         // it just needs polling to exist). Abort it with the server via the handle
         // teardown at the end of the test process.

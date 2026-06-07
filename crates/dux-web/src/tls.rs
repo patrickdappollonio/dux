@@ -452,12 +452,20 @@ async fn redirect_to_https(
 /// issuance/renewal. Instead the allowlist is scoped to a dedicated redirect
 /// sub-router (its `.layer()` wraps only that sub-router's fallback), which is
 /// then mounted via `fallback_service`. The challenge `route_service` lives on
-/// the OUTER router, which carries no layer at all, so a challenge request with
+/// the OUTER router, which carries no allowlist layer, so a challenge request with
 /// any Host reaches the real tower service untouched.
+///
+/// `console` + `access_log` wire the SAME access log the main app uses
+/// ([`crate::server::access_log_layer`]) onto this router, applied OUTERMOST so it
+/// records the final status of every `:80` request — a 200/404 challenge fetch, a
+/// 308 redirect, a 421 from the allowlist, or a 400 bad-Host. Gated on
+/// `access_log && console.is_active()`, so the flip/disabled paths log nothing.
 pub fn build_http_challenge_router(
     state: &DuxAcmeState,
     https_port: u16,
     domains: Vec<String>,
+    console: crate::console::Console,
+    access_log: bool,
 ) -> Router {
     let challenge = state.http01_challenge_tower_service();
     let allowlist = Arc::new(DomainAllowlist::new(domains));
@@ -472,12 +480,15 @@ pub fn build_http_challenge_router(
             host_allowlist_middleware,
         ))
         .with_state(RedirectState { https_port });
-    // The outer router carries NO layer: the challenge route_service is genuinely
-    // exempt from the allowlist, and everything else falls through to the
-    // allowlisted redirect sub-router.
-    Router::new()
+    // The outer router carries no ALLOWLIST layer (the challenge route_service is
+    // genuinely exempt, and everything else falls through to the allowlisted
+    // redirect sub-router); the access log is then layered OUTERMOST over the whole
+    // thing so every `:80` request — challenge or redirect, allowed or 421'd —
+    // logs its final status.
+    let router = Router::new()
         .route_service("/.well-known/acme-challenge/{token}", challenge)
-        .fallback_service(redirect)
+        .fallback_service(redirect);
+    crate::server::access_log_layer(router, console, access_log)
 }
 
 // ── Host allowlist (deferral 2) ────────────────────────────────────────────
@@ -1194,6 +1205,103 @@ mod tests {
         assert!(hsts.contains("max-age=63072000"));
         assert!(hsts.contains("includeSubDomains"));
         assert!(!hsts.contains("preload"), "must NOT assert preload: {hsts}");
+    }
+
+    // ── :80 challenge/redirect router access log (F2) ───────────────────────
+
+    /// Build a `:80` challenge/redirect router against a throwaway staging ACME
+    /// state, wiring the given captured console + access-log toggle. The state is
+    /// never contacted (no network in tests); it only needs to exist so the
+    /// challenge route_service can mount.
+    fn challenge_router_with_console(
+        console: crate::console::Console,
+        access_log: bool,
+    ) -> (Router, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = AcmePlan {
+            http_addr: "0.0.0.0:80".parse().unwrap(),
+            https_addr: "0.0.0.0:443".parse().unwrap(),
+            domains: vec!["dux.example.com".to_string()],
+            email: String::new(),
+            production: false,
+            cache_dir: tmp.path().join("acme"),
+        };
+        let (state, domains) = build_acme_state(&plan).expect("build acme state");
+        let router = build_http_challenge_router(&state, 443, domains, console, access_log);
+        (router, tmp)
+    }
+
+    #[tokio::test]
+    async fn challenge_router_access_log_records_the_308_redirect() {
+        use tower::ServiceExt; // for `oneshot`
+        let (console, sink) = crate::console::Console::test_capture(false);
+        let (router, _tmp) = challenge_router_with_console(console, true);
+        // A plain request to an allowed Host falls through to the redirect fallback
+        // → 308 to HTTPS. The access log must record that final status.
+        let resp = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/some/path")
+                    .header(axum::http::header::HOST, "dux.example.com")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
+        let out = sink.contents();
+        assert!(
+            out.contains("/some/path") && out.contains("308"),
+            "the :80 redirect must log a 308 access line: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn challenge_router_access_log_toggle_off_emits_nothing() {
+        use tower::ServiceExt; // for `oneshot`
+        let (console, sink) = crate::console::Console::test_capture(false);
+        let (router, _tmp) = challenge_router_with_console(console, false);
+        let resp = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/some/path")
+                    .header(axum::http::header::HOST, "dux.example.com")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
+        assert!(
+            sink.contents().is_empty(),
+            "access_log = false must emit no :80 access lines: {}",
+            sink.contents()
+        );
+    }
+
+    #[tokio::test]
+    async fn challenge_router_access_log_records_a_421_foreign_host() {
+        use tower::ServiceExt; // for `oneshot`
+        let (console, sink) = crate::console::Console::test_capture(false);
+        let (router, _tmp) = challenge_router_with_console(console, true);
+        // A foreign Host on a non-challenge path is 421'd by the redirect
+        // sub-router's allowlist; the access log (outermost) still records it.
+        let resp = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/some/path")
+                    .header(axum::http::header::HOST, "evil.example.com")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+        let out = sink.contents();
+        assert!(
+            out.contains("/some/path") && out.contains("421"),
+            "a foreign-Host 421 on :80 must be access-logged: {out}"
+        );
     }
 
     // ── build_acme_state cache-dir hardening ──────────────────────────────

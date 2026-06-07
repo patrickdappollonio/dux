@@ -127,8 +127,8 @@ pub struct AuthReloadContext {
     /// The `dux server` terminal console. A config reload (and its drift warning)
     /// is echoed here so an operator watching the terminal sees it in the
     /// vite-style output, not just the WS status broadcast. A [`Console::noop`]
-    /// for the flip/tests emits nothing. Defaults to noop via
-    /// [`AuthReloadContext::with_console`] when a caller does not set it.
+    /// for the flip/tests emits nothing; callers set this field directly (the CLI
+    /// serve paths pass a real stdout console, the flip/tests pass a noop one).
     pub console: crate::console::Console,
 }
 

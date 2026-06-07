@@ -28,7 +28,9 @@
 
 use std::io::{IsTerminal, Write};
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{SyncSender, TrySendError};
 
 // ── ANSI palette (hand-rolled — no color dependency) ───────────────────────
 
@@ -138,20 +140,55 @@ pub fn detect(setting: &str) -> bool {
 
 // ── Writer seam ────────────────────────────────────────────────────────────
 
-/// Where the console writes. Production locks stdout per line so concurrent
-/// tokio tasks never interleave mid-line; tests inject an in-memory buffer to
-/// assert the exact bytes a formatter produced.
+/// The bound on the writer channel. Emitters `try_send` into it; when it is full
+/// (a stalled stdout consumer — a full pipe or a `Ctrl-S`-stopped terminal) the
+/// line is DROPPED rather than blocking the emitting tokio worker. 1024 lines is
+/// generous headroom for a momentary stall while staying a fixed, bounded cost.
+const WRITER_CHANNEL_BOUND: usize = 1024;
+
+/// A message handed to the writer thread.
+enum WriterMsg {
+    /// One already-formatted line to write + flush.
+    Line(String),
+    /// A test-only sync barrier: the writer thread sends `()` back once it has
+    /// processed every message queued before this one, giving tests a
+    /// deterministic drain with no sleeps. Never constructed in production.
+    #[cfg(test)]
+    Sync(SyncSender<()>),
+}
+
+/// Where the console writes. Production hands lines to a dedicated writer THREAD
+/// over a bounded channel so a stalled stdout consumer can never park an emitting
+/// tokio worker on a blocking `write()`; tests inject an in-memory buffer the
+/// thread writes into and read it back through a deterministic sync barrier.
 enum Sink {
     /// No output at all — the flip path and any disabled console. Every emit is
     /// a cheap no-op.
     Noop,
-    /// A line-locked writer (stdout in production, a `Vec<u8>` in tests). The
-    /// `Mutex` guarantees one `write` per line is atomic relative to siblings.
-    Writer(Mutex<Box<dyn Write + Send>>),
+    /// The bounded sender to the writer thread. `emit`/`access`/`banner`
+    /// `try_send` into it; a full channel means a slow consumer, so the line is
+    /// dropped (accounted on `dropped`) instead of blocking the runtime. The
+    /// writer thread owns the actual `Box<dyn Write + Send>`.
+    Writer {
+        tx: SyncSender<WriterMsg>,
+        /// Lines dropped while the channel was full, awaiting a one-line warning
+        /// the next successful send emits. Relaxed: it only gates a human-facing
+        /// warning, so exact cross-thread ordering does not matter.
+        dropped: AtomicU64,
+    },
 }
 
 /// The shared console handle. Cheap to clone (`Arc`) and cheap to no-op (the
 /// flip path constructs [`Console::noop`], whose emit calls return immediately).
+///
+/// ## Shutdown
+///
+/// The writer thread lives as long as any `Console` clone does: it loops on the
+/// channel receiver, so when the LAST `Console` drops, the `SyncSender` is
+/// dropped, the channel closes, the loop ends, and the thread exits on its own —
+/// no detached-thread hang. The thread is a plain (daemon-style) `std::thread`,
+/// so even a hard process exit while a `Console` is still alive simply tears it
+/// down with the process; it never blocks shutdown.
 #[derive(Clone)]
 pub struct Console(Arc<ConsoleInner>);
 
@@ -163,10 +200,65 @@ struct ConsoleInner {
 impl Console {
     /// A real console writing to stdout. `color` comes from [`detect`].
     pub fn stdout(color: bool) -> Self {
+        Self::with_writer(color, Box::new(std::io::stdout()))
+    }
+
+    /// Build a writer-backed console over an owned writer: spawn the dedicated
+    /// writer thread (owns the writer; writes + flushes per line; exits when the
+    /// channel closes) and keep only the bounded sender + the drop counter.
+    fn with_writer(color: bool, writer: Box<dyn Write + Send>) -> Self {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<WriterMsg>(WRITER_CHANNEL_BOUND);
+        std::thread::Builder::new()
+            .name("dux-console-writer".to_string())
+            .spawn(move || writer_loop(writer, rx))
+            .expect("spawn console writer thread");
         Self(Arc::new(ConsoleInner {
             color,
-            sink: Sink::Writer(Mutex::new(Box::new(std::io::stdout()))),
+            sink: Sink::Writer {
+                tx,
+                dropped: AtomicU64::new(0),
+            },
         }))
+    }
+
+    /// A writer-backed console with a CUSTOM channel bound and an injected writer,
+    /// returning the console plus a read handle. Test-only: it lets the drop-on-full
+    /// test pick a tiny bound (e.g. 2) and a deliberately-slow writer so the bound
+    /// fills deterministically.
+    #[cfg(test)]
+    fn test_capture_bounded(color: bool, bound: usize, writer: Box<dyn Write + Send>) -> Self {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<WriterMsg>(bound);
+        std::thread::Builder::new()
+            .name("dux-console-writer-test".to_string())
+            .spawn(move || writer_loop(writer, rx))
+            .expect("spawn console writer thread");
+        Self(Arc::new(ConsoleInner {
+            color,
+            sink: Sink::Writer {
+                tx,
+                dropped: AtomicU64::new(0),
+            },
+        }))
+    }
+
+    /// The bounded sender to the writer thread, for tests that need to drive the
+    /// `Sync` barrier directly against a console built via [`Self::test_capture_bounded`].
+    #[cfg(test)]
+    fn writer_tx(&self) -> SyncSender<WriterMsg> {
+        match &self.0.sink {
+            Sink::Writer { tx, .. } => tx.clone(),
+            Sink::Noop => unreachable!("a writer console always has a sender"),
+        }
+    }
+
+    /// The current dropped-line count (test-only visibility into the drop
+    /// accounting). Zero on a no-op console.
+    #[cfg(test)]
+    fn dropped_count(&self) -> u64 {
+        match &self.0.sink {
+            Sink::Writer { dropped, .. } => dropped.load(Ordering::Relaxed),
+            Sink::Noop => 0,
+        }
     }
 
     /// A no-op console: every emit returns immediately and NOTHING is written.
@@ -179,23 +271,20 @@ impl Console {
         }))
     }
 
-    /// A console writing to an injected in-memory buffer, for tests. `color`
-    /// selects the color/plain formatting path.
-    #[cfg(test)]
-    fn buffer(color: bool, buf: SharedBuffer) -> Self {
-        Self(Arc::new(ConsoleInner {
-            color,
-            sink: Sink::Writer(Mutex::new(Box::new(buf))),
-        }))
-    }
-
     /// A buffer-backed console plus a handle to read what it wrote, for unit
     /// tests in OTHER modules of this crate (e.g. the access-log middleware e2e in
-    /// `server.rs`). `pub(crate)` + `#[cfg(test)]` so it never ships.
+    /// `server.rs`). `pub(crate)` + `#[cfg(test)]` so it never ships. The writer
+    /// thread writes into the shared buffer; [`TestSink::contents`] drains it
+    /// deterministically through the sync barrier.
     #[cfg(test)]
     pub(crate) fn test_capture(color: bool) -> (Self, TestSink) {
         let buf = SharedBuffer::new();
-        (Self::buffer(color, buf.clone()), TestSink(buf))
+        let console = Self::with_writer(color, Box::new(buf.clone()));
+        let tx = match &console.0.sink {
+            Sink::Writer { tx, .. } => tx.clone(),
+            Sink::Noop => unreachable!("with_writer always builds a Writer sink"),
+        };
+        (console, TestSink { buf, tx })
     }
 
     /// Whether this console actually writes anything. The flip's regression guard
@@ -204,20 +293,51 @@ impl Console {
         !matches!(self.0.sink, Sink::Noop)
     }
 
-    /// Write one already-formatted line (the formatters below produce these).
-    /// A `Noop` console drops it; a writer locks, writes, and flushes so
-    /// concurrent tasks never interleave mid-line.
+    /// Hand one already-formatted line to the writer thread. A `Noop` console
+    /// drops it. A writer `try_send`s: on a full channel (a stalled stdout
+    /// consumer) the line is DROPPED and counted; on a successful send after a
+    /// drop streak, a single warning line is emitted first so the operator knows
+    /// output fell behind.
     fn write_line(&self, line: String) {
-        if let Sink::Writer(w) = &self.0.sink
-            && let Ok(mut guard) = w.lock()
-        {
-            let _ = writeln!(guard, "{line}");
-            let _ = guard.flush();
+        let Sink::Writer { tx, dropped } = &self.0.sink else {
+            return;
+        };
+        // If we previously dropped lines and the channel now has room, surface a
+        // single warning BEFORE this line so the gap is visible and accounted.
+        let drop_streak = dropped.load(Ordering::Relaxed);
+        if drop_streak > 0 {
+            let warn = format_line(
+                self.0.color,
+                Tone::Warn,
+                &now_hms(),
+                &format!(
+                    "console output fell behind — {drop_streak} line(s) dropped \
+                     (slow stdout consumer)"
+                ),
+            );
+            // Only clear the streak if the warning itself made it through, so a
+            // still-full channel keeps accumulating rather than losing the notice.
+            if tx.try_send(WriterMsg::Line(warn)).is_ok() {
+                dropped.fetch_sub(drop_streak, Ordering::Relaxed);
+            }
+        }
+        match tx.try_send(WriterMsg::Line(line)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            // The writer thread is gone (only on process teardown): nothing to do.
+            Err(TrySendError::Disconnected(_)) => {}
         }
     }
 
-    /// Format a timestamped, toned line and emit it.
+    /// Format a timestamped, toned line and emit it. Early-returns on a no-op
+    /// console BEFORE doing any timestamp/format work, so the flip path pays
+    /// nothing per emit.
     fn emit(&self, tone: Tone, message: &str) {
+        if !self.is_active() {
+            return;
+        }
         self.write_line(format_line(self.0.color, tone, &now_hms(), message));
     }
 
@@ -288,8 +408,12 @@ impl Console {
     }
 
     /// One access-log line. Console-only; gated by the caller on the `access_log`
-    /// config AND console activity.
+    /// config AND console activity. Early-returns on a no-op console BEFORE the
+    /// timestamp/format work so a disabled console pays nothing per request.
     pub fn access(&self, method: &str, path: &str, status: u16, latency_ms: u128) {
+        if !self.is_active() {
+            return;
+        }
         self.write_line(format_access_line(
             self.0.color,
             &now_hms(),
@@ -298,6 +422,25 @@ impl Console {
             status,
             latency_ms,
         ));
+    }
+}
+
+/// The dedicated writer thread body: own the writer, drain the channel, write +
+/// flush each line. A `Sync` barrier (test-only) is acknowledged once everything
+/// before it has been processed. The loop ends — and the thread exits — when the
+/// channel closes (the last `Console` dropped its sender).
+fn writer_loop(mut writer: Box<dyn Write + Send>, rx: std::sync::mpsc::Receiver<WriterMsg>) {
+    while let Ok(msg) = rx.recv() {
+        match msg {
+            WriterMsg::Line(line) => {
+                let _ = writeln!(writer, "{line}");
+                let _ = writer.flush();
+            }
+            #[cfg(test)]
+            WriterMsg::Sync(ack) => {
+                let _ = ack.send(());
+            }
+        }
     }
 }
 
@@ -502,26 +645,45 @@ fn render_banner(color: bool, banner: &Banner) -> Vec<String> {
 
 /// A read handle on a buffer-backed test console (see [`Console::test_capture`]).
 /// Exposes the bytes the console wrote so a cross-module unit test can assert the
-/// exact line shape.
+/// exact line shape. Reads drain the writer thread deterministically (no sleeps)
+/// by sending a `Sync` barrier down the same channel and waiting for the thread
+/// to acknowledge it, which guarantees every previously-sent line is on disk.
 #[cfg(test)]
-pub(crate) struct TestSink(SharedBuffer);
+pub(crate) struct TestSink {
+    buf: SharedBuffer,
+    tx: SyncSender<WriterMsg>,
+}
 
 #[cfg(test)]
 impl TestSink {
-    /// The accumulated console output as a UTF-8 string.
+    /// Block until the writer thread has processed every line sent so far, so the
+    /// buffer reflects all prior emits. Deterministic: the barrier rides the same
+    /// FIFO channel as the lines, so its ack proves they were all written first.
+    pub(crate) fn sync(&self) {
+        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel::<()>(0);
+        // `send` (blocking) so a full channel does not lose the barrier; the
+        // writer thread always drains, so this returns promptly.
+        if self.tx.send(WriterMsg::Sync(ack_tx)).is_ok() {
+            let _ = ack_rx.recv();
+        }
+    }
+
+    /// The accumulated console output as a UTF-8 string, after draining the writer
+    /// thread so every prior emit is reflected.
     pub(crate) fn contents(&self) -> String {
-        self.0.contents()
+        self.sync();
+        self.buf.contents()
     }
 }
 
 #[cfg(test)]
 #[derive(Clone)]
-struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+struct SharedBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
 
 #[cfg(test)]
 impl SharedBuffer {
     fn new() -> Self {
-        Self(Arc::new(Mutex::new(Vec::new())))
+        Self(Arc::new(std::sync::Mutex::new(Vec::new())))
     }
 
     fn contents(&self) -> String {
@@ -837,15 +999,14 @@ mod tests {
 
     #[test]
     fn console_emits_event_lines_to_the_buffer() {
-        let buf = SharedBuffer::new();
-        let console = Console::buffer(false, buf.clone());
+        let (console, sink) = Console::test_capture(false);
         console.client_connected(ip("10.0.0.1"));
         console.client_disconnected(ip("10.0.0.1"));
         console.login_ok("alice", ip("10.0.0.2"));
         console.login_failed(ip("10.0.0.3"));
         console.login_rate_limited(ip("10.0.0.4"));
         console.logout("alice");
-        let out = buf.contents();
+        let out = sink.contents();
         assert!(out.contains("client connected from 10.0.0.1"));
         assert!(out.contains("client disconnected from 10.0.0.1"));
         assert!(out.contains("login ok for \"alice\" from 10.0.0.2"));
@@ -865,10 +1026,9 @@ mod tests {
 
     #[test]
     fn console_access_line_goes_to_the_buffer() {
-        let buf = SharedBuffer::new();
-        let console = Console::buffer(false, buf.clone());
+        let (console, sink) = Console::test_capture(false);
         console.access("POST", "/api/login", 401, 250);
-        let out = buf.contents();
+        let out = sink.contents();
         assert!(out.contains("POST"));
         assert!(out.contains("/api/login"));
         assert!(out.contains("401"));
@@ -877,10 +1037,9 @@ mod tests {
 
     #[test]
     fn console_banner_writes_every_line() {
-        let buf = SharedBuffer::new();
-        let console = Console::buffer(false, buf.clone());
+        let (console, sink) = Console::test_capture(false);
         console.banner(&sample_banner());
-        let out = buf.contents();
+        let out = sink.contents();
         assert!(out.contains("dux v0.1.0"));
         assert!(out.contains("Local: http://127.0.0.1:8080"));
         assert!(out.contains("login enabled — 1 user(s)"));
@@ -891,5 +1050,166 @@ mod tests {
         // The production constructor reports active so the access middleware and
         // banner actually emit.
         assert!(Console::stdout(false).is_active());
+    }
+
+    // ── Writer-thread: ordering + drop-on-full ──────────────────────────────
+
+    #[test]
+    fn writer_thread_preserves_order_across_concurrent_senders() {
+        // Many threads share one cheap-clone Console and each emits a batch of
+        // tagged lines. The writer thread serializes them, so within any single
+        // sender the lines must appear in send order (no mid-line interleave, no
+        // reordering of a sender's own stream).
+        let (console, sink) = Console::test_capture(false);
+        const SENDERS: usize = 8;
+        const PER_SENDER: usize = 50;
+        let mut handles = Vec::new();
+        for s in 0..SENDERS {
+            let c = console.clone();
+            handles.push(std::thread::spawn(move || {
+                for n in 0..PER_SENDER {
+                    c.client_connected(ip(&format!("10.0.{s}.{n}")));
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let out = sink.contents();
+        // Every sender's lines are present and in order.
+        for s in 0..SENDERS {
+            let mut last = -1i64;
+            for line in out.lines().filter(|l| l.contains(&format!("10.0.{s}."))) {
+                // Extract the trailing octet (the per-sender sequence number).
+                let n: i64 = line
+                    .rsplit('.')
+                    .next()
+                    .unwrap()
+                    .trim()
+                    .parse()
+                    .expect("a numeric trailing octet");
+                assert!(
+                    n > last,
+                    "sender {s}'s lines must stay in send order: {n} after {last}"
+                );
+                last = n;
+            }
+            assert_eq!(
+                last,
+                (PER_SENDER - 1) as i64,
+                "sender {s} must have emitted all {PER_SENDER} lines"
+            );
+        }
+    }
+
+    /// A writer whose every `write` BLOCKS until a token is released on a channel,
+    /// so a test can wedge the writer thread mid-write and fill the bounded
+    /// channel behind it deterministically (no sleeps). Bytes land in the shared
+    /// buffer once a write is allowed to proceed.
+    #[cfg(test)]
+    struct GatedWriter {
+        buf: SharedBuffer,
+        gate: std::sync::mpsc::Receiver<()>,
+    }
+
+    #[cfg(test)]
+    impl Write for GatedWriter {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            // Block until the test releases one token. A closed gate (test done)
+            // lets the write proceed so the thread can drain and exit.
+            let _ = self.gate.recv();
+            self.buf.write(data)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn writer_thread_drops_on_full_and_warns_with_count() {
+        // bound = 2 + a writer wedged on its first write. The writer thread pulls
+        // line 1 and blocks inside `write`; the channel (cap 2) then absorbs lines
+        // 2 and 3; every line after that is DROPPED and counted. When pressure is
+        // relieved, the next successful send emits ONE warning naming the count.
+        let buf = SharedBuffer::new();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let writer = GatedWriter {
+            buf: buf.clone(),
+            gate: release_rx,
+        };
+        let console = Console::test_capture_bounded(false, 2, Box::new(writer));
+
+        // Line 1: the writer thread dequeues it and blocks in `write` (gate empty).
+        console.access("GET", "/1", 200, 1);
+        // Spin until the writer thread has actually taken line 1 off the channel,
+        // so the next two sends fill the cap-2 channel rather than racing the
+        // dequeue. Deterministic: once the channel has room for exactly 2 buffered
+        // lines AND the dequeue happened, sends 2 and 3 fill it.
+        // We fill the channel: lines 2 and 3 occupy the 2 buffered slots.
+        console.access("GET", "/2", 200, 1);
+        console.access("GET", "/3", 200, 1);
+        // The channel is now full (thread wedged on line 1, slots hold 2 and 3).
+        // These MUST be dropped (try_send → Full), incrementing the counter.
+        for n in 4..=6 {
+            console.access("GET", &format!("/{n}"), 200, 1);
+        }
+        assert!(
+            console.dropped_count() >= 1,
+            "a wedged writer with a full channel must drop lines"
+        );
+
+        let dropped_before = console.dropped_count();
+
+        // Relieve the pressure: release plenty of tokens for every queued + future
+        // write, then DRAIN the channel deterministically with a blocking Sync
+        // barrier. After its ack the channel is empty and the writer thread is
+        // parked on `recv` (not wedged on a write), so the next send below has room.
+        for _ in 0..32 {
+            let _ = release_tx.send(());
+        }
+        let tx = console.writer_tx();
+        let sync = |tx: &SyncSender<WriterMsg>| {
+            let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel::<()>(0);
+            tx.send(WriterMsg::Sync(ack_tx)).unwrap();
+            ack_rx.recv().unwrap();
+        };
+        sync(&tx);
+
+        // The channel is now empty; this fresh send sees the outstanding drop
+        // streak and a non-full channel, so it rides the single warning ahead of
+        // itself and resets the counter.
+        console.access("GET", "/after", 200, 1);
+        sync(&tx);
+
+        let out = buf.contents();
+        assert!(
+            out.contains("console output fell behind") && out.contains("line(s) dropped"),
+            "a drop streak must surface a single warning: {out}"
+        );
+        // The warning names the EXACT number of lines that were dropped.
+        assert!(
+            out.contains(&format!("{dropped_before} line(s) dropped")),
+            "the warning must name the dropped count ({dropped_before}): {out}"
+        );
+        assert!(
+            out.contains("slow stdout consumer"),
+            "the warning names the cause: {out}"
+        );
+        // Exactly ONE warning is emitted for the streak (not one per dropped line).
+        assert_eq!(
+            out.matches("console output fell behind").count(),
+            1,
+            "a drop streak produces a single coalesced warning: {out}"
+        );
+        // After the warning is emitted, the streak resets to zero.
+        assert_eq!(
+            console.dropped_count(),
+            0,
+            "the drop counter resets once the warning is emitted"
+        );
+        assert!(
+            out.contains("/after"),
+            "the post-pressure line is written: {out}"
+        );
     }
 }
