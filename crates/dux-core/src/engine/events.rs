@@ -1394,6 +1394,26 @@ impl Engine {
                     "Could not save global environment variables to config.toml: {err}"
                 ))),
             },
+            WorkerEvent::MacrosPersistenceCompleted { macros, result } => match result {
+                Ok(()) => {
+                    // The engine already adopted these on dispatch; re-affirm in
+                    // case the saver normalized anything, then report.
+                    self.config.macros = macros;
+                    let count = self.config.macros.entries.len();
+                    if count == 0 {
+                        EventReaction::Status(StatusUpdate::info(
+                            "All macros removed. The macro list is now empty.",
+                        ))
+                    } else {
+                        EventReaction::Status(StatusUpdate::info(format!(
+                            "Saved {count} macro(s) to config.toml."
+                        )))
+                    }
+                }
+                Err(err) => EventReaction::Status(StatusUpdate::error(format!(
+                    "Could not save macros to config.toml: {err}"
+                ))),
+            },
             WorkerEvent::AuthUsersPersisted {
                 users,
                 message,
@@ -2648,6 +2668,22 @@ mod tests {
             _worker_tx: std::sync::mpsc::Sender<crate::worker::WorkerEvent>,
         ) {
             self.0.lock().unwrap().push("reload_config".into());
+        }
+
+        fn persist_macros(
+            &self,
+            config: crate::config::Config,
+            _config_path: PathBuf,
+            worker_tx: std::sync::mpsc::Sender<crate::worker::WorkerEvent>,
+        ) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("persist_macros:{}", config.macros.entries.len()));
+            let _ = worker_tx.send(crate::worker::WorkerEvent::MacrosPersistenceCompleted {
+                macros: config.macros,
+                result: Ok(()),
+            });
         }
 
         fn recover_config(

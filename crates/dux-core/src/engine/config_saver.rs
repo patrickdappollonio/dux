@@ -35,6 +35,13 @@ pub trait ConfigSaver: Send + Sync {
         worker_tx: Sender<WorkerEvent>,
     );
 
+    /// Persist the `[macros]` block to the user config file. The engine has
+    /// already adopted the new macros into `config`; the implementation writes
+    /// `config` to `config_path` (preserving comments via the in-place patch)
+    /// and posts `WorkerEvent::MacrosPersistenceCompleted`. Mirrors
+    /// [`ConfigSaver::persist_global_env`].
+    fn persist_macros(&self, config: Config, config_path: PathBuf, worker_tx: Sender<WorkerEvent>);
+
     /// Reload the user config from disk, validate it, and re-sync project
     /// records against the session store. Post `WorkerEvent::ConfigReloadReady`
     /// when done.
@@ -63,6 +70,18 @@ impl ConfigSaver for NoopConfigSaver {
     ) {
         let _ = worker_tx.send(WorkerEvent::GlobalEnvPersistenceCompleted {
             env,
+            result: Ok(()),
+        });
+    }
+
+    fn persist_macros(
+        &self,
+        config: Config,
+        _config_path: PathBuf,
+        worker_tx: Sender<WorkerEvent>,
+    ) {
+        let _ = worker_tx.send(WorkerEvent::MacrosPersistenceCompleted {
+            macros: config.macros,
             result: Ok(()),
         });
     }

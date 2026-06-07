@@ -34,6 +34,16 @@ impl ConfigSaver for TuiConfigSaver {
         });
     }
 
+    fn persist_macros(&self, config: Config, config_path: PathBuf, worker_tx: Sender<WorkerEvent>) {
+        thread::spawn(move || {
+            let bindings = RuntimeBindings::from_keys_config(&config.keys);
+            let result = crate::config::save_config(&config_path, &config, &bindings)
+                .map_err(|err| format!("{err:#}"));
+            let macros = config.macros;
+            let _ = worker_tx.send(WorkerEvent::MacrosPersistenceCompleted { macros, result });
+        });
+    }
+
     fn reload_config(&self, paths: DuxPaths, worker_tx: Sender<WorkerEvent>) {
         thread::spawn(move || {
             let result = crate::config::ensure_config(&paths)

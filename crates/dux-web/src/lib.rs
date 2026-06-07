@@ -1538,6 +1538,18 @@ mod config_saver_tests {
             });
         }
 
+        fn persist_macros(
+            &self,
+            config: Config,
+            _config_path: PathBuf,
+            worker_tx: Sender<WorkerEvent>,
+        ) {
+            let _ = worker_tx.send(WorkerEvent::MacrosPersistenceCompleted {
+                macros: config.macros,
+                result: Ok(()),
+            });
+        }
+
         fn reload_config(&self, _paths: DuxPaths, worker_tx: Sender<WorkerEvent>) {
             let _ = worker_tx.send(WorkerEvent::ConfigReloadReady(Box::new(Ok(
                 Config::default(),

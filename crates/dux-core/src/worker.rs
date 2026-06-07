@@ -297,6 +297,16 @@ pub enum WorkerEvent {
         env: BTreeMap<String, String>,
         result: Result<(), String>,
     },
+    /// A `UpdateMacros` wholesale-replace was written to config.toml on a
+    /// background thread, following the `GlobalEnvPersistenceCompleted` shape.
+    /// `macros` is the persisted set (already adopted into the engine config on
+    /// dispatch); the engine surfaces a verbose success/failure status when this
+    /// arrives. On failure the in-memory config keeps the new macros (they are
+    /// still active for the running session) but the on-disk file may be stale.
+    MacrosPersistenceCompleted {
+        macros: crate::config::MacrosConfig,
+        result: Result<(), String>,
+    },
     /// A web UI `[auth]` user add/update/remove was hashed (for adds) and
     /// persisted to config.toml on a background thread. On success the worker
     /// carries the updated user list so the engine can refresh its in-memory

@@ -43,6 +43,21 @@ impl ConfigSaver for WebConfigSaver {
         });
     }
 
+    fn persist_macros(
+        &self,
+        config: Config,
+        config_path: PathBuf,
+        worker_tx: mpsc::Sender<WorkerEvent>,
+    ) {
+        std::thread::spawn(move || {
+            // `config` already carries the new macros (the engine set it before calling).
+            let result = dux_core::config_write::save_config(&config_path, &config)
+                .map_err(|err| format!("{err:#}"));
+            let macros = config.macros;
+            let _ = worker_tx.send(WorkerEvent::MacrosPersistenceCompleted { macros, result });
+        });
+    }
+
     fn reload_config(&self, paths: DuxPaths, worker_tx: mpsc::Sender<WorkerEvent>) {
         std::thread::spawn(move || {
             // Re-read config from disk (read-only load — same as bootstrap). Returns the

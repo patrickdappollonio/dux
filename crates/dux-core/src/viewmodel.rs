@@ -47,6 +47,27 @@ pub struct ViewModel {
     /// handler. Static for a given build — the watch channel coalesces identical
     /// frames, so this does not cause churn.
     pub palette_commands: Vec<PaletteCommandView>,
+    /// Text macros from `[macros]` in `config.toml`, in config (IndexMap) order.
+    /// The web surfaces these two ways: the terminal-pane quick-picker filters
+    /// by the focused target's surface and runs one via `RunMacro`, and the
+    /// macro-editor dialog lists/edits them (which is why `text` is exposed —
+    /// the web session is authenticated). A config reload that changes `[macros]`
+    /// rebuilds this, so the coalesced ViewModel watch pushes the new list.
+    pub macros: Vec<MacroView>,
+}
+
+/// A single text macro projected for web clients, from
+/// `dux_core::config::MacroEntry`. Order in [`ViewModel::macros`] matches the
+/// config `IndexMap`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MacroView {
+    /// The macro's name (its `[macros]` key).
+    pub name: String,
+    /// The macro's expansion text (may be multi-line).
+    pub text: String,
+    /// "agent" | "terminal" | "both" — matches the config serde casing for
+    /// `MacroSurface`.
+    pub surface: String,
 }
 
 /// A single global palette command surfaced to the web, projected from
@@ -245,6 +266,16 @@ impl ChangedFileView {
     }
 }
 
+impl MacroView {
+    fn from_entry(name: &str, entry: &crate::config::MacroEntry) -> Self {
+        Self {
+            name: name.to_string(),
+            text: entry.text.clone(),
+            surface: entry.surface.as_config_str().to_string(),
+        }
+    }
+}
+
 impl Engine {
     /// Project current engine state into a serializable snapshot for web clients.
     pub fn view_model(&self) -> ViewModel {
@@ -314,6 +345,13 @@ impl Engine {
                     id: c.name,
                     description: c.description,
                 })
+                .collect(),
+            macros: self
+                .config
+                .macros
+                .entries
+                .iter()
+                .map(|(name, entry)| MacroView::from_entry(name, entry))
                 .collect(),
         }
     }
@@ -386,6 +424,69 @@ mod tests {
         assert!(actual.contains(&"toggle-diff-line-numbers"));
         assert!(!actual.contains(&"start-web-server"));
         assert!(!actual.contains(&"change-theme"));
+    }
+
+    #[test]
+    fn macros_are_projected_in_config_order_with_serde_surface_casing() {
+        use crate::config::{MacroEntry, MacroSurface};
+        let (mut engine, _tmp) = test_engine();
+        // Insert in a non-alphabetical order to prove IndexMap order is preserved.
+        engine.config.macros.entries.insert(
+            "zebra".to_string(),
+            MacroEntry {
+                text: "z text".to_string(),
+                surface: MacroSurface::Agent,
+            },
+        );
+        engine.config.macros.entries.insert(
+            "alpha".to_string(),
+            MacroEntry {
+                text: "a text".to_string(),
+                surface: MacroSurface::Terminal,
+            },
+        );
+        engine.config.macros.entries.insert(
+            "beta".to_string(),
+            MacroEntry {
+                text: "b text".to_string(),
+                surface: MacroSurface::Both,
+            },
+        );
+
+        let vm = engine.view_model();
+        let names: Vec<&str> = vm.macros.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["zebra", "alpha", "beta"]);
+        assert_eq!(vm.macros[0].text, "z text");
+        // Surface serializes with the lowercase config serde casing.
+        assert_eq!(vm.macros[0].surface, "agent");
+        assert_eq!(vm.macros[1].surface, "terminal");
+        assert_eq!(vm.macros[2].surface, "both");
+    }
+
+    #[test]
+    fn macros_reflect_a_config_reload() {
+        use crate::config::{MacroEntry, MacroSurface};
+        let (mut engine, _tmp) = test_engine();
+        assert!(engine.view_model().macros.is_empty());
+
+        // Simulate a config reload that introduces a new macro.
+        let mut new_config = engine.config.clone();
+        new_config.macros.entries.insert(
+            "fresh".to_string(),
+            MacroEntry {
+                text: "reloaded".to_string(),
+                surface: MacroSurface::Both,
+            },
+        );
+        engine
+            .apply_reloaded_config(new_config)
+            .expect("apply reloaded config");
+
+        let vm = engine.view_model();
+        assert_eq!(vm.macros.len(), 1);
+        assert_eq!(vm.macros[0].name, "fresh");
+        assert_eq!(vm.macros[0].text, "reloaded");
+        assert_eq!(vm.macros[0].surface, "both");
     }
 
     #[test]

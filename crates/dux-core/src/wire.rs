@@ -261,6 +261,47 @@ pub enum WireCommand {
         pr: String,
         name: String,
     },
+    /// Run a configured text macro against a live PTY target, mirroring the TUI's
+    /// macro bar (Ctrl-\). `target_id` names EITHER an agent session (an entry in
+    /// `providers`, surface `Agent`) OR a companion terminal (an entry in
+    /// `companion_terminals`, surface `Terminal`); the engine resolves which and
+    /// unifies the write through the same `providers`-then-`companion_terminals`
+    /// lookup the actor's `pty_for` uses. `name` is the macro's `[macros]` key.
+    ///
+    /// The engine resolves the entry by name (unknown → error), checks the
+    /// macro's surface against the resolved target's surface (mismatch → error;
+    /// the TUI bar simply doesn't list mismatches, but an explicit wire error is
+    /// the right shape for a programmatic client), translates the text with the
+    /// shared `dux_core::macros::macro_payload_bytes` (newlines → Alt+Enter), and
+    /// writes it to the target's PTY. Parity with the TUI is by construction: the
+    /// same transform, the same surface gate.
+    RunMacro {
+        target_id: String,
+        name: String,
+    },
+    /// Wholesale-replace the `[macros]` config, mirroring the TUI macro editor's
+    /// save semantics (the dialog rewrites the whole map). `entries` is an ORDERED
+    /// list of `(name, {text, surface})` — order is preserved into the config
+    /// IndexMap and thus into the ViewModel's `macros`. Persisted through the
+    /// canonical config writer following the global-env precedent
+    /// (`PersistGlobalEnv` → `ConfigSaver` → background write → completion event),
+    /// so user comments survive the in-place patch. Validation (server-side, the
+    /// client is never trusted): empty names rejected, duplicate names rejected,
+    /// empty text rejected (the TUI editor refuses to save an empty-text macro),
+    /// unknown surface strings rejected.
+    UpdateMacros {
+        entries: Vec<WireMacroEntry>,
+    },
+}
+
+/// A single macro in a [`WireCommand::UpdateMacros`] payload. `surface` is the
+/// canonical lowercase string ("agent" | "terminal" | "both"), matching the
+/// `MacroSurface` serde casing and the ViewModel's `MacroView::surface`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct WireMacroEntry {
+    pub name: String,
+    pub text: String,
+    pub surface: String,
 }
 
 /// A status-line update in wire-safe form.
@@ -1556,6 +1597,41 @@ impl Engine {
             },
             WireCommand::ReorderProjects { project_ids } => {
                 Command::ReorderProjects { project_ids }
+            }
+            WireCommand::RunMacro { target_id, name } => Command::RunMacro { target_id, name },
+            WireCommand::UpdateMacros { entries } => {
+                // Validate + convert into the config map server-side; the client
+                // is never trusted. Mirrors the TUI editor's rules: a name must be
+                // non-empty, names must be unique, text must be non-empty, and the
+                // surface string must be one of the known variants.
+                let mut macros = crate::config::MacrosConfig::default();
+                for entry in entries {
+                    let name = entry.name.trim().to_string();
+                    if name.is_empty() {
+                        anyhow::bail!("Macro name cannot be empty.");
+                    }
+                    if macros.entries.contains_key(&name) {
+                        anyhow::bail!("Name \"{name}\" is already in use. Choose another.");
+                    }
+                    if entry.text.is_empty() {
+                        anyhow::bail!("Macro \"{name}\" has no text. Enter the text to send.");
+                    }
+                    let surface = crate::config::MacroSurface::from_config_str(&entry.surface)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Macro \"{name}\" has an unknown surface \"{}\". Use \"agent\", \"terminal\", or \"both\".",
+                                entry.surface
+                            )
+                        })?;
+                    macros.entries.insert(
+                        name,
+                        crate::config::MacroEntry {
+                            text: entry.text,
+                            surface,
+                        },
+                    );
+                }
+                Command::UpdateMacros { macros }
             }
         })
     }
@@ -4228,5 +4304,210 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         let statuses = engine.drive_pr_lookup_followup(&EventReaction::Nothing);
         assert!(statuses.is_empty());
+    }
+
+    // ── RunMacro / UpdateMacros wire mapping ────────────────────────────────
+
+    #[test]
+    fn wire_run_macro_deserializes() {
+        let json = r#"{"command":"run_macro","args":{"target_id":"sess-1","name":"greet"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::RunMacro {
+                target_id: "sess-1".to_string(),
+                name: "greet".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn wire_update_macros_deserializes() {
+        let json = r#"{"command":"update_macros","args":{"entries":[{"name":"greet","text":"hi","surface":"both"}]}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::UpdateMacros {
+                entries: vec![WireMacroEntry {
+                    name: "greet".to_string(),
+                    text: "hi".to_string(),
+                    surface: "both".to_string(),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn wire_to_command_run_macro_passes_through() {
+        let (engine, _tmp) = test_engine();
+        let cmd = engine
+            .wire_to_command(WireCommand::RunMacro {
+                target_id: "sess-1".to_string(),
+                name: "greet".to_string(),
+            })
+            .expect("reconstruct");
+        match cmd {
+            Command::RunMacro { target_id, name } => {
+                assert_eq!(target_id, "sess-1");
+                assert_eq!(name, "greet");
+            }
+            _ => panic!("expected Command::RunMacro"),
+        }
+    }
+
+    #[test]
+    fn wire_to_command_update_macros_builds_ordered_map() {
+        let (engine, _tmp) = test_engine();
+        let cmd = engine
+            .wire_to_command(WireCommand::UpdateMacros {
+                entries: vec![
+                    WireMacroEntry {
+                        name: "zebra".to_string(),
+                        text: "z".to_string(),
+                        surface: "agent".to_string(),
+                    },
+                    WireMacroEntry {
+                        name: "alpha".to_string(),
+                        text: "a".to_string(),
+                        surface: "terminal".to_string(),
+                    },
+                ],
+            })
+            .expect("reconstruct");
+        match cmd {
+            Command::UpdateMacros { macros } => {
+                let names: Vec<&String> = macros.entries.keys().collect();
+                assert_eq!(names, vec!["zebra", "alpha"]);
+                assert_eq!(
+                    macros.entries["alpha"].surface,
+                    crate::config::MacroSurface::Terminal
+                );
+            }
+            _ => panic!("expected Command::UpdateMacros"),
+        }
+    }
+
+    /// `Command` does not derive `Debug`, so the validation tests inspect the
+    /// `Err` arm directly rather than using `expect_err`/`unwrap_err` (which
+    /// require the `Ok` type to be `Debug`).
+    fn update_macros_err(engine: &Engine, entries: Vec<WireMacroEntry>) -> String {
+        match engine.wire_to_command(WireCommand::UpdateMacros { entries }) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected an error"),
+        }
+    }
+
+    #[test]
+    fn wire_to_command_update_macros_rejects_empty_name() {
+        let (engine, _tmp) = test_engine();
+        let err = update_macros_err(
+            &engine,
+            vec![WireMacroEntry {
+                name: "  ".to_string(),
+                text: "x".to_string(),
+                surface: "both".to_string(),
+            }],
+        );
+        assert!(err.contains("Macro name cannot be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn wire_to_command_update_macros_rejects_duplicate_name() {
+        let (engine, _tmp) = test_engine();
+        let err = update_macros_err(
+            &engine,
+            vec![
+                WireMacroEntry {
+                    name: "dup".to_string(),
+                    text: "a".to_string(),
+                    surface: "both".to_string(),
+                },
+                WireMacroEntry {
+                    name: "dup".to_string(),
+                    text: "b".to_string(),
+                    surface: "both".to_string(),
+                },
+            ],
+        );
+        assert!(err.contains("already in use"), "got: {err}");
+    }
+
+    #[test]
+    fn wire_to_command_update_macros_rejects_empty_text() {
+        let (engine, _tmp) = test_engine();
+        let err = update_macros_err(
+            &engine,
+            vec![WireMacroEntry {
+                name: "blank".to_string(),
+                text: String::new(),
+                surface: "both".to_string(),
+            }],
+        );
+        assert!(err.contains("has no text"), "got: {err}");
+    }
+
+    #[test]
+    fn wire_to_command_update_macros_rejects_unknown_surface() {
+        let (engine, _tmp) = test_engine();
+        let err = update_macros_err(
+            &engine,
+            vec![WireMacroEntry {
+                name: "weird".to_string(),
+                text: "x".to_string(),
+                surface: "sideways".to_string(),
+            }],
+        );
+        assert!(err.contains("unknown surface"), "got: {err}");
+    }
+
+    #[test]
+    fn apply_wire_update_macros_adopts_and_round_trips_through_real_config_writer() {
+        // Two things proven here: (1) apply_wire(UpdateMacros) validates, adopts
+        // the new macros into the engine config immediately, and dispatches the
+        // saver (fire-and-forget, no synchronous status); (2) the SAME adopted
+        // config, when written by the shared canonical writer the WebConfigSaver
+        // uses, persists [macros] in place while preserving user comments.
+        let (mut engine, _tmp) = test_engine();
+        // Seed an existing config file with a user comment so the in-place patch
+        // path runs and comment preservation is meaningful.
+        std::fs::write(&engine.paths.config_path, "# user comment\n").expect("seed config");
+
+        let outcome = engine
+            .apply_wire(WireCommand::UpdateMacros {
+                entries: vec![WireMacroEntry {
+                    name: "greet".to_string(),
+                    text: "hello\nworld".to_string(),
+                    surface: "agent".to_string(),
+                }],
+            })
+            .expect("apply_wire");
+        // UpdateMacros is fire-and-forget, so there is no synchronous status.
+        assert!(outcome.status.is_none());
+
+        // The engine adopted the new macros immediately.
+        assert!(engine.config.macros.entries.contains_key("greet"));
+
+        // The test engine's NoopConfigSaver posts a completion event without
+        // touching disk; drain it so the channel stays clean.
+        let _ = engine.worker_rx.recv().expect("completion event");
+
+        // Round-trip the adopted config through the real canonical writer (the
+        // exact path WebConfigSaver::persist_macros runs on its worker thread).
+        crate::config_write::save_config(&engine.paths.config_path, &engine.config)
+            .expect("save_config");
+        let written = std::fs::read_to_string(&engine.paths.config_path).expect("read back");
+        assert!(written.contains("[macros]"), "macros table: {written}");
+        assert!(written.contains("greet"), "macro name: {written}");
+        assert!(written.contains("surface"), "surface key: {written}");
+        assert!(
+            written.contains("# user comment"),
+            "user comment should survive the in-place patch: {written}"
+        );
+
+        // The persisted file parses back into a config whose macro matches.
+        let reloaded: crate::config::Config = toml::from_str(&written).expect("reparse");
+        let entry = reloaded.macros.entries.get("greet").expect("greet entry");
+        assert_eq!(entry.text, "hello\nworld");
+        assert_eq!(entry.surface, crate::config::MacroSurface::Agent);
     }
 }

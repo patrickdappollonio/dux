@@ -201,6 +201,25 @@ pub enum Command {
     /// the order to storage and reorders `self.projects` to match. Returns
     /// `EventReaction::Nothing`.
     ReorderProjects { project_ids: Vec<String> },
+
+    /// Run a configured text macro against a live PTY target. `target_id` names
+    /// either an agent session (surface `Agent`) or a companion terminal
+    /// (surface `Terminal`); the engine resolves which via the same
+    /// providers-then-terminals lookup the web actor's `pty_for` uses. Resolves
+    /// the macro by name (unknown → error Status), surface-checks it against the
+    /// target (mismatch → error Status), transforms the text via
+    /// `dux_core::macros::macro_payload_bytes`, and writes it to the target's
+    /// PTY. Returns `EventReaction::Status(Info("Sent macro \"<name>\"."))` on
+    /// success — the TUI's exact wording.
+    RunMacro { target_id: String, name: String },
+
+    /// Wholesale-replace the `[macros]` config and persist it. Adopts `macros`
+    /// into the running `config.macros` immediately (so the ViewModel's `macros`
+    /// refreshes without a manual reload) and delegates the on-disk write to
+    /// `Engine::config_saver` following the `PersistGlobalEnv` precedent.
+    /// Fire-and-forget: completion arrives as
+    /// `WorkerEvent::MacrosPersistenceCompleted`.
+    UpdateMacros { macros: crate::config::MacrosConfig },
 }
 
 impl Engine {
@@ -613,7 +632,78 @@ impl Engine {
                 self.reorder_projects(&project_ids)?;
                 Ok(EventReaction::Nothing)
             }
+
+            Command::RunMacro { target_id, name } => self.run_macro(&target_id, &name),
+
+            Command::UpdateMacros { macros } => {
+                // Adopt the new macros into the running config immediately so the
+                // ViewModel's `macros` reflects the change without waiting for a
+                // reload, then persist on a background thread (the on-disk write
+                // outcome arrives as `MacrosPersistenceCompleted`). Mirrors the
+                // `PersistGlobalEnv` shape: mutate in-memory config, hand a config
+                // clone carrying the change to the saver.
+                self.config.macros = macros;
+                let config = self.config.clone();
+                self.config_saver.persist_macros(
+                    config,
+                    self.paths.config_path.clone(),
+                    self.worker_tx.clone(),
+                );
+                Ok(EventReaction::Nothing)
+            }
         }
+    }
+
+    /// Run a configured text macro against a live PTY target. Mirrors the TUI's
+    /// macro bar: resolve the macro by name, gate it by the target's surface,
+    /// translate newlines via the shared core transform, and write to the PTY.
+    /// See [`Command::RunMacro`] for the full contract.
+    fn run_macro(&mut self, target_id: &str, name: &str) -> anyhow::Result<EventReaction> {
+        // Resolve the target's surface: an agent provider is `Agent`, a companion
+        // terminal is `Terminal`. Unknown id → error.
+        let surface = if self.providers.contains_key(target_id) {
+            crate::model::SessionSurface::Agent
+        } else if self.companion_terminals.contains_key(target_id) {
+            crate::model::SessionSurface::Terminal
+        } else {
+            return Ok(EventReaction::Status(StatusUpdate::error(format!(
+                "No live agent or terminal for target \"{target_id}\". Reconnect it and try again."
+            ))));
+        };
+
+        // Resolve the macro entry by name. Unknown → error naming it.
+        let Some(entry) = self.config.macros.entries.get(name) else {
+            return Ok(EventReaction::Status(StatusUpdate::error(format!(
+                "Macro \"{name}\" does not exist."
+            ))));
+        };
+
+        // Surface gate: refuse a macro whose surface doesn't match the target.
+        // The TUI bar simply omits mismatches; the wire returns an explicit error.
+        if !crate::macros::macro_matches_surface(entry.surface, surface) {
+            let target_kind = match surface {
+                crate::model::SessionSurface::Agent => "agent",
+                crate::model::SessionSurface::Terminal => "terminal",
+            };
+            return Ok(EventReaction::Status(StatusUpdate::error(format!(
+                "Macro \"{name}\" is not available on {target_kind} targets ({}).",
+                entry.surface.label()
+            ))));
+        }
+
+        let payload = crate::macros::macro_payload_bytes(&entry.text);
+        // Unified PTY lookup: providers first, then companion terminals — the
+        // same order the web actor's `pty_for` uses.
+        let client = self
+            .providers
+            .get(target_id)
+            .or_else(|| self.companion_terminals.get(target_id).map(|t| &t.client));
+        if let Some(client) = client {
+            client.write_bytes(&payload)?;
+        }
+        Ok(EventReaction::Status(StatusUpdate::info(format!(
+            "Sent macro \"{name}\"."
+        ))))
     }
 
     /// Validate and apply a new per-project session order. See
@@ -1056,5 +1146,226 @@ mod tests {
             _ => panic!("expected Info status reaction"),
         }
         assert!(!untracked.exists(), "untracked file should be deleted");
+    }
+
+    // ── Command::RunMacro ───────────────────────────────────────────────────
+
+    use crate::config::{MacroEntry, MacroSurface};
+    use crate::pty::PtyClient;
+
+    /// Spawn a `cat -v` PTY in raw mode (control bytes render as caret notation:
+    /// ESC → `^[`, CR → `^M`), the same fixture the TUI macro-bar PTY test uses,
+    /// so a RunMacro write can be observed in the terminal snapshot.
+    fn spawn_cat_v_pty() -> PtyClient {
+        let client = PtyClient::spawn(
+            "sh",
+            &["-c".to_string(), "stty raw -echo; exec cat -v".to_string()],
+            std::path::Path::new("."),
+            5,
+            80,
+            100,
+        )
+        .expect("spawn pty");
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        client
+    }
+
+    fn rendered_snapshot(client: &PtyClient) -> String {
+        client
+            .snapshot()
+            .cells
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect()
+    }
+
+    fn insert_macro(engine: &mut Engine, name: &str, text: &str, surface: MacroSurface) {
+        engine.config.macros.entries.insert(
+            name.to_string(),
+            MacroEntry {
+                text: text.to_string(),
+                surface,
+            },
+        );
+    }
+
+    #[test]
+    fn run_macro_writes_to_agent_provider_pty() {
+        let (mut engine, _tmp) = test_engine();
+        engine
+            .providers
+            .insert("sess-1".to_string(), spawn_cat_v_pty());
+        insert_macro(&mut engine, "greet", "first\nsecond", MacroSurface::Agent);
+
+        let reaction = engine
+            .apply(Command::RunMacro {
+                target_id: "sess-1".to_string(),
+                name: "greet".to_string(),
+            })
+            .expect("apply");
+        match reaction {
+            EventReaction::Status(update) => {
+                assert_eq!(update.tone, StatusTone::Info);
+                assert_eq!(update.message, "Sent macro \"greet\".");
+            }
+            _ => panic!("expected Info status reaction"),
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let rendered = rendered_snapshot(engine.providers.get("sess-1").unwrap());
+        assert!(
+            rendered.contains("first") && rendered.contains("second"),
+            "both halves should be visible; got: {rendered:?}"
+        );
+        // Newline translated to ESC+CR (Alt+Enter) by the shared core transform.
+        assert!(
+            rendered.contains("^[") && rendered.contains("^M"),
+            "newline should become ESC+CR; got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn run_macro_writes_to_companion_terminal_pty() {
+        use crate::model::CompanionTerminal;
+        let (mut engine, _tmp) = test_engine();
+        engine.companion_terminals.insert(
+            "term-1".to_string(),
+            CompanionTerminal {
+                session_id: "sess-1".to_string(),
+                label: "term".to_string(),
+                foreground_cmd: None,
+                client: spawn_cat_v_pty(),
+            },
+        );
+        insert_macro(&mut engine, "ls", "ls -la", MacroSurface::Terminal);
+
+        let reaction = engine
+            .apply(Command::RunMacro {
+                target_id: "term-1".to_string(),
+                name: "ls".to_string(),
+            })
+            .expect("apply");
+        match reaction {
+            EventReaction::Status(update) => {
+                assert_eq!(update.tone, StatusTone::Info);
+                assert_eq!(update.message, "Sent macro \"ls\".");
+            }
+            _ => panic!("expected Info status reaction"),
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let rendered = rendered_snapshot(&engine.companion_terminals.get("term-1").unwrap().client);
+        assert!(
+            rendered.contains("ls -la"),
+            "macro text should reach the terminal PTY; got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn run_macro_unknown_name_errors() {
+        let (mut engine, _tmp) = test_engine();
+        engine
+            .providers
+            .insert("sess-1".to_string(), spawn_cat_v_pty());
+
+        let reaction = engine
+            .apply(Command::RunMacro {
+                target_id: "sess-1".to_string(),
+                name: "nope".to_string(),
+            })
+            .expect("apply");
+        match reaction {
+            EventReaction::Status(update) => {
+                assert_eq!(update.tone, StatusTone::Error);
+                assert!(
+                    update.message.contains("Macro \"nope\" does not exist"),
+                    "got: {}",
+                    update.message
+                );
+            }
+            _ => panic!("expected Error status reaction"),
+        }
+    }
+
+    #[test]
+    fn run_macro_wrong_surface_errors() {
+        let (mut engine, _tmp) = test_engine();
+        // Agent target, but the macro is terminal-only.
+        engine
+            .providers
+            .insert("sess-1".to_string(), spawn_cat_v_pty());
+        insert_macro(&mut engine, "ls", "ls -la", MacroSurface::Terminal);
+
+        let reaction = engine
+            .apply(Command::RunMacro {
+                target_id: "sess-1".to_string(),
+                name: "ls".to_string(),
+            })
+            .expect("apply");
+        match reaction {
+            EventReaction::Status(update) => {
+                assert_eq!(update.tone, StatusTone::Error);
+                assert!(
+                    update.message.contains("not available on agent targets"),
+                    "got: {}",
+                    update.message
+                );
+            }
+            _ => panic!("expected Error status reaction"),
+        }
+    }
+
+    #[test]
+    fn run_macro_unknown_target_errors() {
+        let (mut engine, _tmp) = test_engine();
+        insert_macro(&mut engine, "greet", "hi", MacroSurface::Both);
+
+        let reaction = engine
+            .apply(Command::RunMacro {
+                target_id: "ghost".to_string(),
+                name: "greet".to_string(),
+            })
+            .expect("apply");
+        match reaction {
+            EventReaction::Status(update) => {
+                assert_eq!(update.tone, StatusTone::Error);
+                assert!(
+                    update.message.contains("No live agent or terminal"),
+                    "got: {}",
+                    update.message
+                );
+            }
+            _ => panic!("expected Error status reaction"),
+        }
+    }
+
+    // ── Command::UpdateMacros ───────────────────────────────────────────────
+
+    #[test]
+    fn update_macros_adopts_into_engine_config_and_dispatches_saver() {
+        let (mut engine, _tmp) = test_engine();
+        let mut macros = crate::config::MacrosConfig::default();
+        macros.entries.insert(
+            "greet".to_string(),
+            MacroEntry {
+                text: "hi".to_string(),
+                surface: MacroSurface::Both,
+            },
+        );
+
+        let reaction = engine
+            .apply(Command::UpdateMacros {
+                macros: macros.clone(),
+            })
+            .expect("apply");
+        assert!(matches!(reaction, EventReaction::Nothing));
+        // The engine adopted the new macros immediately so the ViewModel refreshes.
+        assert!(engine.config.macros.entries.contains_key("greet"));
+        // The NoopConfigSaver posts a completion event; drain it.
+        let event = engine.worker_rx.recv().expect("completion event");
+        assert!(matches!(
+            event,
+            WorkerEvent::MacrosPersistenceCompleted { result: Ok(()), .. }
+        ));
     }
 }
