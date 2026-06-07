@@ -341,31 +341,28 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
       {/* Pane chrome buttons. Grouped in ONE absolutely-positioned overlay (a
           sibling of the xterm host, NOT inside the unpadded containerRef xterm
           opens into) so they never change the terminal's box measurement — see
-          the hostRef comment. The macro button stays visible (it's a primary
-          affordance, like the TUI's macro bar), while the fullscreen toggle
-          keeps its hover/focus reveal. On mobile the macro button must stay
-          tappable, so it is opacity-100 there regardless of hover. */}
+          the hostRef comment. Both buttons carry a visible icon + text label and
+          stay always visible (no hover reveal) so they read at a glance on every
+          surface, touch included. Widening them is layout-safe: the overlay is a
+          positioned sibling of the measured host, so the terminal box is
+          unaffected. */}
       <div className="absolute top-3 right-3 z-10 flex gap-2">
-        {/* The popover trigger renders a secondary icon Button (see
+        {/* The popover trigger renders a secondary labeled Button (see
             MacroPopover); it must remain reachable on touch, so it does not
             hide on blur. */}
         <MacroPopover target={macroTarget} />
         {/* Fullscreen toggle: embedded mode already forwards every key the
             browser will give a page; fullscreen + keyboard lock additionally
-            captures reserved shortcuts (Ctrl+T, Ctrl+W, …) on Chromium. */}
+            captures reserved shortcuts (Ctrl+T, Ctrl+W, …) on Chromium. Labeled
+            and always visible — the visible text is its own affordance, so no
+            tooltip. */}
         <Button
           variant="secondary"
-          size="icon"
           onClick={() => void toggleFullscreen()}
-          title={
-            isFullscreen
-              ? "Exit fullscreen (hold Esc also works)"
-              : "Fullscreen — captures browser-reserved shortcuts like Ctrl+T"
-          }
           aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-          className="opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
         >
           {isFullscreen ? <Minimize2 /> : <Maximize2 />}
+          {isFullscreen ? "Exit fullscreen" : "Fullscreen"}
         </Button>
       </div>
       {!everReady ? (

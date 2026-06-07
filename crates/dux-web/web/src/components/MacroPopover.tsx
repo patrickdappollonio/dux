@@ -48,15 +48,11 @@ export function MacroPopover({ target }: { target: SelectedTarget }) {
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger
         render={
-          <Button
-            variant="secondary"
-            size="icon"
-            title="Run a macro"
-            aria-label="Run a macro"
-          />
+          <Button variant="secondary" aria-label="Run a macro" />
         }
       >
         <SquareSlash />
+        Macros
       </PopoverTrigger>
       <PopoverContent align="end" className="w-72 p-0">
         {allMacros.length === 0 ? (
