@@ -31,7 +31,13 @@ const EXPECTED_WEB_COMMANDS = [
 ]
 
 describe("paletteRegistry", () => {
-  it("handler map keys match the pinned web-command set", async () => {
+  // ZERO-NO-OP INVARIANT (structural): the handler-map keys must equal the
+  // web-surfaced registry set EXACTLY — no handler without a registry row (a
+  // dead handler) and no registry web id without a handler (which would render
+  // a command that silently does nothing). Set equality both ways pins it; the
+  // Rust `web_pin_matches_the_typescript_pin` ties EXPECTED_WEB_COMMANDS to the
+  // core registry, so the full chain is handlers == TS pin == Rust registry.
+  it("handler map keys match the pinned web-command set (no orphans either way)", async () => {
     const { PALETTE_HANDLERS } = await import("./paletteRegistry")
     const keys = Object.keys(PALETTE_HANDLERS).sort()
     expect(keys).toEqual(EXPECTED_WEB_COMMANDS)
@@ -41,6 +47,14 @@ describe("paletteRegistry", () => {
     const { PALETTE_HANDLERS } = await import("./paletteRegistry")
     for (const [id, handler] of Object.entries(PALETTE_HANDLERS)) {
       expect(typeof handler, `handler for ${id}`).toBe("function")
+    }
+  })
+
+  it("every handled command has a palette group (no ungrouped commands)", async () => {
+    const { PALETTE_HANDLERS } = await import("./paletteRegistry")
+    const { paletteGroupFor } = await import("./paletteGroups")
+    for (const id of Object.keys(PALETTE_HANDLERS)) {
+      expect(paletteGroupFor(id), `group for ${id}`).not.toBeNull()
     }
   })
 })

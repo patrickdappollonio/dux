@@ -140,7 +140,8 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ReloadConfig,
         name: "reload-config",
         description: "Reload config.toml after validating it",
-        // Both: web sends the `reload_config` wire command from the palette.
+        // Both (GLOBAL): reloads the whole config — acts on no selected target.
+        // Web sends the `reload_config` wire command from the palette.
         surface: PaletteSurface::Both,
     },
     PaletteCommand {
@@ -176,7 +177,8 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ConfigureGlobalEnv,
         name: "configure-global-env",
         description: "Configure environment variables inherited by every project",
-        // Both: web opens the global-environment dialog from the palette.
+        // Both (GLOBAL): the global env applies to every project — no target.
+        // Web opens the global-environment dialog from the palette.
         surface: PaletteSurface::Both,
     },
     PaletteCommand {
@@ -212,7 +214,8 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::OpenProjectBrowser,
         name: "add-project",
         description: "Open the project browser",
-        // Both: web opens the add-project dialog from the palette.
+        // Both (GLOBAL): opens the project browser to add a NEW project — it
+        // operates on no existing target. Web opens the add-project dialog.
         surface: PaletteSurface::Both,
     },
     PaletteCommand {
@@ -360,21 +363,24 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::SortAgentsByUpdated,
         name: "sort-agents-by-updated",
         description: "Sort agents by most recently updated",
-        // Both: web sorts via `sortAgents("updated")` from the palette.
+        // Both (GLOBAL): sets the app-wide agent sort order — no target.
+        // Web sorts via `sortAgents("updated")` from the palette.
         surface: PaletteSurface::Both,
     },
     PaletteCommand {
         action: Action::SortAgentsByCreated,
         name: "sort-agents-by-created",
         description: "Sort agents by creation date (newest first)",
-        // Both: web sorts via `sortAgents("created")` from the palette.
+        // Both (GLOBAL): sets the app-wide agent sort order — no target.
+        // Web sorts via `sortAgents("created")` from the palette.
         surface: PaletteSurface::Both,
     },
     PaletteCommand {
         action: Action::SortAgentsByName,
         name: "sort-agents-by-name",
         description: "Sort agents alphabetically by name",
-        // Both: web sorts via `sortAgents("name")` from the palette.
+        // Both (GLOBAL): sets the app-wide agent sort order — no target.
+        // Web sorts via `sortAgents("name")` from the palette.
         surface: PaletteSurface::Both,
     },
     PaletteCommand {
@@ -406,7 +412,8 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ToggleDiffLineNumbers,
         name: "toggle-diff-line-numbers",
         description: "Toggle line numbers in diff view",
-        // Both: web flips its diff gutters via `toggleDiffLineNumbers()`.
+        // Both (GLOBAL): an app-wide diff-view preference — no target.
+        // Web flips its diff gutters via `toggleDiffLineNumbers()`.
         surface: PaletteSurface::Both,
     },
     PaletteCommand {

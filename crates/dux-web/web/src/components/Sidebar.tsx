@@ -35,7 +35,6 @@ import {
   SquareTerminal,
   Terminal,
   Trash2,
-  X,
 } from "lucide-react"
 import type * as React from "react"
 
@@ -149,7 +148,7 @@ function TerminalSubItem({
           off the ancestor menu-item, which here is the whole project block. */}
       <SidebarMenuSubButton
         isActive={active}
-        className="max-md:pr-8 group-focus-within/menu-sub-item:pr-8 group-hover/menu-sub-item:pr-8"
+        className="max-md:pr-8 group-focus-within/menu-sub-item:pr-8 group-hover/menu-sub-item:pr-8 group-has-[[aria-expanded=true]]/menu-sub-item:pr-8"
         onClick={() => selectTerminal(terminal.id, sessionId)}
       >
         <SquareTerminal />
@@ -157,19 +156,35 @@ function TerminalSubItem({
           {title}
         </span>
       </SidebarMenuSubButton>
-      <SidebarMenuAction
-        title="Close terminal"
-        aria-label="Close terminal"
-        // top-1 vertically centers the 20px action in the 28px sub row; the
-        // component's default offsets are calibrated for the taller menu button.
-        className="top-1 md:opacity-0 group-focus-within/menu-sub-item:opacity-100 group-hover/menu-sub-item:opacity-100"
-        onClick={(event) => {
-          event.stopPropagation()
-          openDeleteTerminal(terminal.id)
-        }}
-      >
-        <X />
-      </SidebarMenuAction>
+      {/* ⋯ menu replaces the bare ✕, matching the session rows' pattern: Stream
+          selects this terminal (the macro popover lives on the pane, one click
+          away after selecting), and Close… routes through the same confirm
+          dialog the old ✕ opened. */}
+      <DropdownMenu>
+        <SidebarMenuAction
+          render={<DropdownMenuTrigger />}
+          aria-label="Terminal actions"
+          // top-1 vertically centers the 20px action in the 28px sub row; the
+          // component's default offsets are calibrated for the taller menu button.
+          className="top-1 md:opacity-0 group-focus-within/menu-sub-item:opacity-100 group-hover/menu-sub-item:opacity-100 aria-expanded:opacity-100"
+        >
+          <Ellipsis />
+        </SidebarMenuAction>
+        <DropdownMenuContent side="right" align="start">
+          <DropdownMenuItem onClick={() => selectTerminal(terminal.id, sessionId)}>
+            <Terminal />
+            Stream
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            className="text-destructive"
+            onClick={() => openDeleteTerminal(terminal.id)}
+          >
+            <Trash2 />
+            Close…
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </SidebarMenuSubItem>
   )
 }
