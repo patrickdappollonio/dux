@@ -1102,21 +1102,26 @@ mod tests {
         }
     }
 
-    /// A writer whose every `write` BLOCKS until a token is released on a channel,
-    /// so a test can wedge the writer thread mid-write and fill the bounded
-    /// channel behind it deterministically (no sleeps). Bytes land in the shared
+    /// A writer whose every `write` first SIGNALS that it was entered (proving
+    /// the writer thread dequeued a line off the bounded channel), then BLOCKS
+    /// until a token is released on the gate. The entered signal is what makes
+    /// the drop test deterministic: the test waits for it before filling the
+    /// channel, so the fill can never race the dequeue. Bytes land in the shared
     /// buffer once a write is allowed to proceed.
     #[cfg(test)]
     struct GatedWriter {
         buf: SharedBuffer,
         gate: std::sync::mpsc::Receiver<()>,
+        entered: std::sync::mpsc::Sender<()>,
     }
 
     #[cfg(test)]
     impl Write for GatedWriter {
         fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-            // Block until the test releases one token. A closed gate (test done)
-            // lets the write proceed so the thread can drain and exit.
+            // Announce the dequeue (unbounded send, never blocks), then block
+            // until the test releases one token. A closed gate (test done) lets
+            // the write proceed so the thread can drain and exit.
+            let _ = self.entered.send(());
             let _ = self.gate.recv();
             self.buf.write(data)
         }
@@ -1133,19 +1138,25 @@ mod tests {
         // relieved, the next successful send emits ONE warning naming the count.
         let buf = SharedBuffer::new();
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
         let writer = GatedWriter {
             buf: buf.clone(),
             gate: release_rx,
+            entered: entered_tx,
         };
         let console = Console::test_capture_bounded(false, 2, Box::new(writer));
 
         // Line 1: the writer thread dequeues it and blocks in `write` (gate empty).
         console.access("GET", "/1", 200, 1);
-        // Spin until the writer thread has actually taken line 1 off the channel,
-        // so the next two sends fill the cap-2 channel rather than racing the
-        // dequeue. Deterministic: once the channel has room for exactly 2 buffered
-        // lines AND the dequeue happened, sends 2 and 3 fill it.
-        // We fill the channel: lines 2 and 3 occupy the 2 buffered slots.
+        // BARRIER: wait until the writer thread has provably taken line 1 off the
+        // channel and is wedged inside `write` (it signals `entered` before
+        // blocking on the gate). Only then is the cap-2 channel empty, so the
+        // next two sends deterministically fill it rather than racing the
+        // dequeue.
+        entered_rx
+            .recv()
+            .expect("the writer thread must enter write(/1)");
+        // Fill the channel: lines 2 and 3 occupy the 2 buffered slots.
         console.access("GET", "/2", 200, 1);
         console.access("GET", "/3", 200, 1);
         // The channel is now full (thread wedged on line 1, slots hold 2 and 3).
@@ -1153,9 +1164,10 @@ mod tests {
         for n in 4..=6 {
             console.access("GET", &format!("/{n}"), 200, 1);
         }
-        assert!(
-            console.dropped_count() >= 1,
-            "a wedged writer with a full channel must drop lines"
+        assert_eq!(
+            console.dropped_count(),
+            3,
+            "exactly lines 4-6 are dropped once the fill cannot race the dequeue"
         );
 
         let dropped_before = console.dropped_count();
