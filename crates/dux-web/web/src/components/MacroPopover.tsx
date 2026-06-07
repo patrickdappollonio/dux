@@ -66,7 +66,7 @@ export function MacroPopover({ target }: { target: SelectedTarget }) {
           </div>
         ) : macros.length === 0 ? (
           <div className="p-3 text-sm text-muted-foreground">
-            No macros for this target kind.
+            No macros for this target kind — add one via Edit macros below.
           </div>
         ) : (
           <Command>

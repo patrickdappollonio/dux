@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   MACRO_SURFACE_OPTIONS,
+  commitMacro,
   isMacroSurface,
   macroMatchesSurface,
   macroTextPreview,
@@ -115,6 +116,40 @@ describe("MACRO_SURFACE_OPTIONS", () => {
       "terminal",
       "both",
     ])
+  })
+})
+
+describe("commitMacro", () => {
+  it("renaming entry 0 keeps it at index 0", () => {
+    const prev = [macro("A", "agent"), macro("B", "agent"), macro("C", "agent")]
+    const next = commitMacro(prev, 0, macro("Renamed", "agent"))
+    expect(next.map((m) => m.name)).toEqual(["Renamed", "B", "C"])
+  })
+
+  it("editing a middle entry replaces it in place", () => {
+    const prev = [macro("A", "agent"), macro("B", "agent"), macro("C", "agent")]
+    const next = commitMacro(prev, 1, macro("Renamed", "agent"))
+    expect(next.map((m) => m.name)).toEqual(["A", "Renamed", "C"])
+  })
+
+  it("adding appends to the end, preserving order", () => {
+    const prev = [macro("A", "agent"), macro("B", "agent")]
+    const next = commitMacro(prev, "new", macro("C", "agent"))
+    expect(next.map((m) => m.name)).toEqual(["A", "B", "C"])
+  })
+
+  it("adding to an empty list yields a single entry", () => {
+    expect(commitMacro([], "new", macro("A", "agent")).map((m) => m.name)).toEqual([
+      "A",
+    ])
+  })
+
+  it("does not mutate the input array", () => {
+    const prev = [macro("A", "agent"), macro("B", "agent")]
+    const snapshot = prev.map((m) => m.name)
+    commitMacro(prev, 0, macro("Renamed", "agent"))
+    commitMacro(prev, "new", macro("C", "agent"))
+    expect(prev.map((m) => m.name)).toEqual(snapshot)
   })
 })
 

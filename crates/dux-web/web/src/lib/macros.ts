@@ -62,7 +62,17 @@ export const MACRO_SURFACE_OPTIONS: {
 // A client-side validation error for the macro editor, or null when the whole
 // set is valid. Mirrors the server's wholesale-replace rules (empty/duplicate
 // names, empty text, known surface) so the Save button can give immediate
-// feedback; the server stays authoritative and re-validates regardless.
+// feedback.
+//
+// FAST-FEEDBACK MIRROR ONLY (council decision): the authoritative validation is
+// `WireCommand::UpdateMacros` in `crates/dux-core/src/wire.rs` (the
+// `wire_to_command` arm), which re-runs these rules server-side on every Save.
+// This mirror exists purely for instant UI feedback and is intentionally NOT
+// pinned cross-language: it's a behavioral rule, not a static contract like the
+// palette id pins, so no test ties the two together. If the mirror drifts, the
+// worst case is fail-SAFE — a too-lenient client lets a Save through that the
+// server then rejects. A too-strict client would only over-block, never corrupt
+// state. So the server stays the single source of truth.
 export function validateMacros(macros: MacroView[]): string | null {
   const seen = new Set<string>()
   for (const macro of macros) {
@@ -81,6 +91,21 @@ export function validateMacros(macros: MacroView[]): string | null {
 // Narrow an arbitrary string to a known `MacroSurface`.
 export function isMacroSurface(value: string): value is MacroSurface {
   return value === "agent" || value === "terminal" || value === "both"
+}
+
+// Pure commit reducer for the editor's per-row form submission: appends when
+// adding ("new"), otherwise replaces the entry at `index` in place. In-place
+// replacement is what makes a rename keep its list position (edit entry 0 →
+// still index 0), and the append path preserves declaration order. Lives here
+// (not in the dialog component) so it stays unit-testable and the dialog file
+// keeps exporting only components. Returns a new array; never mutates `prev`.
+export function commitMacro(
+  prev: MacroView[],
+  index: number | "new",
+  macro: MacroView,
+): MacroView[] {
+  if (index === "new") return [...prev, macro]
+  return prev.map((m, i) => (i === index ? macro : m))
 }
 
 // Single-line preview of a macro's text for the editor list: newlines collapse

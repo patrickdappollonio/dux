@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { beforeAll, describe, expect, it, vi } from "vitest"
 
 import {
   PALETTE_GROUP_ORDER,
@@ -7,27 +7,37 @@ import {
 } from "./paletteGroups"
 import type { PaletteCommandView } from "./types"
 
-// The web-surfaced command ids, mirrored from `EXPECTED_WEB_COMMANDS` in
-// `paletteRegistry.test.ts` (itself pinned to the Rust registry). Grouping must
-// cover exactly this set — a new Web/Both command must be mapped to a group.
-const EXPECTED_WEB_COMMANDS = [
-  "add-project",
-  "configure-global-env",
-  "edit-macros",
-  "reload-config",
-  "sort-agents-by-created",
-  "sort-agents-by-name",
-  "sort-agents-by-updated",
-  "toggle-diff-line-numbers",
-]
+// `paletteRegistry` imports `store`, which at module load reads `location` and
+// `localStorage` and registers a `popstate` listener (the test env is node, not
+// a DOM). Stub the minimum surface so the dynamic import succeeds.
+beforeAll(() => {
+  vi.stubGlobal("location", { host: "localhost:0" })
+  vi.stubGlobal("localStorage", {
+    getItem: () => null,
+    setItem: () => {},
+    removeItem: () => {},
+  })
+  vi.stubGlobal("window", { addEventListener: () => {} })
+})
+
+// The web-surfaced command ids are derived from the registry itself
+// (`PALETTE_HANDLERS` keys) rather than re-declared here — that handler set is
+// pinned to the Rust core registry by `paletteRegistry.test.ts`, so this file
+// inherits the same authoritative set without a third hand-mirrored copy.
+// Grouping must cover exactly this set — a new Web/Both command must be mapped
+// to a group.
+async function webCommandIds(): Promise<string[]> {
+  const { PALETTE_HANDLERS } = await import("./paletteRegistry")
+  return Object.keys(PALETTE_HANDLERS)
+}
 
 function cmd(id: string): PaletteCommandView {
   return { id, description: `desc for ${id}` }
 }
 
 describe("paletteGroups", () => {
-  it("maps every web-surfaced command id to a known group", () => {
-    for (const id of EXPECTED_WEB_COMMANDS) {
+  it("maps every web-surfaced command id to a known group", async () => {
+    for (const id of await webCommandIds()) {
       const group = paletteGroupFor(id)
       expect(group, `group for ${id}`).not.toBeNull()
       expect(PALETTE_GROUP_ORDER).toContain(group!)
@@ -38,8 +48,8 @@ describe("paletteGroups", () => {
     expect(paletteGroupFor("does-not-exist")).toBeNull()
   })
 
-  it("buckets commands into groups in the configured group order", () => {
-    const commands = EXPECTED_WEB_COMMANDS.map(cmd)
+  it("buckets commands into groups in the configured group order", async () => {
+    const commands = (await webCommandIds()).map(cmd)
     const grouped = groupPaletteCommands(commands)
     expect(grouped.map((g) => g.group)).toEqual([
       "Configuration",

@@ -22,6 +22,7 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import {
   MACRO_SURFACE_OPTIONS,
+  commitMacro,
   isMacroSurface,
   macroTextPreview,
   validateMacros,
@@ -58,10 +59,7 @@ function MacrosEditor({ initial }: { initial: MacroView[] }) {
         macro={mode.index === "new" ? null : macros[mode.index]}
         onCancel={() => setMode({ kind: "list" })}
         onCommit={(macro) => {
-          setMacros((prev) => {
-            if (mode.index === "new") return [...prev, macro]
-            return prev.map((m, i) => (i === mode.index ? macro : m))
-          })
+          setMacros((prev) => commitMacro(prev, mode.index, macro))
           setMode({ kind: "list" })
         }}
       />
