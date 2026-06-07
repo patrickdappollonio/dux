@@ -136,6 +136,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         pending_deletions: HashSet::new(),
         deletion_busy_messages: HashMap::new(),
         watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
+        watched_session_id: None,
         has_active_processes: Arc::new(AtomicBool::new(false)),
         in_flight: InFlightSet::new(),
         pr_last_checked: HashMap::new(),

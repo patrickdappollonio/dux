@@ -103,6 +103,14 @@ pub struct Engine {
     /// alone). Cleared per-session when the worker event arrives.
     pub deletion_busy_messages: HashMap<String, String>,
     pub watched_worktree: Arc<Mutex<Option<PathBuf>>>,
+    /// The session id whose worktree is currently watched for changed files.
+    /// Runtime state only (never config/persisted): paired with
+    /// `watched_worktree` so the ViewModel can tell a client which session the
+    /// global `staged_files`/`unstaged_files` belong to. A web client viewing a
+    /// DIFFERENT session than this global watch shows a loading state rather than
+    /// the wrong session's files (cross-tab safety). Written exclusively by
+    /// [`Engine::watch_session_worktree`].
+    pub watched_session_id: Option<String>,
     pub has_active_processes: Arc<AtomicBool>,
     /// Set of currently-running operations. See `InFlightKey` for the
     /// allowed variants. Inserted by `mark_in_flight` before spawning a
@@ -612,6 +620,41 @@ impl Engine {
                 let _ = tx.send(WorkerEvent::GhStatusChecked(GhStatus::Available));
             },
         );
+    }
+
+    /// Point the changed-files watch at a session's worktree, or clear it.
+    ///
+    /// This is the engine half of the TUI's `App::reload_changed_files`: it sets
+    /// `watched_worktree` (which the background poller reads every 2–10s) and
+    /// immediately computes the staged/unstaged lists once so the pane fills on
+    /// the next tick rather than waiting for the poll. The web layer calls this
+    /// when a browser selects a session (the TUI never set it for the web, which
+    /// is why the web changed-files pane stayed empty).
+    ///
+    /// - `None` → clear the watch and the lists (no session focused).
+    /// - `Some(id)` for a known session → watch its worktree, record the id, and
+    ///   fill the lists (a `git::changed_files` error yields empty lists, the
+    ///   same `unwrap_or_default` behavior the TUI uses).
+    /// - `Some(id)` for an UNKNOWN session → clear (same as `None`), so a stale
+    ///   id never leaves another session's files showing.
+    pub fn watch_session_worktree(&mut self, session_id: Option<&str>) {
+        let resolved = session_id.and_then(|id| {
+            self.sessions
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| (id.to_string(), PathBuf::from(&s.worktree_path)))
+        });
+        let worktree = resolved.as_ref().map(|(_, path)| path.clone());
+        // Keep the background poller in sync with the watched worktree.
+        if let Ok(mut guard) = self.watched_worktree.lock() {
+            *guard = worktree.clone();
+        }
+        self.watched_session_id = resolved.map(|(id, _)| id);
+        let (staged, unstaged) = worktree
+            .and_then(|p| crate::git::changed_files(&p).ok())
+            .unwrap_or_default();
+        self.staged_files = staged;
+        self.unstaged_files = unstaged;
     }
 
     pub fn spawn_changed_files_poller(&self) {

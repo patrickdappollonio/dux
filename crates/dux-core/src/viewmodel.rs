@@ -172,6 +172,11 @@ pub struct PrView {
 pub struct ChangedFilesView {
     pub staged: Vec<ChangedFileView>,
     pub unstaged: Vec<ChangedFileView>,
+    /// The session id these lists belong to (the currently watched worktree), or
+    /// `None` when nothing is watched. A web client renders these lists only when
+    /// this matches its locally selected session — otherwise it shows a loading
+    /// state rather than another session's files (cross-tab safety).
+    pub watched_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -330,6 +335,7 @@ impl Engine {
                     .iter()
                     .map(ChangedFileView::from_file)
                     .collect(),
+                watched_session_id: self.watched_session_id.clone(),
             },
             global_env: self.config.env.clone(),
             available_providers,

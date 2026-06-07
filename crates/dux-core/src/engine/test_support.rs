@@ -62,6 +62,7 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         pending_deletions: HashSet::new(),
         deletion_busy_messages: HashMap::new(),
         watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
+        watched_session_id: None,
         has_active_processes: Arc::new(AtomicBool::new(false)),
         in_flight: HashSet::new(),
         pr_last_checked: HashMap::new(),

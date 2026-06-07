@@ -226,6 +226,16 @@ pub enum Command {
     /// identical to the `PersistGlobalEnv` precedent. Acceptable for the
     /// single-operator model; a multi-writer setup would need read-modify-merge.
     UpdateMacros { macros: crate::config::MacrosConfig },
+
+    /// Point the changed-files watch at a session's worktree (or clear it with
+    /// `None`). Mirrors the engine half of the TUI's `reload_changed_files`:
+    /// resolves the session, sets `watched_worktree` + `watched_session_id`, and
+    /// fills the staged/unstaged lists immediately so the pane populates on the
+    /// next tick. Returns `EventReaction::Nothing` — the refreshed ViewModel
+    /// broadcast is the feedback (no status toast on every selection). The web
+    /// sends this when a browser selects a session so the global poller knows
+    /// which worktree the client is viewing.
+    WatchChangedFiles { session_id: Option<String> },
 }
 
 impl Engine {
@@ -655,6 +665,11 @@ impl Engine {
                     self.paths.config_path.clone(),
                     self.worker_tx.clone(),
                 );
+                Ok(EventReaction::Nothing)
+            }
+
+            Command::WatchChangedFiles { session_id } => {
+                self.watch_session_worktree(session_id.as_deref());
                 Ok(EventReaction::Nothing)
             }
         }
@@ -1373,5 +1388,161 @@ mod tests {
             event,
             WorkerEvent::MacrosPersistenceCompleted { result: Ok(()), .. }
         ));
+    }
+
+    // ── Engine::watch_session_worktree + Command::WatchChangedFiles ──────────
+
+    /// A temp git repo with one STAGED change (`staged.txt` added to the index)
+    /// and one UNSTAGED change (`unstaged.txt` is a new, untracked file) so a
+    /// `changed_files` read returns a non-empty entry in each list.
+    fn watch_test_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let run = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .expect("spawn git")
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(dir.path().join("base.txt"), "base\n").expect("write base");
+        run(&["add", "base.txt"]);
+        run(&["commit", "-q", "-m", "init"]);
+        // Staged: a new file added to the index.
+        std::fs::write(dir.path().join("staged.txt"), "staged\n").expect("write staged");
+        run(&["add", "staged.txt"]);
+        // Unstaged: a new untracked file (never added).
+        std::fs::write(dir.path().join("unstaged.txt"), "unstaged\n").expect("write unstaged");
+        dir
+    }
+
+    fn session_in_repo(id: &str, repo: &std::path::Path) -> crate::model::AgentSession {
+        let mut session = sample_session(id, "p1", id);
+        session.worktree_path = repo.to_string_lossy().into_owned();
+        session
+    }
+
+    #[test]
+    fn watch_session_worktree_populates_lists_and_records_id() {
+        let repo = watch_test_repo();
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(session_in_repo("s1", repo.path()));
+
+        // Empty before any watch — the exact regression the web hit.
+        assert!(engine.staged_files.is_empty());
+        assert!(engine.unstaged_files.is_empty());
+        assert!(engine.watched_session_id.is_none());
+
+        engine.watch_session_worktree(Some("s1"));
+
+        assert_eq!(engine.watched_session_id.as_deref(), Some("s1"));
+        assert!(
+            engine.staged_files.iter().any(|f| f.path == "staged.txt"),
+            "staged list should contain staged.txt: {:?}",
+            engine.staged_files
+        );
+        assert!(
+            engine
+                .unstaged_files
+                .iter()
+                .any(|f| f.path == "unstaged.txt"),
+            "unstaged list should contain unstaged.txt: {:?}",
+            engine.unstaged_files
+        );
+        // The poller's shared watched-worktree handle now points at the repo.
+        assert_eq!(
+            engine.watched_worktree.lock().unwrap().as_deref(),
+            Some(repo.path())
+        );
+    }
+
+    #[test]
+    fn watch_session_worktree_none_clears_everything() {
+        let repo = watch_test_repo();
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(session_in_repo("s1", repo.path()));
+        engine.watch_session_worktree(Some("s1"));
+        assert!(!engine.staged_files.is_empty());
+
+        engine.watch_session_worktree(None);
+
+        assert!(engine.watched_session_id.is_none());
+        assert!(engine.staged_files.is_empty());
+        assert!(engine.unstaged_files.is_empty());
+        assert!(engine.watched_worktree.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn watch_session_worktree_unknown_id_clears_and_does_not_panic() {
+        let repo = watch_test_repo();
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(session_in_repo("s1", repo.path()));
+        engine.watch_session_worktree(Some("s1"));
+        assert!(!engine.staged_files.is_empty());
+
+        // A stale/unknown id must clear (so it never shows another session's files).
+        engine.watch_session_worktree(Some("ghost"));
+
+        assert!(engine.watched_session_id.is_none());
+        assert!(engine.staged_files.is_empty());
+        assert!(engine.unstaged_files.is_empty());
+        assert!(engine.watched_worktree.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn watch_command_updates_engine_state_and_returns_nothing() {
+        let repo = watch_test_repo();
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(session_in_repo("s1", repo.path()));
+
+        let reaction = engine
+            .apply(Command::WatchChangedFiles {
+                session_id: Some("s1".to_string()),
+            })
+            .expect("apply");
+        assert!(matches!(reaction, EventReaction::Nothing));
+        assert_eq!(engine.watched_session_id.as_deref(), Some("s1"));
+        assert!(!engine.staged_files.is_empty());
+        assert!(!engine.unstaged_files.is_empty());
+    }
+
+    #[test]
+    fn view_model_changed_files_empty_before_watch_populated_after() {
+        let repo = watch_test_repo();
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(session_in_repo("s1", repo.path()));
+
+        // Before the watch the ViewModel carries empty lists and no watched id —
+        // exactly what the web saw (the pane showed nothing).
+        let before = engine.view_model();
+        assert!(before.changed_files.staged.is_empty());
+        assert!(before.changed_files.unstaged.is_empty());
+        assert!(before.changed_files.watched_session_id.is_none());
+
+        engine.watch_session_worktree(Some("s1"));
+
+        let after = engine.view_model();
+        assert_eq!(
+            after.changed_files.watched_session_id.as_deref(),
+            Some("s1")
+        );
+        assert!(
+            after
+                .changed_files
+                .staged
+                .iter()
+                .any(|f| f.path == "staged.txt")
+        );
+        assert!(
+            after
+                .changed_files
+                .unstaged
+                .iter()
+                .any(|f| f.path == "unstaged.txt")
+        );
     }
 }

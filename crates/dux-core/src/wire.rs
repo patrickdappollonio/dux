@@ -292,6 +292,21 @@ pub enum WireCommand {
     UpdateMacros {
         entries: Vec<WireMacroEntry>,
     },
+    /// Point the changed-files watch at a session's worktree, mirroring the TUI's
+    /// selection-driven `reload_changed_files`. `session_id` is nullable: a
+    /// `null` (or absent) id clears the watch so the global poller stops reading
+    /// any worktree, while a real id has the server resolve the session and watch
+    /// its worktree. The web sends this on every session selection because the
+    /// global `watched_worktree`/`changed_files` engine state is otherwise never
+    /// set for a browser client (only the TUI set it), leaving the pane empty.
+    ///
+    /// `#[serde(default)]` so the field accepts the absent form
+    /// (`{"command":"watch_changed_files","args":{}}`) as well as an explicit
+    /// `null`, matching the frontend's clear path.
+    WatchChangedFiles {
+        #[serde(default)]
+        session_id: Option<String>,
+    },
 }
 
 /// A single macro in a [`WireCommand::UpdateMacros`] payload. `surface` is the
@@ -1639,6 +1654,9 @@ impl Engine {
                 }
                 Command::UpdateMacros { macros }
             }
+            WireCommand::WatchChangedFiles { session_id } => {
+                Command::WatchChangedFiles { session_id }
+            }
         })
     }
 
@@ -2806,6 +2824,104 @@ mod tests {
             }
             _ => panic!("expected Command::GenerateCommitMessage variant"),
         }
+    }
+
+    #[test]
+    fn wire_watch_changed_files_deserializes_with_string_id() {
+        let json = r#"{"command":"watch_changed_files","args":{"session_id":"s1"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::WatchChangedFiles {
+                session_id: Some("s1".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn wire_watch_changed_files_deserializes_with_null_id() {
+        let json = r#"{"command":"watch_changed_files","args":{"session_id":null}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(cmd, WireCommand::WatchChangedFiles { session_id: None });
+    }
+
+    #[test]
+    fn wire_watch_changed_files_deserializes_with_absent_id() {
+        // The frontend's clear path may omit the field entirely; `serde(default)`
+        // accepts the empty-args form too.
+        let json = r#"{"command":"watch_changed_files","args":{}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(cmd, WireCommand::WatchChangedFiles { session_id: None });
+    }
+
+    #[test]
+    fn wire_to_command_watch_changed_files_maps_to_command() {
+        let (engine, _tmp) = test_engine();
+        let cmd = engine
+            .wire_to_command(WireCommand::WatchChangedFiles {
+                session_id: Some("s1".to_string()),
+            })
+            .expect("reconstruct");
+        match cmd {
+            Command::WatchChangedFiles { session_id } => {
+                assert_eq!(session_id.as_deref(), Some("s1"));
+            }
+            _ => panic!("expected Command::WatchChangedFiles variant"),
+        }
+    }
+
+    #[test]
+    fn apply_wire_watch_changed_files_populates_view_model() {
+        // `init_repo` leaves `a.txt` untracked (no commit), so it shows up as an
+        // unstaged change once the worktree is watched.
+        let repo = init_repo();
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = repo.path().to_string_lossy().into_owned();
+        engine.sessions.push(session);
+
+        // Empty before the watch (the regression).
+        assert!(engine.view_model().changed_files.unstaged.is_empty());
+
+        let outcome = engine
+            .apply_wire(WireCommand::WatchChangedFiles {
+                session_id: Some("s1".to_string()),
+            })
+            .expect("apply_wire");
+        // No synchronous status — the ViewModel broadcast is the feedback.
+        assert!(outcome.status.is_none());
+
+        let vm = engine.view_model();
+        assert_eq!(vm.changed_files.watched_session_id.as_deref(), Some("s1"));
+        assert!(
+            vm.changed_files.unstaged.iter().any(|f| f.path == "a.txt"),
+            "unstaged should contain a.txt: {:?}",
+            vm.changed_files.unstaged
+        );
+    }
+
+    #[test]
+    fn apply_wire_watch_changed_files_null_clears() {
+        let repo = init_repo();
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = repo.path().to_string_lossy().into_owned();
+        engine.sessions.push(session);
+
+        engine
+            .apply_wire(WireCommand::WatchChangedFiles {
+                session_id: Some("s1".to_string()),
+            })
+            .expect("apply_wire");
+        assert!(!engine.view_model().changed_files.unstaged.is_empty());
+
+        engine
+            .apply_wire(WireCommand::WatchChangedFiles { session_id: None })
+            .expect("apply_wire");
+
+        let vm = engine.view_model();
+        assert!(vm.changed_files.watched_session_id.is_none());
+        assert!(vm.changed_files.unstaged.is_empty());
     }
 
     /// Stage a file in `repo` so `git diff --cached` has content.

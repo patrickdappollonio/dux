@@ -1295,6 +1295,7 @@ impl App {
             pending_deletions: HashSet::new(),
             deletion_busy_messages: HashMap::new(),
             watched_worktree: Arc::clone(&watched_worktree),
+            watched_session_id: None,
             has_active_processes,
             in_flight: HashSet::new(),
             pr_last_checked: HashMap::new(),
@@ -2419,18 +2420,10 @@ impl App {
 
     pub(crate) fn reload_changed_files(&mut self) {
         let session_id = self.selected_session().map(|s| s.id.clone());
-        let worktree = self
-            .selected_session()
-            .map(|s| PathBuf::from(&s.worktree_path));
-        // Keep the background poller in sync with the currently selected session.
-        if let Ok(mut guard) = self.engine.watched_worktree.lock() {
-            *guard = worktree.clone();
-        }
-        let (staged, unstaged) = worktree
-            .and_then(|p| git::changed_files(&p).ok())
-            .unwrap_or_default();
-        self.engine.staged_files = staged;
-        self.engine.unstaged_files = unstaged;
+        // The engine half (watch the worktree + compute staged/unstaged) now
+        // lives on `Engine` so the web layer can drive it too; the App keeps its
+        // view follow-ups (cursor clamp, opportunistic PR check).
+        self.engine.watch_session_worktree(session_id.as_deref());
         self.clamp_files_cursor();
         // Opportunistically check PR status for the newly-selected session.
         if let Some(sid) = session_id {
