@@ -1600,10 +1600,16 @@ impl Engine {
             }
             WireCommand::RunMacro { target_id, name } => Command::RunMacro { target_id, name },
             WireCommand::UpdateMacros { entries } => {
-                // Validate + convert into the config map server-side; the client
-                // is never trusted. Mirrors the TUI editor's rules: a name must be
-                // non-empty, names must be unique, text must be non-empty, and the
-                // surface string must be one of the known variants.
+                // AUTHORITATIVE validation (council decision): the client is never
+                // trusted. This re-runs the rules server-side regardless of any
+                // client-side check — a name must be non-empty, names must be
+                // unique, text must be non-empty, and the surface string must be
+                // one of the known variants. The web client mirrors these in
+                // `validateMacros` (crates/dux-web/web/src/lib/macros.ts) for fast
+                // feedback only; that mirror is deliberately NOT pinned to this
+                // code (it's a behavioral rule, not a static contract). If it
+                // drifts the worst case is fail-safe: a too-lenient client Save
+                // that this arm still rejects.
                 let mut macros = crate::config::MacrosConfig::default();
                 for entry in entries {
                     let name = entry.name.trim().to_string();

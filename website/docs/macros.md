@@ -5,12 +5,15 @@ group: Guides
 order: 20
 ---
 
-Macros are named text snippets stored in your config. When you open the macro
-bar, dux shows only the macros that make sense for whatever is currently focused
-(agent pane or terminal pane) and writes the selected text directly into the
-PTY as if you had typed it yourself. Good for prompts you repeat constantly,
-long build commands you never want to mistype, or anything you find yourself
-copy-pasting.
+Macros are named text snippets stored in your config. When you trigger one, dux
+shows only the macros that make sense for whatever is currently focused (agent
+pane or terminal pane) and writes the selected text directly into the PTY as if
+you had typed it yourself. Good for prompts you repeat constantly, long build
+commands you never want to mistype, or anything you find yourself copy-pasting.
+
+The same `[macros]` config drives both the terminal UI and the web UI. There is
+one list, defined once; the TUI macro bar and the web macro picker both read it,
+and edits made in either place (or by hand in the file) land in the same block.
 
 ## Defining macros
 
@@ -63,7 +66,7 @@ press Enter yourself to send.
 There is no variable or placeholder expansion in macro text. What you write is
 exactly what gets sent.
 
-## Opening the macro bar
+## Sending a macro in the terminal UI
 
 The macro bar is bound to **Ctrl-\\** by default (configurable under
 `open_macro_bar` in `[keys]`). It is available while a pane is in interactive
@@ -81,7 +84,19 @@ Once the bar is open:
 dux writes the macro bytes directly to the active PTY client and shows
 `Sent macro "<name>".` in the status line.
 
-## Managing macros in the app
+## Sending a macro in the web UI
+
+In the browser, every terminal pane (agent or companion terminal) has a macro
+button in its corner. Click it to open a quick-picker popover listing the macros
+that match that pane's surface — the same filtering the TUI macro bar does, just
+scoped to the pane you clicked rather than whatever is focused. Type to filter,
+then click a macro (or press Enter) to send it. The familiar
+`Sent macro "<name>".` confirmation shows in the status line.
+
+If a pane has no macros for its surface, the popover says so and points you at
+the editor; if you have no macros at all, it links straight to **Edit macros**.
+
+## Managing macros in the terminal UI
 
 The `edit-macros` command palette action opens the macros editor overlay. You
 can reach it through the command palette (open with **Ctrl-P** by default and
@@ -103,6 +118,24 @@ Inside the editor:
 All changes (additions, edits, and deletions) are persisted immediately to
 `config.toml`. Hand-edits to the file are also respected: dux rewrites with
 `toml_edit`, so your formatting and ordering survive.
+
+## Managing macros in the web UI
+
+The web UI has a full macro editor too. Open the command palette (**Ctrl/⌘K**)
+and pick **Edit macros**, or click **Edit macros** from any terminal pane's
+macro popover. A dialog opens with the same list of macros in declaration order.
+
+In the dialog:
+
+- **Add macro** opens a form for a new entry: a name, the text, and a surface
+  picker (`Agent` / `Terminal` / `Both`).
+- The pencil button on a row edits it through the same form; renaming an entry
+  keeps its position in the list.
+- The trash button stages a deletion and asks you to confirm inline.
+- **Save** writes the whole list at once; **Cancel** discards your changes.
+
+Because it edits the same `[macros]` block, anything you save here shows up in
+the terminal UI (and on disk) just like a hand-edit would, and vice versa.
 
 ## Adding macros directly in config
 

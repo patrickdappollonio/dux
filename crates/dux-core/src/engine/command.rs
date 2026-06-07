@@ -219,6 +219,12 @@ pub enum Command {
     /// `Engine::config_saver` following the `PersistGlobalEnv` precedent.
     /// Fire-and-forget: completion arrives as
     /// `WorkerEvent::MacrosPersistenceCompleted`.
+    ///
+    /// Last-write-wins: the replacement is the editor's whole set, seeded from a
+    /// pre-edit snapshot of `[macros]`. A Save therefore clobbers any concurrent
+    /// hand-edit to the `[macros]` block made on disk between snapshot and save —
+    /// identical to the `PersistGlobalEnv` precedent. Acceptable for the
+    /// single-operator model; a multi-writer setup would need read-modify-merge.
     UpdateMacros { macros: crate::config::MacrosConfig },
 }
 
