@@ -228,8 +228,19 @@ pub enum WorkerEvent {
         /// different worktree's contents.
         worktree: PathBuf,
     },
-    CommitMessageGenerated(String),
-    CommitMessageFailed(String),
+    /// A one-shot commit-message run succeeded. Carries the session it was
+    /// generated for so the result lands in the matching commit dialog and never
+    /// leaks into another session's draft (two web dialogs / rapid switches).
+    CommitMessageGenerated {
+        session_id: String,
+        message: String,
+    },
+    /// A one-shot commit-message run failed. Carries the session so a failure can
+    /// be scoped to the dialog that requested it.
+    CommitMessageFailed {
+        session_id: String,
+        error: String,
+    },
     PushCompleted(Result<(), String>),
     PullCompleted {
         repo_path: String,

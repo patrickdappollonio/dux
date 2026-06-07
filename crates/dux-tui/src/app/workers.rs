@@ -228,9 +228,12 @@ impl App {
                 self.apply_agent_launch_failed_view(*boxed);
             }
 
-            EventReaction::CommitMessageGenerated(msg) => {
+            EventReaction::CommitMessageGenerated {
+                session_id: _,
+                message,
+            } => {
                 self.commit_input.clear_overlay();
-                self.commit_input.set_text(msg);
+                self.commit_input.set_text(message);
                 self.input_target = InputTarget::CommitMessage;
                 {
                     let exit_key = self.bindings.label_for(Action::ExitCommitInput);
@@ -240,7 +243,10 @@ impl App {
                     ));
                 }
             }
-            EventReaction::CommitMessageFailed(err) => {
+            EventReaction::CommitMessageFailed {
+                session_id: _,
+                error: err,
+            } => {
                 self.commit_input.clear_overlay();
                 {
                     let gen_key = self.bindings.label_for(Action::GenerateCommitMessage);

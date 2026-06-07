@@ -1218,6 +1218,9 @@ impl App {
             return Ok(());
         };
         let worktree = PathBuf::from(&session.worktree_path);
+        // Tag the worker events with the originating session so the result is
+        // session-scoped end-to-end (the web routes it to the matching dialog).
+        let session_id = session.id.clone();
         let base_prompt = self.engine.config.default_commit_prompt();
 
         // Capture the staged diff up-front so the provider does not need tool
@@ -1242,11 +1245,17 @@ impl App {
             .set_overlay("Generating commit message\u{2026}");
         self.set_busy("Generating AI commit message from staged diff\u{2026}");
         thread::spawn(move || match prov.run_oneshot(&prompt, &worktree) {
-            Ok(msg) => {
-                let _ = tx.send(WorkerEvent::CommitMessageGenerated(msg));
+            Ok(message) => {
+                let _ = tx.send(WorkerEvent::CommitMessageGenerated {
+                    session_id,
+                    message,
+                });
             }
             Err(e) => {
-                let _ = tx.send(WorkerEvent::CommitMessageFailed(e.to_string()));
+                let _ = tx.send(WorkerEvent::CommitMessageFailed {
+                    session_id,
+                    error: e.to_string(),
+                });
             }
         });
         Ok(())

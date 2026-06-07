@@ -622,13 +622,17 @@ impl Engine {
                 let prov = crate::provider::create_provider(session.provider.as_str(), cfg);
                 let tx = self.worker_tx.clone();
                 std::thread::spawn(move || match prov.run_oneshot(&prompt, &worktree) {
-                    Ok(msg) => {
-                        let _ = tx.send(crate::worker::WorkerEvent::CommitMessageGenerated(msg));
+                    Ok(message) => {
+                        let _ = tx.send(crate::worker::WorkerEvent::CommitMessageGenerated {
+                            session_id,
+                            message,
+                        });
                     }
                     Err(e) => {
-                        let _ = tx.send(crate::worker::WorkerEvent::CommitMessageFailed(
-                            e.to_string(),
-                        ));
+                        let _ = tx.send(crate::worker::WorkerEvent::CommitMessageFailed {
+                            session_id,
+                            error: e.to_string(),
+                        });
                     }
                 });
                 Ok(EventReaction::Status(StatusUpdate::busy(

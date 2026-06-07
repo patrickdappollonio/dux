@@ -197,7 +197,7 @@ export type ServerMessage =
   | { type: "terminal_created"; session_id: string; terminal_id: string }
   | { type: "error"; message: string }
   | { type: "status"; tone: string; message: string }
-  | { type: "commit_message"; message: string }
+  | { type: "commit_message"; session_id: string; message: string }
   | {
       type: "diff"
       session_id: string

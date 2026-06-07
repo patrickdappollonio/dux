@@ -543,10 +543,16 @@ async fn handle_socket(
         tokio::spawn(async move {
             loop {
                 match commit_rx.recv().await {
-                    Ok(message) => {
-                        if send_json(&sink, &ServerMessage::CommitMessage { message })
-                            .await
-                            .is_err()
+                    Ok(event) => {
+                        if send_json(
+                            &sink,
+                            &ServerMessage::CommitMessage {
+                                session_id: event.session_id,
+                                message: event.message,
+                            },
+                        )
+                        .await
+                        .is_err()
                         {
                             break;
                         }

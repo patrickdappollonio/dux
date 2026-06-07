@@ -3006,6 +3006,57 @@ mod tests {
         }
     }
 
+    /// The one-shot completion tags the result with the originating session id so
+    /// the message routes to the matching commit dialog (the CF2 anti-misroute
+    /// invariant: a generate for session "s1" must surface as
+    /// `CommitMessageGenerated { session_id: "s1", .. }`, never untagged or for
+    /// another session). The provider is overridden to a deterministic `echo` so
+    /// the run is hermetic (no real AI binary on PATH).
+    #[test]
+    fn generate_commit_message_worker_event_carries_session_id() {
+        let repo = init_repo();
+        stage_file(repo.path());
+        let (mut engine, _tmp) = test_engine();
+        // Deterministic one-shot: ignore the prompt, print a fixed marker.
+        engine.config.providers.commands.insert(
+            "claude".to_string(),
+            crate::config::ProviderCommandConfig {
+                command: "bash".to_string(),
+                oneshot_args: vec!["-c".to_string(), "echo SCOPED-COMMIT-MSG".to_string()],
+                ..Default::default()
+            },
+        );
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = repo.path().to_string_lossy().into_owned();
+        engine.sessions.push(session);
+
+        let reaction = engine
+            .apply(Command::GenerateCommitMessage {
+                session_id: "s1".to_string(),
+            })
+            .expect("apply");
+        assert!(matches!(reaction, EventReaction::Status(_)));
+
+        // The one-shot runs on a spawned thread; wait for its WorkerEvent.
+        let event = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(8))
+            .expect("worker event");
+        match event {
+            WorkerEvent::CommitMessageGenerated {
+                session_id,
+                message,
+            } => {
+                assert_eq!(session_id, "s1", "result must be tagged with its session");
+                assert!(
+                    message.contains("SCOPED-COMMIT-MSG"),
+                    "unexpected message: {message}"
+                );
+            }
+            _ => panic!("expected WorkerEvent::CommitMessageGenerated"),
+        }
+    }
+
     /// Like `init_repo`, but also stages and commits the file so HEAD exists
     /// and `current_branch` resolves a normal (born) branch.
     fn init_repo_with_commit() -> tempfile::TempDir {

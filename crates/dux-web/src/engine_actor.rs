@@ -21,6 +21,17 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 /// forwards. (PTY bytes never travel through the request channel.)
 pub type PtySubscription = (Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>);
 
+/// A generated commit message broadcast to every connected client. Carries the
+/// originating session id so a client routes it to the matching commit dialog
+/// and never lets one session's message clobber another's draft (two web dialogs
+/// or a rapid session switch). The failure path rides the status stream as a
+/// generic toast, so only the successful message needs scoping here.
+#[derive(Clone, Debug)]
+pub struct CommitMessageEvent {
+    pub session_id: String,
+    pub message: String,
+}
+
 /// One unit of work for the engine thread.
 pub enum EngineRequest {
     ApplyWire(
@@ -90,7 +101,7 @@ pub(crate) struct ActorLoopEnds {
     req_rx: mpsc::UnboundedReceiver<EngineRequest>,
     vm_tx: watch::Sender<String>,
     status_tx: broadcast::Sender<WireStatus>,
-    commit_msg_tx: broadcast::Sender<String>,
+    commit_msg_tx: broadcast::Sender<CommitMessageEvent>,
     /// Shared with the caller-facing [`EngineHandle`] and every PTY forwarder.
     /// The inline `Shutdown` request trips this so forwarders exit promptly even
     /// before the engine drop disconnects their channels.
@@ -182,7 +193,7 @@ pub(crate) fn build_actor_channels_with_auth(
     let (req_tx, req_rx) = mpsc::unbounded_channel::<EngineRequest>();
     let (vm_tx, vm_rx) = watch::channel(view_model_json(engine));
     let (status_tx, _status_rx) = broadcast::channel::<WireStatus>(256);
-    let (commit_msg_tx, _commit_msg_rx) = broadcast::channel::<String>(64);
+    let (commit_msg_tx, _commit_msg_rx) = broadcast::channel::<CommitMessageEvent>(64);
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     (
         EngineHandle {
@@ -235,7 +246,7 @@ pub struct EngineHandle {
     req_tx: mpsc::UnboundedSender<EngineRequest>,
     view_model_rx: watch::Receiver<String>,
     status_tx: broadcast::Sender<WireStatus>,
-    commit_msg_tx: broadcast::Sender<String>,
+    commit_msg_tx: broadcast::Sender<CommitMessageEvent>,
     /// Tripped when the server is tearing down (ReturnToTui, QuitProcess, or a
     /// `Shutdown` request). PTY forwarders poll it so their blocking
     /// `recv_timeout` loop exits promptly even when the engine — and therefore
@@ -285,7 +296,7 @@ impl EngineHandle {
         self.status_tx.clone()
     }
 
-    pub fn subscribe_commit_messages(&self) -> broadcast::Receiver<String> {
+    pub fn subscribe_commit_messages(&self) -> broadcast::Receiver<CommitMessageEvent> {
         self.commit_msg_tx.subscribe()
     }
 
@@ -503,13 +514,25 @@ pub(crate) fn run_engine_loop(
             // status stream. Handled via `&reaction` so it coexists with the
             // borrows above and stays before the by-value consume below.
             match &reaction {
-                EventReaction::CommitMessageGenerated(msg) => {
-                    let _ = thread_commit_tx.send(msg.clone());
+                EventReaction::CommitMessageGenerated {
+                    session_id,
+                    message,
+                } => {
+                    let _ = thread_commit_tx.send(CommitMessageEvent {
+                        session_id: session_id.clone(),
+                        message: message.clone(),
+                    });
                 }
-                EventReaction::CommitMessageFailed(err) => {
+                EventReaction::CommitMessageFailed {
+                    session_id: _,
+                    error,
+                } => {
+                    // Failures ride the generic status toast (not the scoped
+                    // commit-message lane): a generation error is not a draft to
+                    // route, so the user just needs to know it didn't work.
                     let _ = thread_status_tx.send(WireStatus::new(
                         "error",
-                        format!("Couldn't generate a commit message: {err}"),
+                        format!("Couldn't generate a commit message: {error}"),
                     ));
                 }
                 _ => {}

@@ -490,9 +490,12 @@ socket.onTerminalCreated = (sessionId, terminalId) => {
   selectTerminal(terminalId, sessionId)
 }
 
-socket.onCommitMessage = (message) => {
-  // Fill the open commit dialog's draft with the generated message.
-  if (state.commitTarget !== null) {
+socket.onCommitMessage = (sessionId, message) => {
+  // The generated message is broadcast to every client and tagged with the
+  // session it was generated for. Apply it ONLY when it matches the open
+  // dialog's target; otherwise drop it (the dialog was closed or switched to a
+  // different session) so one session's message never clobbers another's draft.
+  if (state.commitTarget === sessionId) {
     setState({ commitDraft: message })
   }
 }

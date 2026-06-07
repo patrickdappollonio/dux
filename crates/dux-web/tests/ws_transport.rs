@@ -421,9 +421,9 @@ async fn generate_commit_message_streams_result() {
     .unwrap();
 
     let mut saw_busy = false;
-    let mut saw_message = false;
+    let mut commit_frame = String::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
-    while tokio::time::Instant::now() < deadline && !(saw_busy && saw_message) {
+    while tokio::time::Instant::now() < deadline && (!saw_busy || commit_frame.is_empty()) {
         if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
             && let Ok(t) = m.into_text()
         {
@@ -433,15 +433,24 @@ async fn generate_commit_message_streams_result() {
                 saw_busy = true;
             }
             if t.contains("\"type\":\"commit_message\"") && t.contains("DETERMINISTIC-COMMIT-MSG") {
-                saw_message = true;
+                commit_frame = t.to_string();
             }
         }
     }
 
     assert!(saw_busy, "never received the Busy generating status");
     assert!(
-        saw_message,
+        !commit_frame.is_empty(),
         "never received the generated commit_message frame"
+    );
+
+    // CF2: the frame is session-scoped so the frontend routes it to the matching
+    // commit dialog. The session it was generated for ("s1") must travel with it.
+    let v: serde_json::Value = serde_json::from_str(&commit_frame).expect("parse commit frame");
+    assert_eq!(
+        v["session_id"].as_str(),
+        Some("s1"),
+        "commit_message frame must carry its originating session id: {commit_frame}"
     );
 }
 

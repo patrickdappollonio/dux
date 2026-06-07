@@ -85,9 +85,17 @@ pub enum EventReaction {
     AgentLaunchReadyView(Box<AgentLaunchReadyOutcome>),
     AgentLaunchFailedView(Box<AgentLaunchFailedOutcome>),
 
-    // -- Commit message overlay (App formats final status with bindings). --
-    CommitMessageGenerated(String),
-    CommitMessageFailed(String),
+    // -- Commit message overlay (App formats final status with bindings). The
+    //    session id scopes the result so a web client routes it to the matching
+    //    commit dialog (the TUI has a single dialog and ignores it). --
+    CommitMessageGenerated {
+        session_id: String,
+        message: String,
+    },
+    CommitMessageFailed {
+        session_id: String,
+        error: String,
+    },
 
     // -- Picker/browser prompts. --
     BrowserEntriesArrived {
@@ -1013,8 +1021,16 @@ impl Engine {
                     EventReaction::Nothing
                 }
             }
-            WorkerEvent::CommitMessageGenerated(msg) => EventReaction::CommitMessageGenerated(msg),
-            WorkerEvent::CommitMessageFailed(err) => EventReaction::CommitMessageFailed(err),
+            WorkerEvent::CommitMessageGenerated {
+                session_id,
+                message,
+            } => EventReaction::CommitMessageGenerated {
+                session_id,
+                message,
+            },
+            WorkerEvent::CommitMessageFailed { session_id, error } => {
+                EventReaction::CommitMessageFailed { session_id, error }
+            }
             WorkerEvent::PushCompleted(result) => match result {
                 Ok(()) => EventReaction::Status(StatusUpdate::info(
                     "Pushed to remote successfully. Your changes are now available to collaborators.",
@@ -1624,8 +1640,8 @@ mod tests {
             EventReaction::ClampFilesCursor => "ClampFilesCursor",
             EventReaction::AgentLaunchReadyView(_) => "AgentLaunchReadyView",
             EventReaction::AgentLaunchFailedView(_) => "AgentLaunchFailedView",
-            EventReaction::CommitMessageGenerated(_) => "CommitMessageGenerated",
-            EventReaction::CommitMessageFailed(_) => "CommitMessageFailed",
+            EventReaction::CommitMessageGenerated { .. } => "CommitMessageGenerated",
+            EventReaction::CommitMessageFailed { .. } => "CommitMessageFailed",
             EventReaction::BrowserEntriesArrived { .. } => "BrowserEntriesArrived",
             EventReaction::ProjectWorktreesArrived { .. } => "ProjectWorktreesArrived",
             EventReaction::OpenNewAgentPromptForPr(_) => "OpenNewAgentPromptForPr",

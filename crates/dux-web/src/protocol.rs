@@ -122,8 +122,11 @@ pub enum ServerMessage {
         error: Option<String>,
     },
     /// An AI-generated commit message produced by a one-shot provider run,
-    /// pushed asynchronously after a `generate_commit_message` command.
-    CommitMessage { message: String },
+    /// pushed asynchronously after a `generate_commit_message` command. The
+    /// `session_id` scopes the result to the dialog that requested it so the
+    /// frontend never fills the wrong session's draft (two open dialogs or a
+    /// rapid switch). Broadcast to every client; each one routes by session id.
+    CommitMessage { session_id: String, message: String },
     /// Response to `BrowseDir`: the resolved directory and its entries, or an
     /// error string when the listing failed.
     DirEntries {
@@ -211,12 +214,13 @@ mod tests {
     #[test]
     fn commit_message_serializes() {
         let msg = ServerMessage::CommitMessage {
+            session_id: "s1".to_string(),
             message: "Fix the thing".to_string(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"commit_message","message":"Fix the thing"}"#
+            r#"{"type":"commit_message","session_id":"s1","message":"Fix the thing"}"#
         );
     }
 
