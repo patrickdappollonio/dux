@@ -5,6 +5,7 @@ import "@xterm/xterm/css/xterm.css"
 import { Maximize2, Minimize2 } from "lucide-react"
 import { AccessoryBar } from "@/components/AccessoryBar"
 import { MacroPopover } from "@/components/MacroPopover"
+import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { applyModifiers, arrowSeq, ESC, TAB } from "@/lib/termkeys"
@@ -353,17 +354,25 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
         <MacroPopover target={macroTarget} />
         {/* Fullscreen toggle: embedded mode already forwards every key the
             browser will give a page; fullscreen + keyboard lock additionally
-            captures reserved shortcuts (Ctrl+T, Ctrl+W, …) on Chromium. Labeled
-            and always visible — the visible text is its own affordance, so no
-            tooltip. */}
-        <Button
-          variant="secondary"
-          onClick={() => void toggleFullscreen()}
-          aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+            captures reserved shortcuts (Ctrl+T, Ctrl+W, …) on Chromium. The
+            label is the affordance; the tooltip carries the non-obvious
+            keyboard-lock behavior that the label alone cannot. */}
+        <SimpleTooltip
+          content={
+            isFullscreen
+              ? "Exit fullscreen — holding Esc also exits"
+              : "Fullscreen — captures browser-reserved shortcuts like Ctrl+T"
+          }
         >
-          {isFullscreen ? <Minimize2 /> : <Maximize2 />}
-          {isFullscreen ? "Exit fullscreen" : "Fullscreen"}
-        </Button>
+          <Button
+            variant="secondary"
+            onClick={() => void toggleFullscreen()}
+            aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+          >
+            {isFullscreen ? <Minimize2 /> : <Maximize2 />}
+            {isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+          </Button>
+        </SimpleTooltip>
       </div>
       {!everReady ? (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
