@@ -43,6 +43,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
+use axum::serve::ListenerExt;
 use dux_core::config::{DuxPaths, PlanAddr, ServerPlan};
 use dux_core::engine::Engine;
 
@@ -430,9 +431,14 @@ fn run_plain_http(
             let task_shutdown = shutdown.subscribe();
             tasks.spawn(async move {
                 // Serve with connect-info so the login handler can read the peer
-                // IP for the per-IP attempt backoff.
+                // IP for the per-IP attempt backoff. `tap_io` disables Nagle on
+                // each accepted socket: terminal traffic is many tiny packets
+                // (keystrokes, per-char echo/redraws), and Nagle batches them into
+                // laggy clumps that make remote typing stutter and flicker.
                 let result = axum::serve(
-                    listener,
+                    listener.tap_io(|stream| {
+                        let _ = stream.set_nodelay(true);
+                    }),
                     app.into_make_service_with_connect_info::<SocketAddr>(),
                 )
                 .with_graceful_shutdown(wait_for_shutdown(task_shutdown))
@@ -1046,8 +1052,12 @@ pub fn serve_with_engine(
         let task_shutdown = shutdown.subscribe();
         server_tasks.spawn_on(
             async move {
+                // Disable Nagle per accepted socket (see run_plain_http) so
+                // interactive terminal traffic isn't batched into laggy clumps.
                 let result = axum::serve(
-                    tokio_listener,
+                    tokio_listener.tap_io(|stream| {
+                        let _ = stream.set_nodelay(true);
+                    }),
                     app.into_make_service_with_connect_info::<SocketAddr>(),
                 )
                 .with_graceful_shutdown(wait_for_shutdown(task_shutdown))

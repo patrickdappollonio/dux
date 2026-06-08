@@ -752,6 +752,28 @@ pub async fn serve_https_acme(
 /// `RustlsAcceptor` on a `127.0.0.1:0` listener. The acceptor is generic over the
 /// axum-server `Accept` contract so both injections share this exact serve path.
 ///
+/// Wraps an axum-server acceptor to disable Nagle (TCP_NODELAY) on each accepted
+/// socket before the TLS handshake. Terminal traffic is many tiny packets
+/// (keystrokes, per-char echo/redraws); without this, Nagle batches them into
+/// laggy clumps that make remote typing stutter and flicker. Forwards every
+/// associated type to the inner acceptor — it only side-effects the raw stream.
+#[derive(Clone)]
+struct NoDelayAcceptor<A>(A);
+
+impl<A, S> axum_server::accept::Accept<tokio::net::TcpStream, S> for NoDelayAcceptor<A>
+where
+    A: axum_server::accept::Accept<tokio::net::TcpStream, S>,
+{
+    type Stream = A::Stream;
+    type Service = A::Service;
+    type Future = A::Future;
+
+    fn accept(&self, stream: tokio::net::TcpStream, service: S) -> Self::Future {
+        let _ = stream.set_nodelay(true);
+        self.0.accept(stream, service)
+    }
+}
+
 /// The std listener must be non-blocking before tokio registers it; this sets it
 /// so callers (prod and test alike) need not remember to.
 pub async fn serve_https_with_acceptor<A, S>(
@@ -786,7 +808,7 @@ where
     listener.set_nonblocking(true)?;
     axum_server::from_tcp(listener)?
         .handle(handle)
-        .acceptor(acceptor)
+        .acceptor(NoDelayAcceptor(acceptor))
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await
 }
