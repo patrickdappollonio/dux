@@ -148,6 +148,11 @@ export interface FileDiff {
   hunks: DiffHunk[]
 }
 
+/** Fallback xterm.js scrollback used only for the brief window before the first
+ * ViewModel arrives; mirrors the core `agent_scrollback_lines` default
+ * (`config.rs`). Keep in sync if the Rust default changes. */
+export const DEFAULT_SCROLLBACK_LINES = 10000
+
 export interface ViewModel {
   projects: ProjectView[]
   sessions: SessionView[]
@@ -164,6 +169,10 @@ export interface ViewModel {
    * the PR banner lane above the terminal when "top" and below when "bottom".
    * Mobile ignores this and always renders the banner on top. */
   pr_banner_position: "top" | "bottom"
+  /** Mirrors `config.ui.agent_scrollback_lines`. Each xterm.js instance is
+   * sized to this so the reconnect repaint's replayed history isn't trimmed by
+   * xterm's 1000-line default. */
+  agent_scrollback_lines: number
   /** Surface-aware command-palette commands the web renders as a global
    * "Commands" group, in canonical registry order. Derived from the Rust
    * `dux_core::palette` (the Web/Both subset). Each `id` is the dashed command

@@ -11,6 +11,7 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { applyModifiers, arrowSeq, ESC, TAB } from "@/lib/termkeys"
 import { selectSession, socket, useDux } from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
+import { DEFAULT_SCROLLBACK_LINES } from "@/lib/types"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 
 interface TerminalPaneProps {
@@ -77,6 +78,16 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
   }
 
   const { viewModel } = useDux()
+  // Size xterm's scrollback to the configured `agent_scrollback_lines` so the
+  // reconnect repaint's replayed history isn't trimmed by xterm's 1000-line
+  // default. Read via a ref (not an effect dep) so a ViewModel change never
+  // recreates the terminal; the fallback matches the core default and only
+  // applies before the first ViewModel arrives.
+  const scrollbackRef = useRef(
+    viewModel?.agent_scrollback_lines ?? DEFAULT_SCROLLBACK_LINES
+  )
+  scrollbackRef.current =
+    viewModel?.agent_scrollback_lines ?? DEFAULT_SCROLLBACK_LINES
   const session =
     kind === "agent"
       ? viewModel?.sessions.find((s) => s.id === id)
@@ -155,6 +166,7 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
       fontSize: 13,
       cursorBlink: true,
       convertEol: false,
+      scrollback: scrollbackRef.current,
       theme: { background: resolvedBg },
     })
     const fit = new FitAddon()

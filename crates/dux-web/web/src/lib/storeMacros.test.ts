@@ -55,6 +55,7 @@ function vmWithMacros(macros: MacroView[]): ViewModel {
     randomize_agent_names_by_default: false,
     gh_available: false,
     pr_banner_position: "top",
+    agent_scrollback_lines: 10000,
     palette_commands: [],
     macros,
   }

@@ -40,6 +40,11 @@ pub struct ViewModel {
     /// "bottom", matching the TUI's `pr_banner_at_bottom` semantics. Mobile
     /// ignores this and always renders the banner on top.
     pub pr_banner_position: String,
+    /// Mirrors `config.ui.agent_scrollback_lines`. The web sizes each xterm.js
+    /// instance's scrollback to this so it can retain the full history the
+    /// reconnect repaint replays — without it, xterm.js silently caps at its
+    /// 1000-line default and trims the replayed history.
+    pub agent_scrollback_lines: usize,
     /// Surface-aware command-palette commands that the web should render as a
     /// global "Commands" group, in canonical registry order. Derived from
     /// `dux_core::palette` (the `Web`/`Both` subset). Each entry's `id` is the
@@ -346,6 +351,7 @@ impl Engine {
                 .enable_randomized_pet_name_by_default,
             gh_available: self.pr_agent_command_available(),
             pr_banner_position: self.config.ui.pr_banner_position.clone(),
+            agent_scrollback_lines: self.config.ui.agent_scrollback_lines,
             palette_commands: crate::palette::web_palette_commands()
                 .map(|c| PaletteCommandView {
                     id: c.name,
@@ -817,6 +823,14 @@ mod tests {
 
         engine.config.defaults.enable_randomized_pet_name_by_default = true;
         assert!(engine.view_model().randomize_agent_names_by_default);
+    }
+
+    #[test]
+    fn agent_scrollback_lines_is_projected() {
+        let (mut engine, _tmp) = test_engine();
+
+        engine.config.ui.agent_scrollback_lines = 4242;
+        assert_eq!(engine.view_model().agent_scrollback_lines, 4242);
     }
 
     #[test]
