@@ -13,7 +13,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::git::resolve_worktree_path;
+use crate::git::{is_under, resolve_worktree_path};
 
 /// Largest working copy the editor will load. Beyond this, Monaco bogs down and
 /// the read would buffer the whole file into memory and a JSON response, so the
@@ -71,21 +71,36 @@ pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile
     })
 }
 
-/// Overwrite an EXISTING worktree file with new text. Refuses to create new
-/// files or to write through a non-regular-file path.
+/// Write text to a worktree file, creating it if it does not exist (the editor
+/// can save brand-new, uncommitted files). The only constraint is containment:
+/// the target — and, when creating, its parent directory — must stay inside the
+/// worktree. Refuses to write THROUGH a symlink (an existing one, or a dangling
+/// one whose target could appear between the boundary's existence check and the
+/// write) and refuses to write to a directory/fifo/device.
 pub fn write_file(worktree: &Path, rel_path: &str, content: &str) -> anyhow::Result<()> {
     let path = resolve_worktree_path(worktree, rel_path)?;
-    // No-follow stat: refuse to write THROUGH a symlink (a dangling symlink whose
-    // target appears between the boundary's existence check and the write is the
-    // one escape the boundary can miss), and refuse to create files or write to
-    // a directory/fifo/device — only an existing regular file is editable.
-    let meta = std::fs::symlink_metadata(&path)
-        .map_err(|_| anyhow::anyhow!("not an existing file: {rel_path}"))?;
-    if meta.file_type().is_symlink() {
-        anyhow::bail!("refusing to write through a symlink: {rel_path}");
-    }
-    if !meta.is_file() {
-        anyhow::bail!("not an existing file: {rel_path}");
+    // No-follow stat tells existing-file kind apart from "does not exist".
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            anyhow::bail!("refusing to write through a symlink: {rel_path}");
+        }
+        Ok(meta) if meta.is_file() => {
+            // Overwrite an existing regular file.
+        }
+        Ok(_) => anyhow::bail!("not a regular file: {rel_path}"),
+        Err(_) => {
+            // Creating a new file: the parent directory must already exist and
+            // resolve INSIDE the worktree. `is_under` canonicalizes it, so a
+            // symlinked/escaping parent (which the boundary's existence check
+            // skips for a not-yet-existing target) is rejected here, and a
+            // missing parent fails too (no implicit `mkdir -p`).
+            let parent = path.parent().unwrap_or(worktree);
+            if !is_under(worktree, parent) {
+                anyhow::bail!(
+                    "cannot create file: parent directory is missing or outside the worktree: {rel_path}"
+                );
+            }
+        }
     }
     std::fs::write(&path, content)?;
     Ok(())
@@ -152,10 +167,43 @@ mod tests {
     }
 
     #[test]
-    fn write_refuses_to_create_new_file() {
+    fn write_creates_a_new_file_at_the_worktree_root() {
         let dir = worktree();
-        assert!(write_file(dir.path(), "brand-new.txt", "x").is_err());
-        assert!(!dir.path().join("brand-new.txt").exists());
+        write_file(dir.path(), "brand-new.txt", "hello\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("brand-new.txt")).unwrap(),
+            "hello\n"
+        );
+    }
+
+    #[test]
+    fn write_creates_a_new_file_in_an_existing_subdir() {
+        let dir = worktree();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        write_file(dir.path(), "src/new.rs", "fn main() {}\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/new.rs")).unwrap(),
+            "fn main() {}\n"
+        );
+    }
+
+    #[test]
+    fn write_refuses_to_create_in_a_missing_directory() {
+        let dir = worktree();
+        // No implicit mkdir -p: the parent must already exist.
+        assert!(write_file(dir.path(), "nope/new.txt", "x").is_err());
+        assert!(!dir.path().join("nope").exists());
+    }
+
+    #[test]
+    fn write_refuses_to_create_through_a_symlinked_parent_that_escapes() {
+        let dir = worktree();
+        let outside = tempfile::tempdir().unwrap();
+        // A dir symlink inside the worktree pointing outside it.
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+        // Creating "escape/evil.txt" would land at <outside>/evil.txt.
+        assert!(write_file(dir.path(), "escape/evil.txt", "pwned").is_err());
+        assert!(!outside.path().join("evil.txt").exists());
     }
 
     #[test]
