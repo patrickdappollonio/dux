@@ -45,6 +45,13 @@ async function postFileNoContent(
 }
 
 export const fileApi = {
+  // The worktree's git-relevant files (tracked + untracked-not-ignored) for the
+  // editor's browse tree. Editing is NOT limited to this set — any path inside
+  // the worktree can be read/written/created (the server enforces containment).
+  list: (sessionId: string) =>
+    postFile<{ files: string[] }>("/api/file/list", {
+      session_id: sessionId,
+    }).then((r) => r.files),
   read: (sessionId: string, path: string) =>
     postFile<WorktreeFile>("/api/file/read", { session_id: sessionId, path }),
   write: (sessionId: string, path: string, content: string) =>

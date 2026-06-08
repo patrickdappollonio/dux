@@ -1,18 +1,16 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react"
-import { FileCode2, Loader2, Save, X } from "lucide-react"
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react"
+import { FileCode2, FilePlus, Loader2, Save, Search, X } from "lucide-react"
 import { toast } from "sonner"
 import { fileApi } from "@/lib/fileApi"
 import type { WorktreeFile } from "@/lib/fileApi"
-import {
-  editableFiles,
-  shouldShowChangedFiles,
-  statusGlyph,
-} from "@/lib/changedFiles"
+import { shouldShowChangedFiles, statusGlyph } from "@/lib/changedFiles"
+import { ancestorDirs, buildFileTree } from "@/lib/fileTree"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
+import { FileTree } from "@/components/FileTree"
 import {
   Dialog,
   DialogContent,
@@ -21,12 +19,17 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { closeEditor, useDux } from "@/lib/store"
 
 // Monaco is multiple MB; keep it off the main bundle by loading it only when the
 // editor actually opens.
 const CodeEditor = lazy(() => import("./CodeEditor"))
+
+// Cap how many results the search list renders so a 1-char query in a huge repo
+// can't mount thousands of rows.
+const MAX_SEARCH_RESULTS = 300
 
 // A pending discard confirmation: closing the overlay, or switching to another
 // file, while the current buffer has unsaved edits.
@@ -58,7 +61,7 @@ export function EditorOverlay() {
       >
         <DialogTitle className="sr-only">Code editor</DialogTitle>
         <DialogDescription className="sr-only">
-          Edit changed files in this worktree.
+          Browse and edit files in this worktree.
         </DialogDescription>
         {editorTarget && (
           <EditorBody
@@ -91,20 +94,44 @@ function EditorBody({ sessionId, initialPath, closeReqRef }: EditorBodyProps) {
   const [pendingDiscard, setPendingDiscard] = useState<PendingDiscard | null>(
     null,
   )
+  // The worktree's browsable files (fetched from the editor's session directly,
+  // independent of the changed-files watch).
+  const [treeFiles, setTreeFiles] = useState<string[]>([])
+  const [treeLoading, setTreeLoading] = useState(true)
+  const [search, setSearch] = useState("")
+  const [newFileOpen, setNewFileOpen] = useState(false)
+  const [newFilePath, setNewFilePath] = useState("")
+  const [creating, setCreating] = useState(false)
   // Monotonic token so a slow earlier read can never clobber a later one.
   const reqId = useRef(0)
 
   const dirty = openPath !== null && !binary && draft !== loaded
 
+  // Badge the tree's changed files. Sourced from the (watched) changed-files
+  // broadcast, guarded so a different session's list never leaks in.
   const watched = viewModel?.changed_files.watched_session_id ?? null
-  const listReady = shouldShowChangedFiles(watched, sessionId)
-  const files =
-    listReady && viewModel
-      ? editableFiles(
-          viewModel.changed_files.staged,
-          viewModel.changed_files.unstaged,
-        )
-      : []
+  const changedMap = useMemo(() => {
+    const map = new Map<string, string>()
+    if (!shouldShowChangedFiles(watched, sessionId) || !viewModel) return map
+    const { staged, unstaged } = viewModel.changed_files
+    for (const f of [...unstaged, ...staged]) {
+      if (!map.has(f.path)) map.set(f.path, statusGlyph(f.status))
+    }
+    return map
+  }, [viewModel, watched, sessionId])
+
+  const tree = useMemo(() => buildFileTree(treeFiles), [treeFiles])
+  const defaultExpanded = useMemo(
+    () => new Set(initialPath ? ancestorDirs(initialPath) : []),
+    [initialPath],
+  )
+  const filtered = useMemo(() => {
+    const needle = search.trim().toLowerCase()
+    if (!needle) return []
+    return treeFiles
+      .filter((f) => f.toLowerCase().includes(needle))
+      .slice(0, MAX_SEARCH_RESULTS)
+  }, [search, treeFiles])
 
   function applyLoaded(token: number, f: WorktreeFile): void {
     if (reqId.current !== token) return
@@ -121,21 +148,33 @@ function EditorBody({ sessionId, initialPath, closeReqRef }: EditorBodyProps) {
     setLoading(false)
   }
 
-  // Auto-load the initial file on open. setState happens only in the async
-  // callbacks (never synchronously in the effect body), so re-renders stay pure;
-  // `openPath`/`loading` were already seeded from `initialPath` above.
+  // Fetch the worktree file list + auto-load the initial file on open. setState
+  // happens only in async callbacks (never synchronously in the effect body), so
+  // re-renders stay pure; `openPath`/`loading` were seeded from `initialPath`.
   useEffect(() => {
-    if (initialPath === null) return
-    const token = reqId.current
     let cancelled = false
     fileApi
-      .read(sessionId, initialPath)
-      .then((f) => {
-        if (!cancelled) applyLoaded(token, f)
+      .list(sessionId)
+      .then((files) => {
+        if (!cancelled) setTreeFiles(files)
       })
-      .catch((e) => {
-        if (!cancelled) onLoadError(token, e)
+      .catch(() => {
+        if (!cancelled) toast.error("could not list worktree files")
       })
+      .finally(() => {
+        if (!cancelled) setTreeLoading(false)
+      })
+    if (initialPath !== null) {
+      const token = reqId.current
+      fileApi
+        .read(sessionId, initialPath)
+        .then((f) => {
+          if (!cancelled) applyLoaded(token, f)
+        })
+        .catch((e) => {
+          if (!cancelled) onLoadError(token, e)
+        })
+    }
     return () => {
       cancelled = true
     }
@@ -143,7 +182,7 @@ function EditorBody({ sessionId, initialPath, closeReqRef }: EditorBodyProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Open a file from the list. An event handler, so synchronous setState is fine.
+  // Open a file. An event handler, so synchronous setState is fine.
   function load(path: string): void {
     const token = ++reqId.current
     setOpenPath(path)
@@ -156,8 +195,7 @@ function EditorBody({ sessionId, initialPath, closeReqRef }: EditorBodyProps) {
   }
 
   // Switching files discards the current buffer, so guard it the same way as
-  // closing — this is the most common in-editor action and must not silently
-  // drop unsaved edits.
+  // closing — it must not silently drop unsaved edits.
   function requestSwitch(path: string): void {
     if (path === openPath) return
     if (dirty) {
@@ -209,12 +247,31 @@ function EditorBody({ sessionId, initialPath, closeReqRef }: EditorBodyProps) {
       .finally(() => setSaving(false))
   }
 
+  function createFile(): void {
+    const path = newFilePath.trim()
+    if (!path || creating) return
+    setCreating(true)
+    fileApi
+      .write(sessionId, path, "")
+      .then(() => fileApi.list(sessionId))
+      .then((files) => {
+        setTreeFiles(files)
+        setNewFileOpen(false)
+        setNewFilePath("")
+        requestSwitch(path)
+      })
+      .catch((e) => {
+        toast.error(e instanceof Error ? e.message : "could not create file")
+      })
+      .finally(() => setCreating(false))
+  }
+
   return (
     <>
       {/* Header: open file path, dirty indicator, Save, Close. */}
       <div className="flex items-center gap-2 border-b px-3 py-2">
         <FileCode2 className="size-4 shrink-0 text-muted-foreground" />
-        <span className="min-w-0 flex-1 truncate text-left font-mono text-sm [direction:rtl] [unicode-bidi:plaintext]">
+        <span className="min-w-0 flex-1 truncate text-left font-mono text-sm [direction:rtl]">
           {openPath ?? "Select a file"}
         </span>
         {/* Dirty dot kept OUTSIDE the truncating span so it can't be clipped on
@@ -246,44 +303,87 @@ function EditorBody({ sessionId, initialPath, closeReqRef }: EditorBodyProps) {
         </Button>
       </div>
 
-      {/* Body: changed-files list (left) + Monaco (right). */}
+      {/* Body: worktree file tree (left) + Monaco (right). */}
       <div className="flex min-h-0 flex-1">
-        <ScrollArea className="w-64 shrink-0 border-r">
-          <div className="flex flex-col gap-0.5 p-2">
-            {files.length === 0 ? (
-              <p className="px-1 py-2 text-xs text-muted-foreground">
-                No changed files to edit. Make a change and it shows up here.
-              </p>
-            ) : (
-              files.map((f) => (
-                <button
-                  key={f.path}
-                  type="button"
-                  onClick={() => requestSwitch(f.path)}
-                  className={cn(
-                    "flex items-center gap-2 rounded px-1 py-1 hover:bg-muted",
-                    f.path === openPath && "bg-muted",
-                  )}
-                >
-                  <Badge
-                    variant="outline"
-                    className="shrink-0 font-mono leading-none"
-                  >
-                    {statusGlyph(f.status)}
-                  </Badge>
-                  <span className="min-w-0 flex-1 truncate text-left font-mono text-xs [direction:rtl] [unicode-bidi:plaintext]">
-                    {f.path}
-                  </span>
-                </button>
-              ))
-            )}
+        <div className="flex w-64 shrink-0 flex-col border-r">
+          <div className="flex items-center gap-1 border-b p-2">
+            <div className="relative flex-1">
+              <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search files…"
+                className="h-8 pl-7 text-xs"
+              />
+            </div>
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              aria-label="New file"
+              title="New file"
+              onClick={() => setNewFileOpen(true)}
+            >
+              <FilePlus />
+            </Button>
           </div>
-        </ScrollArea>
+          <ScrollArea className="min-h-0 flex-1">
+            <div className="p-1">
+              {treeLoading ? (
+                <div className="flex items-center justify-center py-4 text-muted-foreground">
+                  <Loader2 className="size-4 motion-safe:animate-spin" />
+                </div>
+              ) : search.trim() ? (
+                filtered.length === 0 ? (
+                  <p className="px-1 py-2 text-xs text-muted-foreground">
+                    No files match.
+                  </p>
+                ) : (
+                  filtered.map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => requestSwitch(p)}
+                      className={cn(
+                        "flex w-full items-center gap-1.5 rounded px-1 py-1 hover:bg-muted",
+                        p === openPath && "bg-muted",
+                      )}
+                    >
+                      {changedMap.has(p) && (
+                        <Badge
+                          variant="outline"
+                          className="shrink-0 font-mono text-[10px] leading-none"
+                        >
+                          {changedMap.get(p)}
+                        </Badge>
+                      )}
+                      {/* Full path → start-ellipsize so the filename stays visible. */}
+                      <span className="min-w-0 flex-1 truncate text-left font-mono text-xs [direction:rtl]">
+                        {p}
+                      </span>
+                    </button>
+                  ))
+                )
+              ) : tree.length === 0 ? (
+                <p className="px-1 py-2 text-xs text-muted-foreground">
+                  No files in this worktree.
+                </p>
+              ) : (
+                <FileTree
+                  nodes={tree}
+                  openPath={openPath}
+                  changed={changedMap}
+                  defaultExpanded={defaultExpanded}
+                  onOpen={requestSwitch}
+                />
+              )}
+            </div>
+          </ScrollArea>
+        </div>
 
         <div className="relative min-w-0 flex-1">
           {openPath === null ? (
             <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
-              Select a file from the list to edit it.
+              Select a file from the tree to edit it.
             </div>
           ) : loading ? (
             <div className="flex h-full items-center justify-center text-muted-foreground">
@@ -316,6 +416,59 @@ function EditorBody({ sessionId, initialPath, closeReqRef }: EditorBodyProps) {
           )}
         </div>
       </div>
+
+      {/* New-file prompt. */}
+      <Dialog
+        open={newFileOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            setNewFileOpen(false)
+            setNewFilePath("")
+          }
+        }}
+      >
+        <DialogContent showCloseButton={false} className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>New file</DialogTitle>
+            <DialogDescription>
+              Worktree-relative path. The parent folder must already exist.
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            value={newFilePath}
+            onChange={(e) => setNewFilePath(e.target.value)}
+            placeholder="src/example.ts"
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault()
+                createFile()
+              }
+            }}
+          />
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setNewFileOpen(false)
+                setNewFilePath("")
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              disabled={!newFilePath.trim() || creating}
+              aria-busy={creating}
+              onClick={createFile}
+            >
+              {creating ? (
+                <Loader2 className="motion-safe:animate-spin" />
+              ) : null}
+              Create
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Styled unsaved-changes confirmation (replaces window.confirm to honor
           the design-system + Space-activates-focused-button tenet). */}

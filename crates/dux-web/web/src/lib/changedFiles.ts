@@ -35,23 +35,6 @@ export function filterChangedFiles(
   return files.filter((f) => f.path.toLowerCase().includes(needle))
 }
 
-// The set of files the editor can open: staged ∪ unstaged, deduped by path (a
-// file can be in both), with deleted files dropped (nothing on disk to edit).
-// Unstaged is listed first so the kept status reflects the working-tree state.
-export function editableFiles(
-  staged: ChangedFileView[],
-  unstaged: ChangedFileView[],
-): ChangedFileView[] {
-  const seen = new Map<string, ChangedFileView>()
-  for (const f of [...unstaged, ...staged]) {
-    // Compare the raw status, not the display glyph, so deletion filtering never
-    // silently changes if statusGlyph's presentation mapping is tweaked.
-    if (f.status.toUpperCase().startsWith("D")) continue
-    if (!seen.has(f.path)) seen.set(f.path, f)
-  }
-  return [...seen.values()]
-}
-
 // The changed-files engine state (`watched_worktree`/`changed_files`) is GLOBAL
 // and broadcast to every client, but selection is per-client. So a client must
 // only trust the broadcast lists when they belong to the session it actually has
