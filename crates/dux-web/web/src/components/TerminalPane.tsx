@@ -248,6 +248,21 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
     fit.fit()
     sendSize()
 
+    // First-load redraw. The immediate fit above can read a STALE size when the
+    // pane isn't at its final dimensions synchronously on mount — e.g. after a
+    // mobile→desktop layout switch, opening an agent rendered it at the old
+    // (mobile) width until the user nudged a divider. The ResizeObserver only
+    // re-sends on an actual size CHANGE, so it doesn't self-correct here. Re-fit
+    // once the layout has settled and report unconditionally, so the child gets a
+    // SIGWINCH and redraws at the true size on its own. A same-size resize is a
+    // kernel no-op (no SIGWINCH), so this never triggers a spurious redraw.
+    const redrawTimer = setTimeout(() => {
+      fit.fit()
+      lastRows = term.rows
+      lastCols = term.cols
+      socket.resize(id, term.rows, term.cols)
+    }, 50)
+
     // (Known edge: background tabs throttle rAF but not timers, so a resize
     // while hidden can send pre-fit dims; the next foreground tick corrects it.)
     const ro = new ResizeObserver(() => {
@@ -261,6 +276,7 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
     return () => {
       cancelAnimationFrame(fitFrame)
       clearTimeout(sendTimer)
+      clearTimeout(redrawTimer)
       ro.disconnect()
       dataSub.dispose()
       socket.onPtyBytes = () => {}
