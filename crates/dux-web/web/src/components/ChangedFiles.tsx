@@ -1,5 +1,15 @@
 import { useMemo, useState, useSyncExternalStore } from "react"
-import { Check, Hash, Loader2, MousePointerClick, Search, Undo2 } from "lucide-react"
+import {
+  Check,
+  Hash,
+  Loader2,
+  Minus,
+  MousePointerClick,
+  Plus,
+  Search,
+  Undo2,
+  X,
+} from "lucide-react"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Badge } from "@/components/ui/badge"
@@ -28,6 +38,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
 import {
   Sheet,
+  SheetClose,
   SheetContent,
   SheetHeader,
   SheetTitle,
@@ -95,51 +106,67 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
       className="group flex cursor-pointer items-center gap-2 rounded px-1 py-1 hover:bg-muted max-md:min-h-11"
       onClick={() => onOpenDiff(file.path)}
     >
-      {/* Status glyph */}
-      <Badge variant="outline" className="shrink-0 font-mono">
+      {/* Status glyph. leading-none so the single uppercase letter centers in
+          the fixed-height badge instead of riding high. */}
+      <Badge variant="outline" className="shrink-0 font-mono leading-none">
         {glyph}
       </Badge>
 
-      {/* File path */}
-      <span className="min-w-0 flex-1 truncate text-xs text-foreground">
+      {/* File path — monospace (it's a path/code identifier). */}
+      <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
         {file.path}
       </span>
 
-      {/* Additions / deletions (text-only, skip for binary) */}
+      {/* Additions / deletions (text-only, skip for binary). Added lines green,
+          removed lines red, matching the diff viewer's gutter coloring. */}
       {!file.binary && (file.additions > 0 || file.deletions > 0) && (
-        <span className="shrink-0 text-xs text-muted-foreground">
-          {file.additions > 0 && `+${file.additions}`}
+        <span className="shrink-0 font-mono text-xs">
+          {file.additions > 0 && (
+            <span className="text-green-500">+{file.additions}</span>
+          )}
           {file.additions > 0 && file.deletions > 0 && " "}
-          {file.deletions > 0 && `−${file.deletions}`}
+          {file.deletions > 0 && (
+            <span className="text-red-500">−{file.deletions}</span>
+          )}
         </span>
       )}
 
       {/* Discard action — unstaged rows only (the TUI blocks discarding staged
           files). Destructive-tinted, hover-reveal on desktop / always-visible
           ≥44px on touch, same as the Stage button. */}
+      {/* Both action buttons are labeled (icon + text) and the same size so they
+          sit on one baseline. Discard opens a confirm dialog (it's destructive).
+          Hover-reveal on desktop; always-visible ≥44px on touch (no hover). */}
       {action === "stage" && (
-        <SimpleTooltip content="Discard changes">
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label={`Discard changes to ${file.path}`}
-            className="shrink-0 text-destructive opacity-100 hover:text-destructive max-md:size-11 md:opacity-0 md:group-hover:opacity-100"
-            onClick={handleDiscard}
-          >
-            <Undo2 />
-          </Button>
-        </SimpleTooltip>
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label={`Discard changes to ${file.path}`}
+          className="shrink-0 text-destructive opacity-100 hover:text-destructive max-md:min-h-11 md:opacity-0 md:group-hover:opacity-100"
+          onClick={handleDiscard}
+        >
+          <Undo2 />
+          Discard
+        </Button>
       )}
 
-      {/* Stage / Unstage action. Hover-reveal works on desktop, but touch has
-          no hover — so on phones the button is always visible and ≥44px tall. */}
       <Button
         variant="ghost"
         size="sm"
         className="shrink-0 opacity-100 max-md:min-h-11 md:opacity-0 md:group-hover:opacity-100"
         onClick={handleAction}
       >
-        {action === "stage" ? "Stage" : "Unstage"}
+        {action === "stage" ? (
+          <>
+            <Plus />
+            Stage
+          </>
+        ) : (
+          <>
+            <Minus />
+            Unstage
+          </>
+        )}
       </Button>
     </div>
   )
@@ -370,30 +397,34 @@ export function ChangedFiles() {
             near-full on phones, capped to 3xl on desktop. */}
         <SheetContent
           side="right"
+          showCloseButton={false}
           className="data-[side=right]:w-[92vw] data-[side=right]:sm:max-w-3xl"
         >
-          <SheetHeader className="flex-row items-center justify-between gap-2 pr-14">
+          <SheetHeader className="flex-row items-center justify-between gap-2">
             <SimpleTooltip content={currentDiff?.path ?? ""}>
-              <SheetTitle className="truncate font-mono text-sm">
+              <SheetTitle className="min-w-0 truncate font-mono text-sm">
                 {currentDiff?.path ?? ""}
               </SheetTitle>
             </SimpleTooltip>
-            <SimpleTooltip
-              content={showDiffLineNumbers ? "Hide line numbers" : "Show line numbers"}
-            >
+            {/* Labeled (icon + text) buttons of the same size so they sit on one
+                baseline — the diff sheet replaces the Sheet's default icon-only
+                close with an explicit "Close" for consistency. */}
+            <div className="flex shrink-0 items-center gap-1">
               <Button
                 variant="ghost"
-                size="icon-sm"
-                className={
-                  showDiffLineNumbers ? "shrink-0 text-primary" : "shrink-0 text-muted-foreground"
-                }
-                aria-label="Toggle line numbers"
+                size="sm"
+                className={showDiffLineNumbers ? "text-primary" : undefined}
                 aria-pressed={showDiffLineNumbers}
                 onClick={toggleDiffLineNumbers}
               >
                 <Hash />
+                Line numbers
               </Button>
-            </SimpleTooltip>
+              <SheetClose render={<Button variant="ghost" size="sm" />}>
+                <X />
+                Close
+              </SheetClose>
+            </div>
           </SheetHeader>
           <div className="min-h-0 flex-1 overflow-auto px-4 pb-4">
             <DiffBody state={currentDiff} showLineNumbers={showDiffLineNumbers} />
@@ -472,21 +503,26 @@ function DiffHunks({
   )
   return (
     <div className="overflow-x-auto rounded border font-mono text-xs leading-relaxed">
-      {hunks.map((hunk, hi) => (
-        <div key={hi}>
-          <div className="bg-muted px-2 py-0.5 text-muted-foreground">
-            {hunk.header}
+      {/* w-max so the block grows to the widest line and every row's +/- tint
+          spans the full code width (not just the viewport); min-w-full so short
+          diffs still fill the panel. Rows below inherit this width. */}
+      <div className="w-max min-w-full">
+        {hunks.map((hunk, hi) => (
+          <div key={hi}>
+            <div className="bg-muted px-2 py-0.5 text-muted-foreground">
+              {hunk.header}
+            </div>
+            {hunk.lines.map(({ line, html }, li) => (
+              <DiffRow
+                key={li}
+                line={line}
+                html={html}
+                showLineNumbers={showLineNumbers}
+              />
+            ))}
           </div>
-          {hunk.lines.map(({ line, html }, li) => (
-            <DiffRow
-              key={li}
-              line={line}
-              html={html}
-              showLineNumbers={showLineNumbers}
-            />
-          ))}
-        </div>
-      ))}
+        ))}
+      </div>
     </div>
   )
 }

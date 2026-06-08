@@ -274,9 +274,13 @@ function SessionRow({
           className="min-h-11 flex-1 touch-manipulation justify-start gap-2 px-2"
           onClick={() => selectAndOpen(session.id)}
         >
-          {/* Gently bounces (motion-safe) while the agent streams output. */}
+          {/* Gently bounces (motion-safe) while the agent streams output; the
+              transition settles it back to rest when streaming stops mid-bounce. */}
           <Bot
-            className={cn(session.working && "motion-safe:animate-agent-working")}
+            className={cn(
+              "motion-safe:transition-transform motion-safe:duration-300",
+              session.working && "motion-safe:animate-agent-working"
+            )}
           />
           <span className="flex-1 truncate text-left">{label}</span>
           <span className="flex shrink-0 items-center gap-1">
