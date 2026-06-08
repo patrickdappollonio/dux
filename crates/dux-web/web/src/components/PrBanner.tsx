@@ -21,12 +21,12 @@ export function PrBanner({ pr }: { pr: PrView }) {
         target="_blank"
         rel="noopener noreferrer"
         className={cn(
-          "flex h-8 shrink-0 items-center gap-2 border-y px-3 text-xs transition-colors",
+          "flex h-9 shrink-0 items-center gap-2 border-y px-3 text-sm transition-colors",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
           prBannerClass(pr.state)
         )}
       >
-        <GitPullRequest className="size-3.5 shrink-0" />
+        <GitPullRequest className="size-4 shrink-0" />
         <span className="shrink-0 font-mono font-semibold">#{pr.number}</span>
         <span className="shrink-0 capitalize opacity-80">{state}</span>
         <span className="truncate text-foreground/80">{pr.title}</span>

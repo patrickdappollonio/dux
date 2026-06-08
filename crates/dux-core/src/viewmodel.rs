@@ -26,6 +26,8 @@ pub struct ViewModel {
     /// list. Static content; the watch channel coalesces identical frames so
     /// this does not cause churn.
     pub welcome_tips: Vec<String>,
+    /// Mirrors the binary's display version ('vX.Y.Z' or 'development'); the web shows it in the sidebar brand block.
+    pub dux_version: String,
     /// Mirrors `defaults.enable_randomized_pet_name_by_default`. When true, the
     /// web new-agent dialog pre-checks its "Use randomized pet name" box (and
     /// requests a generated name on open), matching the TUI's prompt default.
@@ -345,6 +347,7 @@ impl Engine {
             global_env: self.config.env.clone(),
             available_providers,
             welcome_tips: crate::welcome::web_tips(),
+            dux_version: crate::display_version().to_string(),
             randomize_agent_names_by_default: self
                 .config
                 .defaults
@@ -373,6 +376,12 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::engine::test_support::{sample_project, sample_session, test_engine};
+
+    #[test]
+    fn dux_version_is_projected() {
+        let (engine, _tmp) = test_engine();
+        assert!(!engine.view_model().dux_version.is_empty());
+    }
 
     #[test]
     fn projects_sessions_and_changed_files_are_projected() {

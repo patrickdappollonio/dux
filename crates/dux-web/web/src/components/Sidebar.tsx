@@ -65,6 +65,7 @@ import {
 import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
   SidebarGroupLabel,
@@ -77,6 +78,7 @@ import {
   SidebarMenuSubButton,
   SidebarMenuSubItem,
   SidebarRail,
+  SidebarTrigger,
 } from "@/components/ui/sidebar"
 import { useSidebar } from "@/components/ui/sidebar"
 import {
@@ -240,8 +242,12 @@ function SessionSubItem({
         className="max-md:pr-8 touch-manipulation group-focus-within/menu-sub-item:pr-8 group-hover/menu-sub-item:pr-8 group-has-[[aria-expanded=true]]/menu-sub-item:pr-8"
         onClick={() => selectSession(session.id)}
       >
-        {/* All agents use the same Bot icon — provider is shown as text. */}
-        <Bot />
+        {/* All agents use the same Bot icon — provider is shown as text. While
+            the agent is streaming output it gently bounces (motion-safe) so the
+            "working" state is unmistakable at a glance. */}
+        <Bot
+          className={cn(session.working && "motion-safe:animate-agent-working")}
+        />
         <span className="truncate">{label}</span>
         <span className="ml-auto flex shrink-0 items-center gap-1">
           {session.pr ? (
@@ -729,7 +735,7 @@ export function AppSidebar() {
               <div className="flex flex-1 flex-col gap-0.5 leading-none">
                 <span className="font-semibold">dux</span>
                 <span className="text-xs text-sidebar-foreground/70">
-                  agent sessions
+                  {viewModel?.dux_version}
                 </span>
               </div>
             </SidebarMenuButton>
@@ -799,6 +805,13 @@ export function AppSidebar() {
         </SidebarGroup>
       </SidebarContent>
 
+      <SidebarFooter>
+        {/* Right-aligned when expanded; centered on the icon rail so it lines up
+            with the collapsed nav icons above it. */}
+        <div className="flex justify-end group-data-[collapsible=icon]:justify-center">
+          <SidebarTrigger />
+        </div>
+      </SidebarFooter>
       <SidebarRail />
       <SidebarResizeHandle />
     </Sidebar>

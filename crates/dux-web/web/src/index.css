@@ -51,6 +51,14 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --radius-2xl: calc(var(--radius) * 1.8);
     --radius-3xl: calc(var(--radius) * 2.2);
     --radius-4xl: calc(var(--radius) * 2.6);
+    /* A gentle bob for the agent icon while it streams output ("working").
+       Smoother than the default bounce easing so a busy sidebar isn't jarring. */
+    --animate-agent-working: agent-working 1s ease-in-out infinite;
+}
+
+@keyframes agent-working {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-25%); }
 }
 
 :root {
