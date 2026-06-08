@@ -1,5 +1,5 @@
 import type * as React from "react"
-import { Suspense } from "react"
+import { Fragment, Suspense } from "react"
 import { LogOut } from "lucide-react"
 
 import { AddProjectDialog } from "@/components/AddProjectDialog"
@@ -30,20 +30,12 @@ import { StatusBar } from "@/components/StatusBar"
 import { LoginScreen } from "@/components/LoginScreen"
 import { Welcome } from "@/components/Welcome"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
-import {
-  Breadcrumb,
-  BreadcrumbItem,
-  BreadcrumbList,
-  BreadcrumbPage,
-  BreadcrumbSeparator,
-} from "@/components/ui/breadcrumb"
 import { Button } from "@/components/ui/button"
 import {
   ResizableHandle,
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable"
-import { Separator } from "@/components/ui/separator"
 import {
   SidebarInset,
   SidebarProvider,
@@ -70,74 +62,45 @@ function InsetHeader() {
       : undefined
   const terminalLabel = terminal ? terminalTitle(terminal) : undefined
 
+  // The header details, mirroring the TUI: a flat `key: value` list joined by a
+  // single separator. `terminal` only appears when a companion terminal is the
+  // focused target; `terminals` (the count) only when there is at least one.
+  const details: { key: string; value: string }[] = []
+  if (session) {
+    details.push({ key: "agent", value: session.title || session.branch_name })
+    details.push({ key: "provider", value: session.provider })
+    if (project?.name) details.push({ key: "project", value: project.name })
+    details.push({ key: "branch", value: session.branch_name })
+    if (terminalLabel) details.push({ key: "terminal", value: terminalLabel })
+    if (session.terminals.length > 0) {
+      details.push({ key: "terminals", value: String(session.terminals.length) })
+    }
+  }
+
   return (
     <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
-      {/* Left region shares one shrink budget so a long title/details row
-          truncates instead of pushing the right-hand controls off the edge. */}
-      <div className="flex min-w-0 flex-1 items-center gap-2">
-        <Breadcrumb className="min-w-0">
-          <BreadcrumbList className="flex-nowrap">
-            {session ? (
-              <>
-                <BreadcrumbItem>
-                  <BreadcrumbPage>{project?.name ?? "dux"}</BreadcrumbPage>
-                </BreadcrumbItem>
-                <BreadcrumbSeparator />
-                <BreadcrumbItem className="min-w-0">
-                  <BreadcrumbPage className="truncate">
-                    {session.title || session.branch_name}
-                  </BreadcrumbPage>
-                </BreadcrumbItem>
-                {terminalLabel ? (
-                  <>
-                    <BreadcrumbSeparator />
-                    <BreadcrumbItem className="min-w-0">
-                      <BreadcrumbPage className="truncate">
-                        {terminalLabel}
-                      </BreadcrumbPage>
-                    </BreadcrumbItem>
-                  </>
-                ) : null}
-              </>
-            ) : (
-              <BreadcrumbItem>
-                <BreadcrumbPage>dux</BreadcrumbPage>
-              </BreadcrumbItem>
+      {/* Left region shares one shrink budget so the details row clips instead of
+          pushing the right-hand controls off the edge. One font (sans) throughout
+          — mixing mono values with sans labels made `items-center` misalign them
+          (mono/sans glyphs center differently). Distinguish key vs value by
+          color/weight, not font. See the mono/sans alignment memory. */}
+      <div className="flex min-w-0 flex-1 items-center gap-x-2 overflow-hidden text-sm">
+        {details.map((d, i) => (
+          <Fragment key={d.key}>
+            {i > 0 && (
+              // A thin, vertically centered divider (items-center keeps it on the
+              // text's midline — a literal "|" glyph rode high).
+              <span
+                aria-hidden
+                className="h-3 w-px shrink-0 bg-border"
+              />
             )}
-          </BreadcrumbList>
-        </Breadcrumb>
-
-        {session ? (
-          <>
-            <Separator orientation="vertical" className="mx-1 h-4 shrink-0" />
-            {/* Keep the whole row ONE font (sans). Mixing mono values with sans
-                labels here made `items-center` misalign them — mono/sans glyphs
-                sit differently inside the centered box. Distinguish key vs value
-                by color/weight (muted label + medium foreground value), not font.
-                See the mono/sans alignment memory. */}
-            <div className="flex min-w-0 items-center gap-x-3 text-sm">
-              <span className="min-w-0 truncate">
-                <span className="text-muted-foreground">branch </span>
-                <span className="font-medium text-foreground">
-                  {session.branch_name}
-                </span>
-              </span>
-              <span className="min-w-0 truncate">
-                <span className="text-muted-foreground">provider </span>
-                <span className="font-medium text-foreground">
-                  {session.provider}
-                </span>
-              </span>
-              {session.terminals.length > 0 ? (
-                <span className="shrink-0 text-muted-foreground">
-                  {session.terminals.length === 1
-                    ? "1 terminal"
-                    : `${session.terminals.length} terminals`}
-                </span>
-              ) : null}
-            </div>
-          </>
-        ) : null}
+            <span className="shrink-0 whitespace-nowrap">
+              <span className="text-muted-foreground">{d.key}: </span>
+              <span className="font-medium text-foreground">{d.value}</span>
+            </span>
+          </Fragment>
+        ))}
       </div>
 
       <div className="flex shrink-0 items-center gap-2">
