@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::engine::{
-    AgentLaunchFailedOutcome, BeginDeleteSessionOutcome, Command, Engine, EventReaction,
-    FinishDeleteSessionOutcome, StatusUpdate, WorktreeRemoval,
+    AgentLaunchFailedOutcome, AgentLaunchReadyView, BeginDeleteSessionOutcome, Command, Engine,
+    EventReaction, FinishDeleteSessionOutcome, StatusUpdate, WorktreeRemoval,
 };
 use crate::model::{Project, ProjectBranchStatus, ProviderKind};
 use crate::statusline::StatusTone;
@@ -404,6 +404,39 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
                 format!("Couldn't auto-reopen agent \"{branch_name}\": {message}"),
             )],
             AgentLaunchFailedOutcome::ResumeFallback => vec![],
+        },
+        // A successful launch must REPLACE the "launching…" Busy status the
+        // dispatch set, or it lingers forever on the web. Mirror the TUI's
+        // `apply_agent_launch_ready_view`: the create/reconnect status on success,
+        // an error if persistence or the startup command failed.
+        EventReaction::AgentLaunchReadyView(outcome) => match &outcome.view {
+            AgentLaunchReadyView::CreatePersistFailed { error } => {
+                vec![WireStatus::new(
+                    "error",
+                    format!("Failed to persist session: {error}"),
+                )]
+            }
+            AgentLaunchReadyView::CreateCommitted {
+                status_message,
+                startup_result_error,
+            } => match startup_result_error {
+                Some(err) => vec![WireStatus::new(
+                    "error",
+                    format!(
+                        "Startup command failed for agent \"{}\": {err}. Run \
+                         read-startup-command-logs for details.",
+                        outcome.session.branch_name
+                    ),
+                )],
+                None => vec![WireStatus::new("info", status_message.clone())],
+            },
+            AgentLaunchReadyView::Reconnect { status_message }
+            | AgentLaunchReadyView::ResumeFallback { status_message, .. } => {
+                vec![WireStatus::new("info", status_message.clone())]
+            }
+            AgentLaunchReadyView::SessionMissing | AgentLaunchReadyView::StartupAutoReopen => {
+                vec![]
+            }
         },
         EventReaction::DeleteTerminalView(view) => view
             .label
@@ -2760,6 +2793,45 @@ mod tests {
             AgentLaunchFailedOutcome::ResumeFallback,
         ));
         assert!(wire_statuses_from_reaction(&r).is_empty());
+    }
+
+    #[test]
+    fn wire_statuses_reports_launch_success() {
+        // A committed create must emit the success status so the web's
+        // "launching…" Busy is replaced rather than lingering forever.
+        let outcome = crate::engine::AgentLaunchReadyOutcome {
+            session: sample_session("s1", "p1", "feat"),
+            pty_size: (24, 80),
+            detached_session_id: None,
+            view: AgentLaunchReadyView::CreateCommitted {
+                status_message: "Launched agent \"feat\".".to_string(),
+                startup_result_error: None,
+            },
+        };
+        let s = wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(outcome)));
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].tone, "info");
+        assert_eq!(s[0].message, "Launched agent \"feat\".");
+    }
+
+    #[test]
+    fn wire_statuses_reports_launch_startup_failure() {
+        let outcome = crate::engine::AgentLaunchReadyOutcome {
+            session: sample_session("s1", "p1", "feat"),
+            pty_size: (24, 80),
+            detached_session_id: None,
+            view: AgentLaunchReadyView::CreateCommitted {
+                status_message: "ignored on failure".to_string(),
+                startup_result_error: Some("boom".to_string()),
+            },
+        };
+        let s = wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(outcome)));
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].tone, "error");
+        assert!(
+            s[0].message
+                .contains("Startup command failed for agent \"feat\": boom")
+        );
     }
 
     #[test]
