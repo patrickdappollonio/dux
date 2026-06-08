@@ -38,7 +38,12 @@ pub async fn static_handler(uri: Uri, headers: HeaderMap) -> Response {
         } else {
             None
         };
-        return serve_asset(&mime, content.data.into_owned(), accepts_gzip, cache_control);
+        return serve_asset(
+            &mime,
+            content.data.into_owned(),
+            accepts_gzip,
+            cache_control,
+        );
     }
     // The hashed bundle lives under `assets/`. A miss here means the browser is
     // requesting a chunk URL from a stale `index.html` (the binary was rebuilt
