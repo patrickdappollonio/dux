@@ -244,9 +244,14 @@ function SessionSubItem({
       >
         {/* All agents use the same Bot icon — provider is shown as text. While
             the agent is streaming output it gently bounces (motion-safe) so the
-            "working" state is unmistakable at a glance. */}
+            "working" state is unmistakable at a glance. The transition lets the
+            icon settle back to rest when streaming stops mid-bounce instead of
+            snapping from wherever the keyframe left it. */}
         <Bot
-          className={cn(session.working && "motion-safe:animate-agent-working")}
+          className={cn(
+            "motion-safe:transition-transform motion-safe:duration-300",
+            session.working && "motion-safe:animate-agent-working"
+          )}
         />
         <span className="truncate">{label}</span>
         <span className="ml-auto flex shrink-0 items-center gap-1">

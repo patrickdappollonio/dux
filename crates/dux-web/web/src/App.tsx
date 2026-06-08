@@ -109,14 +109,23 @@ function InsetHeader() {
         {session ? (
           <>
             <Separator orientation="vertical" className="mx-1 h-4 shrink-0" />
+            {/* Keep the whole row ONE font (sans). Mixing mono values with sans
+                labels here made `items-center` misalign them — mono/sans glyphs
+                sit differently inside the centered box. Distinguish key vs value
+                by color/weight (muted label + medium foreground value), not font.
+                See the mono/sans alignment memory. */}
             <div className="flex min-w-0 items-center gap-x-3 text-sm">
               <span className="min-w-0 truncate">
                 <span className="text-muted-foreground">branch </span>
-                <span className="font-mono">{session.branch_name}</span>
+                <span className="font-medium text-foreground">
+                  {session.branch_name}
+                </span>
               </span>
               <span className="min-w-0 truncate">
                 <span className="text-muted-foreground">provider </span>
-                {session.provider}
+                <span className="font-medium text-foreground">
+                  {session.provider}
+                </span>
               </span>
               {session.terminals.length > 0 ? (
                 <span className="shrink-0 text-muted-foreground">
@@ -220,7 +229,7 @@ function TerminalArea() {
   // simply invisible and the loop can never start.
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {pr && !bannerAtBottom ? <PrBanner pr={pr} /> : null}
+      {pr && !bannerAtBottom ? <PrBanner pr={pr} position="top" /> : null}
       <div className="min-h-0 flex-1 overflow-hidden">
         <ChunkBoundary>
           <Suspense fallback={null}>
@@ -232,7 +241,7 @@ function TerminalArea() {
           </Suspense>
         </ChunkBoundary>
       </div>
-      {pr && bannerAtBottom ? <PrBanner pr={pr} /> : null}
+      {pr && bannerAtBottom ? <PrBanner pr={pr} position="bottom" /> : null}
     </div>
   )
 }
