@@ -64,50 +64,39 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     75% { transform: translateY(10%); }
 }
 
-/* A single light that travels around the OUTSIDE edge of a working agent's row,
-   wrapping the whole row. The animated angle is what moves it; the conic gradient
-   is mostly transparent with one short bright arc, and the mask clips it to a thin
-   ring on the border. The keyframe covers most of the loop in the first half of
-   the time (fast) and crawls the rest (slow), per the requested 50/50 feel. */
-@property --agent-beam-angle {
-    syntax: "<angle>";
-    inherits: false;
-    initial-value: 0deg;
+/* A single light that travels around the OUTSIDE edge of a working agent's row.
+   Implemented as an SVG rect outline with one dash — because the dash length is
+   measured in PATH LENGTH (not angle), the segment stays the SAME length the
+   whole way around, including the corners (a conic-gradient arc, by contrast,
+   stretched badly on a wide/short row). `pathLength="100"` normalizes the
+   perimeter to 100 units so the dash is a fixed fraction regardless of row size.
+   The keyframe moves 80 of those units in the first half of the loop (fast) and
+   the last 20 in the second half (slow), per the requested 50/50 feel. */
+.agent-beam {
+    position: absolute;
+    /* Inset 1px so the centered 1.5px stroke (drawn on the rect at this SVG's
+       edge) stays inside the row; overflow:visible lets that outer half show. */
+    inset: 1px;
+    overflow: visible;
+    pointer-events: none;
+}
+.agent-beam rect {
+    fill: none;
+    stroke: none;
+    stroke-width: 1.5px;
+    stroke-linecap: round;
+    stroke-dasharray: 20 80; /* a 20%-of-perimeter segment + the rest as gap */
 }
 
 @keyframes agent-beam {
-    0% { --agent-beam-angle: 0deg; }
-    50% { --agent-beam-angle: 300deg; }
-    100% { --agent-beam-angle: 360deg; }
+    0% { stroke-dashoffset: 0; }
+    50% { stroke-dashoffset: -80; }
+    100% { stroke-dashoffset: -100; }
 }
 
 @media (prefers-reduced-motion: no-preference) {
-    .agent-beam {
-        position: relative;
-    }
-    .agent-beam::after {
-        content: "";
-        position: absolute;
-        inset: 0;
-        border-radius: inherit;
-        padding: 1.5px; /* beam thickness — the visible ring */
-        background: conic-gradient(
-            from var(--agent-beam-angle),
-            transparent 0deg,
-            transparent 305deg,
-            var(--primary) 340deg,
-            transparent 360deg
-        );
-        /* Clip the filled box down to just the padding ring (the border). */
-        -webkit-mask:
-            linear-gradient(#000 0 0) content-box,
-            linear-gradient(#000 0 0);
-        -webkit-mask-composite: xor;
-        mask:
-            linear-gradient(#000 0 0) content-box,
-            linear-gradient(#000 0 0);
-        mask-composite: exclude;
-        pointer-events: none;
+    .agent-beam rect {
+        stroke: var(--primary);
         animation: agent-beam 2s linear infinite;
     }
 }

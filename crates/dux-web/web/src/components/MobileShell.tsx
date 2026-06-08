@@ -43,6 +43,7 @@ import type { CSSProperties } from "react"
 import { Suspense } from "react"
 import { git } from "@/lib/git"
 
+import { AgentBeam } from "@/components/AgentBeam"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
@@ -279,11 +280,13 @@ function SessionRow({
           variant={agentSelected ? "secondary" : "ghost"}
           className={cn(
             "min-h-11 flex-1 touch-manipulation justify-start gap-2 px-2",
-            // While working, a light beam travels around the row's outline.
-            session.working && "agent-beam"
+            // Positioning context for the beam overlay while working.
+            session.working && "relative"
           )}
           onClick={() => selectAndOpen(session.id)}
         >
+          {/* While working, a constant-length light travels around the row outline. */}
+          {session.working && <AgentBeam />}
           {/* Gently bounces (motion-safe) while the agent streams output; the
               transition settles it back to rest when streaming stops mid-bounce. */}
           <Bot
