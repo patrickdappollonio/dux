@@ -9,9 +9,18 @@ import {
   statusGlyph,
 } from "@/lib/changedFiles"
 import { cn } from "@/lib/utils"
+import { useIsMobile } from "@/hooks/use-mobile"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
+import { ChunkBoundary } from "@/components/ChunkBoundary"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { closeEditor, useDux } from "@/lib/store"
 
@@ -19,24 +28,28 @@ import { closeEditor, useDux } from "@/lib/store"
 // editor actually opens.
 const CodeEditor = lazy(() => import("./CodeEditor"))
 
-// The overlay shell: owns the Dialog and the dirty-aware close guard. The body
-// is keyed by session so each open mounts fresh — no manual state resets. A ref
-// carries the body's dirty flag up so Esc/backdrop/X can all confirm before
-// discarding unsaved work.
+// A pending discard confirmation: closing the overlay, or switching to another
+// file, while the current buffer has unsaved edits.
+type PendingDiscard = { kind: "close" } | { kind: "switch"; path: string }
+
+// The overlay shell: owns the Dialog and is desktop-only (Monaco is poor on
+// touch, and every entry point is already gated to desktop). The body is keyed
+// by session+file so each open mounts fresh — no manual state resets. A ref lets
+// the body intercept Esc/backdrop closes so they run the same dirty guard as the
+// in-body Close button.
 export function EditorOverlay() {
   const { editorTarget } = useDux()
-  const dirtyRef = useRef(false)
+  const isMobile = useIsMobile()
+  // Default close handler (used before a body mounts / after it unmounts).
+  const closeReqRef = useRef<() => void>(closeEditor)
 
-  function requestClose(): void {
-    if (dirtyRef.current && !window.confirm("Discard unsaved changes?")) return
-    closeEditor()
-  }
+  if (isMobile) return null
 
   return (
     <Dialog
       open={editorTarget !== null}
       onOpenChange={(open) => {
-        if (!open) requestClose()
+        if (!open) closeReqRef.current()
       }}
     >
       <DialogContent
@@ -44,13 +57,15 @@ export function EditorOverlay() {
         className="flex h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-[calc(100%-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(80rem,calc(100%-2rem))]"
       >
         <DialogTitle className="sr-only">Code editor</DialogTitle>
+        <DialogDescription className="sr-only">
+          Edit changed files in this worktree.
+        </DialogDescription>
         {editorTarget && (
           <EditorBody
-            key={editorTarget.sessionId}
+            key={`${editorTarget.sessionId}:${editorTarget.initialPath ?? ""}`}
             sessionId={editorTarget.sessionId}
             initialPath={editorTarget.initialPath}
-            dirtyRef={dirtyRef}
-            onClose={requestClose}
+            closeReqRef={closeReqRef}
           />
         )}
       </DialogContent>
@@ -61,16 +76,10 @@ export function EditorOverlay() {
 interface EditorBodyProps {
   sessionId: string
   initialPath: string | null
-  dirtyRef: React.RefObject<boolean>
-  onClose: () => void
+  closeReqRef: React.RefObject<() => void>
 }
 
-function EditorBody({
-  sessionId,
-  initialPath,
-  dirtyRef,
-  onClose,
-}: EditorBodyProps) {
+function EditorBody({ sessionId, initialPath, closeReqRef }: EditorBodyProps) {
   const { viewModel } = useDux()
   const [openPath, setOpenPath] = useState<string | null>(initialPath)
   // `loaded` is the on-disk content; `draft` is the current editor buffer.
@@ -79,15 +88,13 @@ function EditorBody({
   const [loading, setLoading] = useState(initialPath !== null)
   const [saving, setSaving] = useState(false)
   const [binary, setBinary] = useState(false)
+  const [pendingDiscard, setPendingDiscard] = useState<PendingDiscard | null>(
+    null,
+  )
   // Monotonic token so a slow earlier read can never clobber a later one.
   const reqId = useRef(0)
 
   const dirty = openPath !== null && !binary && draft !== loaded
-  // Surface the dirty flag to the shell's close guard (in an effect, so renders
-  // stay pure).
-  useEffect(() => {
-    dirtyRef.current = dirty
-  }, [dirty, dirtyRef])
 
   const watched = viewModel?.changed_files.watched_session_id ?? null
   const listReady = shouldShowChangedFiles(watched, sessionId)
@@ -132,7 +139,7 @@ function EditorBody({
     return () => {
       cancelled = true
     }
-    // Mount-only: the component is keyed by session, so a new open remounts.
+    // Mount-only: the component is keyed by session+file, so a new open remounts.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -146,6 +153,43 @@ function EditorBody({
       .read(sessionId, path)
       .then((f) => applyLoaded(token, f))
       .catch((e) => onLoadError(token, e))
+  }
+
+  // Switching files discards the current buffer, so guard it the same way as
+  // closing — this is the most common in-editor action and must not silently
+  // drop unsaved edits.
+  function requestSwitch(path: string): void {
+    if (path === openPath) return
+    if (dirty) {
+      setPendingDiscard({ kind: "switch", path })
+      return
+    }
+    load(path)
+  }
+
+  function requestClose(): void {
+    if (dirty) {
+      setPendingDiscard({ kind: "close" })
+      return
+    }
+    closeEditor()
+  }
+
+  // Let the shell's Esc/backdrop close run this same dirty guard. Updated every
+  // render (so it sees the latest `dirty`), reset on unmount so a stale closure
+  // can't fire against an unmounted body.
+  useEffect(() => {
+    closeReqRef.current = requestClose
+    return () => {
+      closeReqRef.current = closeEditor
+    }
+  })
+
+  function confirmDiscard(): void {
+    const pending = pendingDiscard
+    setPendingDiscard(null)
+    if (pending?.kind === "switch") load(pending.path)
+    else if (pending?.kind === "close") closeEditor()
   }
 
   function save(): void {
@@ -172,8 +216,21 @@ function EditorBody({
         <FileCode2 className="size-4 shrink-0 text-muted-foreground" />
         <span className="min-w-0 flex-1 truncate text-left font-mono text-sm [direction:rtl] [unicode-bidi:plaintext]">
           {openPath ?? "Select a file"}
-          {dirty ? " ●" : ""}
         </span>
+        {/* Dirty dot kept OUTSIDE the truncating span so it can't be clipped on
+            a long path; sr-only text announces the state to screen readers. */}
+        {dirty && (
+          <>
+            <span
+              className="shrink-0 text-primary"
+              aria-hidden="true"
+              title="Unsaved changes"
+            >
+              ●
+            </span>
+            <span className="sr-only">unsaved changes</span>
+          </>
+        )}
         <Button
           size="sm"
           disabled={!dirty || saving}
@@ -183,7 +240,7 @@ function EditorBody({
           {saving ? <Loader2 className="motion-safe:animate-spin" /> : <Save />}
           Save
         </Button>
-        <Button size="sm" variant="ghost" onClick={onClose}>
+        <Button size="sm" variant="ghost" onClick={requestClose}>
           <X />
           Close
         </Button>
@@ -202,7 +259,7 @@ function EditorBody({
                 <button
                   key={f.path}
                   type="button"
-                  onClick={() => load(f.path)}
+                  onClick={() => requestSwitch(f.path)}
                   className={cn(
                     "flex items-center gap-2 rounded px-1 py-1 hover:bg-muted",
                     f.path === openPath && "bg-muted",
@@ -237,23 +294,58 @@ function EditorBody({
               This file is binary and can&rsquo;t be edited here.
             </div>
           ) : (
-            <Suspense
-              fallback={
-                <div className="flex h-full items-center justify-center text-muted-foreground">
-                  <Loader2 className="size-5 motion-safe:animate-spin" />
-                </div>
-              }
-            >
-              <CodeEditor
-                path={openPath}
-                value={draft}
-                onChange={setDraft}
-                onSave={save}
-              />
-            </Suspense>
+            // ChunkBoundary (outside Suspense) catches a failed lazy import after
+            // a redeploy — a 404 on the hashed Monaco chunk — and offers reload,
+            // instead of unmounting the whole app to a white screen.
+            <ChunkBoundary>
+              <Suspense
+                fallback={
+                  <div className="flex h-full items-center justify-center text-muted-foreground">
+                    <Loader2 className="size-5 motion-safe:animate-spin" />
+                  </div>
+                }
+              >
+                <CodeEditor
+                  path={openPath}
+                  value={draft}
+                  onChange={setDraft}
+                  onSave={save}
+                />
+              </Suspense>
+            </ChunkBoundary>
           )}
         </div>
       </div>
+
+      {/* Styled unsaved-changes confirmation (replaces window.confirm to honor
+          the design-system + Space-activates-focused-button tenet). */}
+      <Dialog
+        open={pendingDiscard !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingDiscard(null)
+        }}
+      >
+        <DialogContent showCloseButton={false} className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Discard unsaved changes?</DialogTitle>
+            <DialogDescription>
+              Your edits haven&rsquo;t been saved. They will be lost.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              autoFocus
+              onClick={() => setPendingDiscard(null)}
+            >
+              Keep editing
+            </Button>
+            <Button variant="destructive" onClick={confirmDiscard}>
+              Discard
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   )
 }

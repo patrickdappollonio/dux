@@ -102,7 +102,7 @@ pub(crate) async fn validate_changed_path(worktree: &Path, path: &str) -> Result
 
 /// Run a blocking git closure off the reactor, mapping its result to a response
 /// error (the success arm is left to the caller, which may also refresh state).
-pub(crate) async fn run_git<F>(op: F) -> Result<(), Response>
+async fn run_git<F>(op: F) -> Result<(), Response>
 where
     F: FnOnce() -> anyhow::Result<()> + Send + 'static,
 {

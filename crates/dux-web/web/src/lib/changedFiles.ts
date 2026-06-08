@@ -44,7 +44,9 @@ export function editableFiles(
 ): ChangedFileView[] {
   const seen = new Map<string, ChangedFileView>()
   for (const f of [...unstaged, ...staged]) {
-    if (statusGlyph(f.status) === "D") continue
+    // Compare the raw status, not the display glyph, so deletion filtering never
+    // silently changes if statusGlyph's presentation mapping is tweaked.
+    if (f.status.toUpperCase().startsWith("D")) continue
     if (!seen.has(f.path)) seen.set(f.path, f)
   }
   return [...seen.values()]

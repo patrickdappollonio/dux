@@ -69,6 +69,9 @@ export default function CodeEditor({
 
   return (
     <Editor
+      // The web UI is dark-only (main.tsx force-adds the `.dark` class), so a
+      // fixed dark Monaco theme matches. If a light theme is ever added, derive
+      // this from the documentElement class instead.
       theme="vs-dark"
       path={path}
       value={value}

@@ -23,7 +23,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::git_routes::{resolve_worktree, run_git, validate_changed_path};
+use crate::git_routes::{resolve_worktree, validate_changed_path};
 use crate::server::AppState;
 
 #[derive(Deserialize)]
@@ -79,9 +79,23 @@ async fn write_file(State(state): State<AppState>, Json(op): Json<WriteOp>) -> R
     let wt = worktree.clone();
     let path = op.path;
     let content = op.content;
-    if let Err(r) = run_git(move || dux_core::worktree_file::write_file(&wt, &path, &content)).await
+    // write_file's errors are path/state validation (escape, symlink, not a
+    // regular file) — client conditions, so map them to 400 like the read route,
+    // not the 500 that `run_git` uses for genuine git-mutation failures.
+    match tokio::task::spawn_blocking(move || {
+        dux_core::worktree_file::write_file(&wt, &path, &content)
+    })
+    .await
     {
-        return r;
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("write task failed: {e}"),
+            )
+                .into_response();
+        }
     }
     state
         .engine
