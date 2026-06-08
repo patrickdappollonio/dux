@@ -311,9 +311,12 @@ export function ChangedFiles() {
     <>
       {/* Main card filling the pane */}
       <Card className="h-full rounded-none border-0 ring-0">
-        <CardHeader className="border-b">
+        {/* flex-wrap (overriding the Card's grid) so the action buttons drop to
+            their own row when the pane is too narrow for them beside the title,
+            instead of overflowing off-screen (e.g. the changes pane on a tablet). */}
+        <CardHeader className="flex flex-wrap items-center justify-between gap-2 border-b">
           <CardTitle>Changes</CardTitle>
-          <CardAction className="flex items-center gap-1 max-md:[&_button]:min-h-11">
+          <CardAction className="flex flex-wrap items-center gap-1 self-center max-md:[&_button]:min-h-11">
             <Button
               size="sm"
               onClick={() => openCommit(selectedSessionId)}
