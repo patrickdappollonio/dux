@@ -173,7 +173,7 @@ function TerminalSubItem({
           aria-label="Terminal actions"
           // top-1 vertically centers the 20px action in the 28px sub row; the
           // component's default offsets are calibrated for the taller menu button.
-          className="top-1 md:opacity-0 group-focus-within/menu-sub-item:opacity-100 group-hover/menu-sub-item:opacity-100 aria-expanded:opacity-100"
+          className="top-1 md:translate-x-1 md:opacity-0 group-focus-within/menu-sub-item:translate-x-0 group-focus-within/menu-sub-item:opacity-100 group-hover/menu-sub-item:translate-x-0 group-hover/menu-sub-item:opacity-100 aria-expanded:translate-x-0 aria-expanded:opacity-100"
         >
           <Ellipsis />
         </SidebarMenuAction>
@@ -316,7 +316,7 @@ function SessionSubItem({
           aria-label="Session actions"
           // top-1 vertically centers the 20px action in the 28px sub row; the
           // component's default offsets are calibrated for the taller menu button.
-          className="top-1 md:opacity-0 group-focus-within/menu-sub-item:opacity-100 group-hover/menu-sub-item:opacity-100 aria-expanded:opacity-100"
+          className="top-1 md:translate-x-1 md:opacity-0 group-focus-within/menu-sub-item:translate-x-0 group-focus-within/menu-sub-item:opacity-100 group-hover/menu-sub-item:translate-x-0 group-hover/menu-sub-item:opacity-100 aria-expanded:translate-x-0 aria-expanded:opacity-100"
         >
           <Ellipsis />
         </SidebarMenuAction>
