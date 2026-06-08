@@ -261,7 +261,17 @@ function SessionSubItem({
             session.working && "motion-safe:animate-agent-working"
           )}
         />
-        <span className="truncate">{label}</span>
+        <span
+          className={cn(
+            "truncate",
+            // While working, the name's glyphs carry a rainbow that sweeps
+            // left→right (clipped to the text, never a background fill).
+            session.working &&
+              "agent-rainbow-text motion-safe:animate-agent-rainbow"
+          )}
+        >
+          {label}
+        </span>
         <span className="ml-auto flex shrink-0 items-center gap-1">
           {session.pr ? (
             // Icon-only PR link: just the state-tinted glyph, with the full

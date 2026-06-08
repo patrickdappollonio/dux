@@ -288,7 +288,15 @@ function SessionRow({
               session.working && "motion-safe:animate-agent-working"
             )}
           />
-          <span className="flex-1 truncate text-left">{label}</span>
+          <span
+            className={cn(
+              "flex-1 truncate text-left",
+              session.working &&
+                "agent-rainbow-text motion-safe:animate-agent-rainbow"
+            )}
+          >
+            {label}
+          </span>
           <span className="flex shrink-0 items-center gap-1">
             {session.pr ? (
               // Icon-only PR link (no tooltip on touch — the banner on the
