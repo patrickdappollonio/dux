@@ -74,13 +74,23 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
    the last 20 in the second half (slow), per the requested 50/50 feel. */
 .agent-beam {
     position: absolute;
-    /* Inset 1px so the centered 1.5px stroke (drawn on the rect at this SVG's
-       edge) stays inside the row; overflow:visible lets that outer half show. */
-    inset: 1px;
-    overflow: visible;
+    inset: 0;
+    /* An inline <svg> is a replaced element — insets alone won't stretch it (it
+       falls back to its intrinsic size and ends up a small box over the icon).
+       Explicit 100%/100% makes it fill the whole row. */
+    width: 100%;
+    height: 100%;
     pointer-events: none;
 }
 .agent-beam rect {
+    /* Inset the RECT (not the SVG) by 1px so the centered 1.5px stroke stays
+       inside the row, and round the corners to match it. (CSS geometry props;
+       the element's width/height="100%" attributes are the fallback.) */
+    x: 1px;
+    y: 1px;
+    width: calc(100% - 2px);
+    height: calc(100% - 2px);
+    rx: 6px;
     fill: none;
     stroke: none;
     stroke-width: 1.5px;
