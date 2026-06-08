@@ -80,7 +80,7 @@ pub(crate) async fn resolve_worktree(
 /// Reject a file path that isn't a real changed file git is tracking in this
 /// worktree (defends against operating on arbitrary filesystem paths). Runs the
 /// `git status` read off-thread.
-pub(crate) async fn validate_changed_path(worktree: &Path, path: &str) -> Result<(), Response> {
+async fn validate_changed_path(worktree: &Path, path: &str) -> Result<(), Response> {
     let wt = worktree.to_path_buf();
     let p = path.to_string();
     let ok = tokio::task::spawn_blocking(move || match dux_core::git::changed_files(&wt) {

@@ -524,6 +524,43 @@ pub fn remove_worktree(
     })
 }
 
+/// List every file in the worktree that git considers — tracked plus untracked
+/// files that are NOT ignored (`git ls-files --cached --others --exclude-standard`).
+/// Paths are worktree-relative, NUL-parsed (so spaces/Unicode/newlines are safe),
+/// sorted and deduped. Excludes `.git/` internals and gitignored files, giving a
+/// clean browsable set for the editor's file tree. Editing is gated separately by
+/// [`resolve_worktree_path`] containment, so a path need not appear here to be
+/// editable (e.g. a brand-new, uncommitted file).
+pub fn worktree_files(worktree_path: &Path) -> Result<Vec<String>> {
+    let wt = worktree_path.to_string_lossy();
+    let output = Command::new("git")
+        .args([
+            "-C",
+            wt.as_ref(),
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let mut files: Vec<String> = output
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect();
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
 pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<ChangedFile>)> {
     let wt = worktree_path.to_string_lossy();
 
@@ -1344,6 +1381,38 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         wt
+    }
+
+    #[test]
+    fn worktree_files_lists_tracked_and_untracked_but_not_ignored() {
+        let repo = init_test_repo();
+        let p = repo.path();
+        let g = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(p)
+                .output()
+                .unwrap();
+        };
+        std::fs::write(p.join("tracked.txt"), "a").unwrap();
+        g(&["add", "tracked.txt"]);
+        g(&["commit", "-m", "add tracked"]);
+        std::fs::write(p.join("untracked.txt"), "b").unwrap();
+        std::fs::write(p.join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(p.join("ignored.txt"), "c").unwrap();
+
+        let files = worktree_files(p).unwrap();
+        assert!(files.contains(&"tracked.txt".to_string()));
+        assert!(files.contains(&"untracked.txt".to_string()));
+        assert!(files.contains(&".gitignore".to_string()));
+        assert!(
+            !files.contains(&"ignored.txt".to_string()),
+            "gitignored file must be excluded: {files:?}"
+        );
+        assert!(
+            !files.iter().any(|f| f.starts_with(".git/")),
+            "never lists git internals: {files:?}"
+        );
     }
 
     #[test]
