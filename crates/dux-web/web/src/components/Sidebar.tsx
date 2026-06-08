@@ -41,6 +41,7 @@ import { toast } from "sonner"
 import type * as React from "react"
 import { git } from "@/lib/git"
 
+import { AgentBeam } from "@/components/AgentBeam"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StatusBadge } from "@/components/StatusBadge"
 import { Badge } from "@/components/ui/badge"
@@ -249,11 +250,13 @@ function SessionSubItem({
         isActive={agentSelected}
         className={cn(
           "max-md:pr-8 touch-manipulation group-focus-within/menu-sub-item:pr-8 group-hover/menu-sub-item:pr-8 group-has-[[aria-expanded=true]]/menu-sub-item:pr-8",
-          // While working, a light beam travels around the row's outline.
-          session.working && "agent-beam"
+          // Positioning context for the beam overlay while working.
+          session.working && "relative"
         )}
         onClick={() => selectSession(session.id)}
       >
+        {/* While working, a constant-length light travels around the row outline. */}
+        {session.working && <AgentBeam />}
         {/* All agents use the same Bot icon — provider is shown as text. While
             the agent is streaming output it gently bounces (motion-safe) so the
             "working" state is unmistakable at a glance. The transition lets the
