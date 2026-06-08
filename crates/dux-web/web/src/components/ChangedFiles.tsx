@@ -121,7 +121,7 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
       {/* File path — monospace (it's a path/code identifier). Long paths
           ellipsize at the START (direction:rtl) so the filename at the end stays
           visible; text-left keeps short paths normally left-aligned. */}
-      <span className="min-w-0 flex-1 truncate text-left font-mono text-xs text-foreground [direction:rtl] [unicode-bidi:plaintext]">
+      <span className="min-w-0 flex-1 truncate text-left font-mono text-xs text-foreground [direction:rtl]">
         {file.path}
       </span>
 
@@ -139,60 +139,62 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
         </span>
       )}
 
-      {/* Open in editor — desktop only (Monaco is poor on touch). Skipped for
-          deleted files (nothing on disk to edit). Hover-reveal like the others. */}
-      {glyph !== "D" && (
-        <Button
-          variant="ghost"
-          size="sm"
-          aria-label={`Open ${file.path} in editor`}
-          className="hidden shrink-0 md:inline-flex md:opacity-0 md:group-hover:opacity-100"
-          onClick={(e) => {
-            e.stopPropagation()
-            openEditor(sessionId, file.path)
-          }}
-        >
-          <Pencil />
-          Edit
-        </Button>
-      )}
-
-      {/* Discard action — unstaged rows only (the TUI blocks discarding staged
-          files). Destructive-tinted, hover-reveal on desktop / always-visible
-          ≥44px on touch, same as the Stage button. */}
-      {/* Both action buttons are labeled (icon + text) and the same size so they
-          sit on one baseline. Discard opens a confirm dialog (it's destructive).
-          Hover-reveal on desktop; always-visible ≥44px on touch (no hover). */}
-      {action === "stage" && (
-        <Button
-          variant="ghost"
-          size="sm"
-          aria-label={`Discard changes to ${file.path}`}
-          className="shrink-0 text-destructive opacity-100 hover:text-destructive max-md:min-h-11 md:opacity-0 md:group-hover:opacity-100"
-          onClick={handleDiscard}
-        >
-          <Undo2 />
-          Discard
-        </Button>
-      )}
-
-      <Button
-        variant="ghost"
-        size="sm"
-        disabled={busy}
-        aria-busy={busy}
-        className="shrink-0 opacity-100 max-md:min-h-11 md:opacity-0 md:group-hover:opacity-100"
-        onClick={handleAction}
-      >
-        {busy ? (
-          <Loader2 className="motion-safe:animate-spin" />
-        ) : action === "stage" ? (
-          <Plus />
-        ) : (
-          <Minus />
+      {/* Action buttons. On desktop the wrapper consumes NO width until the row
+          is hovered — its max-width animates open, so the path/counts use the
+          full row otherwise and the content slides left to make room (not a hard
+          cut). On touch (no hover) it's always visible at a ≥44px target. */}
+      <div className="flex shrink-0 items-center gap-1 overflow-hidden transition-[max-width,opacity] duration-200 ease-out max-md:max-w-none motion-reduce:transition-none md:max-w-0 md:opacity-0 md:group-hover:max-w-64 md:group-hover:opacity-100">
+        {/* Open in editor — desktop only (Monaco is poor on touch). Skipped for
+            deleted files (nothing on disk to edit). */}
+        {glyph !== "D" && (
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label={`Open ${file.path} in editor`}
+            className="hidden shrink-0 md:inline-flex"
+            onClick={(e) => {
+              e.stopPropagation()
+              openEditor(sessionId, file.path)
+            }}
+          >
+            <Pencil />
+            Edit
+          </Button>
         )}
-        {action === "stage" ? "Stage" : "Unstage"}
-      </Button>
+
+        {/* Discard — unstaged rows only (the TUI blocks discarding staged files).
+            Destructive-tinted; opens a confirm dialog (it's destructive). */}
+        {action === "stage" && (
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label={`Discard changes to ${file.path}`}
+            className="shrink-0 text-destructive hover:text-destructive max-md:min-h-11"
+            onClick={handleDiscard}
+          >
+            <Undo2 />
+            Discard
+          </Button>
+        )}
+
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={busy}
+          aria-busy={busy}
+          className="shrink-0 max-md:min-h-11"
+          onClick={handleAction}
+        >
+          {busy ? (
+            <Loader2 className="motion-safe:animate-spin" />
+          ) : action === "stage" ? (
+            <Plus />
+          ) : (
+            <Minus />
+          )}
+          {action === "stage" ? "Stage" : "Unstage"}
+        </Button>
+      </div>
     </div>
   )
 }
@@ -443,7 +445,7 @@ export function ChangedFiles() {
             {/* Left-ellipsize (direction:rtl) so the filename at the path's end
                 stays visible — the title is how you know which file the diff is. */}
             <SimpleTooltip content={currentDiff?.path ?? ""}>
-              <SheetTitle className="min-w-0 truncate text-left font-mono text-sm [direction:rtl] [unicode-bidi:plaintext]">
+              <SheetTitle className="min-w-0 truncate text-left font-mono text-sm [direction:rtl]">
                 {currentDiff?.path ?? ""}
               </SheetTitle>
             </SimpleTooltip>
