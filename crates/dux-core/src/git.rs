@@ -926,9 +926,12 @@ pub fn is_under(base: &Path, candidate: &Path) -> bool {
 
 /// The single security boundary for client-supplied worktree-relative paths.
 /// Resolves `rel_path` to its on-disk location under `worktree`, rejecting empty
-/// or absolute paths, any `..`/root/prefix component, and (for paths that exist)
-/// symlinks whose realpath escapes the worktree. Returns the joined path, which
-/// may not yet exist — existence/file-kind is the caller's concern.
+/// or absolute paths, any `..`/root/prefix component, the `.git` directory, and
+/// (for paths that exist) symlinks whose realpath escapes the worktree. Returns
+/// the joined path, which may not yet exist — existence/file-kind is the caller's
+/// concern. (Callers that read/write should additionally refuse symlinks via a
+/// no-follow stat to close the dangling-symlink window this existence check can
+/// miss — see `worktree_file`.)
 ///
 /// Used by every surface that reads or writes a file from a client path (the
 /// diff engine, the web editor endpoints) so the escape check lives in one
@@ -945,6 +948,18 @@ pub fn resolve_worktree_path(worktree: &Path, rel_path: &str) -> anyhow::Result<
         })
     {
         anyhow::bail!("invalid worktree path: {rel_path}");
+    }
+    // Defense in depth: never touch the git metadata directory, even though
+    // callers' changed-files membership check already excludes it (git status
+    // never lists `.git/` internals). Case-insensitive for case-folding
+    // filesystems (e.g. default macOS), where `.GIT` reaches the same directory.
+    if rp
+        .iter()
+        .next()
+        .and_then(|c| c.to_str())
+        .is_some_and(|c| c.eq_ignore_ascii_case(".git"))
+    {
+        anyhow::bail!("refusing to access the git directory: {rel_path}");
     }
     let joined = worktree.join(rel_path);
     // The component check blocks `..`, but a symlink inside the worktree could

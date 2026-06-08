@@ -41,10 +41,20 @@ fn is_text(bytes: &[u8]) -> bool {
 /// Binary content yields `binary: true` with empty `content`.
 pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile> {
     let path = resolve_worktree_path(worktree, rel_path)?;
-    // Check the size BEFORE reading so an oversized file never buffers into RAM.
-    let size = std::fs::metadata(&path)?.len();
-    if size > MAX_EDITABLE_BYTES {
-        anyhow::bail!("file too large to edit: {size} bytes (limit {MAX_EDITABLE_BYTES})");
+    // No-follow stat: detect a symlink even when its target is missing (a
+    // dangling symlink that `exists()` reports as absent, which the boundary's
+    // existence-gated escape check would skip). The editor only edits regular
+    // files, so refuse symlinks outright. The same stat gives the size, so an
+    // oversized file is rejected BEFORE it ever buffers into RAM.
+    let meta = std::fs::symlink_metadata(&path)?;
+    if meta.file_type().is_symlink() {
+        anyhow::bail!("refusing to read through a symlink: {rel_path}");
+    }
+    if meta.len() > MAX_EDITABLE_BYTES {
+        anyhow::bail!(
+            "file too large to edit: {} bytes (limit {MAX_EDITABLE_BYTES})",
+            meta.len()
+        );
     }
     let bytes = std::fs::read(&path)?;
     if !is_text(&bytes) {
@@ -65,7 +75,16 @@ pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile
 /// files or to write through a non-regular-file path.
 pub fn write_file(worktree: &Path, rel_path: &str, content: &str) -> anyhow::Result<()> {
     let path = resolve_worktree_path(worktree, rel_path)?;
-    if !path.is_file() {
+    // No-follow stat: refuse to write THROUGH a symlink (a dangling symlink whose
+    // target appears between the boundary's existence check and the write is the
+    // one escape the boundary can miss), and refuse to create files or write to
+    // a directory/fifo/device — only an existing regular file is editable.
+    let meta = std::fs::symlink_metadata(&path)
+        .map_err(|_| anyhow::anyhow!("not an existing file: {rel_path}"))?;
+    if meta.file_type().is_symlink() {
+        anyhow::bail!("refusing to write through a symlink: {rel_path}");
+    }
+    if !meta.is_file() {
         anyhow::bail!("not an existing file: {rel_path}");
     }
     std::fs::write(&path, content)?;
@@ -170,6 +189,37 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(outside.path().join("secret.txt")).unwrap(),
             "top secret\n"
+        );
+    }
+
+    #[test]
+    fn dangling_symlink_is_rejected_before_its_target_can_appear() {
+        // A symlink whose target does not exist at check time: `exists()` (which
+        // follows) reports absent, so the boundary's escape check is skipped —
+        // but the no-follow stat still sees the symlink and refuses it, closing
+        // the window where the target could appear before the write follows it.
+        let dir = worktree();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("not-yet.txt");
+        std::os::unix::fs::symlink(&target, dir.path().join("dangling.txt")).unwrap();
+        assert!(!target.exists());
+        assert!(read_file(dir.path(), "dangling.txt").is_err());
+        assert!(write_file(dir.path(), "dangling.txt", "pwned").is_err());
+        // The write was refused, so the (now-relevant) target was never created.
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn git_directory_is_refused() {
+        let dir = worktree();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git/config"), "[core]\n").unwrap();
+        assert!(read_file(dir.path(), ".git/config").is_err());
+        assert!(write_file(dir.path(), ".git/config", "x").is_err());
+        // Untouched.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(".git/config")).unwrap(),
+            "[core]\n"
         );
     }
 }
