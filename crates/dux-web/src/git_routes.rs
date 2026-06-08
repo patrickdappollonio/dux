@@ -27,6 +27,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
+use dux_core::wire::WireCommand;
 use serde::Deserialize;
 
 use crate::server::AppState;
@@ -208,74 +209,65 @@ async fn commit(State(state): State<AppState>, Json(op): Json<CommitOp>) -> Resp
     StatusCode::OK.into_response()
 }
 
+// push / pull / pull-project / checkout-default are async, worker-based engine
+// operations with stateful guards (in-flight dedup, the source-checkout dirty-
+// tree refusal, leading-branch resolution, path-missing checks) and busy/done
+// status. Rather than re-run raw git and lose all of that, these endpoints
+// TRIGGER the existing engine command via `apply_wire` (which spawns the worker
+// off the actor thread). A 200 means "accepted"; the busy/completion status
+// flows to clients over the WebSocket status broadcast, exactly as before.
+
 async fn push(State(state): State<AppState>, Json(op): Json<SessionOp>) -> Response {
-    let worktree = match resolve_worktree(&state, op.session_id).await {
-        Ok(w) => w,
-        Err(r) => return r,
-    };
-    // Push changes no files; the branch ahead/behind status follows via the
-    // engine's periodic branch-sync poll.
-    match run_git(move || dux_core::git::push(&worktree).map(|_| ())).await {
-        Ok(()) => StatusCode::OK.into_response(),
-        Err(r) => r,
-    }
+    apply_wire_response(
+        state
+            .engine
+            .apply_wire(WireCommand::Push {
+                session_id: op.session_id,
+            })
+            .await,
+    )
 }
 
 async fn pull(State(state): State<AppState>, Json(op): Json<SessionOp>) -> Response {
-    let worktree = match resolve_worktree(&state, op.session_id).await {
-        Ok(w) => w,
-        Err(r) => return r,
-    };
-    let wt = worktree.clone();
-    if let Err(r) = run_git(move || dux_core::git::pull_current_branch(&wt)).await {
-        return r;
-    }
-    // A pull can bring in file changes → refresh the changed-files lists.
-    state
-        .engine
-        .refresh_changed_files(worktree.to_string_lossy().into_owned());
-    StatusCode::OK.into_response()
+    apply_wire_response(
+        state
+            .engine
+            .apply_wire(WireCommand::Pull {
+                session_id: op.session_id,
+            })
+            .await,
+    )
 }
 
-// ── Project-scoped ops (operate on the project's source checkout) ─────────────
-
 async fn pull_project(State(state): State<AppState>, Json(op): Json<ProjectOp>) -> Response {
-    let repo = match resolve_project_repo(&state, op.project_id).await {
-        Ok(r) => r,
-        Err(r) => return r,
-    };
-    // The source checkout's branch status follows via the engine's branch poll.
-    match run_git(move || dux_core::git::pull_current_branch(&repo)).await {
-        Ok(()) => StatusCode::OK.into_response(),
-        Err(r) => r,
-    }
+    apply_wire_response(
+        state
+            .engine
+            .apply_wire(WireCommand::PullProject {
+                project_id: op.project_id,
+            })
+            .await,
+    )
 }
 
 async fn checkout_default(State(state): State<AppState>, Json(op): Json<ProjectOp>) -> Response {
-    let project = match state.engine.project_worktree_inputs(op.project_id).await {
-        Some((project, _, _)) => project,
-        None => return (StatusCode::NOT_FOUND, "unknown project").into_response(),
-    };
-    let branch = match project.leading_branch {
-        Some(b) => b,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                "the project's default branch is not known yet",
-            )
-                .into_response();
-        }
-    };
-    let repo = PathBuf::from(project.path);
-    match run_git(move || dux_core::git::switch_branch_if_needed(&repo, &branch)).await {
-        Ok(()) => StatusCode::OK.into_response(),
-        Err(r) => r,
-    }
+    apply_wire_response(
+        state
+            .engine
+            .apply_wire(WireCommand::CheckoutProjectDefaultBranch {
+                project_id: op.project_id,
+            })
+            .await,
+    )
 }
 
-async fn resolve_project_repo(state: &AppState, project_id: String) -> Result<PathBuf, Response> {
-    match state.engine.project_worktree_inputs(project_id).await {
-        Some((project, _, _)) => Ok(PathBuf::from(project.path)),
-        None => Err((StatusCode::NOT_FOUND, "unknown project").into_response()),
+/// Map an `apply_wire` result to an HTTP response. `Ok` = the command was
+/// accepted (its busy/success status and async worker completion reach clients
+/// over the WS status broadcast); `Err` is a synchronous resolution/guard
+/// refusal (unknown session/project, source checkout path missing, …).
+fn apply_wire_response(result: Result<dux_core::wire::WireCommandOutcome, String>) -> Response {
+    match result {
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
 }

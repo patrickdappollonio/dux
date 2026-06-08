@@ -795,9 +795,11 @@ fn handle_request(engine: &mut Engine, req: EngineRequest) {
             let _ = reply.send(worktree);
         }
         EngineRequest::RefreshChangedFiles(worktree) => {
-            // Only refresh if this is the currently-watched worktree — a stale
-            // refresh for some other worktree would be dropped by events.rs
-            // anyway, but skipping it here avoids a pointless worker spawn.
+            // Spawn the off-thread refresh unconditionally. If this worktree is
+            // not the currently-watched one, the resulting `ChangedFilesReady`
+            // (worktree-tagged) is dropped by `events.rs`. In practice the git
+            // HTTP handler only refreshes the worktree it just mutated, which is
+            // normally the watched one.
             engine.spawn_changed_files_refresh(std::path::PathBuf::from(worktree));
         }
         EngineRequest::ProjectWorktreeInputs(project_id, reply) => {

@@ -129,7 +129,7 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
       {/* File path — monospace (it's a path/code identifier). Long paths
           ellipsize at the START (direction:rtl) so the filename at the end stays
           visible; text-left keeps short paths normally left-aligned. */}
-      <span className="min-w-0 flex-1 truncate text-left font-mono text-xs text-foreground [direction:rtl]">
+      <span className="min-w-0 flex-1 truncate text-left font-mono text-xs text-foreground [direction:rtl] [unicode-bidi:plaintext]">
         {file.path}
       </span>
 
@@ -170,11 +170,12 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
         variant="ghost"
         size="sm"
         disabled={busy}
+        aria-busy={busy}
         className="shrink-0 opacity-100 max-md:min-h-11 md:opacity-0 md:group-hover:opacity-100"
         onClick={handleAction}
       >
         {busy ? (
-          <Loader2 className="animate-spin" />
+          <Loader2 className="motion-safe:animate-spin" />
         ) : action === "stage" ? (
           <Plus />
         ) : (
@@ -432,7 +433,7 @@ export function ChangedFiles() {
             {/* Left-ellipsize (direction:rtl) so the filename at the path's end
                 stays visible — the title is how you know which file the diff is. */}
             <SimpleTooltip content={currentDiff?.path ?? ""}>
-              <SheetTitle className="min-w-0 truncate text-left font-mono text-sm [direction:rtl]">
+              <SheetTitle className="min-w-0 truncate text-left font-mono text-sm [direction:rtl] [unicode-bidi:plaintext]">
                 {currentDiff?.path ?? ""}
               </SheetTitle>
             </SimpleTooltip>
@@ -443,14 +444,22 @@ export function ChangedFiles() {
               <Button
                 variant="ghost"
                 size="sm"
-                className={showDiffLineNumbers ? "text-primary" : undefined}
+                className={
+                  showDiffLineNumbers
+                    ? "max-md:min-h-11 text-primary"
+                    : "max-md:min-h-11"
+                }
                 aria-pressed={showDiffLineNumbers}
                 onClick={toggleDiffLineNumbers}
               >
                 <Hash />
                 Line numbers
               </Button>
-              <SheetClose render={<Button variant="ghost" size="sm" />}>
+              <SheetClose
+                render={
+                  <Button variant="ghost" size="sm" className="max-md:min-h-11" />
+                }
+              >
                 <X />
                 Close
               </SheetClose>
