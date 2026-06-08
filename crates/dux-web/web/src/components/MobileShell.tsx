@@ -38,8 +38,10 @@ import {
   Trash2,
   X,
 } from "lucide-react"
+import { toast } from "sonner"
 import type { CSSProperties } from "react"
 import { Suspense } from "react"
+import { git } from "@/lib/git"
 
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
@@ -119,11 +121,15 @@ function SessionActions({ session }: { session: SessionView }) {
   }
 
   function handlePush() {
-    socket.sendCommand("push", { session_id: session.id })
+    git
+      .push(session.id)
+      .catch((e) => toast.error(e instanceof Error ? e.message : "push failed"))
   }
 
   function handlePull() {
-    socket.sendCommand("pull", { session_id: session.id })
+    git
+      .pull(session.id)
+      .catch((e) => toast.error(e instanceof Error ? e.message : "pull failed"))
   }
 
   return (

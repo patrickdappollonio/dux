@@ -36,7 +36,9 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react"
+import { toast } from "sonner"
 import type * as React from "react"
+import { git } from "@/lib/git"
 
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StatusBadge } from "@/components/StatusBadge"
@@ -222,11 +224,15 @@ function SessionSubItem({
   }
 
   function handlePush() {
-    socket.sendCommand("push", { session_id: session.id })
+    git
+      .push(session.id)
+      .catch((e) => toast.error(e instanceof Error ? e.message : "push failed"))
   }
 
   function handlePull() {
-    socket.sendCommand("pull", { session_id: session.id })
+    git
+      .pull(session.id)
+      .catch((e) => toast.error(e instanceof Error ? e.message : "pull failed"))
   }
 
   return (
