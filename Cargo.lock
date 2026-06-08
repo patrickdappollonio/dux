@@ -953,6 +953,7 @@ dependencies = [
  "axum-server",
  "chrono",
  "dux-core",
+ "flate2",
  "futures-util",
  "hyper",
  "libc",

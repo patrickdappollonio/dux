@@ -27,6 +27,14 @@ hyper = "1"
 # so the sweepable in-memory store that implements them needs the same macro.
 async-trait = "0.1"
 rust-embed = { version = "8", features = ["mime-guess", "debug-embed"] }
+# Decompress embedded assets on the fly for the rare client that doesn't accept
+# gzip (build.rs stores them gzipped to shrink the binary). Already in the lock.
+flate2 = "1"
+
+# Gzip the built web assets in place so rust-embed bakes the compressed bytes
+# into the binary (and they're served with Content-Encoding: gzip).
+[build-dependencies]
+flate2 = "1"
 
 [dev-dependencies]
 tempfile.workspace = true
