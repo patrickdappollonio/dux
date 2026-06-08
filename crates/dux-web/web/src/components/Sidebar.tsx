@@ -17,6 +17,7 @@ import {
   Cpu,
   Download,
   Ellipsis,
+  FileCode2,
   Folder,
   FolderGit2,
   FolderOpen,
@@ -105,6 +106,7 @@ import {
   openChangeProvider,
   openCheckoutDefaultBranch,
   openCommit,
+  openEditor,
   openCreateAgent,
   openCreateAgentFromPr,
   openDelete,
@@ -363,6 +365,10 @@ function SessionSubItem({
             <DropdownMenuItem onClick={() => openCommit(session.id)}>
               <GitCommitHorizontal />
               Commit…
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => openEditor(session.id)}>
+              <FileCode2 />
+              Open editor
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => createTerminal(session.id)}>

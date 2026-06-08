@@ -30,6 +30,7 @@ pub mod auth;
 pub mod bootstrap;
 pub mod console;
 pub mod engine_actor;
+pub mod file_routes;
 pub mod git_routes;
 pub mod protocol;
 pub mod server;

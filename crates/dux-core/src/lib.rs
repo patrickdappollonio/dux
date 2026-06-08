@@ -33,6 +33,7 @@ pub mod viewmodel;
 pub mod welcome;
 pub mod wire;
 pub mod worker;
+pub mod worktree_file;
 
 /// Display version string ('vX.Y.Z' for release builds, 'development' otherwise), set by build.rs — mirrors the TUI's `DUX_DISPLAY_VERSION`.
 pub fn display_version() -> &'static str {
