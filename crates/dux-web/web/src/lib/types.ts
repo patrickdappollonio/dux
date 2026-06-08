@@ -160,6 +160,8 @@ export interface ViewModel {
   global_env: Record<string, string>
   available_providers: string[]
   welcome_tips: string[]
+  /** Mirrors the binary's display version ('vX.Y.Z' or 'development'); shown in the sidebar brand block. */
+  dux_version: string
   randomize_agent_names_by_default: boolean
   /** Whether the new-agent-from-PR flow is available (GitHub integration on +
    * `gh` installed and authenticated). The "From PR" mode is disabled with a

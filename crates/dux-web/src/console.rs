@@ -558,7 +558,9 @@ pub enum LoginRow {
 /// addresses that ACTUALLY bound, so it shows truth (no pre-bind hedging).
 #[derive(Debug, Clone)]
 pub struct Banner {
-    /// The dux crate version (e.g. `0.1.0`).
+    /// The dux display version, already formatted (`vX.Y.Z` for release builds,
+    /// `development` otherwise) — the same string the TUI footer and web sidebar
+    /// show, via `dux_core::display_version`. Rendered verbatim.
     pub version: String,
     /// The mode line (e.g. `plain HTTP`, `TLS via Let's Encrypt`,
     /// `TLS via Let's Encrypt [STAGING]`).
@@ -575,16 +577,18 @@ pub struct Banner {
 fn render_banner(color: bool, banner: &Banner) -> Vec<String> {
     let mut out = Vec::new();
 
-    // Header: bold "dux" + version + the mode in the info tone.
+    // Header: bold "dux" + version + the mode in the info tone. `banner.version`
+    // is already the display string (e.g. "v0.1.0" or "development"), so it is
+    // rendered verbatim — no "v" prefix is added here.
     let header_name = if color {
         format!("{BOLD}{CYAN}dux{RESET}")
     } else {
         "dux".to_string()
     };
     let version = if color {
-        format!("{DIM}v{}{RESET}", banner.version)
+        format!("{DIM}{}{RESET}", banner.version)
     } else {
-        format!("v{}", banner.version)
+        banner.version.clone()
     };
     out.push(format!("{header_name} {version}  {}", banner.mode));
 
@@ -933,7 +937,7 @@ mod tests {
 
     fn sample_banner() -> Banner {
         Banner {
-            version: "0.1.0".to_string(),
+            version: "v0.1.0".to_string(),
             mode: "plain HTTP".to_string(),
             listeners: vec![ListenerRow {
                 label: "Local".to_string(),
@@ -1051,7 +1055,7 @@ mod tests {
     #[test]
     fn banner_acme_staging_mode_and_redirect_note() {
         let b = Banner {
-            version: "0.1.0".to_string(),
+            version: "v0.1.0".to_string(),
             mode: "TLS via Let's Encrypt [STAGING]".to_string(),
             listeners: vec![ListenerRow {
                 label: "dux.example.com".to_string(),

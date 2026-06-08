@@ -52,6 +52,7 @@ function vmWithMacros(macros: MacroView[]): ViewModel {
     global_env: {},
     available_providers: [],
     welcome_tips: [],
+    dux_version: "development",
     randomize_agent_names_by_default: false,
     gh_available: false,
     pr_banner_position: "top",

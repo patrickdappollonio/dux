@@ -7,6 +7,11 @@ members = [
 ]
 resolver = "3"
 
+# Single source of truth for the crate version so the TUI (dux-tui) and the web
+# (dux-core's display_version) can never show different versions.
+[workspace.package]
+version = "0.1.0"
+
 [workspace.dependencies]
 anyhow = "1.0.98"
 bcrypt = "0.19"

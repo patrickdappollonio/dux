@@ -46,12 +46,11 @@ import { Separator } from "@/components/ui/separator"
 import {
   SidebarInset,
   SidebarProvider,
-  SidebarTrigger,
 } from "@/components/ui/sidebar"
 import { Toaster } from "@/components/ui/sonner"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
-import { paletteShortcutLabel } from "@/lib/platform"
+import { paletteShortcutKeys } from "@/lib/platform"
 import { UNREACHABLE_MESSAGE } from "@/lib/auth"
 import { logout, retryBoot, setPaletteOpen, useDux } from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
@@ -72,45 +71,82 @@ function InsetHeader() {
 
   return (
     <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
-      <SidebarTrigger className="-ml-1" />
-      <Separator orientation="vertical" className="mx-1 h-4" />
-      <Breadcrumb>
-        <BreadcrumbList>
-          {session ? (
-            <>
+      {/* Left region shares one shrink budget so a long title/details row
+          truncates instead of pushing the right-hand controls off the edge. */}
+      <div className="flex min-w-0 flex-1 items-center gap-2">
+        <Breadcrumb className="min-w-0">
+          <BreadcrumbList className="flex-nowrap">
+            {session ? (
+              <>
+                <BreadcrumbItem>
+                  <BreadcrumbPage>{project?.name ?? "dux"}</BreadcrumbPage>
+                </BreadcrumbItem>
+                <BreadcrumbSeparator />
+                <BreadcrumbItem className="min-w-0">
+                  <BreadcrumbPage className="truncate">
+                    {session.title || session.branch_name}
+                  </BreadcrumbPage>
+                </BreadcrumbItem>
+                {terminalLabel ? (
+                  <>
+                    <BreadcrumbSeparator />
+                    <BreadcrumbItem className="min-w-0">
+                      <BreadcrumbPage className="truncate">
+                        {terminalLabel}
+                      </BreadcrumbPage>
+                    </BreadcrumbItem>
+                  </>
+                ) : null}
+              </>
+            ) : (
               <BreadcrumbItem>
-                <BreadcrumbPage>{project?.name ?? "dux"}</BreadcrumbPage>
+                <BreadcrumbPage>dux</BreadcrumbPage>
               </BreadcrumbItem>
-              <BreadcrumbSeparator />
-              <BreadcrumbItem>
-                <BreadcrumbPage className="font-mono">
-                  {session.branch_name}
-                </BreadcrumbPage>
-              </BreadcrumbItem>
-              {terminalLabel ? (
-                <>
-                  <BreadcrumbSeparator />
-                  <BreadcrumbItem>
-                    <BreadcrumbPage>{terminalLabel}</BreadcrumbPage>
-                  </BreadcrumbItem>
-                </>
-              ) : null}
-            </>
-          ) : (
-            <BreadcrumbItem>
-              <BreadcrumbPage>dux</BreadcrumbPage>
-            </BreadcrumbItem>
-          )}
-        </BreadcrumbList>
-      </Breadcrumb>
+            )}
+          </BreadcrumbList>
+        </Breadcrumb>
 
-      <div className="ml-auto flex items-center gap-2">
+        {session ? (
+          <>
+            <Separator orientation="vertical" className="mx-1 h-4 shrink-0" />
+            <div className="flex min-w-0 items-center gap-x-3 text-sm">
+              <span className="min-w-0 truncate">
+                <span className="text-muted-foreground">branch </span>
+                <span className="font-mono">{session.branch_name}</span>
+              </span>
+              <span className="min-w-0 truncate">
+                <span className="text-muted-foreground">provider </span>
+                {session.provider}
+              </span>
+              {session.terminals.length > 0 ? (
+                <span className="shrink-0 text-muted-foreground">
+                  {session.terminals.length === 1
+                    ? "1 terminal"
+                    : `${session.terminals.length} terminals`}
+                </span>
+              ) : null}
+            </div>
+          </>
+        ) : null}
+      </div>
+
+      <div className="flex shrink-0 items-center gap-2">
         <Button
           variant="outline"
           size="sm"
           onClick={() => setPaletteOpen(true)}
         >
-          <span className="font-mono text-xs">{paletteShortcutLabel()}</span>
+          {/* Render each key as its own flex child so the spacing between keys
+              matches the button's gap to "Search…" (a single monospace string
+              put a wide font-space between the keys), and so the keys share the
+              button's sans font for consistent vertical alignment. The keycaps
+              are decorative (the button already reads "Search…"), so they're
+              hidden from assistive tech. */}
+          {paletteShortcutKeys().map((key) => (
+            <span key={key} aria-hidden className="text-muted-foreground">
+              {key}
+            </span>
+          ))}
           Search…
         </Button>
         {auth.phase === "authed" ? (

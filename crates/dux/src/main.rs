@@ -243,7 +243,10 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
         paths,
         plan,
         cli_disable_auth,
-        env!("CARGO_PKG_VERSION").to_string(),
+        // Same display version as the TUI footer and the web sidebar
+        // ("vX.Y.Z" for release builds, "development" otherwise) so all three
+        // surfaces always show the same thing.
+        dux_core::display_version().to_string(),
     )
 }
 
