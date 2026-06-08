@@ -1,4 +1,7 @@
-import { Sparkles } from "lucide-react"
+import { useState } from "react"
+import { Loader2, Sparkles } from "lucide-react"
+import { toast } from "sonner"
+import { git } from "@/lib/git"
 import { shouldShowChangedFiles } from "@/lib/changedFiles"
 import { Button } from "@/components/ui/button"
 import {
@@ -13,12 +16,12 @@ import {
   closeCommit,
   generateCommitMessage,
   setCommitDraft,
-  socket,
   useDux,
 } from "@/lib/store"
 
 export function CommitDialog() {
   const { commitTarget, commitDraft, viewModel } = useDux()
+  const [committing, setCommitting] = useState(false)
 
   const isOpen = commitTarget !== null
   // Only trust the global staged list when it belongs to THIS dialog's session
@@ -29,13 +32,17 @@ export function CommitDialog() {
     ? (viewModel?.changed_files.staged.length ?? 0)
     : 0
 
-  function handleCommit() {
-    if (!commitTarget || !commitDraft.trim()) return
-    socket.sendCommand("commit_changes", {
-      session_id: commitTarget,
-      message: commitDraft.trim(),
-    })
-    closeCommit()
+  async function handleCommit() {
+    if (!commitTarget || !commitDraft.trim() || committing) return
+    setCommitting(true)
+    try {
+      await git.commit(commitTarget, commitDraft.trim())
+      closeCommit()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "commit failed")
+    } finally {
+      setCommitting(false)
+    }
   }
 
   function handleGenerate() {
@@ -79,7 +86,11 @@ export function CommitDialog() {
             <Button variant="outline" onClick={() => closeCommit()}>
               Cancel
             </Button>
-            <Button onClick={handleCommit} disabled={!commitDraft.trim()}>
+            <Button
+              onClick={handleCommit}
+              disabled={committing || !commitDraft.trim()}
+            >
+              {committing ? <Loader2 className="animate-spin" /> : null}
               Commit
             </Button>
           </div>

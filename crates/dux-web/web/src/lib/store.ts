@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react"
 import { toast } from "sonner"
 
 import { sanitizeAgentName } from "./agentName"
+import { git } from "./git"
 import {
   type AuthState,
   type MeBody,
@@ -873,7 +874,9 @@ export function closeDiscard(): void {
 // if the file is staged, so this never trusts the client about the destructive
 // outcome.
 export function discardFile(sessionId: string, path: string): void {
-  socket.sendCommand("discard_file", { session_id: sessionId, path })
+  git
+    .discard(sessionId, path)
+    .catch((e) => toast.error(e instanceof Error ? e.message : "discard failed"))
 }
 
 export function openCommit(sessionId: string): void {
@@ -1083,7 +1086,9 @@ export function removeProject(projectId: string): void {
 // against its source checkout, and reports busy/success/failure on the status
 // stream — nothing to do here but fire the command.
 export function pullProject(projectId: string): void {
-  socket.sendCommand("pull_project", { project_id: projectId })
+  git
+    .pullProject(projectId)
+    .catch((e) => toast.error(e instanceof Error ? e.message : "pull failed"))
 }
 
 // Open the confirm dialog for switching a project's source checkout back to its
@@ -1102,7 +1107,11 @@ export function closeCheckoutDefaultBranch(): void {
 // server reports the outcome (switched / already on it / can't determine) on
 // the command result, so there is nothing to do here but fire the command.
 export function checkoutDefaultBranch(projectId: string): void {
-  socket.sendCommand("checkout_project_default_branch", { project_id: projectId })
+  git
+    .checkoutDefault(projectId)
+    .catch((e) =>
+      toast.error(e instanceof Error ? e.message : "checkout failed")
+    )
 }
 
 // Open the attach-worktree dialog for a project and immediately request its

@@ -10,6 +10,8 @@ import {
   Undo2,
   X,
 } from "lucide-react"
+import { toast } from "sonner"
+import { git } from "@/lib/git"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Badge } from "@/components/ui/badge"
@@ -55,7 +57,6 @@ import {
   openCommit,
   openDiscard,
   requestDiff,
-  socket,
   toggleDiffLineNumbers,
   useDux,
 } from "@/lib/store"
@@ -85,11 +86,24 @@ interface FileRowProps {
 
 function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
   const glyph = statusGlyph(file.status)
+  const [busy, setBusy] = useState(false)
 
-  function handleAction(e: React.MouseEvent) {
+  async function handleAction(e: React.MouseEvent) {
     e.stopPropagation()
-    const command = action === "stage" ? "stage_file" : "unstage_file"
-    socket.sendCommand(command, { session_id: sessionId, path: file.path })
+    setBusy(true)
+    try {
+      if (action === "stage") {
+        await git.stage(sessionId, file.path)
+      } else {
+        await git.unstage(sessionId, file.path)
+      }
+      // The file moves staged↔unstaged once the engine's changed-files refresh
+      // arrives over the socket; that unmounts this row.
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "git operation failed")
+    } finally {
+      setBusy(false)
+    }
   }
 
   // Discard is only offered on unstaged files (the "stage" action rows), mirroring
@@ -112,8 +126,10 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
         {glyph}
       </Badge>
 
-      {/* File path — monospace (it's a path/code identifier). */}
-      <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
+      {/* File path — monospace (it's a path/code identifier). Long paths
+          ellipsize at the START (direction:rtl) so the filename at the end stays
+          visible; text-left keeps short paths normally left-aligned. */}
+      <span className="min-w-0 flex-1 truncate text-left font-mono text-xs text-foreground [direction:rtl]">
         {file.path}
       </span>
 
@@ -153,20 +169,18 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
       <Button
         variant="ghost"
         size="sm"
+        disabled={busy}
         className="shrink-0 opacity-100 max-md:min-h-11 md:opacity-0 md:group-hover:opacity-100"
         onClick={handleAction}
       >
-        {action === "stage" ? (
-          <>
-            <Plus />
-            Stage
-          </>
+        {busy ? (
+          <Loader2 className="animate-spin" />
+        ) : action === "stage" ? (
+          <Plus />
         ) : (
-          <>
-            <Minus />
-            Unstage
-          </>
+          <Minus />
         )}
+        {action === "stage" ? "Stage" : "Unstage"}
       </Button>
     </div>
   )
@@ -297,14 +311,28 @@ export function ChangedFiles() {
             <Button
               size="sm"
               variant="outline"
-              onClick={() => socket.sendCommand("push", { session_id: selectedSessionId })}
+              onClick={() => {
+                if (!selectedSessionId) return
+                git
+                  .push(selectedSessionId)
+                  .catch((e) =>
+                    toast.error(e instanceof Error ? e.message : "push failed")
+                  )
+              }}
             >
               Push
             </Button>
             <Button
               size="sm"
               variant="outline"
-              onClick={() => socket.sendCommand("pull", { session_id: selectedSessionId })}
+              onClick={() => {
+                if (!selectedSessionId) return
+                git
+                  .pull(selectedSessionId)
+                  .catch((e) =>
+                    toast.error(e instanceof Error ? e.message : "pull failed")
+                  )
+              }}
             >
               Pull
             </Button>
@@ -401,8 +429,10 @@ export function ChangedFiles() {
           className="data-[side=right]:w-[92vw] data-[side=right]:sm:max-w-3xl"
         >
           <SheetHeader className="flex-row items-center justify-between gap-2">
+            {/* Left-ellipsize (direction:rtl) so the filename at the path's end
+                stays visible — the title is how you know which file the diff is. */}
             <SimpleTooltip content={currentDiff?.path ?? ""}>
-              <SheetTitle className="min-w-0 truncate font-mono text-sm">
+              <SheetTitle className="min-w-0 truncate text-left font-mono text-sm [direction:rtl]">
                 {currentDiff?.path ?? ""}
               </SheetTitle>
             </SimpleTooltip>

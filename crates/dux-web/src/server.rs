@@ -224,6 +224,7 @@ pub fn build_app(
     // structure can't stop a route from being misplaced into the open group.
     let gated = Router::new()
         .route("/ws", get(ws_upgrade))
+        .merge(crate::git_routes::routes())
         .merge(extra_gated)
         .route_layer(middleware::from_fn_with_state(state.clone(), gate));
 
@@ -1056,6 +1057,59 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "a gated data route must reject an unauthenticated request before reaching its handler"
         );
+    }
+
+    /// A real git-mutation route is inside the gated group: unauthenticated →
+    /// 401, before any git work runs.
+    #[tokio::test]
+    async fn git_route_requires_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let hash = dux_core::auth::hash_password("pw").unwrap();
+        let auth = auth::shared_auth(&[format!("alice:{hash}")], false);
+        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/git/stage")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"session_id":"s1","path":"a.txt"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// With auth off the gate passes; an unknown session resolves to 404 (the
+    /// handler is wired and resolves the worktree before doing any git work).
+    #[tokio::test]
+    async fn git_route_unknown_session_is_404() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let auth = auth::shared_auth(&[], false);
+        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/git/stage")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"session_id":"does-not-exist","path":"a.txt"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     /// The access middleware logs a request's method, path, and final status when

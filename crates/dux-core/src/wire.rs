@@ -449,7 +449,7 @@ pub fn delete_session_status_message(
 /// trusted from the client. Mirrors the TUI's guard: a file that is currently
 /// STAGED cannot be discarded (the TUI tells the user to unstage it first), and
 /// a file with no working-tree change has nothing to discard.
-fn discard_classify(worktree_path: &std::path::Path, path: &str) -> anyhow::Result<bool> {
+pub fn discard_classify(worktree_path: &std::path::Path, path: &str) -> anyhow::Result<bool> {
     let (staged, unstaged) = crate::git::changed_files(worktree_path)?;
     // Reject when the file is staged. The TUI surfaces "Unstage the file first
     // to discard changes." for the same case; mirror that wording.

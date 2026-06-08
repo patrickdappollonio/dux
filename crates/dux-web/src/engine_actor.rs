@@ -48,6 +48,12 @@ pub enum EngineRequest {
     /// Resolve a session's worktree path (instant lookup; diff I/O happens
     /// off-thread in the server handler).
     SessionWorktree(String, oneshot::Sender<Option<String>>),
+    /// Ask the engine to recompute the changed-files lists for a worktree (after
+    /// an HTTP git mutation ran the git op off-thread). Fire-and-forget: the
+    /// engine spawns its off-thread refresh worker, whose result flows back
+    /// through the normal `ChangedFilesReady` path and the coalesced ViewModel
+    /// watch — so every connected client sees the new state over the socket.
+    RefreshChangedFiles(String),
     /// Snapshot the inputs needed to classify a project's managed worktrees:
     /// the project, the dux paths, and the current sessions. Instant clones off
     /// engine state; the git work (`list_worktrees` + classification) runs
@@ -363,6 +369,15 @@ impl EngineHandle {
             return None;
         }
         rx.await.unwrap_or(None)
+    }
+
+    /// Fire-and-forget: ask the engine to recompute changed-files for `worktree`
+    /// (after an HTTP git mutation). The refreshed lists reach clients via the
+    /// ViewModel watch; nothing to await here.
+    pub fn refresh_changed_files(&self, worktree: String) {
+        let _ = self
+            .req_tx
+            .send(EngineRequest::RefreshChangedFiles(worktree));
     }
 
     /// Snapshot the inputs to classify a project's managed worktrees (project,
@@ -778,6 +793,12 @@ fn handle_request(engine: &mut Engine, req: EngineRequest) {
                 .find(|s| s.id == session_id)
                 .map(|s| s.worktree_path.clone());
             let _ = reply.send(worktree);
+        }
+        EngineRequest::RefreshChangedFiles(worktree) => {
+            // Only refresh if this is the currently-watched worktree — a stale
+            // refresh for some other worktree would be dropped by events.rs
+            // anyway, but skipping it here avoids a pointless worker spawn.
+            engine.spawn_changed_files_refresh(std::path::PathBuf::from(worktree));
         }
         EngineRequest::ProjectWorktreeInputs(project_id, reply) => {
             let inputs = engine
