@@ -14,8 +14,9 @@ use std::thread;
 use std::time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
-use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::grid::{Dimensions, GridCell, Scroll};
+use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{self, Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{
     Color as TermColor, CursorShape, NamedColor, Processor, Rgb, StdSyncHandler,
@@ -219,6 +220,21 @@ fn bg_sgr(color: CellColor) -> String {
 /// redraw anyway because pause is only active during scrollback sessions with
 /// TUI-style providers.
 const PAUSE_BUFFER_CAP: usize = 4 * 1024 * 1024;
+
+/// Safety ceiling on how many grid rows a single reconnect repaint replays.
+/// `agent_scrollback_lines` is an unbounded user value; this bounds the one-time
+/// buffer a connect builds (under the terminal lock) so a pathological config
+/// can't stall the engine thread or balloon memory. The default scrollback
+/// (10_000) is far below this, so normal use is never truncated; when it is, the
+/// most recent lines are kept and the drop is logged.
+const MAX_RECONNECT_REPLAY_LINES: i32 = 100_000;
+
+/// Topmost grid line a reconnect repaint should start from: the buffer top,
+/// unless that would exceed [`MAX_RECONNECT_REPLAY_LINES`] rows, in which case it
+/// is pulled down to keep only the most recent lines.
+fn clamp_replay_top(full_top: i32, bottom: i32) -> i32 {
+    full_top.max(bottom + 1 - MAX_RECONNECT_REPLAY_LINES)
+}
 
 /// A PTY-based client that spawns a CLI tool in a pseudo-terminal and keeps a
 /// full terminal grid with scrollback using `alacritty_terminal`.
@@ -486,10 +502,9 @@ impl PtyClient {
     pub fn subscribe_with_repaint(&self) -> (Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>) {
         let rx = self.subscribe();
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
-        let snapshot = terminal.snapshot();
-        let alt_screen = terminal.is_alt_screen();
+        let repaint = terminal.reconnect_repaint();
         drop(terminal);
-        (synthesize_repaint(&snapshot, alt_screen), rx)
+        (repaint, rx)
     }
 
     /// Fill `target` with the current terminal viewport, reusing its `cells`
@@ -924,33 +939,13 @@ impl TerminalState {
                 }
             }
 
-            let mut modifier = CellModifier::default();
-            if cell.flags.contains(Flags::BOLD) {
-                modifier.bold = true;
-            }
-            if cell.flags.contains(Flags::ITALIC) {
-                modifier.italic = true;
-            }
-            if cell.flags.intersects(Flags::ALL_UNDERLINES) {
-                modifier.underlined = true;
-            }
-            if cell.flags.contains(Flags::INVERSE) {
-                modifier.reversed = true;
-            }
-            if cell.flags.contains(Flags::DIM) {
-                modifier.dim = true;
-            }
-            if cell.flags.contains(Flags::STRIKEOUT) {
-                modifier.crossed_out = true;
-            }
-
             target.cells.push(SnapshotCell {
                 row: point.line as u16,
                 col: point.column.0 as u16,
                 symbol,
                 fg: convert_terminal_color(cell.fg, colors),
                 bg: convert_terminal_color(cell.bg, colors),
-                modifier,
+                modifier: cell_modifier(cell),
             });
         }
 
@@ -959,6 +954,133 @@ impl TerminalState {
         target.scrollback_offset = display_offset;
         target.scrollback_total = history_size;
         target.cursor = cursor;
+    }
+
+    /// Build an ANSI byte sequence that repaints the terminal onto a freshly
+    /// connected (or reconnected) client *including scrollback history*, so the
+    /// client's scroll buffer matches what the TUI renders from the same grid.
+    ///
+    /// On the alternate screen there is no scrollback, so this is identical to
+    /// the viewport-only `synthesize_repaint(.., true)`. On the main screen we
+    /// rebuild the client's primary buffer by printing the whole grid (history +
+    /// viewport) as a newline-separated line stream; natural scrolling pushes
+    /// the history into the client's scrollback. Printing is the only way to
+    /// populate a terminal's scrollback over a byte stream — absolute-positioned
+    /// repaints overwrite the viewport without ever scrolling.
+    fn reconnect_repaint(&self) -> Vec<u8> {
+        if self.is_alt_screen() {
+            return synthesize_repaint(&self.snapshot(), true);
+        }
+
+        let renderable = self.term.renderable_content();
+        let colors = renderable.colors;
+        // The replay always rebuilds the buffer ending at the live bottom, so the
+        // cursor must be mapped as if the grid were NOT scrolled back (display
+        // offset 0). Using the live `display_offset` here would add the scrollback
+        // distance and emit an out-of-range cursor position whenever a TUI
+        // operator is reading history at the moment a web client connects.
+        let cursor = if renderable.cursor.shape == CursorShape::Hidden {
+            None
+        } else {
+            term::point_to_viewport(0, renderable.cursor.point)
+        };
+
+        let grid = self.term.grid();
+        let cols = grid.columns();
+        let full_top = grid.topmost_line().0;
+        let bottom = grid.bottommost_line().0;
+        // Bound the replay so a very large configured scrollback can't make one
+        // connect build an enormous buffer under the terminal lock. The default
+        // (10_000) never trips this; when it does, the most recent lines are kept.
+        let top = clamp_replay_top(full_top, bottom);
+        if top != full_top {
+            logger::debug(&format!(
+                "reconnect replay truncated scrollback from {} to {} lines (cap {})",
+                bottom - full_top + 1,
+                bottom - top + 1,
+                MAX_RECONNECT_REPLAY_LINES,
+            ));
+        }
+
+        // Pre-size to history+screen rows so a large scrollback doesn't reallocate
+        // repeatedly while we hold the terminal lock.
+        let est_rows = (bottom - top + 1).max(0) as usize;
+        let mut out = String::with_capacity(est_rows * (cols + 2) + 32);
+        // Ensure the primary buffer and autowrap-on (so soft-wrapped rows can be
+        // rebuilt by the client), then clear the screen, clear the client's saved
+        // scrollback (3J), and home the cursor. Clearing scrollback makes a
+        // reconnect idempotent: we rebuild from the authoritative grid rather than
+        // appending a second copy of the history.
+        out.push_str("\x1b[?1049l\x1b[?7h\x1b[2J\x1b[3J\x1b[H");
+
+        let mut last_style: Option<(CellColor, CellColor, CellModifier)> = None;
+        // A soft-wrapped row carries `WRAPLINE` on its last cell. We replay such a
+        // row at full width with NO line break and let the client's autowrap
+        // re-create the soft wrap when the next row's first cell overflows — that
+        // preserves copy/paste and resize-reflow semantics. A `\r\n` is emitted
+        // only for genuine (hard) line breaks.
+        let mut prev_wrapped = false;
+        for line in top..=bottom {
+            let row = &grid[Line(line)];
+            let wrapped = cols > 0 && row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
+            if line != top && !prev_wrapped {
+                out.push_str("\r\n");
+            }
+            // Right-trim trailing empty default cells so we don't emit a screen's
+            // worth of spaces per line. `Cell::is_empty` is false for colored
+            // (non-default-background) spaces, so visible trailing blocks survive.
+            // A wrapped row keeps its full width — the trailing cells are load
+            // bearing for the autowrap to fire at the right column.
+            let emit_to = if wrapped {
+                cols
+            } else {
+                let mut last_col = 0usize;
+                for c in 0..cols {
+                    if !row[Column(c)].is_empty() {
+                        last_col = c + 1;
+                    }
+                }
+                last_col
+            };
+            for c in 0..emit_to {
+                let cell = &row[Column(c)];
+                // The trailing spacer of a wide char carries no glyph; the wide
+                // char itself (at the previous column) holds the symbol.
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+                let fg = convert_terminal_color(cell.fg, colors);
+                let bg = convert_terminal_color(cell.bg, colors);
+                let modifier = cell_modifier(cell);
+                let style = (fg, bg, modifier);
+                if last_style != Some(style) {
+                    out.push_str("\x1b[0m");
+                    out.push_str(&sgr_sequence(fg, bg, modifier));
+                    last_style = Some(style);
+                }
+                // A tab cell stores a literal '\t' as a one-column anchor (the
+                // span's fill spaces follow in later cells); emitting it raw would
+                // make the client interpret a tab control and jump columns. Map
+                // any C0 control to a space — only '\t' is reachable here, but
+                // this is defensively safe for all of them.
+                out.push(if cell.c < ' ' { ' ' } else { cell.c });
+                if let Some(zerowidth) = cell.zerowidth() {
+                    for ch in zerowidth {
+                        out.push(*ch);
+                    }
+                }
+            }
+            prev_wrapped = wrapped;
+        }
+
+        out.push_str("\x1b[0m");
+        if let Some(point) = cursor {
+            out.push_str(&format!("\x1b[{};{}H", point.line + 1, point.column.0 + 1));
+        }
+        out.into_bytes()
     }
 
     fn scrollback_offset(&self) -> usize {
@@ -1086,6 +1208,31 @@ impl Dimensions for TerminalDimensions {
     fn columns(&self) -> usize {
         self.cols
     }
+}
+
+/// Translate an alacritty cell's style flags into our serializable
+/// `CellModifier`. Shared by the per-frame snapshot and the reconnect repaint.
+fn cell_modifier(cell: &Cell) -> CellModifier {
+    let mut modifier = CellModifier::default();
+    if cell.flags.contains(Flags::BOLD) {
+        modifier.bold = true;
+    }
+    if cell.flags.contains(Flags::ITALIC) {
+        modifier.italic = true;
+    }
+    if cell.flags.intersects(Flags::ALL_UNDERLINES) {
+        modifier.underlined = true;
+    }
+    if cell.flags.contains(Flags::INVERSE) {
+        modifier.reversed = true;
+    }
+    if cell.flags.contains(Flags::DIM) {
+        modifier.dim = true;
+    }
+    if cell.flags.contains(Flags::STRIKEOUT) {
+        modifier.crossed_out = true;
+    }
+    modifier
 }
 
 fn convert_terminal_color(
@@ -1337,6 +1484,180 @@ mod tests {
             terminal.term.grid().history_size()
         );
         assert!(terminal.term.grid().history_size() >= 5);
+    }
+
+    #[test]
+    fn reconnect_repaint_includes_scrollback_history() {
+        let mut terminal = TerminalState::with_scrollback(4, 20, 1000);
+        for i in 0..12 {
+            terminal.process(format!("line{i}\r\n").as_bytes());
+        }
+        assert!(
+            terminal.term.grid().history_size() > 0,
+            "precondition: terminal has scrollback history"
+        );
+
+        let replay = String::from_utf8(terminal.reconnect_repaint()).unwrap();
+        assert!(
+            replay.contains("line0"),
+            "earliest history line must be replayed, got:\n{replay}"
+        );
+        assert!(replay.contains("line11"), "recent line must be present");
+
+        // The viewport-only repaint (the previous behavior) omits scrolled-off
+        // history — this is exactly the gap this method closes.
+        let viewport_only =
+            String::from_utf8(synthesize_repaint(&terminal.snapshot(), false)).unwrap();
+        assert!(
+            !viewport_only.contains("line0"),
+            "sanity: viewport-only repaint omits scrolled-off history"
+        );
+    }
+
+    #[test]
+    fn reconnect_repaint_alt_screen_matches_viewport_repaint() {
+        let mut terminal = TerminalState::with_scrollback(5, 20, 100);
+        terminal.process(b"main screen line\r\n");
+        terminal.process(b"\x1b[?1049h"); // enter the alternate screen
+        terminal.process(b"alt content");
+        assert!(terminal.is_alt_screen());
+
+        // On the alt screen there is no scrollback to replay, so the reconnect
+        // repaint must be byte-identical to the viewport-only repaint.
+        assert_eq!(
+            terminal.reconnect_repaint(),
+            synthesize_repaint(&terminal.snapshot(), true),
+        );
+    }
+
+    #[test]
+    fn reconnect_repaint_round_trips_through_a_fresh_terminal() {
+        let mut src = TerminalState::with_scrollback(4, 20, 1000);
+        for i in 0..12 {
+            src.process(format!("line{i}\r\n").as_bytes());
+        }
+        let replay = src.reconnect_repaint();
+
+        // Feeding the replay into a fresh terminal of the same size must rebuild
+        // the same grid — proven by idempotence: the rebuilt terminal's own
+        // replay is byte-identical, and the scrollback is repopulated.
+        let mut dst = TerminalState::with_scrollback(4, 20, 1000);
+        dst.process(&replay);
+
+        assert!(
+            dst.term.grid().history_size() > 0,
+            "replay must rebuild scrollback in a fresh terminal"
+        );
+        assert_eq!(
+            src.reconnect_repaint(),
+            dst.reconnect_repaint(),
+            "reconnect repaint is stable across a round-trip",
+        );
+    }
+
+    #[test]
+    fn reconnect_repaint_cursor_in_range_when_scrolled_back() {
+        let mut terminal = TerminalState::with_scrollback(4, 20, 1000);
+        for i in 0..12 {
+            terminal.process(format!("line{i}\r\n").as_bytes());
+        }
+        // The operator scrolls into history; a web client connecting now must
+        // still place the cursor within the live screen, not at an offset row.
+        terminal.set_scrollback(terminal.term.grid().history_size());
+        let replay = String::from_utf8(terminal.reconnect_repaint()).unwrap();
+
+        // Inspect the trailing cursor-restore CUP (\x1b[<row>;<col>H), if present.
+        // The previous code added the live display offset and emitted an
+        // out-of-range row (e.g. \x1b[7;1H on a 4-row screen).
+        if let Some(idx) = replay.rfind("\x1b[") {
+            let tail = &replay[idx + 2..];
+            if let Some(h) = tail.find('H') {
+                let row: usize = tail[..h].split(';').next().unwrap().parse().unwrap();
+                assert!(row <= 4, "cursor row {row} must be within the 4-row screen");
+            }
+        }
+    }
+
+    #[test]
+    fn reconnect_repaint_preserves_soft_wrap() {
+        let mut src = TerminalState::with_scrollback(4, 8, 1000);
+        // 12 chars into an 8-col terminal soft-wraps across two grid rows.
+        src.process(b"ABCDEFGHIJKL");
+        let has_wrap = |t: &TerminalState| {
+            (t.term.grid().topmost_line().0..=t.term.grid().bottommost_line().0).any(|l| {
+                t.term.grid()[Line(l)][Column(7)]
+                    .flags
+                    .contains(Flags::WRAPLINE)
+            })
+        };
+        assert!(
+            has_wrap(&src),
+            "precondition: source has a soft-wrapped row"
+        );
+
+        let replay = src.reconnect_repaint();
+        let mut dst = TerminalState::with_scrollback(4, 8, 1000);
+        dst.process(&replay);
+
+        // The soft wrap must survive the round-trip (rebuilt via the client's
+        // autowrap), not degrade into a hard line break.
+        assert!(has_wrap(&dst), "soft wrap must survive the round-trip");
+        assert_eq!(src.reconnect_repaint(), dst.reconnect_repaint());
+    }
+
+    #[test]
+    fn reconnect_repaint_maps_tabs_to_spaces_without_drift() {
+        let mut src = TerminalState::with_scrollback(4, 40, 100);
+        // Tabs stop every 8 columns: a@0, b@8, c@16.
+        src.process(b"a\tb\tc");
+        let replay = src.reconnect_repaint();
+        assert!(
+            !replay.contains(&b'\t'),
+            "replay must not emit a raw tab — the client would re-interpret it and drift columns"
+        );
+
+        let mut dst = TerminalState::with_scrollback(4, 40, 100);
+        dst.process(&replay);
+        let snap = dst.snapshot();
+        let at = |row: u16, col: u16| {
+            snap.cells
+                .iter()
+                .find(|c| c.row == row && c.col == col)
+                .map(|c| c.symbol.as_str())
+        };
+        // Columns must line up after the round-trip; the pre-fix code emitted the
+        // raw tab AND the fill spaces, double-advancing the cursor (b drifted to
+        // col 14, c to col 22).
+        assert_eq!(at(0, 0), Some("a"));
+        assert_eq!(at(0, 8), Some("b"));
+        assert_eq!(at(0, 16), Some("c"));
+    }
+
+    #[test]
+    fn clamp_replay_top_bounds_history() {
+        // Within the cap: start at the real buffer top (4-row screen, bottom = 3).
+        assert_eq!(clamp_replay_top(-50, 3), -50);
+        // Beyond the cap: pull down to keep the most recent lines only.
+        assert_eq!(
+            clamp_replay_top(-200_000, 3),
+            4 - MAX_RECONNECT_REPLAY_LINES
+        );
+        // Exactly at the cap boundary is not truncated.
+        let exact = 4 - MAX_RECONNECT_REPLAY_LINES;
+        assert_eq!(clamp_replay_top(exact, 3), exact);
+    }
+
+    #[test]
+    fn reconnect_repaint_preserves_cursor_position() {
+        let mut terminal = TerminalState::with_scrollback(5, 20, 100);
+        terminal.process(b"abc");
+        terminal.process(b"\x1b[3;5H"); // move cursor to row 3, col 5 (1-based)
+
+        let replay = String::from_utf8(terminal.reconnect_repaint()).unwrap();
+        assert!(
+            replay.ends_with("\x1b[3;5H"),
+            "replay should restore the cursor position; full replay: {replay:?}"
+        );
     }
 
     #[test]
