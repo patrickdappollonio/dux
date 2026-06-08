@@ -4,7 +4,7 @@
 //! The TUI keeps its own syntect+ratatui renderer in `dux-tui/src/diff.rs`;
 //! unifying the two onto this engine is a future follow-up.
 
-use std::path::{Component, Path};
+use std::path::Path;
 
 use serde::Serialize;
 
@@ -54,27 +54,11 @@ pub struct FileDiff {
 /// `..`/root/prefix component are rejected, since the web passes
 /// client-supplied paths here.
 pub fn file_diff(worktree: &Path, rel_path: &str) -> anyhow::Result<FileDiff> {
-    let rp = Path::new(rel_path);
-    if rp.is_absolute()
-        || rp.components().any(|c| {
-            matches!(
-                c,
-                Component::ParentDir | Component::Prefix(_) | Component::RootDir
-            )
-        })
-    {
-        anyhow::bail!("invalid diff path: {rel_path}");
-    }
-
-    // The component check above blocks `..`, but a symlink INSIDE the worktree
-    // could still point outside it. Since the web passes client-supplied paths,
-    // resolve the working-copy path and refuse to read anything whose realpath
-    // escapes the worktree. (The HEAD side comes from `git cat-file`, which
-    // never follows filesystem symlinks, so only the working read needs this.)
-    let working_path = worktree.join(rel_path);
-    if working_path.exists() && !crate::git::is_under(worktree, &working_path) {
-        anyhow::bail!("path escapes worktree: {rel_path}");
-    }
+    // Reject absolute paths, `..`/root components, and symlinks that escape the
+    // worktree — the web passes client-supplied paths. (The HEAD side comes from
+    // `git cat-file`, which never follows filesystem symlinks; only the working
+    // read below needs the on-disk check, which the boundary performs.)
+    let working_path = crate::git::resolve_worktree_path(worktree, rel_path)?;
 
     let old_bytes = crate::git::file_bytes_at_head(worktree, rel_path)?.unwrap_or_default();
     let new_bytes = std::fs::read(&working_path).unwrap_or_default();

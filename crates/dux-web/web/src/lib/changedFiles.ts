@@ -5,6 +5,27 @@
 
 import type { ChangedFileView } from "./types"
 
+// Map a raw git status code to a short display glyph, shared by the changes pane
+// and the editor's file list so they stay consistent.
+export function statusGlyph(status: string): string {
+  const upper = status.toUpperCase()
+  switch (upper) {
+    case "M":
+      return "M"
+    case "A":
+      return "A"
+    case "D":
+      return "D"
+    case "?":
+    case "??":
+      return "?"
+    case "R":
+      return "R"
+    default:
+      return status.slice(0, 1).toUpperCase() || "?"
+  }
+}
+
 export function filterChangedFiles(
   files: ChangedFileView[],
   query: string,
@@ -12,6 +33,21 @@ export function filterChangedFiles(
   const needle = query.trim().toLowerCase()
   if (needle === "") return files
   return files.filter((f) => f.path.toLowerCase().includes(needle))
+}
+
+// The set of files the editor can open: staged ∪ unstaged, deduped by path (a
+// file can be in both), with deleted files dropped (nothing on disk to edit).
+// Unstaged is listed first so the kept status reflects the working-tree state.
+export function editableFiles(
+  staged: ChangedFileView[],
+  unstaged: ChangedFileView[],
+): ChangedFileView[] {
+  const seen = new Map<string, ChangedFileView>()
+  for (const f of [...unstaged, ...staged]) {
+    if (statusGlyph(f.status) === "D") continue
+    if (!seen.has(f.path)) seen.set(f.path, f)
+  }
+  return [...seen.values()]
 }
 
 // The changed-files engine state (`watched_worktree`/`changed_files`) is GLOBAL

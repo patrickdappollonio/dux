@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, symlink};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
@@ -922,6 +922,37 @@ pub fn is_under(base: &Path, candidate: &Path) -> bool {
         (Ok(b), Ok(c)) => c.starts_with(b),
         _ => false,
     }
+}
+
+/// The single security boundary for client-supplied worktree-relative paths.
+/// Resolves `rel_path` to its on-disk location under `worktree`, rejecting empty
+/// or absolute paths, any `..`/root/prefix component, and (for paths that exist)
+/// symlinks whose realpath escapes the worktree. Returns the joined path, which
+/// may not yet exist — existence/file-kind is the caller's concern.
+///
+/// Used by every surface that reads or writes a file from a client path (the
+/// diff engine, the web editor endpoints) so the escape check lives in one
+/// tested place and cannot drift between call sites.
+pub fn resolve_worktree_path(worktree: &Path, rel_path: &str) -> anyhow::Result<PathBuf> {
+    let rp = Path::new(rel_path);
+    if rp.as_os_str().is_empty()
+        || rp.is_absolute()
+        || rp.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::Prefix(_) | Component::RootDir
+            )
+        })
+    {
+        anyhow::bail!("invalid worktree path: {rel_path}");
+    }
+    let joined = worktree.join(rel_path);
+    // The component check blocks `..`, but a symlink inside the worktree could
+    // still point outside it. Refuse to touch anything whose realpath escapes.
+    if joined.exists() && !is_under(worktree, &joined) {
+        anyhow::bail!("path escapes worktree: {rel_path}");
+    }
+    Ok(joined)
 }
 
 pub fn ellipsize_middle(input: &str, max_width: usize) -> String {

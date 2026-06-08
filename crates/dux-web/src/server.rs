@@ -225,6 +225,7 @@ pub fn build_app(
     let gated = Router::new()
         .route("/ws", get(ws_upgrade))
         .merge(crate::git_routes::routes())
+        .merge(crate::file_routes::routes())
         .merge(extra_gated)
         .route_layer(middleware::from_fn_with_state(state.clone(), gate));
 
@@ -1103,6 +1104,59 @@ mod tests {
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
                         r#"{"session_id":"does-not-exist","path":"a.txt"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The editor file routes live in the same gated group: unauthenticated read
+    /// → 401 before any file I/O runs.
+    #[tokio::test]
+    async fn file_route_requires_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let hash = dux_core::auth::hash_password("pw").unwrap();
+        let auth = auth::shared_auth(&[format!("alice:{hash}")], false);
+        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/file/read")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"session_id":"s1","path":"a.txt"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// With auth off the gate passes; an unknown session resolves to 404 (the
+    /// write handler resolves the worktree before touching the filesystem).
+    #[tokio::test]
+    async fn file_route_unknown_session_is_404() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let auth = auth::shared_auth(&[], false);
+        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/file/write")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"session_id":"does-not-exist","path":"a.txt","content":"x"}"#,
                     ))
                     .unwrap(),
             )

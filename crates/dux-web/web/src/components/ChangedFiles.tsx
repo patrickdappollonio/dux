@@ -5,6 +5,7 @@ import {
   Loader2,
   Minus,
   MousePointerClick,
+  Pencil,
   Plus,
   Search,
   Undo2,
@@ -51,31 +52,22 @@ import {
   languageForPath,
   subscribeHighlighter,
 } from "@/lib/highlight"
-import { filterChangedFiles, shouldShowChangedFiles } from "@/lib/changedFiles"
+import {
+  filterChangedFiles,
+  shouldShowChangedFiles,
+  statusGlyph,
+} from "@/lib/changedFiles"
 import {
   closeDiff,
   openCommit,
   openDiscard,
+  openEditor,
   requestDiff,
   toggleDiffLineNumbers,
   useDux,
 } from "@/lib/store"
 import type { DuxState } from "@/lib/store"
 import type { ChangedFileView, DiffLine, FileDiff } from "@/lib/types"
-
-// Map raw git status codes to a short display glyph.
-function statusGlyph(status: string): string {
-  const upper = status.toUpperCase()
-  switch (upper) {
-    case "M":  return "M"
-    case "A":  return "A"
-    case "D":  return "D"
-    case "?":
-    case "??": return "?"
-    case "R":  return "R"
-    default:   return status.slice(0, 1).toUpperCase() || "?"
-  }
-}
 
 interface FileRowProps {
   file: ChangedFileView
@@ -145,6 +137,24 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
             <span className="text-red-500">−{file.deletions}</span>
           )}
         </span>
+      )}
+
+      {/* Open in editor — desktop only (Monaco is poor on touch). Skipped for
+          deleted files (nothing on disk to edit). Hover-reveal like the others. */}
+      {glyph !== "D" && (
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label={`Open ${file.path} in editor`}
+          className="hidden shrink-0 md:inline-flex md:opacity-0 md:group-hover:opacity-100"
+          onClick={(e) => {
+            e.stopPropagation()
+            openEditor(sessionId, file.path)
+          }}
+        >
+          <Pencil />
+          Edit
+        </Button>
       )}
 
       {/* Discard action — unstaged rows only (the TUI blocks discarding staged
@@ -441,6 +451,21 @@ export function ChangedFiles() {
                 baseline — the diff sheet replaces the Sheet's default icon-only
                 close with an explicit "Close" for consistency. */}
             <div className="flex shrink-0 items-center gap-1">
+              {/* Open the current file in the editor (desktop only — Monaco is
+                  poor on touch). Closes the diff so the editor takes the screen. */}
+              <Button
+                variant="ghost"
+                size="sm"
+                className="hidden md:inline-flex"
+                onClick={() => {
+                  if (!currentDiff) return
+                  openEditor(currentDiff.sessionId, currentDiff.path)
+                  closeDiff()
+                }}
+              >
+                <Pencil />
+                Edit
+              </Button>
               <Button
                 variant="ghost"
                 size="sm"

@@ -11,6 +11,7 @@ import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { CommandPalette } from "@/components/CommandPalette"
 import { ChangeProviderDialog } from "@/components/ChangeProviderDialog"
 import { CommitDialog } from "@/components/CommitDialog"
+import { EditorOverlay } from "@/components/EditorOverlay"
 import { ConfirmDeleteTerminalDialog } from "@/components/ConfirmDeleteTerminalDialog"
 import { ConfirmDiscardFileDialog } from "@/components/ConfirmDiscardFileDialog"
 import { CreateAgentDialog } from "@/components/CreateAgentDialog"
@@ -253,6 +254,7 @@ function GlobalOverlays() {
     <>
       <CommandPalette />
       <CommitDialog />
+      <EditorOverlay />
       <CreateAgentDialog />
       <RenameSessionDialog />
       <ChangeProviderDialog />

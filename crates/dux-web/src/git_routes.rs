@@ -67,7 +67,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/git/checkout-default", post(checkout_default))
 }
 
-async fn resolve_worktree(state: &AppState, session_id: String) -> Result<PathBuf, Response> {
+pub(crate) async fn resolve_worktree(
+    state: &AppState,
+    session_id: String,
+) -> Result<PathBuf, Response> {
     match state.engine.session_worktree(session_id).await {
         Some(w) => Ok(PathBuf::from(w)),
         None => Err((StatusCode::NOT_FOUND, "unknown session").into_response()),
@@ -77,7 +80,7 @@ async fn resolve_worktree(state: &AppState, session_id: String) -> Result<PathBu
 /// Reject a file path that isn't a real changed file git is tracking in this
 /// worktree (defends against operating on arbitrary filesystem paths). Runs the
 /// `git status` read off-thread.
-async fn validate_changed_path(worktree: &Path, path: &str) -> Result<(), Response> {
+pub(crate) async fn validate_changed_path(worktree: &Path, path: &str) -> Result<(), Response> {
     let wt = worktree.to_path_buf();
     let p = path.to_string();
     let ok = tokio::task::spawn_blocking(move || match dux_core::git::changed_files(&wt) {
@@ -99,7 +102,7 @@ async fn validate_changed_path(worktree: &Path, path: &str) -> Result<(), Respon
 
 /// Run a blocking git closure off the reactor, mapping its result to a response
 /// error (the success arm is left to the caller, which may also refresh state).
-async fn run_git<F>(op: F) -> Result<(), Response>
+pub(crate) async fn run_git<F>(op: F) -> Result<(), Response>
 where
     F: FnOnce() -> anyhow::Result<()> + Send + 'static,
 {

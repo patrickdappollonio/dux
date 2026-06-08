@@ -211,6 +211,12 @@ export interface DuxState {
     error: string | null
     loading: boolean
   } | null
+  // The session whose code-editor overlay is open, plus the file to auto-open on
+  // launch (null = none preselected; the overlay just shows the changed-files
+  // list). The editor always operates on the SELECTED session, so opening it
+  // selects that session first and reuses the existing changed-files broadcast
+  // for its file list — no separate listing endpoint. Null = overlay closed.
+  editorTarget: { sessionId: string; initialPath: string | null } | null
 }
 
 // The expanded sidebar width is drag-resizable and persisted across reloads.
@@ -276,6 +282,7 @@ let state: DuxState = {
   sidebarWidth: loadSidebarWidth(),
   showDiffLineNumbers: loadShowDiffLineNumbers(),
   currentDiff: null,
+  editorTarget: null,
 }
 
 const listeners = new Set<() => void>()
@@ -695,6 +702,7 @@ function clearSessionScopedState(): Partial<DuxState> {
     selectedTarget: null,
     selectedSessionId: null,
     currentDiff: null,
+    editorTarget: null,
     commitTarget: null,
     commitDraft: "",
     statusLine: { tone: "info", message: "" },
@@ -902,6 +910,22 @@ export function requestDiff(sessionId: string, path: string): void {
 
 export function closeDiff(): void {
   setState({ currentDiff: null })
+}
+
+// Open the code-editor overlay for a session. Selecting the session first points
+// the engine's changed-files watch at its worktree so the editor's file list
+// populates from the same broadcast the changes pane uses. `initialPath` (from
+// an "Open in editor" affordance on a specific file) auto-loads that file.
+export function openEditor(
+  sessionId: string,
+  initialPath: string | null = null,
+): void {
+  if (state.selectedSessionId !== sessionId) selectSession(sessionId)
+  setState({ editorTarget: { sessionId, initialPath } })
+}
+
+export function closeEditor(): void {
+  setState({ editorTarget: null })
 }
 
 export function openDelete(sessionId: string): void {
