@@ -161,12 +161,27 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
     // than being an external border.
     host.style.background = resolvedBg
 
+    // xterm 6 draws a custom DOM scrollbar whose width is the `overviewRuler.width`
+    // option (default 14). Drive it from the SAME `--xterm-scrollbar-width` CSS
+    // var the button overlay reserves its gutter from, so the slimmed scrollbar
+    // and the reserved space always agree (single source). Setting the option
+    // also instantiates an overview-ruler canvas; index.css hides it (dux uses no
+    // decorations, so it's always empty).
+    const scrollbarWidth =
+      parseInt(
+        getComputedStyle(document.documentElement).getPropertyValue(
+          "--xterm-scrollbar-width"
+        ),
+        10
+      ) || 8
+
     const term = new Terminal({
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
       fontSize: 13,
       cursorBlink: true,
       convertEol: false,
       scrollback: scrollbackRef.current,
+      overviewRuler: { width: scrollbarWidth },
       theme: { background: resolvedBg },
     })
     const fit = new FitAddon()
@@ -358,8 +373,11 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
           stay always visible (no hover reveal) so they read at a glance on every
           surface, touch included. Widening them is layout-safe: the overlay is a
           positioned sibling of the measured host, so the terminal box is
-          unaffected. */}
-      <div className="absolute top-3 right-3 z-10 flex gap-2">
+          unaffected. The right offset reserves the xterm scrollbar gutter so the
+          buttons never overlap the scrollbar: 0.5rem MUST match the host's `p-2`
+          padding below, then the shared --xterm-scrollbar-width (fallback keeps
+          the offset valid if the var is ever missing), then a small gap. */}
+      <div className="absolute top-3 right-[calc(0.5rem+var(--xterm-scrollbar-width,8px)+0.25rem)] z-10 flex gap-2">
         {/* The popover trigger renders a secondary labeled Button (see
             MacroPopover); it must remain reachable on touch, so it does not
             hide on blur. */}

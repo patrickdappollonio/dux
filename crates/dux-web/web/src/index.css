@@ -130,12 +130,22 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --sidebar-ring: oklch(0.556 0 0);
 }
 
-/* Slim the xterm scrollbar so it doesn't dominate the terminal column. */
+/* Slim the xterm scrollbar so it doesn't dominate the terminal column. xterm 6
+   draws a CUSTOM DOM scrollbar sized via the Terminal's overviewRuler.width
+   option (TerminalPane reads this same var for it), so the visible bar matches
+   --xterm-scrollbar-width; the terminal-pane button overlay reserves exactly
+   this width so the buttons never sit on top of the scrollbar. The ::-webkit /
+   scrollbar-width rules below slim the native viewport scrollbar defensively —
+   xterm 6 virtualizes the viewport so it usually shows no thumb, but they cost
+   nothing and guard against a fat native bar if a browser ever surfaces one. */
+:root {
+  --xterm-scrollbar-width: 8px;
+}
 .xterm .xterm-viewport {
   scrollbar-width: thin;
 }
 .xterm .xterm-viewport::-webkit-scrollbar {
-  width: 10px;
+  width: var(--xterm-scrollbar-width);
 }
 .xterm .xterm-viewport::-webkit-scrollbar-track {
   background: transparent;
@@ -143,6 +153,15 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
 .xterm .xterm-viewport::-webkit-scrollbar-thumb {
   background: var(--border);
   border-radius: 9999px;
+}
+/* Sizing the scrollbar via overviewRuler.width also instantiates an overview-
+   ruler canvas; dux registers no decorations, so it's always empty. xterm sets
+   this canvas's `display` INLINE on every buffer switch (block on the normal
+   buffer), so !important is required — without it the canvas reappears as an
+   empty foreground-colored streak in the gutter every time an agent exits an
+   alt-screen TUI (vim, a pager, a full-screen provider UI) back to the shell. */
+.xterm .xterm-decoration-overview-ruler {
+  display: none !important;
 }
 
 @layer base {
