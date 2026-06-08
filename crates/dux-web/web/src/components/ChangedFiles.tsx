@@ -143,7 +143,7 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
           is hovered — its max-width animates open, so the path/counts use the
           full row otherwise and the content slides left to make room (not a hard
           cut). On touch (no hover) it's always visible at a ≥44px target. */}
-      <div className="flex shrink-0 items-center gap-1 overflow-hidden transition-[max-width,opacity] duration-200 ease-out max-md:max-w-none motion-reduce:transition-none md:max-w-0 md:opacity-0 md:group-hover:max-w-64 md:group-hover:opacity-100">
+      <div className="flex shrink-0 items-center gap-0.5 overflow-hidden transition-[max-width,opacity] duration-200 ease-out max-md:max-w-none motion-reduce:transition-none md:max-w-0 md:opacity-0 md:group-hover:max-w-64 md:group-hover:opacity-100">
         {/* Open in editor — desktop only (Monaco is poor on touch). Skipped for
             deleted files (nothing on disk to edit). */}
         {glyph !== "D" && (
