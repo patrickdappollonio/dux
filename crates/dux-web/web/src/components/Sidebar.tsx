@@ -247,7 +247,11 @@ function SessionSubItem({
         {...attributes}
         {...listeners}
         isActive={agentSelected}
-        className="max-md:pr-8 touch-manipulation group-focus-within/menu-sub-item:pr-8 group-hover/menu-sub-item:pr-8 group-has-[[aria-expanded=true]]/menu-sub-item:pr-8"
+        className={cn(
+          "max-md:pr-8 touch-manipulation group-focus-within/menu-sub-item:pr-8 group-hover/menu-sub-item:pr-8 group-has-[[aria-expanded=true]]/menu-sub-item:pr-8",
+          // While working, a light beam travels around the row's outline.
+          session.working && "agent-beam"
+        )}
         onClick={() => selectSession(session.id)}
       >
         {/* All agents use the same Bot icon — provider is shown as text. While
@@ -261,17 +265,7 @@ function SessionSubItem({
             session.working && "motion-safe:animate-agent-working"
           )}
         />
-        <span
-          className={cn(
-            "truncate",
-            // While working, the name's glyphs carry a rainbow that sweeps
-            // left→right (clipped to the text, never a background fill).
-            session.working &&
-              "agent-rainbow-text motion-safe:animate-agent-rainbow"
-          )}
-        >
-          {label}
-        </span>
+        <span className="truncate">{label}</span>
         <span className="ml-auto flex shrink-0 items-center gap-1">
           {session.pr ? (
             // Icon-only PR link: just the state-tinted glyph, with the full

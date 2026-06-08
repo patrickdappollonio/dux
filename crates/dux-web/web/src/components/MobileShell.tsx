@@ -277,7 +277,11 @@ function SessionRow({
           {...attributes}
           {...listeners}
           variant={agentSelected ? "secondary" : "ghost"}
-          className="min-h-11 flex-1 touch-manipulation justify-start gap-2 px-2"
+          className={cn(
+            "min-h-11 flex-1 touch-manipulation justify-start gap-2 px-2",
+            // While working, a light beam travels around the row's outline.
+            session.working && "agent-beam"
+          )}
           onClick={() => selectAndOpen(session.id)}
         >
           {/* Gently bounces (motion-safe) while the agent streams output; the
@@ -288,15 +292,7 @@ function SessionRow({
               session.working && "motion-safe:animate-agent-working"
             )}
           />
-          <span
-            className={cn(
-              "flex-1 truncate text-left",
-              session.working &&
-                "agent-rainbow-text motion-safe:animate-agent-rainbow"
-            )}
-          >
-            {label}
-          </span>
+          <span className="flex-1 truncate text-left">{label}</span>
           <span className="flex shrink-0 items-center gap-1">
             {session.pr ? (
               // Icon-only PR link (no tooltip on touch — the banner on the
