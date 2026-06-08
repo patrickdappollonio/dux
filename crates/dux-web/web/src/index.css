@@ -96,18 +96,24 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     stroke-width: 1.5px;
     stroke-linecap: round;
     stroke-dasharray: 20 80; /* a 20%-of-perimeter segment + the rest as gap */
+    /* ~40% transparent so the moving light is present but not attention-grabbing. */
+    stroke-opacity: 0.6;
 }
 
+/* One smooth loop around the perimeter. The easing (not keyframe stops) shapes
+   the speed: a strong ease-in-out crawls through the seam — the rect path starts
+   at the top-left, so the beam slows as it climbs the LEFT edge and rounds that
+   corner — then zips fast around the top/right/bottom. Slow→slow at the seam, so
+   the loop stays seamless. */
 @keyframes agent-beam {
-    0% { stroke-dashoffset: 0; }
-    50% { stroke-dashoffset: -80; }
-    100% { stroke-dashoffset: -100; }
+    from { stroke-dashoffset: 0; }
+    to { stroke-dashoffset: -100; }
 }
 
 @media (prefers-reduced-motion: no-preference) {
     .agent-beam rect {
         stroke: var(--primary);
-        animation: agent-beam 2s linear infinite;
+        animation: agent-beam 2s cubic-bezier(0.9, 0, 0.1, 1) infinite;
     }
 }
 
