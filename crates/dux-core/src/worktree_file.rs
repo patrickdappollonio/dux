@@ -1,19 +1,17 @@
-//! Safe working-copy file read/write for client-supplied worktree paths, used
-//! by the web editor. Every access goes through [`crate::git::resolve_worktree_path`]
-//! (the path-escape boundary). Reads reject binary content (the editor only
-//! edits text); writes refuse to create new files (the editor edits files that
-//! already exist on disk).
-//!
-//! This module enforces only path-safety and text-ness. Whether a path is a
-//! file git is actually tracking/changing is a separate gate enforced by the
-//! caller (the web layer's changed-files membership check), so `.git/` internals
-//! and ignored files never reach here.
+//! Safe working-copy file read/write for client-supplied worktree paths, used by
+//! the web editor. The editor works against the WORKTREE itself: any file inside
+//! it can be read, written, or CREATED — the only constraint is containment.
+//! Every access goes through [`crate::git::resolve_worktree_path`] (the
+//! path-escape + `.git`-rejection boundary); reads additionally reject binary and
+//! oversized content, and writes refuse to follow symlinks or create through a
+//! parent that resolves outside the worktree or into `.git`. There is no
+//! git-tracked/changed-file gate here — that is the changes pane's concern.
 
 use std::path::Path;
 
 use serde::Serialize;
 
-use crate::git::{is_under, resolve_worktree_path};
+use crate::git::{is_under, resolve_worktree_path, resolves_into_git_dir};
 
 /// Largest working copy the editor will load. Beyond this, Monaco bogs down and
 /// the read would buffer the whole file into memory and a JSON response, so the
@@ -99,6 +97,11 @@ pub fn write_file(worktree: &Path, rel_path: &str, content: &str) -> anyhow::Res
                 anyhow::bail!(
                     "cannot create file: parent directory is missing or outside the worktree: {rel_path}"
                 );
+            }
+            // ...and must not resolve into a `.git` dir via a symlinked parent
+            // (the literal `.git` check in resolve_worktree_path can't see that).
+            if resolves_into_git_dir(worktree, parent) {
+                anyhow::bail!("refusing to create a file inside the git directory: {rel_path}");
             }
         }
     }
@@ -269,5 +272,42 @@ mod tests {
             std::fs::read_to_string(dir.path().join(".git/config")).unwrap(),
             "[core]\n"
         );
+    }
+
+    #[test]
+    fn nested_git_directory_is_refused() {
+        // A NESTED repo's .git (vendored dep / submodule) must be unreachable —
+        // a hook written here would run as code on the next git op in that repo.
+        let dir = worktree();
+        std::fs::create_dir_all(dir.path().join("vendor/repo/.git/hooks")).unwrap();
+        std::fs::write(dir.path().join("vendor/repo/.git/config"), "[core]\n").unwrap();
+        assert!(read_file(dir.path(), "vendor/repo/.git/config").is_err());
+        assert!(
+            write_file(
+                dir.path(),
+                "vendor/repo/.git/hooks/pre-commit",
+                "#!/bin/sh\necho pwned",
+            )
+            .is_err()
+        );
+        assert!(
+            !dir.path()
+                .join("vendor/repo/.git/hooks/pre-commit")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn symlink_into_git_directory_is_refused() {
+        // A symlinked dir resolving into .git sidesteps the literal name check;
+        // the canonical realpath check must still refuse it (read and create).
+        let dir = worktree();
+        std::fs::create_dir_all(dir.path().join(".git/hooks")).unwrap();
+        std::fs::write(dir.path().join(".git/config"), "[core]\nsecret=1\n").unwrap();
+        std::os::unix::fs::symlink(dir.path().join(".git"), dir.path().join("gitlink")).unwrap();
+
+        assert!(read_file(dir.path(), "gitlink/config").is_err());
+        assert!(write_file(dir.path(), "gitlink/hooks/post-checkout", "#!/bin/sh").is_err());
+        assert!(!dir.path().join(".git/hooks/post-checkout").exists());
     }
 }

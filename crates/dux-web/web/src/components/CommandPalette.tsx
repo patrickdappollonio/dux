@@ -61,7 +61,7 @@ export function CommandPalette() {
       onOpenChange={setPaletteOpen}
       className="sm:max-w-2xl"
     >
-      <CommandInput placeholder="Type a command or search sessions…" />
+      <CommandInput placeholder="Type a command…" />
       <CommandList>
         <CommandEmpty>No results found.</CommandEmpty>
 

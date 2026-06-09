@@ -2808,7 +2808,8 @@ mod tests {
                 startup_result_error: None,
             },
         };
-        let s = wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(outcome)));
+        let s =
+            wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(outcome)));
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].tone, "info");
         assert_eq!(s[0].message, "Launched agent \"feat\".");
@@ -2825,7 +2826,8 @@ mod tests {
                 startup_result_error: Some("boom".to_string()),
             },
         };
-        let s = wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(outcome)));
+        let s =
+            wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(outcome)));
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].tone, "error");
         assert!(
