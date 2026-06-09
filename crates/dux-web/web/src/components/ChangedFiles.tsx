@@ -571,11 +571,11 @@ function DiffHunks({
     [diff, language, highlighterReady],
   )
   return (
-    <div className="overflow-x-auto rounded border font-mono text-xs leading-relaxed">
-      {/* w-max so the block grows to the widest line and every row's +/- tint
-          spans the full code width (not just the viewport); min-w-full so short
-          diffs still fill the panel. Rows below inherit this width. */}
-      <div className="w-max min-w-full">
+    <div className="rounded border font-mono text-sm leading-relaxed">
+      {/* Full container width (no horizontal scroll): long lines wrap within the
+          code column instead of growing the block, and every row's +/- tint
+          spans the full visible width. Rows below inherit this width. */}
+      <div className="w-full">
         {hunks.map((hunk, hi) => (
           <div key={hi}>
             <div className="bg-muted px-2 py-0.5 text-muted-foreground">
@@ -619,15 +619,15 @@ function DiffRow({
         ? "text-red-500"
         : "text-muted-foreground"
   return (
-    <div className={`flex ${rowClass}`}>
+    <div className={`flex items-start ${rowClass}`}>
       {/* Old/new line-number gutters hide together when the toggle is off. The
           sign column always stays, so add/delete coloring reads without them. */}
       {showLineNumbers ? (
         <>
-          <span className="w-10 shrink-0 select-none px-1 text-right text-muted-foreground">
+          <span className="w-12 shrink-0 select-none px-1 text-right text-muted-foreground tabular-nums">
             {line.old_line ?? ""}
           </span>
-          <span className="w-10 shrink-0 select-none px-1 text-right text-muted-foreground">
+          <span className="w-12 shrink-0 select-none px-1 text-right text-muted-foreground tabular-nums">
             {line.new_line ?? ""}
           </span>
         </>
@@ -636,7 +636,12 @@ function DiffRow({
         {sign}
       </span>
       <span
-        className="whitespace-pre"
+        // Wrap long lines within the code column: the gutters/sign stay on the
+        // first visual row (the row is top-aligned via items-start) and wrapped
+        // text aligns under the code, mirroring the TUI diff wrapping. min-w-0
+        // lets the column shrink so it actually wraps; overflow-wrap:anywhere
+        // force-breaks a pathological unbroken token (no horizontal scroll now).
+        className="min-w-0 flex-1 whitespace-pre-wrap [overflow-wrap:anywhere]"
         // Safe: highlight.js escapes the source; `html` is escaped plain text when no language.
         dangerouslySetInnerHTML={{ __html: html }}
       />

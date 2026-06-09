@@ -177,7 +177,7 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
 
     const term = new Terminal({
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-      fontSize: 13,
+      fontSize: 14,
       cursorBlink: true,
       convertEol: false,
       scrollback: scrollbackRef.current,

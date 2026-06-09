@@ -71,7 +71,12 @@ export default function CodeEditor({
       onChange={(v) => onChange(v ?? "")}
       onMount={handleMount}
       options={{
-        fontSize: 13,
+        // 14px matches the app's text-sm body size; 13 read as too small.
+        fontSize: 14,
+        // Wrap long lines: Monaco keeps the line number on the first row, blanks
+        // continuation rows, and indents wrapped text under the code (mirrors the
+        // TUI diff wrapping). No horizontal scroll for overflowing lines.
+        wordWrap: "on",
         minimap: { enabled: false },
         scrollBeyondLastLine: false,
         automaticLayout: true,
