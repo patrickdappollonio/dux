@@ -47,6 +47,7 @@ import { paletteShortcutKeys } from "@/lib/platform"
 import { UNREACHABLE_MESSAGE } from "@/lib/auth"
 import { logout, retryBoot, setPaletteOpen, useDux } from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
+import { keyboardLikelyOpen } from "@/lib/viewport"
 
 function InsetHeader() {
   const { viewModel, selectedSessionId, selectedTarget, auth } = useDux()
@@ -279,13 +280,37 @@ function MobileApp() {
   const viewportHeight = useVisualViewportHeight()
   const constrainToKeyboard =
     mobileScreen === "terminal" && viewportHeight !== null
+  // Drop the bottom safe-area inset only when we're actually pinning the shell
+  // above an open keyboard — i.e. the terminal screen (constrainToKeyboard) with
+  // the keyboard up. iOS does NOT zero env(safe-area-inset-bottom) when the
+  // keyboard is open, so keeping it there would leave a dead strip between the
+  // status bar and the keyboard. Everywhere else (keyboard down, or the
+  // home/changes screens where opening the palette keyboard doesn't pin the
+  // shell) the inset must stay to clear the home indicator. The `&&`
+  // short-circuit avoids reading window.innerHeight when there's no viewport.
+  const dropBottomInset =
+    constrainToKeyboard &&
+    viewportHeight !== null &&
+    keyboardLikelyOpen(viewportHeight, window.innerHeight)
 
   return (
+    // Safe-area padding lives on this single mobile root so EVERY screen
+    // (terminal/home/changes) clears the notch, home indicator, and rounded
+    // corners — except the fullscreen terminal column, which escapes this root
+    // into the fullscreen layer and pads itself (see TerminalPane). Top/side
+    // insets always apply; the bottom inset drops only above an open keyboard.
     <div
       className="flex min-h-0 flex-col overflow-hidden"
-      style={
-        constrainToKeyboard ? { height: viewportHeight } : { height: "100svh" }
-      }
+      style={{
+        height:
+          constrainToKeyboard && viewportHeight !== null
+            ? viewportHeight
+            : "100svh",
+        paddingTop: "env(safe-area-inset-top)",
+        paddingBottom: dropBottomInset ? 0 : "env(safe-area-inset-bottom)",
+        paddingLeft: "env(safe-area-inset-left)",
+        paddingRight: "env(safe-area-inset-right)",
+      }}
     >
       <div className="min-h-0 flex-1">
         <MobileShell />

@@ -5,7 +5,12 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="theme-color" content="#0a0a0a" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover lets the page draw under the notch/home indicator
+         AND makes env(safe-area-inset-*) report the real insets (they are 0
+         without it). The mobile chrome uses those insets to keep content off
+         rounded corners — see the env() padding on the mobile root in App.tsx
+         (and the fullscreen terminal column in TerminalPane.tsx). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>dux</title>
   </head>
   <body>

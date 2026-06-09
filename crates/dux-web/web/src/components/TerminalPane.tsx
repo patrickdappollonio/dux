@@ -4,6 +4,7 @@ import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
 import { Maximize2, Minimize2 } from "lucide-react"
 import { AccessoryBar } from "@/components/AccessoryBar"
+import type { ScrollDir } from "@/components/AccessoryBar"
 import { MacroPopover } from "@/components/MacroPopover"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
@@ -55,7 +56,10 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
   // The unpadded element xterm opens into; its border-box equals its content
   // box, so FitAddon's measurement is exact.
   const containerRef = useRef<HTMLDivElement>(null)
-  const wrapperRef = useRef<HTMLDivElement>(null)
+  // The element handed to the Fullscreen API. On desktop it is the pane itself;
+  // on mobile it is the OUTER column (pane + accessory bar) so the bar stays
+  // visible in fullscreen — fullscreening the pane alone would crop it out.
+  const fullscreenRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const isMobile = useIsMobile()
@@ -294,28 +298,38 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
   // Track fullscreen state for this pane and release the keyboard lock the
   // moment fullscreen ends, however it ends (button, held Esc, tab switch).
   useEffect(() => {
+    let scrollTimer: ReturnType<typeof setTimeout> | undefined
     function handleFullscreenChange() {
-      const active = document.fullscreenElement === wrapperRef.current
+      const active = document.fullscreenElement === fullscreenRef.current
       setIsFullscreen(active)
       if (!active) {
         unlockKeyboard()
       }
+      // Entering or leaving fullscreen reflows the pane to a new size; xterm
+      // does not re-anchor to the latest output on its own, so the agent's input
+      // line can end up scrolled off-screen. Pull the viewport back to the
+      // bottom once the resize has settled so the prompt is visible without the
+      // user having to fight the slim mobile scrollbar. Tracked + cleared so a
+      // rapid toggle (or an unmount) can't leave a stale timer firing.
+      clearTimeout(scrollTimer)
+      scrollTimer = setTimeout(() => termRef.current?.scrollToBottom(), 50)
     }
     document.addEventListener("fullscreenchange", handleFullscreenChange)
     return () => {
+      clearTimeout(scrollTimer)
       document.removeEventListener("fullscreenchange", handleFullscreenChange)
       unlockKeyboard()
     }
   }, [])
 
   async function toggleFullscreen() {
-    const wrapper = wrapperRef.current
-    if (!wrapper) return
-    if (document.fullscreenElement === wrapper) {
+    const target = fullscreenRef.current
+    if (!target) return
+    if (document.fullscreenElement === target) {
       await document.exitFullscreen().catch(() => {})
     } else {
       try {
-        await wrapper.requestFullscreen()
+        await target.requestFullscreen()
         // Only meaningful while fullscreen; held-Esc exits, single Esc presses
         // flow to the agent.
         lockKeyboard()
@@ -357,6 +371,31 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
     termRef.current?.focus()
   }
 
+  // Scroll the xterm viewport from the accessory bar's second row. These drive
+  // xterm's own scrollback (the normal-buffer history that accumulates as the
+  // agent streams output), giving a reliable touch target the slim scrollbar
+  // can't. preventDefault on the buttons keeps the soft keyboard up, so there's
+  // no need to refocus here. (Alt-screen TUIs keep no scrollback, so page/jump
+  // scrolling is a no-op there — the cursor-arrow row drives those instead.)
+  function onScroll(dir: ScrollDir) {
+    const term = termRef.current
+    if (!term) return
+    switch (dir) {
+      case "top":
+        term.scrollToTop()
+        break
+      case "bottom":
+        term.scrollToBottom()
+        break
+      case "pageUp":
+        term.scrollPages(-1)
+        break
+      case "pageDown":
+        term.scrollPages(1)
+        break
+    }
+  }
+
   // The host div owns the padding so the resolved bg fills the padding area
   // seamlessly — no external "border" look. FitAddon measures the content box.
   // The wrapper is `relative` so the readiness spinner can overlay the host
@@ -375,7 +414,11 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
   // clipping never affects them.
   const pane = (
     <div
-      ref={wrapperRef}
+      // On desktop the pane IS the fullscreen target; on mobile the outer column
+      // below owns that ref so the accessory bar is included in fullscreen.
+      // Crossing the mobile breakpoint swaps the whole app subtree (App.tsx), so
+      // this instance never sees isMobile flip mid-life — the ref never churns.
+      ref={isMobile ? null : fullscreenRef}
       className={
         isMobile
           ? "group relative min-h-0 w-full flex-1 overflow-hidden bg-background"
@@ -455,12 +498,32 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
   // refits + debounce-resizes the PTY when this column reflows, so no extra
   // resize wiring is needed.
   return (
-    <div className="flex h-full w-full flex-col">
+    <div
+      // The mobile fullscreen target: the column wraps the pane AND the bar so
+      // both fill the screen in fullscreen. bg-background paints the fullscreen
+      // backdrop so it matches the theme rather than going black. In fullscreen
+      // this column escapes the safe-area-padded mobile root (App.tsx) into the
+      // fullscreen layer, so it must clear the notch / home indicator / rounded
+      // corners itself; in normal layout the root handles it, so no inset here.
+      ref={fullscreenRef}
+      className="flex h-full w-full flex-col bg-background"
+      style={
+        isFullscreen
+          ? {
+              paddingTop: "env(safe-area-inset-top)",
+              paddingBottom: "env(safe-area-inset-bottom)",
+              paddingLeft: "env(safe-area-inset-left)",
+              paddingRight: "env(safe-area-inset-right)",
+            }
+          : undefined
+      }
+    >
       {pane}
       <AccessoryBar
         onEsc={() => sendSeq(ESC)}
         onTab={() => sendSeq(TAB)}
         onArrow={onArrow}
+        onScroll={onScroll}
         ctrl={ctrl}
         alt={alt}
         onToggleCtrl={toggleCtrl}
