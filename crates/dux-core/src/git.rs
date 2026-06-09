@@ -986,25 +986,52 @@ pub fn resolve_worktree_path(worktree: &Path, rel_path: &str) -> anyhow::Result<
     {
         anyhow::bail!("invalid worktree path: {rel_path}");
     }
-    // Defense in depth: never touch the git metadata directory, even though
-    // callers' changed-files membership check already excludes it (git status
-    // never lists `.git/` internals). Case-insensitive for case-folding
-    // filesystems (e.g. default macOS), where `.GIT` reaches the same directory.
+    // Never touch a git metadata directory. Reject `.git` as ANY path component,
+    // not just the first — editing is gated by containment alone, so a NESTED
+    // repo's `.git` (a vendored dep, a submodule) must be unreachable too.
+    // Case-insensitive for case-folding filesystems (e.g. default macOS).
     if rp
         .iter()
-        .next()
-        .and_then(|c| c.to_str())
-        .is_some_and(|c| c.eq_ignore_ascii_case(".git"))
+        .any(|c| c.to_str().is_some_and(|c| c.eq_ignore_ascii_case(".git")))
     {
         anyhow::bail!("refusing to access the git directory: {rel_path}");
     }
     let joined = worktree.join(rel_path);
-    // The component check blocks `..`, but a symlink inside the worktree could
-    // still point outside it. Refuse to touch anything whose realpath escapes.
-    if joined.exists() && !is_under(worktree, &joined) {
-        anyhow::bail!("path escapes worktree: {rel_path}");
+    // The literal checks above block `..` and `.git` names, but a symlink inside
+    // the worktree could still point outside it, OR a symlinked directory could
+    // resolve INTO a `.git` dir (sidestepping the literal name check). For paths
+    // that exist, resolve and refuse anything whose realpath escapes the worktree
+    // or lands inside a `.git` directory.
+    if joined.exists() {
+        if !is_under(worktree, &joined) {
+            anyhow::bail!("path escapes worktree: {rel_path}");
+        }
+        if resolves_into_git_dir(worktree, &joined) {
+            anyhow::bail!("refusing to access the git directory: {rel_path}");
+        }
     }
     Ok(joined)
+}
+
+/// True when `candidate`'s realpath lies inside a `.git` directory under the
+/// worktree — a literal nested `.git`, or one reached through a symlinked
+/// directory (which the literal component check can't see). Used to close the
+/// symlink-into-`.git` gap on both read/write and on file creation (where the
+/// parent dir is checked). Returns false if either path can't be canonicalized.
+pub(crate) fn resolves_into_git_dir(worktree: &Path, candidate: &Path) -> bool {
+    match (worktree.canonicalize(), candidate.canonicalize()) {
+        (Ok(wt), Ok(c)) => c
+            .strip_prefix(&wt)
+            .map(|rel| {
+                rel.components().any(|comp| {
+                    comp.as_os_str()
+                        .to_str()
+                        .is_some_and(|s| s.eq_ignore_ascii_case(".git"))
+                })
+            })
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 pub fn ellipsize_middle(input: &str, max_width: usize) -> String {

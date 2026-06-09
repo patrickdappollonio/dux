@@ -70,8 +70,10 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
    whole way around, including the corners (a conic-gradient arc, by contrast,
    stretched badly on a wide/short row). `pathLength="100"` normalizes the
    perimeter to 100 units so the dash is a fixed fraction regardless of row size.
-   The keyframe moves 80 of those units in the first half of the loop (fast) and
-   the last 20 in the second half (slow), per the requested 50/50 feel. */
+   A strong ease-in-out (see the animation below) shapes the speed: slow at the
+   loop seam — the rect path starts at the top-left, so it crawls up the left edge
+   and around that corner — then fast around the rest, slowing smoothly back.
+   Velocities match across the seam (-100 ≡ 0), so the loop is seamless. */
 .agent-beam {
     position: absolute;
     inset: 0;
