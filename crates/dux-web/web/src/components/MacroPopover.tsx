@@ -30,7 +30,22 @@ import type { SelectedTarget } from "@/lib/store"
 // `containerRef` xterm opens into), so it never changes the terminal's box
 // measurement — the same placement the fullscreen button uses. See the hostRef
 // comment in `TerminalPane`.
-export function MacroPopover({ target }: { target: SelectedTarget }) {
+export function MacroPopover({
+  target,
+  finalFocus,
+}: {
+  target: SelectedTarget
+  // Where focus lands when the popover closes (selecting a macro, Esc, or
+  // dismissing). TerminalPane points this at the xterm helper textarea so the
+  // cursor returns to the terminal rather than the "Macros…" trigger button.
+  // That is the whole point of the feature: running a macro pastes its text into
+  // the agent's input WITHOUT submitting, so focus must be on the terminal for
+  // the user to review and press Enter to submit — with the default
+  // trigger-return, Enter would just re-press this trigger and re-open the menu.
+  // This intentionally overrides the usual "return focus to the trigger" popover
+  // convention because the trigger floats over a live terminal the user drives.
+  finalFocus?: () => HTMLElement | null
+}) {
   const { viewModel } = useDux()
   const [open, setOpen] = useState(false)
 
@@ -54,7 +69,7 @@ export function MacroPopover({ target }: { target: SelectedTarget }) {
         <SquareSlash />
         Macros…
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-72 p-0">
+      <PopoverContent align="end" className="w-72 p-0" finalFocus={finalFocus}>
         {allMacros.length === 0 ? (
           <div className="px-3 py-6 text-center text-sm text-muted-foreground">
             No macros found — start by creating one!

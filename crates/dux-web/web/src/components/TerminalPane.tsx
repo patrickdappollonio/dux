@@ -402,8 +402,14 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
       <div className="absolute top-3 right-[calc(0.5rem+var(--xterm-scrollbar-width,8px)+0.25rem)] z-10 flex gap-2">
         {/* The popover trigger renders a secondary labeled Button (see
             MacroPopover); it must remain reachable on touch, so it does not
-            hide on blur. */}
-        <MacroPopover target={macroTarget} />
+            hide on blur. On close we hand Base UI the terminal's textarea as the
+            focus target instead of calling termRef.focus() imperatively like the
+            accessory-bar handlers do, because Base UI owns focus during a
+            popover close — see the MacroPopover finalFocus comment. */}
+        <MacroPopover
+          target={macroTarget}
+          finalFocus={() => termRef.current?.textarea ?? null}
+        />
         {/* Fullscreen toggle: embedded mode already forwards every key the
             browser will give a page; fullscreen + keyboard lock additionally
             captures reserved shortcuts (Ctrl+T, Ctrl+W, …) on Chromium. The
