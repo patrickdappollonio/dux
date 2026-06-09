@@ -1835,13 +1835,7 @@ impl App {
             "restarting agent \"{}\" with fresh session (no resume args)",
             session.branch_name
         ));
-        let proj_name = self.engine.project_name_for_session(&session);
-        let mut msg = format!(
-            "Started fresh {} session for agent \"{}\" in project \"{}\". Use /sessions inside the agent to restore a prior conversation.",
-            session.provider.as_str(),
-            session.branch_name,
-            proj_name,
-        );
+        let mut msg = self.engine.agent_reconnect_status_message(&session, false);
         if let Some(detached) = &detached_label {
             msg.push_str(&format!(
                 " Agent \"{}\" was detached to avoid worktree conflicts.",
@@ -1907,22 +1901,9 @@ impl App {
             self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
 
         let use_resume = self.engine.should_resume_session(&session);
-        let proj_name = self.engine.project_name_for_session(&session);
-        let mut msg = if use_resume {
-            format!(
-                "Resumed {} agent \"{}\" in project \"{}\".",
-                session.provider.as_str(),
-                session.branch_name,
-                proj_name
-            )
-        } else {
-            format!(
-                "Started fresh {} session for agent \"{}\" in project \"{}\". Use /sessions inside the agent to restore a prior conversation.",
-                session.provider.as_str(),
-                session.branch_name,
-                proj_name
-            )
-        };
+        let mut msg = self
+            .engine
+            .agent_reconnect_status_message(&session, use_resume);
         if let Some(detached) = &detached_label {
             msg.push_str(&format!(
                 " Agent \"{}\" was detached to avoid worktree conflicts.",

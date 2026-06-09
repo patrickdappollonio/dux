@@ -39,26 +39,42 @@ function ConnectionIndicator() {
 
 // The persistent statusline, rendered 1:1 with the TUI: tone drives both the
 // text color and the leading iconography (so the meaning survives in monochrome
-// too). An empty message renders nothing.
+// too).
+//
+// This is now the SINGLE surface for engine status (the duplicate toast was
+// removed), so it must be a live region — otherwise a screen-reader user would
+// no longer hear "Resumed agent…", "Push failed", etc. (sonner toasts announced
+// those for free). The container stays mounted even when empty so the FIRST
+// message is announced, and aria-atomic re-reads the whole message on each
+// change. role="status" is polite; we don't force assertive so a stream of
+// routine info/busy updates never interrupts the user mid-sentence.
 function StatusLine() {
   const { statusLine } = useDux()
-  if (!statusLine.message) {
-    return null
-  }
-  const { icon, className } = statusPresentation(statusLine.tone)
+  const { icon, className } = statusLine.message
+    ? statusPresentation(statusLine.tone)
+    : { icon: "none" as const, className: "" }
 
   return (
-    <div className={`flex min-w-0 items-center gap-1.5 ${className}`}>
-      {icon === "spinner" ? <BrailleSpinner /> : null}
-      {icon === "warning" ? (
-        <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+    <div
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      className={`flex min-w-0 items-center gap-1.5 ${className}`}
+    >
+      {statusLine.message ? (
+        <>
+          {icon === "spinner" ? <BrailleSpinner /> : null}
+          {icon === "warning" ? (
+            <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+          ) : null}
+          {icon === "error" ? (
+            <CircleX className="size-3.5 shrink-0" aria-hidden />
+          ) : null}
+          <SimpleTooltip content={statusLine.message}>
+            <span className="truncate">{statusLine.message}</span>
+          </SimpleTooltip>
+        </>
       ) : null}
-      {icon === "error" ? (
-        <CircleX className="size-3.5 shrink-0" aria-hidden />
-      ) : null}
-      <SimpleTooltip content={statusLine.message}>
-        <span className="truncate">{statusLine.message}</span>
-      </SimpleTooltip>
     </div>
   )
 }

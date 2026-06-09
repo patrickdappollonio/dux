@@ -429,29 +429,10 @@ async function recheckAuthAfterFailure(): Promise<void> {
   }
 }
 
-// Show a toast colored by the engine's StatusTone. dux uses Info for positive
-// confirmations ("X succeeded"), so Info maps to a success toast; Busy is a
-// neutral in-progress notice; Warning/Error map directly. Shared by the
-// synchronous command-result path and the async status stream so a "busy"
-// result is never shown as a green success.
-function toastForTone(tone: string, message: string): void {
-  switch (tone) {
-    case "error":
-      toast.error(message)
-      break
-    case "warning":
-      toast.warning(message)
-      break
-    case "busy":
-      toast.info(message)
-      break
-    default:
-      // "info" (and any unknown tone) is a positive confirmation.
-      toast.success(message)
-      break
-  }
-}
-
+// Engine status/command events go to the status LINE only, 1:1 with the TUI —
+// the TUI shows these in its status line and never as a separate transient
+// notice. (Earlier these also fired a toast, so a single event surfaced twice;
+// the status line is the single source of truth for engine-driven status.)
 socket.onCommandResult = (status, error) => {
   if (error) {
     // A rejected reorder (stale/partial id set) comes back as an error here;
@@ -461,10 +442,8 @@ socket.onCommandResult = (status, error) => {
       statusLine: { tone: "error", message: error },
       ...clearPendingOrders(),
     })
-    toast.error(error)
   } else if (status) {
     setState({ statusLine: { tone: status.tone, message: status.message } })
-    toastForTone(status.tone, status.message)
   }
 }
 
@@ -473,7 +452,6 @@ socket.onError = (message) => {
     statusLine: { tone: "error", message },
     ...clearPendingOrders(),
   })
-  toast.error(message)
 }
 
 // Reset both optimistic order overlays. Returned as a patch so callers can fold
@@ -484,13 +462,12 @@ function clearPendingOrders(): Partial<DuxState> {
 }
 
 // Asynchronous status/lifecycle events (background push/pull completing, an
-// agent launch failing, a PTY exiting). Surface them as a toast toned by the
-// engine's StatusTone and keep the latest in the status bar.
+// agent launch finishing or failing, a PTY exiting). These mirror the TUI's
+// status line 1:1 — keep the latest in the status bar, no separate toast.
 socket.onStatus = (tone, message) => {
   // An error-toned async status also unwinds any optimistic reorder overlay.
   const patch = tone === "error" ? clearPendingOrders() : {}
   setState({ statusLine: { tone, message }, ...patch })
-  toastForTone(tone, message)
 }
 
 // A freshly created terminal auto-focuses so the user lands on it immediately.

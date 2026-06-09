@@ -856,13 +856,17 @@ fn launch_agent(engine: &mut Engine, session_id: &str) -> Result<(), String> {
         return Ok(());
     }
     let resume = engine.should_resume_session(&session);
+    // Use the SAME completion message the TUI shows on reconnect-ready (via
+    // Engine::agent_reconnect_status_message) rather than a static "attaching…"
+    // placeholder. The launch-ready reaction echoes this status_message back as
+    // the final status; echoing a placeholder is what left the status line stuck
+    // on "Attaching to agent" forever after the agent had already attached.
+    let status_message = engine.agent_reconnect_status_message(&session, resume);
     let request = engine.build_agent_launch_request(
         session,
         resume,
         (24, 80),
-        AgentLaunchKind::Reconnect {
-            status_message: "Attaching to agent".to_string(),
-        },
+        AgentLaunchKind::Reconnect { status_message },
     );
     engine
         .apply(Command::DispatchAgentLaunch {
