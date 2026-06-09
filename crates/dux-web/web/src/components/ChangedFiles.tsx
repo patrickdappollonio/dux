@@ -1,6 +1,7 @@
 import { useMemo, useState, useSyncExternalStore } from "react"
 import {
   Check,
+  EllipsisVertical,
   Hash,
   Loader2,
   Minus,
@@ -24,6 +25,12 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import {
   Collapsible,
   CollapsibleContent,
@@ -311,47 +318,57 @@ export function ChangedFiles() {
     <>
       {/* Main card filling the pane */}
       <Card className="h-full rounded-none border-0 ring-0">
-        {/* flex-wrap (overriding the Card's grid) so the action buttons drop to
-            their own row when the pane is too narrow for them beside the title,
-            instead of overflowing off-screen (e.g. the changes pane on a tablet). */}
-        <CardHeader className="flex flex-wrap items-center justify-between gap-2 border-b">
+        {/* The git actions collapse into a single "Actions" menu so the header
+            never overflows when the pane is narrow (e.g. on a tablet). */}
+        <CardHeader className="flex items-center justify-between gap-2 border-b">
           <CardTitle>Changes</CardTitle>
-          <CardAction className="flex flex-wrap items-center gap-1 self-center max-md:[&_button]:min-h-11">
-            <Button
-              size="sm"
-              onClick={() => openCommit(selectedSessionId)}
-              disabled={changed.staged.length === 0}
-            >
-              Commit…
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                if (!selectedSessionId) return
-                git
-                  .push(selectedSessionId)
-                  .catch((e) =>
-                    toast.error(e instanceof Error ? e.message : "push failed")
-                  )
-              }}
-            >
-              Push
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                if (!selectedSessionId) return
-                git
-                  .pull(selectedSessionId)
-                  .catch((e) =>
-                    toast.error(e instanceof Error ? e.message : "pull failed")
-                  )
-              }}
-            >
-              Pull
-            </Button>
+          <CardAction className="self-center">
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <Button
+                    size="icon"
+                    variant="outline"
+                    aria-label="Changes actions"
+                    className="max-md:size-11"
+                  />
+                }
+              >
+                <EllipsisVertical />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  onClick={() => openCommit(selectedSessionId)}
+                  disabled={changed.staged.length === 0}
+                >
+                  Commit…
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => {
+                    if (!selectedSessionId) return
+                    git
+                      .push(selectedSessionId)
+                      .catch((e) =>
+                        toast.error(e instanceof Error ? e.message : "push failed")
+                      )
+                  }}
+                >
+                  Push
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => {
+                    if (!selectedSessionId) return
+                    git
+                      .pull(selectedSessionId)
+                      .catch((e) =>
+                        toast.error(e instanceof Error ? e.message : "pull failed")
+                      )
+                  }}
+                >
+                  Pull
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </CardAction>
         </CardHeader>
 

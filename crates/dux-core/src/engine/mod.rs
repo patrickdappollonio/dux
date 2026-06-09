@@ -1131,6 +1131,31 @@ impl Engine {
             .unwrap_or_else(|| "unknown".to_string())
     }
 
+    /// The status message shown when an existing agent's provider becomes ready
+    /// after a reconnect. Shared by the TUI and the web so both report the SAME
+    /// completion message (1:1) instead of a frontend echoing its own
+    /// "attaching…" placeholder back to the user. `resume` is the result of
+    /// [`should_resume_session`]. Callers may append extra context (e.g. a
+    /// detached-worktree note) to the returned string.
+    pub fn agent_reconnect_status_message(&self, session: &AgentSession, resume: bool) -> String {
+        let proj_name = self.project_name_for_session(session);
+        if resume {
+            format!(
+                "Resumed {} agent \"{}\" in project \"{}\".",
+                session.provider.as_str(),
+                session.branch_name,
+                proj_name
+            )
+        } else {
+            format!(
+                "Started fresh {} session for agent \"{}\" in project \"{}\". Use /sessions inside the agent to restore a prior conversation.",
+                session.provider.as_str(),
+                session.branch_name,
+                proj_name
+            )
+        }
+    }
+
     /// Provider currently driving the session's live PTY, if any. After an
     /// in-place provider swap while the agent is still running, this returns
     /// the *original* provider until the user exits and relaunches — so the
@@ -1237,6 +1262,26 @@ mod tests {
 
         // No entry at all → not streaming.
         assert!(!engine.is_agent_streaming("absent"));
+    }
+
+    #[test]
+    fn agent_reconnect_status_message_reads_as_completed() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feature");
+
+        // Resume → a completed-action message naming provider, agent, project.
+        assert_eq!(
+            engine.agent_reconnect_status_message(&session, true),
+            "Resumed claude agent \"feature\" in project \"p1-name\"."
+        );
+
+        // Fresh → the no-resume variant with the /sessions hint.
+        assert_eq!(
+            engine.agent_reconnect_status_message(&session, false),
+            "Started fresh claude session for agent \"feature\" in project \"p1-name\". \
+             Use /sessions inside the agent to restore a prior conversation."
+        );
     }
 
     #[test]

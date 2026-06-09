@@ -64,16 +64,13 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     75% { transform: translateY(10%); }
 }
 
-/* A single light that travels around the OUTSIDE edge of a working agent's row.
-   Implemented as an SVG rect outline with one dash — because the dash length is
-   measured in PATH LENGTH (not angle), the segment stays the SAME length the
-   whole way around, including the corners (a conic-gradient arc, by contrast,
-   stretched badly on a wide/short row). `pathLength="100"` normalizes the
-   perimeter to 100 units so the dash is a fixed fraction regardless of row size.
-   A strong ease-in-out (see the animation below) shapes the speed: slow at the
-   loop seam — the rect path starts at the top-left, so it crawls up the left edge
-   and around that corner — then fast around the rest, slowing smoothly back.
-   Velocities match across the seam (-100 ≡ 0), so the loop is seamless. */
+/* A faint constant-length light that crawls the LEFT edge of a working agent's
+   row and races the other three sides, fading in and out each lap so it reads as
+   a barely-there pulse rather than a constant ring. Implemented as an SVG rect
+   outline with one dash — the dash length is measured in PATH LENGTH (not angle),
+   so the comet stays the SAME length the whole way around, corners included (a
+   conic-gradient arc, by contrast, stretched badly on a wide/short row).
+   `pathLength="100"` normalizes the perimeter to 100 units. */
 .agent-beam {
     position: absolute;
     inset: 0;
@@ -97,25 +94,37 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     stroke: none;
     stroke-width: 1.5px;
     stroke-linecap: round;
-    stroke-dasharray: 20 80; /* a 20%-of-perimeter segment + the rest as gap */
-    /* ~40% transparent so the moving light is present but not attention-grabbing. */
-    stroke-opacity: 0.6;
+    stroke-dasharray: 10 90; /* a short 10%-of-perimeter comet + the rest as gap */
 }
 
-/* One smooth loop around the perimeter. The easing (not keyframe stops) shapes
-   the speed: a strong ease-in-out crawls through the seam — the rect path starts
-   at the top-left, so the beam slows as it climbs the LEFT edge and rounds that
-   corner — then zips fast around the top/right/bottom. Slow→slow at the seam, so
-   the loop stays seamless. */
-@keyframes agent-beam {
-    from { stroke-dashoffset: 0; }
-    to { stroke-dashoffset: -100; }
+/* The rect outline is drawn top → right → bottom → LEFT, so the left edge is the
+   final slice of the perimeter. `--beam-left-start` (set per row in AgentBeam.tsx
+   from the measured aspect ratio) is where that slice begins; spending HALF the
+   lap from there to the end (-100) makes the comet crawl the left edge slowly and
+   race the other three sides in the other half. The default matches a square row. */
+@keyframes agent-beam-travel {
+    0% { stroke-dashoffset: 0; }
+    50% { stroke-dashoffset: calc(-1 * var(--beam-left-start, 75)); }
+    100% { stroke-dashoffset: -100; }
+}
+
+/* Fade in as the comet is born and out as it dies, every lap, so the effect is a
+   gentle pulse and stays barely noticeable (peak ~22% opacity). */
+@keyframes agent-beam-fade {
+    0%, 100% { stroke-opacity: 0; }
+    15%, 85% { stroke-opacity: 0.22; }
 }
 
 @media (prefers-reduced-motion: no-preference) {
     .agent-beam rect {
         stroke: var(--primary);
-        animation: agent-beam 2s cubic-bezier(0.9, 0, 0.1, 1) infinite;
+        /* ease-in-out on the travel brings velocity to ~0 at each keyframe stop
+           (top-left seam AND the bottom-left corner where fast→slow meet), so
+           there's no abrupt jolt as the comet hands off from the fast lap to the
+           slow left crawl — it decelerates in and accelerates out smoothly. */
+        animation:
+            agent-beam-travel 2.4s ease-in-out infinite,
+            agent-beam-fade 2.4s ease-in-out infinite;
     }
 }
 
