@@ -8,13 +8,7 @@ import {
   CommandList,
   CommandSeparator,
 } from "@/components/ui/command"
-import {
-  logout,
-  selectSession,
-  setPaletteOpen,
-  socket,
-  useDux,
-} from "@/lib/store"
+import { logout, setPaletteOpen, useDux } from "@/lib/store"
 import { groupPaletteCommands } from "@/lib/paletteGroups"
 import { PALETTE_HANDLERS } from "@/lib/paletteRegistry"
 
@@ -52,12 +46,6 @@ export function CommandPalette() {
     close()
   }
 
-  function handleSelectSession(id: string) {
-    selectSession(id)
-    close()
-  }
-
-  const sessions = viewModel?.sessions ?? []
   // The "Commands" groups are driven by the surface-aware core registry: the
   // ViewModel projects the Web/Both subset (id + description, canonical order);
   // we render each entry whose id has a web handler, bucketed into app-menu
@@ -88,64 +76,40 @@ export function CommandPalette() {
               <CommandItem
                 key={cmd.id}
                 value={`${cmd.id} ${cmd.description}`}
-                className="cursor-pointer"
+                // Two aligned columns (tabwriter-style): a fixed-width command
+                // name so every description starts at the same x across rows.
+                className="grid cursor-pointer grid-cols-[12rem_minmax(0,1fr)] items-baseline gap-3"
                 onSelect={() => runPaletteCommand(cmd.id)}
               >
-                <span className="font-medium">{cmd.id}</span>
-                <span className="text-muted-foreground">{cmd.description}</span>
+                <span className="truncate font-medium">{cmd.id}</span>
+                <span className="truncate text-muted-foreground">
+                  {cmd.description}
+                </span>
               </CommandItem>
             ))}
           </CommandGroup>
         ))}
-        {commandGroups.length > 0 ? <CommandSeparator /> : null}
-
-        {/* Web-only: not a TUI palette command (no BINDING_DEFS/core entry), so
-            it stays hand-written. Both are GLOBAL. Recover config overwrites
-            config.toml from the running config — paired with the registry's
-            reload-config. Log out is web-only (the TUI has no session to end)
-            and shown only when auth is on — following the recover-config
-            precedent of a hand-written entry that never touches the core
-            registry. */}
-        <CommandGroup heading="Config">
-          <CommandItem
-            className="cursor-pointer"
-            onSelect={() => {
-              socket.sendCommand("recover_config", {})
-              close()
-            }}
-          >
-            Recover config (overwrite config.toml)
-          </CommandItem>
-          {auth.phase === "authed" ? (
-            <CommandItem
-              className="cursor-pointer"
-              onSelect={() => {
-                void logout()
-                close()
-              }}
-            >
-              Log out{auth.username ? ` (${auth.username})` : ""}
-            </CommandItem>
-          ) : null}
-        </CommandGroup>
-        <CommandSeparator />
-
-        {/* Switch session is global navigation (the menu analog of "Window >
-            switch to…"), not an action ON a target — it selects which session
-            the center pane streams. The per-session ACTIONS live in the session
-            row's triple-dot menu. */}
-        <CommandGroup heading="Switch session">
-          {sessions.map((s) => (
-            <CommandItem
-              key={s.id}
-              value={`${s.provider} ${s.branch_name} ${s.id}`}
-              className="cursor-pointer"
-              onSelect={() => handleSelectSession(s.id)}
-            >
-              {s.provider} · {s.branch_name}
-            </CommandItem>
-          ))}
-        </CommandGroup>
+        {/* Log out is web-only (the TUI has no session to end) and shown only
+            when auth is on. Deliberately NOT here: "Switch session" (switching
+            is the row's job — click it, or use its triple-dot menu) and "Recover
+            config" (it overwrites config.toml — far too destructive for a
+            one-keystroke palette entry). */}
+        {auth.phase === "authed" ? (
+          <>
+            {commandGroups.length > 0 ? <CommandSeparator /> : null}
+            <CommandGroup heading="Account">
+              <CommandItem
+                className="cursor-pointer"
+                onSelect={() => {
+                  void logout()
+                  close()
+                }}
+              >
+                Log out{auth.username ? ` (${auth.username})` : ""}
+              </CommandItem>
+            </CommandGroup>
+          </>
+        ) : null}
       </CommandList>
     </CommandDialog>
   )

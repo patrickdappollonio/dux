@@ -109,18 +109,17 @@ function InsetHeader() {
           size="sm"
           onClick={() => setPaletteOpen(true)}
         >
-          {/* Render each key as its own flex child so the spacing between keys
-              matches the button's gap to "Search…" (a single monospace string
-              put a wide font-space between the keys), and so the keys share the
-              button's sans font for consistent vertical alignment. The keycaps
-              are decorative (the button already reads "Search…"), so they're
-              hidden from assistive tech. */}
+          {/* Render each key as its own flex child so the keys share the button's
+              sans font for consistent vertical alignment. The keycaps are
+              decorative (the button already reads "Commands…"), so they're hidden
+              from assistive tech. The label gets extra leading margin so the
+              keycaps sit as a distinct group, set apart from the word. */}
           {paletteShortcutKeys().map((key) => (
             <span key={key} aria-hidden className="text-muted-foreground">
               {key}
             </span>
           ))}
-          Search…
+          <span className="ms-2">Commands…</span>
         </Button>
         {auth.phase === "authed" ? (
           <div className="flex items-center gap-1.5">
