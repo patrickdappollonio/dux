@@ -225,6 +225,12 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
       socket.subscribe(id)
     }
 
+    // Focus the terminal on selection so the user can type immediately — no extra
+    // click into the pane. This effect re-runs (and the pane remounts) on every
+    // agent OR companion-terminal selection (keyed by [kind, id]), so both cases
+    // are covered. Runs after the click that selected the row, so it wins focus.
+    term.focus()
+
     // Sizing has two halves with very different costs:
     //  - LOCAL refits (fit.fit()) are cheap, so the canvas tracks the container
     //    every frame while the user drags a divider or the window edge.
