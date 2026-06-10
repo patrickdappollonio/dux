@@ -349,6 +349,8 @@ fn run_plain_http(
     // the engine moves into the actor thread.
     let (console, access_log) = build_console(&engine.config);
     let user_count = dux_core::auth::parse_users(&engine.config.auth.users).len();
+    // Capture the connection cap before the engine moves into the actor thread.
+    let max_ws_connections = engine.config.server.max_websocket_connections;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -407,7 +409,9 @@ fn run_plain_http(
             handle.clone(),
             Arc::clone(&auth),
             axum::Router::new(),
-            RouterParams::plain_http().with_console(console.clone(), access_log),
+            RouterParams::plain_http()
+                .with_console(console.clone(), access_log)
+                .with_max_websocket_connections(max_ws_connections),
         );
         let sweep = tls::spawn_session_sweep(store, SESSION_SWEEP_PERIOD, sweep_shutdown_rx);
 
@@ -569,6 +573,8 @@ fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool, version: String
     // BEFORE the engine moves into the actor thread.
     let (console, access_log) = build_console(&engine.config);
     let user_count = dux_core::auth::parse_users(&engine.config.auth.users).len();
+    // Capture the connection cap before the engine moves into the actor thread.
+    let max_ws_connections = engine.config.server.max_websocket_connections;
     let production = plan.production;
     let https_addr = plan.https_addr;
     let (handle, _join) = engine_actor::spawn_engine_thread_with_auth(
@@ -637,7 +643,9 @@ fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool, version: String
             handle.clone(),
             Arc::clone(&auth),
             axum::Router::new(),
-            RouterParams::tls().with_console(console.clone(), access_log),
+            RouterParams::tls()
+                .with_console(console.clone(), access_log)
+                .with_max_websocket_connections(max_ws_connections),
         );
         // Pin every route to the configured domains (DNS-rebinding defense) and
         // stamp HSTS on every response. Both are HTTPS-ONLY hardening: dux owns
@@ -1037,7 +1045,8 @@ pub fn serve_with_engine(
         handle.clone(),
         Arc::clone(&auth),
         axum::Router::new(),
-        RouterParams::plain_http(),
+        RouterParams::plain_http()
+            .with_max_websocket_connections(engine.config.server.max_websocket_connections),
     );
     let sweep_task = {
         let _guard = runtime.enter();

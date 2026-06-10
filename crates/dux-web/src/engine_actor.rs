@@ -1,8 +1,10 @@
 //! The engine runs on its own thread (the `Engine` is `!Send`). Async code talks to it
-//! through `EngineHandle`: requests over a tokio unbounded mpsc (so the handle is
-//! `Send + Sync` for use as axum state), the engine thread polling it with `try_recv` on
-//! a tick (so it also drains worker events and refreshes the ViewModel watch); replies
-//! over tokio oneshots; the latest ViewModel JSON over a tokio watch channel.
+//! through `EngineHandle`: requests over a BOUNDED tokio mpsc (so the handle is
+//! `Send + Sync` for use as axum state, and a misbehaving/flooding client cannot grow
+//! the queue without limit — see [`REQ_CHANNEL_CAPACITY`]), the engine thread polling it
+//! with `try_recv` on a tick (so it also drains worker events and refreshes the ViewModel
+//! watch); replies over tokio oneshots; the latest ViewModel JSON over a tokio watch
+//! channel.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -109,11 +111,12 @@ pub enum LoopControl {
 /// dedicated-thread path and the in-process flip can build the channels once
 /// and run the same loop body.
 pub(crate) struct ActorLoopEnds {
-    req_rx: mpsc::UnboundedReceiver<EngineRequest>,
+    req_rx: mpsc::Receiver<EngineRequest>,
     vm_tx: watch::Sender<String>,
     status_tx: broadcast::Sender<WireStatus>,
     status_snapshot_tx: watch::Sender<WireStatus>,
     commit_msg_tx: broadcast::Sender<CommitMessageEvent>,
+    commit_snapshot_tx: watch::Sender<Option<(CommitMessageEvent, Instant)>>,
     /// Shared with the caller-facing [`EngineHandle`] and every PTY forwarder.
     /// The inline `Shutdown` request trips this so forwarders exit promptly even
     /// before the engine drop disconnects their channels.
@@ -165,10 +168,13 @@ pub struct AuthReloadContext {
 /// Compared fields mirror what the resolver consumes to bind: the LOCAL MODE
 /// `port`, the `tailscale_enabled` toggle, the FULL WEB MODE `listen_addrs`, and
 /// the entire `[server.acme]` section (any of its fields shifts the bound ports,
-/// the issued domains, or staging-vs-production). `bind` is intentionally absent:
-/// it is deprecated and migrated into `port`/`listen_addrs` on load, so a change
-/// to it surfaces through those fields. `insecure_allow_remote` is a gate input,
-/// not a bound value, so it cannot drift a live listener.
+/// the issued domains, or staging-vs-production). `max_websocket_connections` is
+/// also startup-bound: the `/ws` connection-cap semaphore is built ONCE in
+/// `build_app` and never resized on reload, so changing the cap needs a restart
+/// just like the listeners. `bind` is intentionally absent: it is deprecated and
+/// migrated into `port`/`listen_addrs` on load, so a change to it surfaces through
+/// those fields. `insecure_allow_remote` is a gate input, not a bound value, so it
+/// cannot drift a live listener.
 fn server_rebind_settings_changed(
     prev: &dux_core::config::ServerConfig,
     next: &dux_core::config::ServerConfig,
@@ -178,6 +184,7 @@ fn server_rebind_settings_changed(
     prev.port != next.port
         || prev.tailscale_enabled != next.tailscale_enabled
         || prev.listen_addrs != next.listen_addrs
+        || prev.max_websocket_connections != next.max_websocket_connections
         || a.enabled != b.enabled
         || a.domains != b.domains
         || a.email != b.email
@@ -185,6 +192,39 @@ fn server_rebind_settings_changed(
         || a.https_port != b.https_port
         || a.production != b.production
         || a.cache_dir != b.cache_dir
+}
+
+/// Bound on the engine request channel. A burst buffer, not a steady-state
+/// queue: the engine drains the WHOLE channel every `TICK` (50ms), so under
+/// normal use it holds only a handful of in-flight requests. The cap exists so a
+/// flooding or buggy client cannot grow the queue without limit (the old channel
+/// was unbounded). Reply-bearing sends apply backpressure when full (`.send().await`
+/// waits for the next drain); fire-and-forget sends (`write_pty`, `resize_pty`,
+/// `refresh_changed_files`, `emit_status`) use `try_send` and drop on a full
+/// channel — acceptable overload shedding, since reaching this depth means the
+/// producer is far outrunning a 20-drains-per-second consumer. Kept a const,
+/// like the broadcast capacities above, rather than user config: it is an
+/// internal safety ceiling, not a preference.
+const REQ_CHANNEL_CAPACITY: usize = 1024;
+
+/// How long a generated commit message stays deliverable as a connect snapshot.
+/// Long enough to cover a slow one-shot generation plus a reconnect blip, short
+/// enough that an old, already-used message never silently pre-fills a freshly
+/// opened commit dialog. See [`EngineHandle::commit_message_snapshot`].
+const COMMIT_SNAPSHOT_TTL: Duration = Duration::from_secs(90);
+
+/// Return the snapshot's message only if it is younger than `ttl`. Pure (takes
+/// `now`) so the TTL boundary is unit-testable without sleeping. Uses a saturating
+/// age so a clock that appears to go backwards yields age 0 (treated as fresh)
+/// rather than panicking.
+fn fresh_commit_snapshot(
+    slot: &Option<(CommitMessageEvent, Instant)>,
+    ttl: Duration,
+    now: Instant,
+) -> Option<CommitMessageEvent> {
+    slot.as_ref().and_then(|(event, generated_at)| {
+        (now.saturating_duration_since(*generated_at) < ttl).then(|| event.clone())
+    })
 }
 
 /// Build the actor channels and split them into the caller-facing
@@ -202,7 +242,7 @@ pub(crate) fn build_actor_channels_with_auth(
     engine: &Engine,
     auth_reload: Option<AuthReloadContext>,
 ) -> (EngineHandle, ActorLoopEnds) {
-    let (req_tx, req_rx) = mpsc::unbounded_channel::<EngineRequest>();
+    let (req_tx, req_rx) = mpsc::channel::<EngineRequest>(REQ_CHANNEL_CAPACITY);
     let (vm_tx, vm_rx) = watch::channel(view_model_json(engine));
     // Status uses TWO channels driven from one place (the StatusEmitter):
     //  - `status_tx` (broadcast) delivers every status LIVE, so a transient
@@ -214,6 +254,16 @@ pub(crate) fn build_actor_channels_with_auth(
     let (status_snapshot_tx, status_snapshot_rx) =
         watch::channel(WireStatus::new("info", String::new()));
     let (commit_msg_tx, _commit_msg_rx) = broadcast::channel::<CommitMessageEvent>(64);
+    // The commit-message snapshot mirrors the status snapshot watch: it holds the
+    // LAST generated message (or `None` before any), stamped with the `Instant` it
+    // was generated, so a client that reconnected after generation completed — or
+    // in the connect/subscribe gap — still receives it once on connect (see
+    // `commit_message_snapshot`). The timestamp bounds staleness: the snapshot is
+    // only delivered while it is younger than `COMMIT_SNAPSHOT_TTL`, so an old,
+    // already-used message never pre-fills a freshly opened dialog. Live delivery
+    // stays on `commit_msg_tx` (broadcast).
+    let (commit_snapshot_tx, commit_snapshot_rx) =
+        watch::channel::<Option<(CommitMessageEvent, Instant)>>(None);
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     (
         EngineHandle {
@@ -222,6 +272,7 @@ pub(crate) fn build_actor_channels_with_auth(
             status_tx: status_tx.clone(),
             status_snapshot_rx,
             commit_msg_tx: commit_msg_tx.clone(),
+            commit_snapshot_rx,
             shutdown_flag: Arc::clone(&shutdown_flag),
         },
         ActorLoopEnds {
@@ -230,6 +281,7 @@ pub(crate) fn build_actor_channels_with_auth(
             status_tx,
             status_snapshot_tx,
             commit_msg_tx,
+            commit_snapshot_tx,
             shutdown_flag,
             auth_reload,
         },
@@ -265,11 +317,12 @@ struct PendingSubscribe {
 
 #[derive(Clone)]
 pub struct EngineHandle {
-    req_tx: mpsc::UnboundedSender<EngineRequest>,
+    req_tx: mpsc::Sender<EngineRequest>,
     view_model_rx: watch::Receiver<String>,
     status_tx: broadcast::Sender<WireStatus>,
     status_snapshot_rx: watch::Receiver<WireStatus>,
     commit_msg_tx: broadcast::Sender<CommitMessageEvent>,
+    commit_snapshot_rx: watch::Receiver<Option<(CommitMessageEvent, Instant)>>,
     /// Tripped when the server is tearing down (ReturnToTui, QuitProcess, or a
     /// `Shutdown` request). PTY forwarders poll it so their blocking
     /// `recv_timeout` loop exits promptly even when the engine — and therefore
@@ -325,17 +378,43 @@ impl EngineHandle {
     /// can never linger. The engine loop drains this and emits it via its
     /// `StatusEmitter`. A no-op if the engine loop has already exited.
     pub fn emit_status(&self, status: WireStatus) {
-        let _ = self.req_tx.send(EngineRequest::EmitStatus(status));
+        // `try_send` (not `send().await`): this is sync fire-and-forget, called
+        // from the ACME task. On a full channel the status is dropped — only under
+        // extreme overload — but a certificate-lifecycle status going missing is
+        // worth a breadcrumb, so log the Full case. A Closed channel means the
+        // engine is already gone (normal shutdown), so that case stays silent.
+        if let Err(mpsc::error::TrySendError::Full(_)) =
+            self.req_tx.try_send(EngineRequest::EmitStatus(status))
+        {
+            dux_core::logger::warn(
+                "engine request channel full: dropped an ACME/lifecycle status update",
+            );
+        }
     }
 
     pub fn subscribe_commit_messages(&self) -> broadcast::Receiver<CommitMessageEvent> {
         self.commit_msg_tx.subscribe()
     }
 
+    /// The last generated commit message, or `None` if none has been produced OR
+    /// the last one is older than [`COMMIT_SNAPSHOT_TTL`]. A client connecting
+    /// after generation completed — or in the connect/subscribe gap — sends this
+    /// once so a reconnect during a commit flow still fills the draft. The TTL
+    /// bounds staleness so an old, already-used message never pre-fills a freshly
+    /// opened dialog. Mirrors `status_snapshot` for the commit lane.
+    pub fn commit_message_snapshot(&self) -> Option<CommitMessageEvent> {
+        fresh_commit_snapshot(
+            &self.commit_snapshot_rx.borrow(),
+            COMMIT_SNAPSHOT_TTL,
+            Instant::now(),
+        )
+    }
+
     pub async fn apply_wire(&self, command: WireCommand) -> Result<WireCommandOutcome, String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
             .send(EngineRequest::ApplyWire(command, tx))
+            .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
     }
@@ -344,24 +423,34 @@ impl EngineHandle {
         let (tx, rx) = oneshot::channel();
         self.req_tx
             .send(EngineRequest::SubscribePty(session_id, tx))
+            .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
     }
 
     pub fn write_pty(&self, session_id: String, bytes: Vec<u8>) {
-        let _ = self.req_tx.send(EngineRequest::WritePty(session_id, bytes));
+        // `try_send`: keystrokes are fire-and-forget from a sync caller. A full
+        // channel means the producer is flooding far past the engine's drain
+        // rate; shedding the write then is the intended overload behaviour (the
+        // bounded channel + WS frame-size limit together cap memory).
+        let _ = self
+            .req_tx
+            .try_send(EngineRequest::WritePty(session_id, bytes));
     }
 
     pub fn resize_pty(&self, session_id: String, rows: u16, cols: u16) {
+        // `try_send`: a resize dropped under overload is self-correcting (the next
+        // resize re-establishes the size); no need to backpressure a sync caller.
         let _ = self
             .req_tx
-            .send(EngineRequest::ResizePty(session_id, rows, cols));
+            .try_send(EngineRequest::ResizePty(session_id, rows, cols));
     }
 
     pub async fn subscribe_terminal(&self, terminal_id: String) -> Result<PtySubscription, String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
             .send(EngineRequest::SubscribeTerminal(terminal_id, tx))
+            .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
     }
@@ -370,6 +459,7 @@ impl EngineHandle {
         let (tx, rx) = oneshot::channel();
         self.req_tx
             .send(EngineRequest::CreateTerminal(session_id, tx))
+            .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
     }
@@ -380,7 +470,7 @@ impl EngineHandle {
     /// happened.
     pub async fn shutdown(&self) {
         let (tx, rx) = oneshot::channel();
-        if self.req_tx.send(EngineRequest::Shutdown(tx)).is_ok() {
+        if self.req_tx.send(EngineRequest::Shutdown(tx)).await.is_ok() {
             let _ = rx.await;
         }
     }
@@ -390,6 +480,7 @@ impl EngineHandle {
         if self
             .req_tx
             .send(EngineRequest::SessionWorktree(session_id, tx))
+            .await
             .is_err()
         {
             return None;
@@ -401,9 +492,11 @@ impl EngineHandle {
     /// (after an HTTP git mutation). The refreshed lists reach clients via the
     /// ViewModel watch; nothing to await here.
     pub fn refresh_changed_files(&self, worktree: String) {
+        // `try_send`: a dropped refresh under overload self-heals — the periodic
+        // changed-files poller recomputes the lists on its next pass regardless.
         let _ = self
             .req_tx
-            .send(EngineRequest::RefreshChangedFiles(worktree));
+            .try_send(EngineRequest::RefreshChangedFiles(worktree));
     }
 
     /// Snapshot the inputs to classify a project's managed worktrees (project,
@@ -422,6 +515,7 @@ impl EngineHandle {
         if self
             .req_tx
             .send(EngineRequest::ProjectWorktreeInputs(project_id, tx))
+            .await
             .is_err()
         {
             return None;
@@ -490,6 +584,7 @@ pub(crate) fn run_engine_loop(
         status_tx: thread_status_tx,
         status_snapshot_tx,
         commit_msg_tx: thread_commit_tx,
+        commit_snapshot_tx,
         shutdown_flag,
         auth_reload,
     } = ends;
@@ -573,10 +668,15 @@ pub(crate) fn run_engine_loop(
                     session_id,
                     message,
                 } => {
-                    let _ = thread_commit_tx.send(CommitMessageEvent {
+                    let event = CommitMessageEvent {
                         session_id: session_id.clone(),
                         message: message.clone(),
-                    });
+                    };
+                    // Update the connect snapshot BEFORE the live broadcast so a
+                    // client subscribing in the gap sees a consistent watch value.
+                    // The Instant stamps generation time for the snapshot TTL.
+                    let _ = commit_snapshot_tx.send(Some((event.clone(), Instant::now())));
+                    let _ = thread_commit_tx.send(event);
                 }
                 EventReaction::CommitMessageFailed {
                     session_id: _,
@@ -1140,6 +1240,90 @@ mod tests {
         );
     }
 
+    #[test]
+    fn commit_snapshot_respects_ttl() {
+        let now = Instant::now();
+        let event = CommitMessageEvent {
+            session_id: "s1".to_string(),
+            message: "a generated commit message".to_string(),
+        };
+        // Fresh (age 0) → delivered.
+        let fresh = Some((event.clone(), now));
+        assert!(fresh_commit_snapshot(&fresh, COMMIT_SNAPSHOT_TTL, now).is_some());
+        // Just inside the TTL → still delivered.
+        let inside = Some((event.clone(), now));
+        let near_edge = now + COMMIT_SNAPSHOT_TTL - Duration::from_secs(1);
+        assert!(fresh_commit_snapshot(&inside, COMMIT_SNAPSHOT_TTL, near_edge).is_some());
+        // Older than the TTL → dropped, so it can't pre-fill a fresh dialog.
+        let stale = Some((event, now));
+        let past_edge = now + COMMIT_SNAPSHOT_TTL + Duration::from_secs(1);
+        assert!(fresh_commit_snapshot(&stale, COMMIT_SNAPSHOT_TTL, past_edge).is_none());
+        // No snapshot at all → None.
+        assert!(fresh_commit_snapshot(&None, COMMIT_SNAPSHOT_TTL, now).is_none());
+    }
+
+    #[tokio::test]
+    async fn commit_message_reaches_snapshot_and_broadcast() {
+        // A generated commit message is published on BOTH the connect snapshot (so
+        // a client that reconnected after generation completed still receives it)
+        // AND the live broadcast (so an already-connected client gets it at once).
+        // Mirrors the status snapshot/broadcast split.
+        let (_tmp, paths) = temp_paths();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        // Clone the worker sender before the engine moves into its thread so the
+        // test can inject the event the one-shot commit run would normally post.
+        let worker_tx = engine.worker_tx.clone();
+        let (handle, _join) = spawn_engine_thread(engine);
+
+        // Nothing generated yet → the connect snapshot is empty.
+        assert!(handle.commit_message_snapshot().is_none());
+
+        // Subscribe to the live broadcast before injecting so we prove live
+        // delivery, not just the snapshot (a regression dropping the broadcast send
+        // but keeping the snapshot update would otherwise pass).
+        let mut commit_rx = handle.subscribe_commit_messages();
+
+        worker_tx
+            .send(dux_core::worker::WorkerEvent::CommitMessageGenerated {
+                session_id: "s1".to_string(),
+                message: "a generated commit message".to_string(),
+            })
+            .expect("inject worker event");
+
+        // Live broadcast delivers it to connected clients…
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let delivered = loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), commit_rx.recv())
+                .await
+            {
+                Ok(Ok(ev))
+                    if ev.session_id == "s1" && ev.message == "a generated commit message" =>
+                {
+                    break true;
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break false,
+                Ok(Err(_)) | Err(_) => {}
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+        };
+        assert!(
+            delivered,
+            "commit message was not broadcast to live clients"
+        );
+
+        // …and the connect snapshot now holds it (set before the broadcast, so it
+        // is guaranteed present once the broadcast has been observed) for a client
+        // that connects after generation.
+        let snap = handle
+            .commit_message_snapshot()
+            .expect("snapshot holds the generated message");
+        assert_eq!(snap.session_id, "s1");
+        assert_eq!(snap.message, "a generated commit message");
+    }
+
     #[tokio::test]
     async fn shutdown_acks_and_stops_the_engine_thread() {
         let (_tmp, paths) = temp_paths();
@@ -1212,6 +1396,17 @@ mod tests {
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
         next.listen_addrs.push("0.0.0.0:9000".to_string());
+        assert!(server_rebind_settings_changed(&prev, &next));
+    }
+
+    #[test]
+    fn rebind_drift_detects_max_websocket_connections_change() {
+        // The /ws connection-cap semaphore is built once at startup, so changing
+        // the cap must surface as a restart-needed warning like the other
+        // startup-bound settings — not be silently swallowed by a live reload.
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.max_websocket_connections += 1;
         assert!(server_rebind_settings_changed(&prev, &next));
     }
 

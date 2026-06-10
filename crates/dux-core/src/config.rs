@@ -159,6 +159,11 @@ pub struct EditorConfig {
     pub default: String,
 }
 
+/// Default cap on concurrent WebSocket connections — see
+/// [`ServerConfig::max_websocket_connections`]. Shared so the config default and
+/// the server's router default cannot drift apart.
+pub const DEFAULT_MAX_WEBSOCKET_CONNECTIONS: u32 = 128;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
@@ -193,6 +198,14 @@ pub struct ServerConfig {
     /// Default true. The access log is console-only (never written to `dux.log`),
     /// so piping `dux server`'s stdout captures it.
     pub access_log: bool,
+    /// Maximum number of concurrent WebSocket (`/ws`) connections. Once this many
+    /// are live, further upgrade attempts are rejected with HTTP 503 until a slot
+    /// frees. A safety bound against connection exhaustion (a runaway tab loop, a
+    /// buggy reconnector); the trusted single-operator deployment normally uses a
+    /// handful. Default 128. A value of 0 is treated as "no new connections".
+    /// Changing this requires a server restart to take effect — the connection-cap
+    /// semaphore is built at startup and a config reload cannot resize it.
+    pub max_websocket_connections: u32,
     pub acme: AcmeSettings,
 }
 
@@ -412,6 +425,7 @@ impl Default for ServerConfig {
             insecure_allow_remote: false,
             color: "auto".to_string(),
             access_log: true,
+            max_websocket_connections: DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
             acme: AcmeSettings::default(),
         }
     }

@@ -232,6 +232,12 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
     );
     patch_table_str(doc, "server", "color", &config.server.color);
     patch_table_bool(doc, "server", "access_log", config.server.access_log);
+    patch_table_usize(
+        doc,
+        "server",
+        "max_websocket_connections",
+        config.server.max_websocket_connections as usize,
+    );
 
     // --- [server.acme] ---
     patch_acme(doc, &config.server.acme);
@@ -659,6 +665,7 @@ unknown_key = \"untouched\"
         config.server.insecure_allow_remote = true;
         config.server.color = "never".to_string();
         config.server.access_log = false;
+        config.server.max_websocket_connections = 42;
 
         write_config_plain(&config_path, &config).expect("write_config_plain");
 
@@ -670,6 +677,7 @@ unknown_key = \"untouched\"
         assert!(parsed.server.insecure_allow_remote);
         assert_eq!(parsed.server.color, "never");
         assert!(!parsed.server.access_log);
+        assert_eq!(parsed.server.max_websocket_connections, 42);
         // The deprecated `bind` key is never re-emitted by the patcher.
         assert!(
             !saved.contains("bind ="),

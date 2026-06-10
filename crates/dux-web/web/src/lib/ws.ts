@@ -36,6 +36,8 @@ export class DuxSocket {
   onTerminalCreated: (sessionId: string, terminalId: string) => void = () => {}
   onStatus: (tone: string, message: string) => void = () => {}
   onCommitMessage: (sessionId: string, message: string) => void = () => {}
+  onCommitMessageSnapshot: (sessionId: string, message: string) => void =
+    () => {}
   onDiff: (
     sessionId: string,
     path: string,
@@ -136,6 +138,9 @@ export class DuxSocket {
         break
       case "commit_message":
         this.onCommitMessage(message.session_id, message.message)
+        break
+      case "commit_message_snapshot":
+        this.onCommitMessageSnapshot(message.session_id, message.message)
         break
       case "diff":
         this.onDiff(message.session_id, message.path, message.diff, message.error)

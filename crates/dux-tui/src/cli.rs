@@ -310,6 +310,12 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         defaults.server.access_log,
         current.server.access_log,
     );
+    diff_usize(
+        &mut changes,
+        "server.max_websocket_connections",
+        defaults.server.max_websocket_connections as usize,
+        current.server.max_websocket_connections as usize,
+    );
 
     // [server.acme]
     diff_bool(

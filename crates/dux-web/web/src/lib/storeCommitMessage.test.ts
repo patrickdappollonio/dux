@@ -77,3 +77,40 @@ describe("commit-message routing", () => {
     expect(mod.getSnapshot().commitDraft).toBe("")
   })
 })
+
+describe("commit-message connect snapshot", () => {
+  it("fills an empty draft for the open dialog (reconnect during generation)", async () => {
+    const mod = await loadStore()
+    // The dialog is open for s1 with an empty draft (the user asked to generate
+    // and the socket reconnected). The snapshot re-delivers the result.
+    mod.openCommit("s1")
+    mod.socket.onCommitMessageSnapshot("s1", "Generated for s1")
+    expect(mod.getSnapshot().commitDraft).toBe("Generated for s1")
+  })
+
+  it("never clobbers an in-progress edit (non-empty draft)", async () => {
+    const mod = await loadStore()
+    // Unlike the live push, a stale snapshot must not overwrite a draft the user
+    // has started editing — the empty-draft guard protects it.
+    mod.openCommit("s1")
+    mod.setCommitDraft("hand-typed for s1")
+    mod.socket.onCommitMessageSnapshot("s1", "Stale generated message")
+    expect(mod.getSnapshot().commitDraft).toBe("hand-typed for s1")
+  })
+
+  it("ignores a snapshot for a different session", async () => {
+    const mod = await loadStore()
+    mod.openCommit("s1")
+    mod.socket.onCommitMessageSnapshot("s2", "Generated for s2")
+    expect(mod.getSnapshot().commitDraft).toBe("")
+  })
+
+  it("drops a snapshot when no dialog is open", async () => {
+    const mod = await loadStore()
+    // A fresh connection has no dialog open: the snapshot must not silently fill
+    // a draft the user never asked to generate into.
+    mod.socket.onCommitMessageSnapshot("s1", "Generated for s1")
+    expect(mod.getSnapshot().commitTarget).toBeNull()
+    expect(mod.getSnapshot().commitDraft).toBe("")
+  })
+})
