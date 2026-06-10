@@ -51,6 +51,8 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
 use dux_core::wire::WireStatus;
 use futures_util::StreamExt;
+
+use crate::engine_actor::EngineHandle;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
 use tower_sessions::cookie::time::OffsetDateTime;
@@ -254,11 +256,12 @@ pub fn acme_status_for_event(event: &AcmeStatusEvent, domains: &[String]) -> Opt
 /// failing renewal is visible in `dux.log`), and a stream END is an error too
 /// because it means certificates will silently stop renewing.
 ///
-/// `status_tx` is the engine's `WireStatus` broadcast (the SAME channel WS clients
-/// subscribe to and the reload warnings ride). When `Some`, each event is also
-/// projected through [`acme_status_for_event`] and broadcast so the web UI shows
-/// certificate acquisition/renewal/failure live — not just `dux.log`. `None` for
-/// callers without an engine actor (tests, standalone construction).
+/// `emit` is the engine handle. When `Some`, each event is projected through
+/// [`acme_status_for_event`] and published through the engine's shared status
+/// controller (via [`EngineHandle::emit_status`]) so the web UI shows certificate
+/// acquisition/renewal/failure live AND it auto-clears on the same policy as
+/// every other status — not just `dux.log`. `None` for callers without an engine
+/// actor (tests, standalone construction).
 ///
 /// `console` is the `dux server` terminal console (a [`crate::console::Console`]):
 /// each surfaced event is ALSO echoed there so an operator watching the terminal
@@ -272,20 +275,16 @@ pub fn acme_status_for_event(event: &AcmeStatusEvent, domains: &[String]) -> Opt
 /// Returns the `JoinHandle` so the serve path can abort it on shutdown.
 pub fn spawn_acme_event_task(
     mut state: DuxAcmeState,
-    status_tx: Option<tokio::sync::broadcast::Sender<WireStatus>>,
+    emit: Option<EngineHandle>,
     console: crate::console::Console,
     domains: Vec<String>,
 ) -> tokio::task::JoinHandle<()> {
-    // Echo a surfaced status to BOTH the WireStatus broadcast and the console, so
-    // the web UI and the terminal stay in lock-step with dux.log.
-    fn surface(
-        status_tx: &Option<tokio::sync::broadcast::Sender<WireStatus>>,
-        console: &crate::console::Console,
-        status: WireStatus,
-    ) {
+    // Echo a surfaced status to BOTH the engine's status controller and the
+    // console, so the web UI and the terminal stay in lock-step with dux.log.
+    fn surface(emit: &Option<EngineHandle>, console: &crate::console::Console, status: WireStatus) {
         console.acme(status.tone == "error", &status.message);
-        if let Some(tx) = status_tx {
-            let _ = tx.send(status);
+        if let Some(handle) = emit {
+            handle.emit_status(status);
         }
     }
 
@@ -319,13 +318,13 @@ pub fn spawn_acme_event_task(
                     if let Some(status) =
                         acme_status_for_event(&AcmeStatusEvent::StreamEnded, &domains)
                     {
-                        surface(&status_tx, &console, status);
+                        surface(&emit, &console, status);
                     }
                     break;
                 }
             };
             if let Some(status) = acme_status_for_event(&event, &domains) {
-                surface(&status_tx, &console, status);
+                surface(&emit, &console, status);
             }
         }
     })

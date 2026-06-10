@@ -297,6 +297,10 @@ pub struct UiConfig {
     pub staged_pane_height_pct: u16,
     pub commit_pane_height_pct: u16,
     pub agent_scrollback_lines: usize,
+    /// Seconds before a transient status-line message (a success/info
+    /// confirmation) auto-clears. Busy/pending and warning/error messages are
+    /// unaffected — they persist until replaced. 0 disables auto-clear entirely.
+    pub status_clear_seconds: u16,
     pub branch_sync_interval: u16,
     pub show_diff_line_numbers: bool,
     pub diff_tab_width: u16,
@@ -423,6 +427,7 @@ impl Default for UiConfig {
             staged_pane_height_pct: 50,
             commit_pane_height_pct: 40,
             agent_scrollback_lines: 10_000,
+            status_clear_seconds: 6,
             branch_sync_interval: 30,
             show_diff_line_numbers: false,
             diff_tab_width: 4,
@@ -926,6 +931,7 @@ impl Default for Config {
                 staged_pane_height_pct: 50,
                 commit_pane_height_pct: 40,
                 agent_scrollback_lines: 10_000,
+                status_clear_seconds: 6,
                 branch_sync_interval: 30,
                 show_diff_line_numbers: false,
                 diff_tab_width: 4,

@@ -386,6 +386,13 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Usize(c.ui.agent_scrollback_lines),
         },
         ConfigEntry::Field {
+            key: "status_clear_seconds",
+            comment: Some(CommentSource::Static(
+                "# Seconds before a transient status-line message auto-clears.\n# Applies to success/info confirmations only; busy/pending messages stay\n# until the operation finishes, and warnings/errors stay until replaced.\n# Set to 0 to disable auto-clear (messages persist until the next one).",
+            )),
+            value_fn: |c| FieldValue::U16(c.ui.status_clear_seconds),
+        },
+        ConfigEntry::Field {
             key: "branch_sync_interval",
             comment: Some(CommentSource::Static(
                 "# Interval in seconds for syncing git branch names in the background.\n# Keeps dux in sync if a branch is renamed outside the app.\n# Set to 0 to disable.",

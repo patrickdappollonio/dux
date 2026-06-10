@@ -173,6 +173,12 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
     patch_table_u16(
         doc,
         "ui",
+        "status_clear_seconds",
+        config.ui.status_clear_seconds,
+    );
+    patch_table_u16(
+        doc,
+        "ui",
         "branch_sync_interval",
         config.ui.branch_sync_interval,
     );
