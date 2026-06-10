@@ -112,6 +112,7 @@ pub(crate) struct ActorLoopEnds {
     req_rx: mpsc::UnboundedReceiver<EngineRequest>,
     vm_tx: watch::Sender<String>,
     status_tx: broadcast::Sender<WireStatus>,
+    status_snapshot_tx: watch::Sender<WireStatus>,
     commit_msg_tx: broadcast::Sender<CommitMessageEvent>,
     /// Shared with the caller-facing [`EngineHandle`] and every PTY forwarder.
     /// The inline `Shutdown` request trips this so forwarders exit promptly even
@@ -203,7 +204,15 @@ pub(crate) fn build_actor_channels_with_auth(
 ) -> (EngineHandle, ActorLoopEnds) {
     let (req_tx, req_rx) = mpsc::unbounded_channel::<EngineRequest>();
     let (vm_tx, vm_rx) = watch::channel(view_model_json(engine));
+    // Status uses TWO channels driven from one place (the StatusEmitter):
+    //  - `status_tx` (broadcast) delivers every status LIVE, so a transient
+    //    pending flash ("Pulling…", "Launching…") is never coalesced away.
+    //  - `status_snapshot_tx` (watch) always holds the LATEST status so a client
+    //    connecting mid-status reads it once on connect (see `status_snapshot`),
+    //    rather than waiting blank for the next update. Empty renders as nothing.
     let (status_tx, _status_rx) = broadcast::channel::<WireStatus>(256);
+    let (status_snapshot_tx, status_snapshot_rx) =
+        watch::channel(WireStatus::new("info", String::new()));
     let (commit_msg_tx, _commit_msg_rx) = broadcast::channel::<CommitMessageEvent>(64);
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     (
@@ -211,6 +220,7 @@ pub(crate) fn build_actor_channels_with_auth(
             req_tx,
             view_model_rx: vm_rx,
             status_tx: status_tx.clone(),
+            status_snapshot_rx,
             commit_msg_tx: commit_msg_tx.clone(),
             shutdown_flag: Arc::clone(&shutdown_flag),
         },
@@ -218,6 +228,7 @@ pub(crate) fn build_actor_channels_with_auth(
             req_rx,
             vm_tx,
             status_tx,
+            status_snapshot_tx,
             commit_msg_tx,
             shutdown_flag,
             auth_reload,
@@ -257,6 +268,7 @@ pub struct EngineHandle {
     req_tx: mpsc::UnboundedSender<EngineRequest>,
     view_model_rx: watch::Receiver<String>,
     status_tx: broadcast::Sender<WireStatus>,
+    status_snapshot_rx: watch::Receiver<WireStatus>,
     commit_msg_tx: broadcast::Sender<CommitMessageEvent>,
     /// Tripped when the server is tearing down (ReturnToTui, QuitProcess, or a
     /// `Shutdown` request). PTY forwarders poll it so their blocking
@@ -296,6 +308,15 @@ impl EngineHandle {
 
     pub fn subscribe_status(&self) -> broadcast::Receiver<WireStatus> {
         self.status_tx.subscribe()
+    }
+
+    /// The current status (latest-wins), from the snapshot watch. A client
+    /// connecting mid-status sends this once so it shows the active status
+    /// immediately — e.g. a "Launching agent…" Busy that hasn't resolved yet —
+    /// instead of a blank line until the next live update arrives over the
+    /// broadcast. Mirrors `view_model_json` for the ViewModel.
+    pub fn status_snapshot(&self) -> WireStatus {
+        self.status_snapshot_rx.borrow().clone()
     }
 
     /// Publish a status from a non-engine producer (the ACME certificate-lifecycle
@@ -467,19 +488,22 @@ pub(crate) fn run_engine_loop(
         mut req_rx,
         vm_tx,
         status_tx: thread_status_tx,
+        status_snapshot_tx,
         commit_msg_tx: thread_commit_tx,
         shutdown_flag,
         auth_reload,
     } = ends;
-    // Route every status broadcast through the shared StatusLine controller so
-    // the web gets the SAME auto-clear + pending→final behaviour as the TUI from
-    // one place. Keeping the binding name `thread_status_tx` and a `send` method
-    // means the loop's existing broadcast sites need no changes; `tick` (called
-    // once per iteration below) broadcasts the cleared state when a transient
-    // status expires. The timeout is captured at startup (like the TUI), so
-    // changing `status_clear_seconds` takes effect on the next server start.
+    // Route every status through the shared StatusLine controller so the web gets
+    // the SAME auto-clear + pending→final behaviour as the TUI from one place.
+    // The emitter broadcasts each status LIVE and keeps the snapshot watch in
+    // sync; keeping the binding name `thread_status_tx` and a `send` method means
+    // the loop's existing broadcast sites need no changes. `tick` (called once per
+    // iteration below) publishes the cleared state when a transient status
+    // expires. The timeout is captured at startup (like the TUI), so changing
+    // `status_clear_seconds` takes effect on the next server start.
     let mut thread_status_tx = StatusEmitter::new(
         thread_status_tx,
+        status_snapshot_tx,
         Duration::from_secs(engine.config.ui.status_clear_seconds as u64),
     );
     // Subscribes waiting for their provider to come up via the worker-event drain.
@@ -768,29 +792,38 @@ pub(crate) fn run_engine_loop(
     engine
 }
 
-/// Wraps the WS status broadcast so every status flows through a shared
-/// [`StatusLine`] controller: [`send`](Self::send) records the current status
-/// and broadcasts it; [`tick`](Self::tick) — called once per loop iteration —
-/// broadcasts an empty "cleared" status once a transient Info/success message
-/// has outlived `status_clear_seconds`. Busy/warning/error never auto-clear (the
-/// controller enforces the tone rules), so the web matches the TUI 1:1. The
-/// `send` method name lets the loop's existing broadcast sites stay unchanged.
+/// Wraps the WS status channels so every status flows through one shared
+/// [`StatusLine`] controller: [`send`](Self::send) records the status, updates
+/// the snapshot watch (latest-wins, for clients connecting mid-status), and
+/// broadcasts it LIVE so a transient pending flash is never coalesced away;
+/// [`tick`](Self::tick) — called once per loop iteration — publishes a cleared
+/// status to both once a transient Info/success message has outlived
+/// `status_clear_seconds`. Busy/warning/error never auto-clear (the controller
+/// enforces the tone rules), so the web matches the TUI 1:1. The `send` method
+/// name and broadcast return type let the loop's existing send sites stay
+/// unchanged.
 struct StatusEmitter {
     tx: broadcast::Sender<WireStatus>,
+    snapshot_tx: watch::Sender<WireStatus>,
     controller: StatusLine,
 }
 
 impl StatusEmitter {
-    fn new(tx: broadcast::Sender<WireStatus>, clear_after: Duration) -> Self {
+    fn new(
+        tx: broadcast::Sender<WireStatus>,
+        snapshot_tx: watch::Sender<WireStatus>,
+        clear_after: Duration,
+    ) -> Self {
         Self {
             tx,
+            snapshot_tx,
             controller: StatusLine::with_clear_after("", clear_after),
         }
     }
 
-    /// Record the status in the controller, then broadcast it. Returns the
-    /// broadcast `send` result so the existing call sites keep discarding it with
-    /// `let _ =` exactly as they did with the raw sender.
+    /// Record the status in the controller, refresh the snapshot, then broadcast
+    /// it live. Returns the broadcast `send` result so the call sites keep
+    /// discarding it with `let _ =` exactly as before.
     fn send(
         &mut self,
         status: WireStatus,
@@ -800,13 +833,17 @@ impl StatusEmitter {
             StatusTone::from_wire(&status.tone),
             status.message.as_str(),
         );
+        let _ = self.snapshot_tx.send(status.clone());
         self.tx.send(status)
     }
 
-    /// Broadcast the cleared state if the current transient status just expired.
+    /// Publish the cleared state — to both the snapshot and the live broadcast —
+    /// if the current transient status just expired.
     fn tick(&mut self, now: Instant) {
         if self.controller.tick(now) {
-            let _ = self.tx.send(WireStatus::new("info", String::new()));
+            let cleared = WireStatus::new("info", String::new());
+            let _ = self.snapshot_tx.send(cleared.clone());
+            let _ = self.tx.send(cleared);
         }
     }
 }
@@ -1042,10 +1079,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_wire_status_is_broadcast_so_it_auto_clears() {
-        // A synchronous command result is ALSO broadcast through the shared status
-        // controller (not just returned to the requester), so it reaches every
-        // client and auto-clears — the bug the council caught.
+    async fn apply_wire_status_reaches_the_shared_watch() {
+        // A synchronous command result is ALSO published on the shared status
+        // watch (not just returned to the requester), so it reaches every client
+        // AND a client connecting right after sees it via the snapshot. The
+        // council caught that command results previously bypassed the controller.
         let (_tmp, paths) = temp_paths();
         {
             let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
@@ -1061,7 +1099,10 @@ mod tests {
         let engine = bootstrap_engine(&paths).expect("bootstrap");
         let (handle, _join) = spawn_engine_thread(engine);
 
-        // Subscribe BEFORE issuing the command so its broadcast isn't missed.
+        // Subscribe to the LIVE broadcast before issuing the command so we can
+        // prove the status reaches already-connected clients — not just the
+        // snapshot. (A regression that dropped the broadcast send but kept the
+        // snapshot update would otherwise pass.)
         let mut status_rx = handle.subscribe_status();
 
         let outcome = handle
@@ -1074,25 +1115,29 @@ mod tests {
         // The reply still carries the status (the requester's instant ack)…
         let want = outcome.status.expect("command produced a status").message;
 
-        // …and the same status is broadcast to every client so the controller
-        // can auto-clear it. Loop past any unrelated startup status.
+        // …apply_wire updates the watch before it replies, so the shared snapshot
+        // a newly-connected client would read now holds the same status…
+        assert_eq!(handle.status_snapshot().message, want);
+
+        // …AND it is delivered live on the broadcast to every connected client.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        loop {
+        let delivered = loop {
             match tokio::time::timeout(std::time::Duration::from_millis(200), status_rx.recv())
                 .await
             {
-                Ok(Ok(s)) if s.message == want => break,
+                Ok(Ok(s)) if s.message == want => break true,
                 Ok(Ok(_)) => {}
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
-                    panic!("status channel closed before the command status arrived")
-                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break false,
                 Ok(Err(_)) | Err(_) => {}
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "command status \"{want}\" was never broadcast"
-            );
-        }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+        };
+        assert!(
+            delivered,
+            "command status was not broadcast to live clients"
+        );
     }
 
     #[tokio::test]
