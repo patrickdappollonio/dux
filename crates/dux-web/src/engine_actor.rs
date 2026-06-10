@@ -980,8 +980,13 @@ fn handle_request(engine: &mut Engine, req: EngineRequest, status_tx: &mut Statu
         // Shutdown is handled inline in the loop (it must stop the thread).
         EngineRequest::Shutdown(_) => unreachable!("Shutdown handled in the loop"),
         EngineRequest::WritePty(id, bytes) => {
-            if let Some(client) = pty_for(engine, &id) {
-                let _ = client.write_bytes(&bytes);
+            let wrote =
+                pty_for(engine, &id).is_some_and(|client| client.write_bytes(&bytes).is_ok());
+            // Record keystrokes that actually reached an agent PTY (not a
+            // companion terminal, not an empty frame) so the user's own echoed
+            // typing doesn't read as the agent "working".
+            if wrote && !bytes.is_empty() && engine.providers.contains_key(&id) {
+                engine.note_pty_input(&id);
             }
         }
         EngineRequest::ResizePty(id, rows, cols) => {

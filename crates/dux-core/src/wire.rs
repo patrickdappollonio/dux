@@ -736,16 +736,19 @@ impl Engine {
             self.providers.remove(&session.id);
             self.running_provider_pins.remove(&session.id);
             self.pty_activity.remove(&session.id);
+            self.pty_input.remove(&session.id);
             self.resume_fallback_candidates.remove(&session.id);
         }
 
         // Detach any other session holding the same worktree's live PTY. The
         // engine method marks it Detached and clears provider/pin/candidate;
-        // mirror the TUI App wrapper by also clearing its `pty_activity` entry.
+        // mirror the TUI App wrapper by also clearing its `pty_activity` and
+        // `pty_input` entries.
         let detached_label = self
             .detach_conflicting_worktree_session(&session.worktree_path, &session.id)
             .map(|detached| {
                 self.pty_activity.remove(&detached.id);
+                self.pty_input.remove(&detached.id);
                 detached.label
             });
 

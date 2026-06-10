@@ -802,6 +802,7 @@ impl App {
 
         // View-side cleanup the engine couldn't do.
         self.engine.pty_activity.remove(session_id);
+        self.engine.pty_input.remove(session_id);
         self.clear_companion_terminals_for_session(session_id);
 
         // Derived view state.
@@ -1826,6 +1827,7 @@ impl App {
         self.engine.providers.remove(&session.id);
         self.engine.running_provider_pins.remove(&session.id);
         self.engine.pty_activity.remove(&session.id);
+        self.engine.pty_input.remove(&session.id);
         self.engine.resume_fallback_candidates.remove(&session.id);
 
         let detached_label =
@@ -2354,6 +2356,7 @@ impl App {
                     if self.engine.providers.remove(session_id).is_some() {
                         self.engine.running_provider_pins.remove(session_id);
                         self.engine.pty_activity.remove(session_id);
+                        self.engine.pty_input.remove(session_id);
                         self.engine
                             .mark_session_status(session_id, SessionStatus::Detached);
                         killed_agents += 1;
@@ -2425,6 +2428,7 @@ impl App {
             .engine
             .detach_conflicting_worktree_session(worktree_path, exclude_id)?;
         self.engine.pty_activity.remove(&detached.id);
+        self.engine.pty_input.remove(&detached.id);
         Some(detached.label)
     }
 
@@ -2594,6 +2598,7 @@ mod tests {
             changed_files_poller_started: AtomicBool::new(false),
             branch_sync_worker_started: AtomicBool::new(false),
             pty_activity: std::collections::HashMap::new(),
+            pty_input: std::collections::HashMap::new(),
             last_foreground_refresh: None,
         };
         let mut app = App {
@@ -2755,6 +2760,7 @@ mod tests {
             changed_files_poller_started: AtomicBool::new(false),
             branch_sync_worker_started: AtomicBool::new(false),
             pty_activity: std::collections::HashMap::new(),
+            pty_input: std::collections::HashMap::new(),
             last_foreground_refresh: None,
         }
     }
@@ -3455,7 +3461,11 @@ mod tests {
         app.engine
             .pty_activity
             .insert("s1".to_string(), std::time::Instant::now());
+        app.engine
+            .pty_input
+            .insert("s1".to_string(), std::time::Instant::now());
         assert!(app.engine.pty_activity.contains_key("s1"));
+        assert!(app.engine.pty_input.contains_key("s1"));
 
         app.finish_delete_session("s1", WorktreeRemoval::PreservedOrphan, true)
             .expect("finish succeeds");
@@ -3463,6 +3473,10 @@ mod tests {
         assert!(
             !app.engine.pty_activity.contains_key("s1"),
             "deleting a session must drop its pty_activity entry",
+        );
+        assert!(
+            !app.engine.pty_input.contains_key("s1"),
+            "deleting a session must drop its pty_input entry",
         );
     }
 

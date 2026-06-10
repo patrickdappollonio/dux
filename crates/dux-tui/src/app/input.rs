@@ -1604,11 +1604,14 @@ impl App {
         // overhead (critical for large pastes).
         let mut forward_batch: Vec<u8> = Vec::new();
 
-        /// Flush accumulated forward bytes to the PTY in a single write.
+        /// Flush accumulated forward bytes to the PTY in a single write. Sets
+        /// `forwarded` when bytes actually reach the PTY so the caller can
+        /// record user input for the streaming-indicator suppression.
         fn flush_forward_batch(
             batch: &mut Vec<u8>,
             is_scrolled_back: bool,
             needs_selection_clear: &mut bool,
+            forwarded: &mut bool,
             provider: Option<&crate::pty::PtyClient>,
         ) {
             if batch.is_empty() {
@@ -1617,6 +1620,7 @@ impl App {
             *needs_selection_clear = true;
             if !is_scrolled_back && let Some(p) = provider {
                 let _ = p.write_bytes(batch);
+                *forwarded = true;
             }
             batch.clear();
         }
@@ -1626,6 +1630,13 @@ impl App {
         // borrow-mut conflicts inside the loop.
         let mut needs_selection_clear = false;
 
+        // Track whether any user input actually reached the focused PTY this
+        // batch (typing, arrow-key passthrough, mouse forwarding). If it did and
+        // the focus is an agent, we record it so the terminal echo of the user's
+        // own input does not light the "working" indicator. Agent-only —
+        // companion-terminal output never feeds the agent's working state.
+        let mut forwarded_to_pty = false;
+
         for action in actions {
             match action {
                 SeqAction::Intercept(Action::OpenMacroBar, _, _) => {
@@ -1633,6 +1644,7 @@ impl App {
                         &mut forward_batch,
                         is_scrolled_back,
                         &mut needs_selection_clear,
+                        &mut forwarded_to_pty,
                         self.selected_terminal_surface_client(),
                     );
                     if is_scrolled_back {
@@ -1661,6 +1673,7 @@ impl App {
                         &mut forward_batch,
                         is_scrolled_back,
                         &mut needs_selection_clear,
+                        &mut forwarded_to_pty,
                         self.selected_terminal_surface_client(),
                     );
                     self.exit_interactive_mode();
@@ -1671,6 +1684,7 @@ impl App {
                         &mut forward_batch,
                         is_scrolled_back,
                         &mut needs_selection_clear,
+                        &mut forwarded_to_pty,
                         self.selected_terminal_surface_client(),
                     );
                     if self.last_pty_size.0 > 0 {
@@ -1682,6 +1696,7 @@ impl App {
                         &mut forward_batch,
                         is_scrolled_back,
                         &mut needs_selection_clear,
+                        &mut forwarded_to_pty,
                         self.selected_terminal_surface_client(),
                     );
                     if self.last_pty_size.0 > 0 {
@@ -1697,6 +1712,7 @@ impl App {
                             &mut forward_batch,
                             is_scrolled_back,
                             &mut needs_selection_clear,
+                            &mut forwarded_to_pty,
                             self.selected_terminal_surface_client(),
                         );
                         self.scroll_pty(ScrollDirection::Up, 1);
@@ -1713,6 +1729,7 @@ impl App {
                             &mut forward_batch,
                             is_scrolled_back,
                             &mut needs_selection_clear,
+                            &mut forwarded_to_pty,
                             self.selected_terminal_surface_client(),
                         );
                         self.scroll_pty(ScrollDirection::Down, 1);
@@ -1729,6 +1746,7 @@ impl App {
                             &mut forward_batch,
                             is_scrolled_back,
                             &mut needs_selection_clear,
+                            &mut forwarded_to_pty,
                             self.selected_terminal_surface_client(),
                         );
                         self.reset_pty_scrollback();
@@ -1745,6 +1763,7 @@ impl App {
                             &mut forward_batch,
                             is_scrolled_back,
                             &mut needs_selection_clear,
+                            &mut forwarded_to_pty,
                             self.selected_terminal_surface_client(),
                         );
                         self.set_pty_scrollback_max();
@@ -1760,6 +1779,7 @@ impl App {
                         &mut forward_batch,
                         is_scrolled_back,
                         &mut needs_selection_clear,
+                        &mut forwarded_to_pty,
                         self.selected_terminal_surface_client(),
                     );
                     let is_scroll = matches!(
@@ -1783,6 +1803,7 @@ impl App {
                         if forward {
                             if let Some(provider) = self.selected_terminal_surface_client() {
                                 let _ = provider.write_bytes(&raw);
+                                forwarded_to_pty = true;
                             }
                         } else if self.handle_mouse(mouse_ev) {
                             return Ok(true);
@@ -1830,6 +1851,7 @@ impl App {
                                 )
                             {
                                 let _ = provider.write_bytes(&translated);
+                                forwarded_to_pty = true;
                             }
                         }
                     }
@@ -1848,11 +1870,22 @@ impl App {
             &mut forward_batch,
             is_scrolled_back,
             &mut needs_selection_clear,
+            &mut forwarded_to_pty,
             self.selected_terminal_surface_client(),
         );
 
         if needs_selection_clear {
             self.terminal_selection = None;
+        }
+
+        // Record input that actually reached the focused agent's PTY so its
+        // terminal echo isn't mistaken for the agent "working". See
+        // [`Engine::note_pty_input`].
+        if forwarded_to_pty
+            && matches!(self.input_target, InputTarget::Agent)
+            && let Some(id) = self.selected_session().map(|s| s.id.clone())
+        {
+            self.engine.note_pty_input(&id);
         }
 
         Ok(false)
@@ -6574,6 +6607,7 @@ mod tests {
             changed_files_poller_started: AtomicBool::new(false),
             branch_sync_worker_started: AtomicBool::new(false),
             pty_activity: std::collections::HashMap::new(),
+            pty_input: std::collections::HashMap::new(),
             last_foreground_refresh: None,
         };
         let mut app = App {
@@ -12810,6 +12844,89 @@ cyan = "#00ffff"
             "ExitInteractive must work even when scrolled back"
         );
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    /// Helper: an App focused on a live agent PTY in interactive mode, not
+    /// scrolled back, so forwarded input actually reaches the PTY.
+    fn app_with_live_agent_pty() -> (App, String) {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let args = vec!["-c".to_string(), "sleep 5".to_string()];
+        let client = PtyClient::spawn("sh", &args, std::path::Path::new("."), 24, 80, 100)
+            .expect("spawn pty");
+        app.engine.providers.insert(session_id.clone(), client);
+        app.input_target = InputTarget::Agent;
+        app.session_surface = SessionSurface::Agent;
+        (app, session_id)
+    }
+
+    #[test]
+    fn typing_into_agent_records_input_for_indicator_suppression() {
+        let (mut app, session_id) = app_with_live_agent_pty();
+        assert!(!app.engine.pty_input.contains_key(&session_id));
+
+        app.process_raw_input_bytes(b"x").unwrap();
+        assert!(
+            app.engine.pty_input.contains_key(&session_id),
+            "typing into the focused agent must record input so the echo isn't \
+             mistaken for the agent working"
+        );
+    }
+
+    #[test]
+    fn arrow_key_passthrough_records_input_when_not_scrolled_back() {
+        // Arrow keys are bound to line-scroll but pass through to the PTY when
+        // not scrolled back. They echo back like typing, so they must also
+        // record input — the earlier Forward-only check missed this path.
+        let (mut app, session_id) = app_with_live_agent_pty();
+
+        app.process_raw_input_bytes(b"\x1b[A").unwrap();
+        assert!(
+            app.engine.pty_input.contains_key(&session_id),
+            "arrow-key passthrough reaches the agent PTY and must record input"
+        );
+    }
+
+    #[test]
+    fn scrolled_back_input_does_not_record_pty_input() {
+        // When scrolled back, keystrokes are suppressed and never reach the
+        // PTY, so there is no echo to discount — nothing should be recorded.
+        let mut app = app_with_scrolled_back_pty();
+        let session_id = app.engine.sessions[0].id.clone();
+
+        app.process_raw_input_bytes(b"x").unwrap();
+        assert!(
+            !app.engine.pty_input.contains_key(&session_id),
+            "input suppressed by scrollback must not record a stamp"
+        );
+    }
+
+    #[test]
+    fn typing_into_companion_terminal_does_not_record_agent_input() {
+        // Companion-terminal output never feeds the agent's working state, so
+        // typing into a terminal must not suppress the agent indicator.
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let args = vec!["-c".to_string(), "sleep 5".to_string()];
+        app.engine.companion_terminals.insert(
+            "term-1".to_string(),
+            crate::app::CompanionTerminal {
+                session_id,
+                label: "shell".to_string(),
+                foreground_cmd: None,
+                client: PtyClient::spawn("sh", &args, std::path::Path::new("."), 24, 80, 100)
+                    .expect("spawn terminal"),
+            },
+        );
+        app.active_terminal_id = Some("term-1".to_string());
+        app.session_surface = SessionSurface::Terminal;
+        app.input_target = InputTarget::Terminal;
+
+        app.process_raw_input_bytes(b"x").unwrap();
+        assert!(
+            app.engine.pty_input.is_empty(),
+            "typing into a companion terminal must not suppress the agent indicator"
+        );
     }
 
     #[test]
