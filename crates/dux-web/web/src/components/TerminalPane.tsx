@@ -9,7 +9,8 @@ import { MacroPopover } from "@/components/MacroPopover"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 import { useIsMobile } from "@/hooks/use-mobile"
-import { dragScrollLines } from "@/lib/viewport"
+import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
+import { dragScrollLines, keyboardLikelyOpen } from "@/lib/viewport"
 import { applyModifiers, arrowSeq, ESC, TAB } from "@/lib/termkeys"
 import { selectSession, socket, useDux } from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
@@ -64,6 +65,13 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
   const termRef = useRef<Terminal | null>(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const isMobile = useIsMobile()
+  // Visual-viewport height so a FULLSCREEN terminal can keep its content above
+  // the soft keyboard. The non-fullscreen mobile layout is pinned to this by the
+  // MobileApp root, but a fullscreen terminal escapes that root into the
+  // fullscreen layer (sized to the full layout viewport by the browser), so it
+  // has to track the keyboard itself — see the inner column in the mobile return.
+  // null off-API; the hook runs on every platform but is only read on mobile.
+  const viewportHeight = useVisualViewportHeight()
 
   // Sticky (one-shot latched) soft-keyboard modifiers for the mobile accessory
   // bar. The state drives the latch's visual highlight; the ref mirrors it so
@@ -600,6 +608,21 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
   // Desktop: render the pane exactly as before — no extra wrapper, no bar.
   if (!isMobile) return pane
 
+  // In fullscreen the column lives in the fullscreen layer, which the browser
+  // forces to the full layout-viewport height (`:fullscreen { height:100%
+  // !important }`) — so we CAN'T shrink the fullscreen element itself for the
+  // keyboard. The soft keyboard shrinks only the VISUAL viewport, so without
+  // this the bottom rows (the prompt) and the accessory bar sit behind the
+  // keyboard, unreachable even by scrolling. The fix caps an INNER wrapper (not
+  // the fullscreen element) at the visual-viewport height. Only engage when the
+  // keyboard is actually up; the `&&` short-circuit avoids reading innerHeight
+  // when there's no viewport. The non-fullscreen path is already handled by the
+  // MobileApp root, so this is fullscreen-only.
+  const constrainToKeyboard =
+    isFullscreen &&
+    viewportHeight !== null &&
+    keyboardLikelyOpen(viewportHeight, window.innerHeight)
+
   // Mobile: a column root so the terminal host (flex-1 min-h-0) and the
   // accessory bar (shrink-0) stack. The ResizeObserver on the host already
   // refits + debounce-resizes the PTY when this column reflows, so no extra
@@ -608,34 +631,50 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
     <div
       // The mobile fullscreen target: the column wraps the pane AND the bar so
       // both fill the screen in fullscreen. bg-background paints the fullscreen
-      // backdrop so it matches the theme rather than going black. In fullscreen
-      // this column escapes the safe-area-padded mobile root (App.tsx) into the
-      // fullscreen layer, so it must clear the notch / home indicator / rounded
-      // corners itself; in normal layout the root handles it, so no inset here.
+      // backdrop (incl. the strip behind the keyboard when the inner column is
+      // capped below) so it matches the theme rather than going black.
       ref={fullscreenRef}
       className="flex h-full w-full flex-col bg-background"
-      style={
-        isFullscreen
-          ? {
-              paddingTop: "env(safe-area-inset-top)",
-              paddingBottom: "env(safe-area-inset-bottom)",
-              paddingLeft: "env(safe-area-inset-left)",
-              paddingRight: "env(safe-area-inset-right)",
-            }
-          : undefined
-      }
     >
-      {pane}
-      <AccessoryBar
-        onEsc={() => sendSeq(ESC)}
-        onTab={() => sendSeq(TAB)}
-        onArrow={onArrow}
-        onScroll={onScroll}
-        ctrl={ctrl}
-        alt={alt}
-        onToggleCtrl={toggleCtrl}
-        onToggleAlt={toggleAlt}
-      />
+      {/* Inner column owns the keyboard/safe-area sizing. In fullscreen it caps
+          at the visual-viewport height when the keyboard is up (max-height is NOT
+          subject to the UA :fullscreen override, since this is a child, not the
+          fullscreen element), keeping the bar + prompt above the keyboard. The
+          safe-area insets live HERE so they fall inside the capped (border-box)
+          height; the bottom inset drops above an open keyboard so no dead strip
+          sits between the bar and the keyboard (mirrors MobileApp). Outside
+          fullscreen the MobileApp root handles insets, so no inline style. */}
+      <div
+        className="flex min-h-0 w-full flex-1 flex-col"
+        style={
+          isFullscreen
+            ? {
+                maxHeight:
+                  constrainToKeyboard && viewportHeight !== null
+                    ? viewportHeight
+                    : undefined,
+                paddingTop: "env(safe-area-inset-top)",
+                paddingBottom: constrainToKeyboard
+                  ? 0
+                  : "env(safe-area-inset-bottom)",
+                paddingLeft: "env(safe-area-inset-left)",
+                paddingRight: "env(safe-area-inset-right)",
+              }
+            : undefined
+        }
+      >
+        {pane}
+        <AccessoryBar
+          onEsc={() => sendSeq(ESC)}
+          onTab={() => sendSeq(TAB)}
+          onArrow={onArrow}
+          onScroll={onScroll}
+          ctrl={ctrl}
+          alt={alt}
+          onToggleCtrl={toggleCtrl}
+          onToggleAlt={toggleAlt}
+        />
+      </div>
     </div>
   )
 }
