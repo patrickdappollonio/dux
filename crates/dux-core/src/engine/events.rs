@@ -457,10 +457,11 @@ impl Engine {
     /// Find any other session that owns `worktree_path` and currently has a
     /// running provider, and detach it so the incoming launch can take over.
     /// Returns the detached session's id + label so the App caller can clear
-    /// the engine's `pty_activity` entry and surface the label in status messages.
+    /// the engine's `pty_activity`/`pty_input` entries and surface the label in
+    /// status messages.
     ///
     /// The App's `detach_conflicting_worktree_session` is a thin wrapper that
-    /// also drops the `pty_activity` entry for the returned id.
+    /// also drops the `pty_activity` and `pty_input` entries for the returned id.
     pub fn detach_conflicting_worktree_session(
         &mut self,
         worktree_path: &str,
@@ -756,6 +757,7 @@ impl Engine {
         self.running_provider_pins.remove(&session.id);
         self.resume_fallback_candidates.remove(&session.id);
         self.pty_activity.remove(&session.id);
+        self.pty_input.remove(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
         self.companion_terminals
             .retain(|_, t| t.session_id != session.id);

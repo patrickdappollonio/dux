@@ -52,9 +52,10 @@ impl Engine {
             .collect();
         for (session_id, exit_success) in exited_agents {
             self.providers.remove(&session_id);
-            // Drop the activity stamp with the provider — without this, a
-            // long-running server leaks one map entry per exited agent.
+            // Drop the activity and input stamps with the provider — without
+            // this, a long-running server leaks one map entry per exited agent.
             self.pty_activity.remove(&session_id);
+            self.pty_input.remove(&session_id);
             let label = self
                 .sessions
                 .iter()
@@ -252,9 +253,10 @@ mod tests {
         // A clean-exiting agent provider (cat exits 0 on EOF).
         let client = spawn_cat(worktree.path());
         engine.providers.insert("s1".to_string(), client);
-        // The activity stamp must die with the provider — a long-running
-        // server would otherwise leak one entry per exited agent.
+        // The activity and input stamps must die with the provider — a
+        // long-running server would otherwise leak one entry per exited agent.
         engine.pty_activity.insert("s1".to_string(), Instant::now());
+        engine.pty_input.insert("s1".to_string(), Instant::now());
 
         // Ctrl-D (EOF) makes cat exit with status 0.
         engine
@@ -283,6 +285,10 @@ mod tests {
         assert!(
             !engine.pty_activity.contains_key("s1"),
             "pruning an exited agent must clear its activity stamp"
+        );
+        assert!(
+            !engine.pty_input.contains_key("s1"),
+            "pruning an exited agent must clear its input stamp"
         );
     }
 

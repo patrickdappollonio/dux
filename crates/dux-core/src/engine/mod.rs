@@ -144,6 +144,19 @@ pub struct Engine {
     /// and the in-process flip carries this map across automatically with the
     /// engine.
     pub pty_activity: HashMap<String, Instant>,
+    /// Tracks when the user last forwarded keystrokes to each agent's PTY. The
+    /// terminal echoes the user's own typing back as PTY output, which would
+    /// otherwise read as the agent streaming ([`Engine::is_agent_streaming`])
+    /// and falsely light the "working" indicator. Surfaces stamp this via
+    /// [`Engine::note_pty_input`] when forwarding interactive input to an agent
+    /// (never companion terminals — their output doesn't feed the agent's
+    /// working state), and the predicate voids streaming while an entry is
+    /// fresh. Engine-owned for the same reason as `pty_activity`: both the TUI
+    /// and the web actor project identical working state, and the in-process
+    /// flip carries the map across with the engine. Invariant: cleared wherever
+    /// `pty_activity` is cleared (session teardown, detach, forced relaunch) so
+    /// the two never drift; a new teardown path must drop both entries.
+    pub pty_input: HashMap<String, Instant>,
     /// Wall-clock timestamp of the last companion-terminal foreground refresh.
     /// [`Engine::refresh_terminal_foregrounds`] throttles itself against this so
     /// callers can invoke it every tick while the actual `tcgetpgrp` probe runs
@@ -161,6 +174,17 @@ pub struct Engine {
 /// change-only ViewModel watch channel only pushes on transitions (idle→working
 /// and working→idle), never on every byte. See [`crate::viewmodel::SessionView`].
 pub const AGENT_STREAMING_WINDOW: Duration = Duration::from_secs(1);
+
+/// How long after the user forwards keystrokes to an agent's PTY the
+/// streaming/"working" indicator stays suppressed. The terminal echoes the
+/// user's own typing straight back as PTY output, so without this the act of
+/// typing reads as the agent producing output (see [`AGENT_STREAMING_WINDOW`]).
+/// The window is slightly longer than the output hysteresis so the trailing
+/// echo of the last keystroke fully ages out before the indicator can return;
+/// genuine agent output continuing past it re-lights the indicator on the next
+/// tick. Shared by the TUI spinner and the web ViewModel through
+/// [`Engine::is_agent_streaming`].
+pub const AGENT_INPUT_SUPPRESSION_WINDOW: Duration = Duration::from_millis(1250);
 
 /// How often [`Engine::refresh_terminal_foregrounds`] actually probes companion
 /// terminals for their foreground command. Calls more frequent than this are
@@ -236,12 +260,36 @@ impl Engine {
         }
     }
 
+    /// Record that the user just forwarded interactive keystrokes to the given
+    /// agent's PTY. [`Engine::is_agent_streaming`] treats such input as voiding
+    /// the streaming indicator for [`AGENT_INPUT_SUPPRESSION_WINDOW`] so the
+    /// terminal echo of the user's own typing isn't mistaken for the agent
+    /// working. Stamp this only for agent PTYs, never companion terminals, and
+    /// never for programmatic writes (macros, startup commands) — those should
+    /// keep showing the agent as working.
+    pub fn note_pty_input(&mut self, session_id: &str) {
+        self.pty_input
+            .insert(session_id.to_string(), Instant::now());
+    }
+
     /// Returns `true` if the given agent received PTY data within
-    /// [`AGENT_STREAMING_WINDOW`], indicating it is actively streaming output.
+    /// [`AGENT_STREAMING_WINDOW`], indicating it is actively streaming output —
+    /// unless the user forwarded keystrokes to it within
+    /// [`AGENT_INPUT_SUPPRESSION_WINDOW`], in which case the recent output is
+    /// assumed to be the echo of that typing and the indicator is voided.
     pub fn is_agent_streaming(&self, session_id: &str) -> bool {
-        self.pty_activity
+        let streaming = self
+            .pty_activity
             .get(session_id)
-            .is_some_and(|t| t.elapsed() < AGENT_STREAMING_WINDOW)
+            .is_some_and(|t| t.elapsed() < AGENT_STREAMING_WINDOW);
+        if !streaming {
+            return false;
+        }
+        let typing = self
+            .pty_input
+            .get(session_id)
+            .is_some_and(|t| t.elapsed() < AGENT_INPUT_SUPPRESSION_WINDOW);
+        !typing
     }
 
     /// True if the given key is currently marked in-flight.
@@ -1262,6 +1310,51 @@ mod tests {
 
         // No entry at all → not streaming.
         assert!(!engine.is_agent_streaming("absent"));
+    }
+
+    #[test]
+    fn recent_typing_voids_the_streaming_indicator() {
+        let (mut engine, _tmp) = test_engine();
+
+        // Fresh output activity reads as streaming on its own.
+        engine.pty_activity.insert("s1".to_string(), Instant::now());
+        assert!(engine.is_agent_streaming("s1"));
+
+        // The user typing into the agent echoes back as that same output, so a
+        // keystroke within the suppression window voids the indicator.
+        engine.note_pty_input("s1");
+        assert!(
+            !engine.is_agent_streaming("s1"),
+            "recent typing must void the streaming indicator"
+        );
+    }
+
+    #[test]
+    fn suppression_window_outlasts_streaming_window() {
+        // The feature relies on the input-suppression window being strictly
+        // longer than the output hysteresis: the echo of the last keystroke
+        // must fully age out of pty_activity before suppression lifts, or the
+        // indicator would flicker back on right after typing. Guard the
+        // invariant so a future tweak to either constant can't silently break
+        // it.
+        assert!(AGENT_INPUT_SUPPRESSION_WINDOW > AGENT_STREAMING_WINDOW);
+    }
+
+    #[test]
+    fn streaming_returns_once_the_input_window_lapses() {
+        let (mut engine, _tmp) = test_engine();
+
+        // Output is fresh, but the last keystroke is older than the suppression
+        // window — genuine ongoing output must read as streaming again.
+        engine.pty_activity.insert("s1".to_string(), Instant::now());
+        engine.pty_input.insert(
+            "s1".to_string(),
+            Instant::now() - (AGENT_INPUT_SUPPRESSION_WINDOW + Duration::from_millis(50)),
+        );
+        assert!(
+            engine.is_agent_streaming("s1"),
+            "once the input window lapses, ongoing output reads as streaming"
+        );
     }
 
     #[test]
