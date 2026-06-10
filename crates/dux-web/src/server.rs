@@ -513,11 +513,38 @@ async fn handle_socket(
         });
     }
 
-    // Forward engine status/lifecycle events (background completions, launch
-    // failures, PTY exits) to this client.
+    // Subscribe to the live status broadcast BEFORE reading the snapshot. The
+    // broadcast does NOT replay to receivers created after a send, so if we read
+    // the snapshot first and subscribed second, a status emitted in the gap
+    // (notably during the snapshot's `send_json().await`) would be lost: the
+    // snapshot is already stale and the new subscriber never sees it. Subscribing
+    // first means the gap status is buffered for this receiver; any overlap with
+    // the snapshot is a harmless duplicate (the client re-sets the same value).
+    let mut status_rx = engine.subscribe_status();
+
+    // Initial status: a client connecting mid-status (e.g. an unresolved
+    // "Launching agent…" Busy) sees the active status immediately rather than a
+    // blank line until the next update. Empty means nothing is showing, so skip.
+    {
+        let snapshot = engine.status_snapshot();
+        if !snapshot.message.is_empty() {
+            let _ = send_json(
+                &sink,
+                &ServerMessage::Status {
+                    tone: snapshot.tone,
+                    message: snapshot.message,
+                },
+            )
+            .await;
+        }
+    }
+
+    // Forward engine status/lifecycle updates (background completions, launch
+    // failures, PTY exits, and the auto-clear) live over the broadcast, so every
+    // status — including a transient pending flash — reaches this client. Uses
+    // the receiver subscribed above so nothing emitted since connect is missed.
     {
         let sink = Arc::clone(&sink);
-        let mut status_rx = engine.subscribe_status();
         tokio::spawn(async move {
             loop {
                 match status_rx.recv().await {
