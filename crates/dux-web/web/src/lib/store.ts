@@ -199,6 +199,17 @@ export interface DuxState {
   // in flight, which is the overwhelmingly common case.
   pendingSessionOrder: PendingSessionOrder | null
   pendingProjectOrder: string[] | null
+  // While an agent-create THIS client initiated is in flight, holds the session
+  // ids that already existed when we submitted, plus the project the new agent
+  // will land in. Agent creation is an async server job whose only completion
+  // signal is a broadcast ViewModel (no per-client reply, no request/echo
+  // correlation), so we recognize "our" new agent as the session id that appears
+  // in `projectId` and wasn't in `knownIds`, then focus it — mirroring the TUI,
+  // which jumps selection to a freshly created agent when its launch completes.
+  // Only the client that armed this reacts, so other connected clients aren't
+  // yanked off whatever they're viewing. Null when no create is awaiting focus.
+  // See `armCreateFocus` and `focusNewlyCreatedSession`.
+  pendingCreateFocus: { knownIds: string[]; projectId: string } | null
   sidebarWidth: string
   // Whether the diff viewer shows the old/new line-number gutters. Mirrors the
   // TUI's `toggle-diff-line-numbers` (config `ui.show_diff_line_numbers`),
@@ -279,6 +290,7 @@ let state: DuxState = {
   mobileScreen: "home",
   pendingSessionOrder: null,
   pendingProjectOrder: null,
+  pendingCreateFocus: null,
   sidebarWidth: loadSidebarWidth(),
   showDiffLineNumbers: loadShowDiffLineNumbers(),
   currentDiff: null,
@@ -330,6 +342,10 @@ socket.onViewModel = (vm) => {
     pendingSessionOrder: reconcilePendingSessionOrder(vm, state.pendingSessionOrder),
     pendingProjectOrder: reconcilePendingProjectOrder(vm, state.pendingProjectOrder),
   })
+  // If an agent THIS client just created has now appeared, jump focus to it
+  // (see `focusNewlyCreatedSession`). Run before the prune below: this only ever
+  // selects a session present in `vm`, so the prune leaves it alone.
+  focusNewlyCreatedSession(vm)
   // If the focused target vanished (an agent session was removed, or a
   // companion terminal exited and was pruned server-side), drop the selection
   // so the center pane shows the empty state instead of a dead terminal.
@@ -381,12 +397,51 @@ function pruneSelectionIfGone(vm: ViewModel): void {
   }
 }
 
+// Snapshot the session ids that exist right now and arm auto-focus for an agent
+// THIS client is creating, so the next ViewModel carrying a new id in `projectId`
+// is recognized as our new agent and focused (see `focusNewlyCreatedSession`).
+// Call this immediately before dispatching an agent-create command; it is wired
+// into `submitNameDialog` (new/fork/from-PR) and `attachWorktree`. Re-arming
+// overwrites any prior pending focus, so a fresh create supersedes an earlier
+// one whose agent never arrived. Always pass the project the new agent will land
+// in — the match is project-scoped, so a caller that cannot resolve the project
+// must skip arming rather than pass a placeholder.
+function armCreateFocus(projectId: string): void {
+  const knownIds = (state.viewModel?.sessions ?? []).map((s) => s.id)
+  setState({ pendingCreateFocus: { knownIds, projectId } })
+}
+
+// Focus the agent THIS client just created, the instant it shows up. With a
+// pending-focus token armed (`armCreateFocus`), scan the incoming ViewModel for a
+// session that wasn't known at submit time and lives in the expected project,
+// select it (which points the changed-files watch at it; the focused TerminalPane
+// subscribes its PTY on mount), and disarm. No-op — and cheap — when nothing is
+// pending, the overwhelmingly common case. Other clients never armed a token, so
+// they don't react: focus moves only on the client that initiated the create.
+function focusNewlyCreatedSession(vm: ViewModel): void {
+  const pending = state.pendingCreateFocus
+  if (!pending) return
+  const known = new Set(pending.knownIds)
+  const created = vm.sessions.find(
+    (s) => !known.has(s.id) && s.project_id === pending.projectId,
+  )
+  if (!created) return
+  // Consume the token before selecting so a later ViewModel can't re-fire.
+  setState({ pendingCreateFocus: null })
+  selectSession(created.id)
+}
+
 socket.onConn = (conn) => {
   // A connection break invalidates any in-flight optimistic reorder: the
   // command (or its rejection) may have been lost, and after the reconnect
   // nothing would ever reconcile a non-matching overlay — leaving the UI
   // showing an order the server never persisted. Snap back to authoritative.
-  const patch = conn === "closed" || conn === "failed" ? clearPendingOrders() : {}
+  // The same break also voids any pending create-focus: its `knownIds` snapshot
+  // predates the disconnect, so diffing it against the post-reconnect ViewModel
+  // could mis-identify an unrelated session as "ours". Drop it and let the user
+  // pick up the new agent from the sidebar.
+  const patch =
+    conn === "closed" || conn === "failed" ? clearPendingClientIntent() : {}
   setState({ conn, ...patch })
   // Re-establish the server-side changed-files watch on every (re)connect. The
   // watch is server state that a dropped connection discards, so a reconnect
@@ -440,7 +495,7 @@ socket.onCommandResult = (status, error) => {
     // error string IS the message and the tone is "error".
     setState({
       statusLine: { tone: "error", message: error },
-      ...clearPendingOrders(),
+      ...clearPendingClientIntent(),
     })
   } else if (status) {
     setState({ statusLine: { tone: status.tone, message: status.message } })
@@ -450,7 +505,7 @@ socket.onCommandResult = (status, error) => {
 socket.onError = (message) => {
   setState({
     statusLine: { tone: "error", message },
-    ...clearPendingOrders(),
+    ...clearPendingClientIntent(),
   })
 }
 
@@ -461,12 +516,24 @@ function clearPendingOrders(): Partial<DuxState> {
   return { pendingSessionOrder: null, pendingProjectOrder: null }
 }
 
+// Clear every transient, optimistic client intent at once: the reorder overlays
+// AND any pending create-focus. Used on the failure/teardown paths (command
+// error, async error status, socket disconnect) where an in-flight create can no
+// longer be trusted to resolve — a surviving `pendingCreateFocus` snapshot would
+// otherwise mis-identify a later, unrelated session as the one we created. NOT
+// folded into `clearPendingOrders` because user actions like sorting also clear
+// the order overlays but must NOT cancel an in-flight create-focus.
+function clearPendingClientIntent(): Partial<DuxState> {
+  return { ...clearPendingOrders(), pendingCreateFocus: null }
+}
+
 // Asynchronous status/lifecycle events (background push/pull completing, an
 // agent launch finishing or failing, a PTY exiting). These mirror the TUI's
 // status line 1:1 — keep the latest in the status bar, no separate toast.
 socket.onStatus = (tone, message) => {
-  // An error-toned async status also unwinds any optimistic reorder overlay.
-  const patch = tone === "error" ? clearPendingOrders() : {}
+  // An error-toned async status also voids any in-flight create-focus (the
+  // create likely just failed) and unwinds any optimistic reorder overlay.
+  const patch = tone === "error" ? clearPendingClientIntent() : {}
   setState({ statusLine: { tone, message }, ...patch })
 }
 
@@ -726,6 +793,9 @@ function clearSessionScopedState(): Partial<DuxState> {
     // Optimistic reorder overlays — explicitly cleared (was incidental before).
     pendingSessionOrder: null,
     pendingProjectOrder: null,
+    // Any in-flight create-focus intent dies with the session, so a create
+    // submitted before logout never yanks focus into the next login's workspace.
+    pendingCreateFocus: null,
   }
 }
 
@@ -1158,6 +1228,7 @@ export function attachWorktree(
   worktreePath: string,
   name: string,
 ): void {
+  armCreateFocus(projectId)
   socket.sendCommand("create_agent_from_worktree", {
     project_id: projectId,
     worktree_path: worktreePath,
@@ -1296,10 +1367,20 @@ export function submitNameDialog(name: string): void {
   const target = state.createAgentTarget
   if (!target) return
   if (target.kind === "new") {
+    armCreateFocus(target.projectId)
     createAgent(target.projectId, name)
   } else if (target.kind === "fork") {
+    // A fork lands in the same project as its source session; resolve it so the
+    // focus diff is scoped to that project. If the source vanished from the
+    // ViewModel, skip auto-focus rather than arming an unscoped token that could
+    // grab any project's next new session.
+    const projectId = state.viewModel?.sessions.find(
+      (s) => s.id === target.sessionId,
+    )?.project_id
+    if (projectId) armCreateFocus(projectId)
     forkAgent(target.sessionId, name)
   } else {
+    armCreateFocus(target.projectId)
     createAgentFromPr(target.projectId, state.createAgentPrInput.trim(), name)
   }
   closeCreateAgent()
