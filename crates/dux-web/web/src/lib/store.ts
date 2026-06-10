@@ -485,6 +485,18 @@ socket.onCommitMessage = (sessionId, message) => {
   }
 }
 
+socket.onCommitMessageSnapshot = (sessionId, message) => {
+  // The connect snapshot re-delivers the LAST generated message so a reconnect
+  // during a commit flow still fills the draft. Apply it conservatively: only
+  // when this session's dialog is open AND the draft is still empty, so a stale
+  // snapshot never clobbers an in-progress edit (or fills a dialog the user
+  // never asked to generate into). The live `onCommitMessage` path handles the
+  // normal case where the client stayed connected through generation.
+  if (state.commitTarget === sessionId && state.commitDraft === "") {
+    setState({ commitDraft: message })
+  }
+}
+
 socket.onDiff = (sessionId, path, diff, error) => {
   // Ignore stale responses for a file the user already navigated away from.
   if (state.currentDiff?.path !== path || state.currentDiff?.sessionId !== sessionId) {

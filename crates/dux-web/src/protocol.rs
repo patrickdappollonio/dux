@@ -127,6 +127,13 @@ pub enum ServerMessage {
     /// frontend never fills the wrong session's draft (two open dialogs or a
     /// rapid switch). Broadcast to every client; each one routes by session id.
     CommitMessage { session_id: String, message: String },
+    /// The most recently generated commit message, delivered ONCE on connect so a
+    /// client that reconnected after generation completed (or in the
+    /// connect/subscribe gap) still receives it. Distinct from `CommitMessage`
+    /// (the live push) so the client applies it conservatively — only when the
+    /// matching session's commit dialog is open AND its draft is still empty,
+    /// never clobbering an in-progress edit. Not sent when no message exists yet.
+    CommitMessageSnapshot { session_id: String, message: String },
     /// Response to `BrowseDir`: the resolved directory and its entries, or an
     /// error string when the listing failed.
     DirEntries {
@@ -221,6 +228,22 @@ mod tests {
         assert_eq!(
             json,
             r#"{"type":"commit_message","session_id":"s1","message":"Fix the thing"}"#
+        );
+    }
+
+    #[test]
+    fn commit_message_snapshot_serializes() {
+        // The connect-snapshot frame must carry its own `type` tag so the client
+        // routes it to the conservative (empty-draft-only) handler, distinct from
+        // the live `commit_message` push. This tag is what `ws.ts` switches on.
+        let msg = ServerMessage::CommitMessageSnapshot {
+            session_id: "s1".to_string(),
+            message: "Fix the thing".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"commit_message_snapshot","session_id":"s1","message":"Fix the thing"}"#
         );
     }
 

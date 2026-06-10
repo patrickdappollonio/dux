@@ -210,6 +210,11 @@ export type ServerMessage =
   | { type: "status"; tone: string; message: string }
   | { type: "commit_message"; session_id: string; message: string }
   | {
+      type: "commit_message_snapshot"
+      session_id: string
+      message: string
+    }
+  | {
       type: "diff"
       session_id: string
       path: string

@@ -65,7 +65,22 @@ pub struct AppState {
     /// The access middleware checks this AND `console.is_active()` before
     /// emitting, so the flip and disabled-console paths never log.
     pub access_log: bool,
+    /// Caps concurrent `/ws` connections (`[server] max_websocket_connections`).
+    /// `ws_upgrade` takes a permit before upgrading and holds it for the socket's
+    /// lifetime; when none are free the upgrade is refused with HTTP 503. Shared
+    /// (cheap `Arc` clone) so every request hits the same permit pool.
+    pub ws_semaphore: Arc<tokio::sync::Semaphore>,
 }
+
+/// Maximum size of a single inbound WebSocket message (text or binary). This
+/// bounds ONE frame — down from axum's untuned 64 MiB default — so a client
+/// cannot push an arbitrarily large message; it is NOT a total-memory cap (the
+/// theoretical worst case is `REQ_CHANNEL_CAPACITY` queued frames of this size).
+/// In practice in-flight memory stays far below that product: the engine drains
+/// the whole request channel every tick, and link bandwidth caps how many large
+/// frames can even arrive per tick. 16 MiB is far above any realistic terminal
+/// paste, so legitimate input is never truncated.
+const MAX_WS_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
 /// Build the router with the login gate OFF (no `[auth]` users). Kept as the
 /// zero-argument entry the existing test harnesses and any no-auth caller use;
@@ -110,6 +125,10 @@ pub struct RouterParams {
     /// Whether the per-request access log is on (`[server] access_log`). Off by
     /// default; the CLI serve paths set it from config.
     pub access_log: bool,
+    /// Cap on concurrent `/ws` connections (`[server] max_websocket_connections`).
+    /// Defaults to [`dux_core::config::DEFAULT_MAX_WEBSOCKET_CONNECTIONS`]; the
+    /// serve paths override it from config via [`with_max_websocket_connections`].
+    pub max_websocket_connections: u32,
 }
 
 impl RouterParams {
@@ -123,6 +142,7 @@ impl RouterParams {
             secure_cookie: false,
             console: Console::noop(),
             access_log: false,
+            max_websocket_connections: dux_core::config::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
         }
     }
 
@@ -135,6 +155,7 @@ impl RouterParams {
             secure_cookie: true,
             console: Console::noop(),
             access_log: false,
+            max_websocket_connections: dux_core::config::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
         }
     }
 
@@ -144,6 +165,14 @@ impl RouterParams {
     pub fn with_console(mut self, console: Console, access_log: bool) -> Self {
         self.console = console;
         self.access_log = access_log;
+        self
+    }
+
+    /// Set the concurrent-connection cap from `[server] max_websocket_connections`.
+    /// The serve paths call this so the configured value (not just the default)
+    /// bounds live sockets.
+    pub fn with_max_websocket_connections(mut self, max: u32) -> Self {
+        self.max_websocket_connections = max;
         self
     }
 }
@@ -166,6 +195,7 @@ pub fn build_router_with_recheck(
             secure_cookie: false,
             console: Console::noop(),
             access_log: false,
+            max_websocket_connections: dux_core::config::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
         },
     )
     .0
@@ -185,6 +215,15 @@ pub fn build_app(
     extra_gated: Router<AppState>,
     params: RouterParams,
 ) -> (Router, SweepableMemoryStore) {
+    // A zero cap is a valid-but-drastic setting ("refuse all new connections").
+    // Warn loudly at startup so an accidental 0 isn't a silent web-UI lock-out —
+    // every upgrade would 503 with no other clue (explicit failure over silence).
+    if params.max_websocket_connections == 0 {
+        dux_core::logger::warn(
+            "[server] max_websocket_connections = 0: every WebSocket upgrade will be \
+             refused with HTTP 503 and the web UI will be unreachable",
+        );
+    }
     let state = AppState {
         engine,
         auth,
@@ -192,6 +231,9 @@ pub fn build_app(
         ws_recheck_period: params.ws_recheck_period,
         console: params.console,
         access_log: params.access_log,
+        ws_semaphore: Arc::new(tokio::sync::Semaphore::new(
+            params.max_websocket_connections as usize,
+        )),
     };
 
     // In-memory session store: sessions die with the server (documented v1
@@ -451,22 +493,48 @@ async fn ws_upgrade(
     } else {
         None
     };
+    // Cap concurrent sockets: take a permit BEFORE upgrading so a refusal is a
+    // real HTTP 503 (not an upgrade that immediately closes). The permit moves
+    // into the socket task and frees the slot when `handle_socket` returns.
+    let permit = match Arc::clone(&state.ws_semaphore).try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            // Record the refusal so an operator can see the cap is being hit (a
+            // bare 503 in the access log gives no reason). Goes to dux.log
+            // regardless of the access-log toggle.
+            dux_core::logger::warn(&format!(
+                "[server] WebSocket upgrade refused for {}: connection cap reached \
+                 (max_websocket_connections)",
+                peer.ip()
+            ));
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "too many WebSocket connections; try again shortly",
+            )
+                .into_response();
+        }
+    };
+
     let auth = state.auth.clone();
     let recheck_period = state.ws_recheck_period;
     let console = state.console.clone();
     let peer_ip = peer.ip();
-    ws.on_upgrade(move |socket| {
-        handle_socket(
-            socket,
-            state.engine,
-            auth,
-            recheck_user,
-            recheck_period,
-            console,
-            peer_ip,
-        )
-    })
-    .into_response()
+    // Bound a single inbound frame (see `MAX_WS_MESSAGE_SIZE`) so one client can't
+    // push an oversized message into the engine's bounded request channel.
+    ws.max_message_size(MAX_WS_MESSAGE_SIZE)
+        .on_upgrade(move |socket| {
+            handle_socket(
+                socket,
+                state.engine,
+                auth,
+                recheck_user,
+                recheck_period,
+                console,
+                peer_ip,
+                permit,
+            )
+        })
+        .into_response()
 }
 
 type SharedSink = Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>;
@@ -480,6 +548,11 @@ type SharedSink = Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<WebSock
 /// upgraded socket, so this recheck closes the gap: on failure we send a Close
 /// frame and break, which kills BOTH the ViewModel/status streaming and command
 /// intake. Auth-off sockets pass `recheck_user = None` and are never rechecked.
+// Each parameter is independent per-connection context (transport, engine, auth
+// recheck inputs, console identity, and the concurrency permit held for the
+// socket's lifetime). They have no shared lifetime or invariant, so bundling them
+// into a struct would add indirection without making the contract clearer.
+#[allow(clippy::too_many_arguments)]
 async fn handle_socket(
     socket: WebSocket,
     engine: EngineHandle,
@@ -488,6 +561,10 @@ async fn handle_socket(
     recheck_period: std::time::Duration,
     console: Console,
     peer_ip: std::net::IpAddr,
+    // The concurrency-cap permit acquired in `ws_upgrade`. Held for the whole
+    // connection purely for its Drop: when this function returns (socket closed),
+    // the permit frees a slot for the next client. Never read.
+    _permit: tokio::sync::OwnedSemaphorePermit,
 ) {
     // A client just upgraded: announce it on the console (peer IP). The matching
     // disconnect is logged when this function returns (the loop below breaks on
@@ -557,18 +634,48 @@ async fn handle_socket(
                             break;
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        dux_core::logger::warn(&format!(
+                            "WebSocket client {peer_ip} lagged behind the status broadcast; \
+                             dropped {n} update(s)"
+                        ));
+                        continue;
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
     }
 
+    // Subscribe to the live commit-message broadcast BEFORE reading the snapshot,
+    // same race lesson as the status lane above: the broadcast does not replay to
+    // a receiver created after a send, so a message generated in the gap (notably
+    // during the snapshot's `send_json().await`) would otherwise be lost.
+    let mut commit_rx = engine.subscribe_commit_messages();
+
+    // Initial commit message: a client that reconnected after generation
+    // completed (or in the connect/subscribe gap) still receives the last
+    // generated message. Sent as a DISTINCT snapshot frame so the client applies
+    // it conservatively (only into a matching, still-empty draft) and never
+    // clobbers an in-progress edit. Empty/absent means nothing to deliver.
+    if let Some(event) = engine.commit_message_snapshot()
+        && !event.message.is_empty()
+    {
+        let _ = send_json(
+            &sink,
+            &ServerMessage::CommitMessageSnapshot {
+                session_id: event.session_id,
+                message: event.message,
+            },
+        )
+        .await;
+    }
+
     // Forward AI-generated commit messages (produced by one-shot provider runs
-    // after a `generate_commit_message` command) to this client.
+    // after a `generate_commit_message` command) to this client. Uses the
+    // receiver subscribed above so nothing emitted since connect is missed.
     {
         let sink = Arc::clone(&sink);
-        let mut commit_rx = engine.subscribe_commit_messages();
         tokio::spawn(async move {
             loop {
                 match commit_rx.recv().await {
@@ -586,7 +693,13 @@ async fn handle_socket(
                             break;
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        dux_core::logger::warn(&format!(
+                            "WebSocket client {peer_ip} lagged behind the commit-message \
+                             broadcast; dropped {n} message(s)"
+                        ));
+                        continue;
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }

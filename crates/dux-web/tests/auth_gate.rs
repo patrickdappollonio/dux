@@ -191,6 +191,79 @@ async fn no_users_ws_open_without_auth() {
 }
 
 #[tokio::test]
+async fn ws_connection_cap_rejects_extra_with_503() {
+    // Resource limit: with `max_websocket_connections = 1`, the first socket takes
+    // the only permit; a second upgrade is refused with HTTP 503 while the first
+    // is open, then succeeds once the first closes and frees the slot.
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = seed_paths(tmp.path());
+    let mut engine = bootstrap_engine(&paths).unwrap();
+    engine.config.providers.commands.insert(
+        "claude".to_string(),
+        ProviderCommandConfig {
+            command: "cat".to_string(),
+            args: vec![],
+            resume_args: None,
+            ..Default::default()
+        },
+    );
+    let (handle, _join) = spawn_engine_thread(engine);
+    // Build the app with a cap of ONE (auth off, so no cookie dance).
+    let app = dux_web::server::build_app(
+        handle,
+        shared_auth(&[], false),
+        axum::Router::new(),
+        dux_web::server::RouterParams::plain_http().with_max_websocket_connections(1),
+    )
+    .0;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    // First connection takes the only permit (acquired before the 101 response,
+    // so it is held by the time `connect_async` returns).
+    let (ws1, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .expect("first ws connects while a slot is free");
+
+    // Second connection while the first is open → refused with 503.
+    let err = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .expect_err("second ws must be refused while the cap is full");
+    match err {
+        tokio_tungstenite::tungstenite::Error::Http(resp) => {
+            assert_eq!(resp.status(), 503, "over-cap upgrade should be 503");
+        }
+        other => panic!("expected an HTTP 503 response, got {other:?}"),
+    }
+
+    // Close the first socket; its permit frees when `handle_socket` returns. The
+    // drop is asynchronous to us, so poll until a fresh connection succeeds.
+    drop(ws1);
+    let mut reconnected = false;
+    for _ in 0..50 {
+        match tokio_tungstenite::connect_async(format!("ws://{addr}/ws")).await {
+            Ok((mut ws, _)) => {
+                reconnected = wait_for_view_model(&mut ws).await;
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+    assert!(
+        reconnected,
+        "a slot should free once the first socket closes"
+    );
+}
+
+#[tokio::test]
 async fn no_users_me_reports_disabled() {
     let (addr, _tmp) = boot_with_users(vec![]).await;
     let resp = client()

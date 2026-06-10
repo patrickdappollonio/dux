@@ -540,6 +540,20 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             )),
             value_fn: |c| FieldValue::Bool(c.server.access_log),
         },
+        ConfigEntry::Field {
+            key: "max_websocket_connections",
+            comment: Some(CommentSource::Static(
+                "# Maximum number of concurrent WebSocket connections to `dux server`.\n\
+                 # Each open browser tab or device holds one. Once this many are live,\n\
+                 # further connections are refused with HTTP 503 until a slot frees — a\n\
+                 # safety bound against connection exhaustion (a runaway reconnect loop,\n\
+                 # a tab left multiplying). The normal single-operator deployment uses a\n\
+                 # handful; raise it if you genuinely run many tabs/devices. 0 refuses\n\
+                 # all new connections. Changing this needs a server restart to take\n\
+                 # effect (a reload of the running server cannot resize the cap).",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.max_websocket_connections as usize),
+        },
         ConfigEntry::Blank,
         ConfigEntry::ServerAcme,
         ConfigEntry::Auth,
@@ -1163,6 +1177,7 @@ mod tests {
         assert!(rendered.contains("insecure_allow_remote = false"));
         assert!(rendered.contains("color = \"auto\""));
         assert!(rendered.contains("access_log = true"));
+        assert!(rendered.contains("max_websocket_connections = 128"));
         assert!(rendered.contains("[server.acme]"));
         assert!(rendered.contains("enabled = false"));
         assert!(rendered.contains("domains = []"));
