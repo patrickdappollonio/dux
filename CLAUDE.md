@@ -88,6 +88,8 @@ When making changes, edit only the relevant submodule. If you need to add a new 
 ## Recommendations For Future Changes
 
 - Keep the status line centralized. New async operations should report progress through the shared status API, not ad hoc strings.
+- The status line is the single shared surface for engine status, behaving 1:1 across the TUI and the web. Both drive it through the shared `dux_core::statusline::StatusLine` controller (the TUI holds one in-process; the web actor holds one and broadcasts its state). Do NOT duplicate engine status onto a second surface (e.g. a web toast in addition to the status line) — the status line is the source of truth, mirroring the TUI.
+- Status messages auto-clear on a tone-aware policy owned by the controller: **Busy/pending persists until a final state replaces it** (a `set_busy` must be followed by a `set_info`/`set_error`; an unresolved pending intentionally shows as a stuck spinner rather than vanishing), **Info/success auto-clears** after `ui.status_clear_seconds` (default 6; 0 disables), and **Warning/Error persist until the next status replaces them**. New status call sites must follow this pending→final convention; never leave a Busy hanging.
 - Status line messages must be verbose and actionable. Do not write terse messages like "Done." or "Pushed." — instead explain what happened and, when relevant, what the user can do next. Example: "Changes committed successfully. Press ^U to push to remote." rather than "Committed."
 - Code must be production ready and modular to allow future Open Source contributors to integrate new features with ease. Do not take shortcuts.
 - Route new modal UI through `PromptState` so `Esc` keeps working uniformly.

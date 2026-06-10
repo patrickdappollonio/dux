@@ -13,6 +13,7 @@ use dux_core::engine::{
     Command, Engine, EventReaction, InFlightKey, ProjectPersistenceView, PrunedPtyKind,
 };
 use dux_core::pty::PtyClient;
+use dux_core::statusline::{StatusLine, StatusTone};
 use dux_core::wire::{WireCommand, WireCommandOutcome, WireStatus};
 use dux_core::worker::AgentLaunchKind;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -38,6 +39,10 @@ pub enum EngineRequest {
         WireCommand,
         oneshot::Sender<Result<WireCommandOutcome, String>>,
     ),
+    /// A status from a non-engine producer (the ACME certificate-lifecycle task)
+    /// to broadcast through the shared status controller so it auto-clears and
+    /// reaches every client, exactly like engine-originated statuses.
+    EmitStatus(WireStatus),
     SubscribePty(String, oneshot::Sender<Result<PtySubscription, String>>),
     WritePty(String, Vec<u8>),
     ResizePty(String, u16, u16),
@@ -293,13 +298,13 @@ impl EngineHandle {
         self.status_tx.subscribe()
     }
 
-    /// A clone of the status broadcast SENDER, so a non-engine producer (the ACME
-    /// certificate-lifecycle task) can publish onto the SAME channel WS clients
-    /// subscribe to via [`subscribe_status`] and the engine loop's reload warnings
-    /// ride. The handle holds the same `Sender` the loop does (see
-    /// `build_actor_channels_with_auth`), so a send here reaches every subscriber.
-    pub fn status_sender(&self) -> broadcast::Sender<WireStatus> {
-        self.status_tx.clone()
+    /// Publish a status from a non-engine producer (the ACME certificate-lifecycle
+    /// task) THROUGH the shared status controller — not directly onto the broadcast
+    /// — so it auto-clears on the same tone-aware policy as every other status and
+    /// can never linger. The engine loop drains this and emits it via its
+    /// `StatusEmitter`. A no-op if the engine loop has already exited.
+    pub fn emit_status(&self, status: WireStatus) {
+        let _ = self.req_tx.send(EngineRequest::EmitStatus(status));
     }
 
     pub fn subscribe_commit_messages(&self) -> broadcast::Receiver<CommitMessageEvent> {
@@ -466,6 +471,17 @@ pub(crate) fn run_engine_loop(
         shutdown_flag,
         auth_reload,
     } = ends;
+    // Route every status broadcast through the shared StatusLine controller so
+    // the web gets the SAME auto-clear + pending→final behaviour as the TUI from
+    // one place. Keeping the binding name `thread_status_tx` and a `send` method
+    // means the loop's existing broadcast sites need no changes; `tick` (called
+    // once per iteration below) broadcasts the cleared state when a transient
+    // status expires. The timeout is captured at startup (like the TUI), so
+    // changing `status_clear_seconds` takes effect on the next server start.
+    let mut thread_status_tx = StatusEmitter::new(
+        thread_status_tx,
+        Duration::from_secs(engine.config.ui.status_clear_seconds as u64),
+    );
     // Subscribes waiting for their provider to come up via the worker-event drain.
     let mut pending: Vec<PendingSubscribe> = Vec::new();
     loop {
@@ -733,7 +749,7 @@ pub(crate) fn run_engine_loop(
                     disconnected = true;
                     break;
                 }
-                Ok(req) => handle_request(&mut engine, req),
+                Ok(req) => handle_request(&mut engine, req, &mut thread_status_tx),
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     disconnected = true;
@@ -744,20 +760,83 @@ pub(crate) fn run_engine_loop(
         if disconnected {
             break;
         }
+        // Expire a timed-out transient status and broadcast the cleared state to
+        // every connected client. Busy/warning/error are left untouched.
+        thread_status_tx.tick(Instant::now());
         thread::sleep(TICK);
     }
     engine
+}
+
+/// Wraps the WS status broadcast so every status flows through a shared
+/// [`StatusLine`] controller: [`send`](Self::send) records the current status
+/// and broadcasts it; [`tick`](Self::tick) — called once per loop iteration —
+/// broadcasts an empty "cleared" status once a transient Info/success message
+/// has outlived `status_clear_seconds`. Busy/warning/error never auto-clear (the
+/// controller enforces the tone rules), so the web matches the TUI 1:1. The
+/// `send` method name lets the loop's existing broadcast sites stay unchanged.
+struct StatusEmitter {
+    tx: broadcast::Sender<WireStatus>,
+    controller: StatusLine,
+}
+
+impl StatusEmitter {
+    fn new(tx: broadcast::Sender<WireStatus>, clear_after: Duration) -> Self {
+        Self {
+            tx,
+            controller: StatusLine::with_clear_after("", clear_after),
+        }
+    }
+
+    /// Record the status in the controller, then broadcast it. Returns the
+    /// broadcast `send` result so the existing call sites keep discarding it with
+    /// `let _ =` exactly as they did with the raw sender.
+    fn send(
+        &mut self,
+        status: WireStatus,
+    ) -> Result<usize, broadcast::error::SendError<WireStatus>> {
+        self.controller.set(
+            Instant::now(),
+            StatusTone::from_wire(&status.tone),
+            status.message.as_str(),
+        );
+        self.tx.send(status)
+    }
+
+    /// Broadcast the cleared state if the current transient status just expired.
+    fn tick(&mut self, now: Instant) {
+        if self.controller.tick(now) {
+            let _ = self.tx.send(WireStatus::new("info", String::new()));
+        }
+    }
 }
 
 fn view_model_json(engine: &Engine) -> String {
     serde_json::to_string(&engine.view_model()).unwrap_or_else(|_| "{}".to_string())
 }
 
-fn handle_request(engine: &mut Engine, req: EngineRequest) {
+fn handle_request(engine: &mut Engine, req: EngineRequest, status_tx: &mut StatusEmitter) {
     match req {
         EngineRequest::ApplyWire(cmd, reply) => {
             let res = engine.apply_wire(cmd).map_err(|e| e.to_string());
+            // ALSO route the synchronous command-result status through the shared
+            // controller — broadcast to EVERY client and auto-cleared on the same
+            // policy as engine statuses — instead of leaving it only on the
+            // requesting client's status line, where it never cleared (and could
+            // be wiped early by an unrelated status's expiry). The reply still
+            // carries the status for the requester's instant ack (and the Err path
+            // it needs to revert an optimistic reorder); the requester then sets
+            // the same value from both the reply and the broadcast, which is a
+            // harmless idempotent set.
+            if let Ok(outcome) = &res
+                && let Some(status) = &outcome.status
+            {
+                let _ = status_tx.send(status.clone());
+            }
             let _ = reply.send(res);
+        }
+        EngineRequest::EmitStatus(status) => {
+            let _ = status_tx.send(status);
         }
         // SubscribePty is handled inline in the loop (it needs `&mut pending`).
         EngineRequest::SubscribePty(_, _) => unreachable!("SubscribePty handled in the loop"),
@@ -959,6 +1038,60 @@ mod tests {
                 "view model never reflected toggle: {json}"
             );
             let _ = tokio::time::timeout(std::time::Duration::from_millis(200), rx.changed()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_wire_status_is_broadcast_so_it_auto_clears() {
+        // A synchronous command result is ALSO broadcast through the shared status
+        // controller (not just returned to the requester), so it reaches every
+        // client and auto-clears — the bug the council caught.
+        let (_tmp, paths) = temp_paths();
+        {
+            let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
+            store
+                .upsert_session(&sample_session(
+                    "s1",
+                    "p1",
+                    "feat",
+                    paths.root.to_string_lossy().as_ref(),
+                ))
+                .unwrap();
+        }
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+
+        // Subscribe BEFORE issuing the command so its broadcast isn't missed.
+        let mut status_rx = handle.subscribe_status();
+
+        let outcome = handle
+            .apply_wire(WireCommand::ToggleAgentAutoReopen {
+                session_id: "s1".to_string(),
+                enabled: true,
+            })
+            .await
+            .expect("apply");
+        // The reply still carries the status (the requester's instant ack)…
+        let want = outcome.status.expect("command produced a status").message;
+
+        // …and the same status is broadcast to every client so the controller
+        // can auto-clear it. Loop past any unrelated startup status.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), status_rx.recv())
+                .await
+            {
+                Ok(Ok(s)) if s.message == want => break,
+                Ok(Ok(_)) => {}
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                    panic!("status channel closed before the command status arrived")
+                }
+                Ok(Err(_)) | Err(_) => {}
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "command status \"{want}\" was never broadcast"
+            );
         }
     }
 

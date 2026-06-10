@@ -1263,6 +1263,10 @@ impl App {
         );
         let (theme, theme_warning) = crate::theme::load_or_fallback(&config.ui.theme, &paths);
         let mut status = StatusLine::new(initial_status);
+        status.set_clear_after(Duration::from_secs(config.ui.status_clear_seconds as u64));
+        // The first-run help hint should persist until the user's first action,
+        // not auto-clear after the timeout like a confirmation does.
+        status.pin();
         if let Some(message) = theme_warning {
             status.warning(message);
         }
@@ -1451,6 +1455,12 @@ impl App {
         let mut status = StatusLine::new(
             "Web server stopped. Your agents kept running — reconnect to any session to pick up where it left off.",
         );
+        status.set_clear_after(Duration::from_secs(
+            engine.config.ui.status_clear_seconds as u64,
+        ));
+        // The post-flip guidance ("Web server stopped… reconnect to pick up")
+        // should persist until the user acts, not auto-clear like a confirmation.
+        status.pin();
         if let Some(message) = theme_warning {
             status.warning(message);
         }
@@ -1497,6 +1507,10 @@ impl App {
                 self.drain_events();
                 self.engine.poll_pty_activity();
                 self.tick_count = self.tick_count.wrapping_add(1);
+                // Expire a transient status (e.g. a success confirmation) after
+                // its configured lifetime. Busy/warning/error persist; the
+                // controller handles the tone rules. Wall-clock, not tick count.
+                self.status.tick(Instant::now());
 
                 // Check SIGWINCH — needed when bypassing crossterm's event
                 // reader (which would otherwise deliver Resize events).

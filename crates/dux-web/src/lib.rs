@@ -620,11 +620,12 @@ fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool, version: String
 
         // Drive certificate acquisition/renewal. Without this nothing progresses.
         // Thread the engine's status broadcast in so certificate lifecycle events
-        // (acquired/renewed, errors, stream-end) reach web clients live — the same
-        // channel the reload warnings ride — not just dux.log — AND the CLI console.
+        // (acquired/renewed, errors, stream-end) reach web clients live — routed
+        // through the shared status controller so they auto-clear like every other
+        // status — not just dux.log — AND the CLI console.
         let acme_task = tls::spawn_acme_event_task(
             acme_state,
-            Some(handle.status_sender()),
+            Some(handle.clone()),
             console.clone(),
             domains.clone(),
         );

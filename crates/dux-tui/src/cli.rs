@@ -216,6 +216,12 @@ fn run_diff_summary(current: &Config) -> Result<()> {
     );
     diff_u16(
         &mut changes,
+        "ui.status_clear_seconds",
+        defaults.ui.status_clear_seconds,
+        current.ui.status_clear_seconds,
+    );
+    diff_u16(
+        &mut changes,
         "ui.branch_sync_interval",
         defaults.ui.branch_sync_interval,
         current.ui.branch_sync_interval,

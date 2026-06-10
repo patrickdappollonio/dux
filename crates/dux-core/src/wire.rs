@@ -15,7 +15,6 @@ use crate::engine::{
     EventReaction, FinishDeleteSessionOutcome, StatusUpdate, WorktreeRemoval,
 };
 use crate::model::{Project, ProjectBranchStatus, ProviderKind};
-use crate::statusline::StatusTone;
 use crate::worker::{
     AgentLaunchKind, CreateAgentRequest, NonDefaultBranchAction, ProjectPersistenceAction,
     PullTarget,
@@ -337,14 +336,8 @@ impl WireStatus {
     }
 
     fn from_update(update: &StatusUpdate) -> Self {
-        let tone = match update.tone {
-            StatusTone::Info => "info",
-            StatusTone::Busy => "busy",
-            StatusTone::Warning => "warning",
-            StatusTone::Error => "error",
-        };
         Self {
-            tone: tone.to_string(),
+            tone: update.tone.as_wire().to_string(),
             message: update.message.clone(),
         }
     }
@@ -1725,6 +1718,7 @@ mod tests {
     use crate::engine::test_support::{sample_project, sample_session, test_engine};
     use crate::engine::{DeleteTerminalView, InFlightKey};
     use crate::model::AgentSession;
+    use crate::statusline::StatusTone;
     use crate::worker::WorkerEvent;
     use std::path::Path;
 
