@@ -44,9 +44,13 @@ interface AccessoryBarProps {
   onToggleAlt: () => void
 }
 
-// CRITICAL: every bar button must call preventDefault() on pointerdown so the
-// xterm hidden textarea keeps focus and the soft keyboard stays open. We also
-// fire the action on pointerdown (not click) for snappy, latency-free feel.
+// CRITICAL: every bar button calls preventDefault() on pointerdown so the press
+// can't shift focus off the xterm hidden textarea before the handler runs, and
+// we fire on pointerdown (not click) for a snappy, latency-free feel. The KEY
+// row relies on this to keep the textarea focused and the soft keyboard open;
+// the SCROLL row reuses the same handler for that focus/sequencing guarantee but
+// then deliberately blurs in TerminalPane.onScroll to dismiss the keyboard for
+// reading. So "keeps focus" is the key-row contract, not a universal one.
 function keyDown(handler: () => void) {
   return (event: React.PointerEvent) => {
     event.preventDefault()

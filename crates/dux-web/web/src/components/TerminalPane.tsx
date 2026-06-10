@@ -9,6 +9,7 @@ import { MacroPopover } from "@/components/MacroPopover"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { dragScrollLines } from "@/lib/viewport"
 import { applyModifiers, arrowSeq, ESC, TAB } from "@/lib/termkeys"
 import { selectSession, socket, useDux } from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
@@ -235,6 +236,96 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
     // are covered. Runs after the click that selected the row, so it wins focus.
     term.focus()
 
+    // Touch gestures over the terminal, mapped to the natural mobile model:
+    //   - a one-finger DRAG scrolls the scrollback,
+    //   - a stationary LONG-PRESS hands off to the browser's native text
+    //     selection (and its handle-drag to extend it),
+    //   - a quick TAP falls through to xterm so it focuses and the keyboard opens.
+    // xterm's text layer sits over its scrollable viewport, so a finger drag on
+    // the output never reaches the native scroll (only the slim scrollbar does);
+    // we bridge that by translating a vertical drag into xterm's own
+    // scrollLines() — the same scrollback the accessory-bar page buttons move
+    // through (they call scrollPages/scrollToTop/scrollToBottom). Touch-only
+    // listeners, so this also lights up a touchscreen laptop, not just the mobile
+    // layout. Only the normal buffer has scrollback; alt-screen TUIs own the
+    // screen (no history), so we leave their touches alone and let the arrow row
+    // drive them.
+    //
+    // Disambiguation: a long-press timer marks the gesture as a selection the
+    // moment the finger has been held still past the delay; from then on we never
+    // scroll, so extending a selection by dragging a handle is not hijacked. If
+    // the finger instead MOVES past a small threshold before that fires, it's a
+    // scroll — we cancel the timer and take over. A short, still tap trips
+    // neither and reaches xterm as a normal focus tap.
+    const LONG_PRESS_MS = 400
+    const SCROLL_THRESHOLD_PX = 8
+    let touchLastY = 0
+    let touchAccum = 0
+    let touchScrolling = false
+    let touchActive = false
+    let touchSelecting = false
+    let longPressTimer: ReturnType<typeof setTimeout> | undefined
+    const onTouchStart = (e: TouchEvent) => {
+      // Any new touch (including a second finger landing mid-gesture) supersedes
+      // a pending long-press, so always cancel it first.
+      clearTimeout(longPressTimer)
+      if (e.touches.length !== 1 || term.buffer.active.type !== "normal") {
+        touchActive = false
+        return
+      }
+      touchActive = true
+      touchScrolling = false
+      touchSelecting = false
+      touchAccum = 0
+      touchLastY = e.touches[0].clientY
+      longPressTimer = setTimeout(() => {
+        touchSelecting = true
+      }, LONG_PRESS_MS)
+    }
+    const onTouchMove = (e: TouchEvent) => {
+      // Re-check the buffer type: an agent can enter an alt-screen TUI (no
+      // scrollback) mid-drag, and we leave those to native handling.
+      if (
+        !touchActive ||
+        touchSelecting ||
+        e.touches.length !== 1 ||
+        term.buffer.active.type !== "normal"
+      )
+        return
+      const y = e.touches[0].clientY
+      touchAccum += y - touchLastY
+      touchLastY = y
+      // Engage only once the finger has clearly moved, so a tap or an
+      // about-to-be long-press is never stolen.
+      if (!touchScrolling && Math.abs(touchAccum) < SCROLL_THRESHOLD_PX) return
+      if (!touchScrolling) {
+        // Movement won the race against the long-press: this is a scroll.
+        clearTimeout(longPressTimer)
+        touchScrolling = true
+        // Reading gesture: get the keyboard out of the way (see onScroll).
+        term.textarea?.blur()
+      }
+      e.preventDefault()
+      const { scrollLines, remainderPx } = dragScrollLines(
+        touchAccum,
+        container.clientHeight / term.rows,
+      )
+      if (scrollLines !== 0) {
+        term.scrollLines(scrollLines)
+        touchAccum = remainderPx
+      }
+    }
+    const endTouch = () => {
+      clearTimeout(longPressTimer)
+      touchActive = false
+      touchScrolling = false
+      touchSelecting = false
+    }
+    container.addEventListener("touchstart", onTouchStart, { passive: true })
+    container.addEventListener("touchmove", onTouchMove, { passive: false })
+    container.addEventListener("touchend", endTouch, { passive: true })
+    container.addEventListener("touchcancel", endTouch, { passive: true })
+
     // Sizing has two halves with very different costs:
     //  - LOCAL refits (fit.fit()) are cheap, so the canvas tracks the container
     //    every frame while the user drags a divider or the window edge.
@@ -287,6 +378,11 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
       cancelAnimationFrame(fitFrame)
       clearTimeout(sendTimer)
       clearTimeout(redrawTimer)
+      clearTimeout(longPressTimer)
+      container.removeEventListener("touchstart", onTouchStart)
+      container.removeEventListener("touchmove", onTouchMove)
+      container.removeEventListener("touchend", endTouch)
+      container.removeEventListener("touchcancel", endTouch)
       ro.disconnect()
       dataSub.dispose()
       socket.onPtyBytes = () => {}
@@ -374,9 +470,16 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
   // Scroll the xterm viewport from the accessory bar's second row. These drive
   // xterm's own scrollback (the normal-buffer history that accumulates as the
   // agent streams output), giving a reliable touch target the slim scrollbar
-  // can't. preventDefault on the buttons keeps the soft keyboard up, so there's
-  // no need to refocus here. (Alt-screen TUIs keep no scrollback, so page/jump
-  // scrolling is a no-op there — the cursor-arrow row drives those instead.)
+  // can't. (Alt-screen TUIs keep no scrollback, so page/jump scrolling is a
+  // no-op there — the cursor-arrow row drives those instead.)
+  //
+  // Scrolling is a READ gesture, so it drops the hidden textarea's focus: that
+  // slides the soft keyboard away to free the whole screen for reading back and,
+  // crucially, stops a scroll-button tap from re-summoning it. On iOS the
+  // textarea stays the focused element after the user swipes the keyboard down,
+  // so any later tap on a focus-retaining (preventDefault) button pops it right
+  // back up; blurring here is what keeps it down. Tapping the terminal refocuses
+  // to resume typing. (The key row above instead KEEPS focus — that's input.)
   function onScroll(dir: ScrollDir) {
     const term = termRef.current
     if (!term) return
@@ -394,6 +497,10 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
         term.scrollPages(1)
         break
     }
+    // Only a touch device has a soft keyboard to dismiss. Gating on touch
+    // capability stops a narrow-window mouse user (who also gets this mobile bar)
+    // from silently losing terminal focus when paging through output.
+    if (navigator.maxTouchPoints > 0) term.textarea?.blur()
   }
 
   // The host div owns the padding so the resolved bg fills the padding area
