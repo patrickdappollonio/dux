@@ -103,7 +103,7 @@ export function MacroPopover({
         )}
         <button
           type="button"
-          className="flex w-full items-center gap-2 border-t px-3 py-2 text-left text-xs text-muted-foreground hover:text-foreground"
+          className="flex w-full items-center gap-2 border-t px-3 py-2 text-left text-sm text-muted-foreground hover:text-foreground"
           onClick={() => {
             setOpen(false)
             openMacrosDialog()

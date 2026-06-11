@@ -109,7 +109,7 @@ function AttachWorktreeBody({ projectId }: { projectId: string }) {
             })}
             {attached.length > 0 ? (
               <>
-                <div className="px-3 pt-3 pb-1 text-xs font-medium text-muted-foreground">
+                <div className="px-3 pt-3 pb-1 text-sm font-medium text-muted-foreground">
                   Already has an agent
                 </div>
                 {attached.map((entry) => (

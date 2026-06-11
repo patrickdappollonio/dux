@@ -124,7 +124,7 @@ function InsetHeader() {
         </Button>
         {auth.phase === "authed" ? (
           <div className="flex items-center gap-1.5">
-            <span className="max-w-32 truncate text-xs text-muted-foreground">
+            <span className="max-w-32 truncate text-sm text-muted-foreground">
               {auth.username}
             </span>
             <SimpleTooltip content="Log out">

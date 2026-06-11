@@ -1,54 +1,43 @@
-import { useLayoutEffect, useRef, useState } from "react"
+import { useEffect, useState } from "react"
 
-// A faint constant-length light that crawls the LEFT edge of a working agent row
-// and races the other three sides, fading in and out each lap. The styling
-// (geometry, stroke, dash, keyframes) lives in `.agent-beam` in index.css;
-// `pathLength={100}` keeps the comet a fixed fraction of the perimeter so it
-// never grows or shrinks as it rounds the corners.
+// A soft light that sweeps LEFT → RIGHT across a working agent's row to signal
+// activity, alongside the bouncing Bot icon. The geometry/keyframes live in
+// `.agent-beam` / `.agent-beam-light` in index.css.
 //
-// An SVG `<rect>`'s outline is drawn top → right → bottom → LEFT, so the left
-// edge is the final slice of the perimeter. Its size as a fraction of the whole
-// depends on the row's aspect ratio (a wide row has a tiny left edge), which CSS
-// can't know — so we measure the row and hand the slice's start to the keyframes
-// via `--beam-left-start`. The travel animation then spends half the lap crossing
-// that slice (slow) and half on the rest (fast). Render inside a `relative` row,
-// only while the agent is working.
-export function AgentBeam() {
-  const ref = useRef<SVGSVGElement>(null)
-  // Where the left-edge slice begins, as a percent of the perimeter. The default
-  // is the square-row value ((2w+h)/2(w+h) at w=h = 75%); the measure below
-  // refines it to the real row before the first paint settles.
-  const [leftStart, setLeftStart] = useState(75)
+// When the agent STOPS working we don't yank the beam mid-sweep (that froze the
+// light part-way across the name). Instead we keep it mounted and let the current
+// left→right pass finish: on the next animation-iteration boundary (the end of a
+// sweep) with work done, we unmount. A timer is the fallback for when the sweep
+// is disabled (prefers-reduced-motion), so the beam can't linger forever.
+// Mirrors how the Bot icon eases back to rest rather than snapping. Rendered
+// unconditionally by the row; returns null when idle.
+export function AgentBeam({ working }: { working: boolean }) {
+  const [show, setShow] = useState(working)
 
-  // Layout effect (not useEffect) so the measured value is applied before the
-  // first paint — otherwise a wide row's first lap animates with the square-row
-  // default (75) and the "slow" zone briefly lands on the wrong edge.
-  useLayoutEffect(() => {
-    const svg = ref.current
-    const row = svg?.parentElement
-    if (!row) return
-    const measure = () => {
-      const { width, height } = row.getBoundingClientRect()
-      if (width <= 0 || height <= 0) return
-      // Perimeter order is top(w) → right(h) → bottom(w) → left(h); the left
-      // slice starts after the first three sides.
-      const start = ((2 * width + height) / (2 * (width + height))) * 100
-      setLeftStart(start)
-    }
-    measure()
-    const ro = new ResizeObserver(measure)
-    ro.observe(row)
-    return () => ro.disconnect()
-  }, [])
+  // Begin the moment work starts — the React-sanctioned "adjust state during
+  // render" pattern (like CodeEditor's everReady), so there's no setState inside
+  // an effect. The stop side is handled by the iteration handler + fallback timer.
+  if (working && !show) setShow(true)
 
+  useEffect(() => {
+    if (working) return
+    // Work stopped: fallback-unmount one sweep later in case the animation is
+    // off (reduced motion) so `onAnimationIteration` never fires. The setState
+    // is inside the timer (async), not synchronous in the effect body.
+    const timer = setTimeout(() => setShow(false), 1700)
+    return () => clearTimeout(timer)
+  }, [working])
+
+  if (!show) return null
   return (
-    <svg
-      ref={ref}
-      aria-hidden
-      className="agent-beam"
-      style={{ "--beam-left-start": leftStart } as React.CSSProperties}
-    >
-      <rect x="0" y="0" width="100%" height="100%" rx="6" pathLength={100} />
-    </svg>
+    <div className="agent-beam" aria-hidden>
+      <span
+        className="agent-beam-light"
+        onAnimationIteration={() => {
+          // End of a full sweep — if work is done, stop here for a clean finish.
+          if (!working) setShow(false)
+        }}
+      />
+    </div>
   )
 }

@@ -280,13 +280,15 @@ function SessionRow({
           variant={agentSelected ? "secondary" : "ghost"}
           className={cn(
             "min-h-11 flex-1 touch-manipulation justify-start gap-2 px-2",
-            // Positioning context for the beam overlay while working.
-            session.working && "relative"
+            // Positioning context for the beam overlay. Always relative: the beam
+            // lingers a moment past `working` to finish its sweep (see AgentBeam).
+            "relative"
           )}
           onClick={() => selectAndOpen(session.id)}
         >
-          {/* While working, a constant-length light travels around the row outline. */}
-          {session.working && <AgentBeam />}
+          {/* A light sweeps left→right across the row while the agent works (and
+              finishes its current pass when work stops). Self-manages mount. */}
+          <AgentBeam working={session.working} />
           {/* Gently bounces (motion-safe) while the agent streams output; the
               transition settles it back to rest when streaming stops mid-bounce. */}
           <Bot
@@ -428,7 +430,7 @@ function ProjectBlock({
             {branch ? (
               <SimpleTooltip content={branch.tooltip ?? undefined}>
                 <span
-                  className={`min-w-0 truncate font-mono text-xs ${
+                  className={`min-w-0 truncate font-mono text-sm ${
                     branch.warn ? "text-amber-500" : "text-muted-foreground"
                   }`}
                 >
@@ -624,7 +626,7 @@ function HomeScreen() {
         <img src="/dux-logo.png" alt="dux" className="size-8 rounded-lg" />
         <div className="flex min-w-0 flex-1 flex-col gap-0.5 leading-none">
           <span className="font-semibold">dux</span>
-          <span className="text-xs text-muted-foreground">agent sessions</span>
+          <span className="text-sm text-muted-foreground">agent sessions</span>
         </div>
         <Button
           variant="outline"
@@ -653,7 +655,7 @@ function HomeScreen() {
           <div className="flex flex-col gap-4 p-3">
             <div className="flex flex-col gap-2">
               {withAgents.length > 0 ? (
-                <p className="px-2 text-xs font-medium text-muted-foreground">
+                <p className="px-2 text-sm font-medium text-muted-foreground">
                   Projects
                 </p>
               ) : null}
@@ -671,7 +673,7 @@ function HomeScreen() {
 
             {withoutAgents.length > 0 ? (
               <div className="flex flex-col gap-2">
-                <p className="px-2 text-xs font-medium text-muted-foreground">
+                <p className="px-2 text-sm font-medium text-muted-foreground">
                   Projects with no agents
                 </p>
                 <ProjectGroupList

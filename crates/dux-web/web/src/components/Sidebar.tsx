@@ -252,13 +252,17 @@ function SessionSubItem({
         isActive={agentSelected}
         className={cn(
           "max-md:pr-8 touch-manipulation group-focus-within/menu-sub-item:pr-8 group-hover/menu-sub-item:pr-8 group-has-[[aria-expanded=true]]/menu-sub-item:pr-8",
-          // Positioning context for the beam overlay while working.
-          session.working && "relative"
+          // Positioning context for the beam overlay. Always relative: the beam
+          // self-manages its lifetime (it lingers a moment past `working` to
+          // finish its sweep), so the row can't gate the positioning context on
+          // `working` without clipping that final pass.
+          "relative"
         )}
         onClick={() => selectSession(session.id)}
       >
-        {/* While working, a constant-length light travels around the row outline. */}
-        {session.working && <AgentBeam />}
+        {/* A light sweeps left→right across the row while the agent works (and
+            finishes its current pass when work stops). Self-manages mount. */}
+        <AgentBeam working={session.working} />
         {/* All agents use the same Bot icon — provider is shown as text. While
             the agent is streaming output it gently bounces (motion-safe) so the
             "working" state is unmistakable at a glance. The transition lets the
@@ -543,7 +547,7 @@ function ProjectItem({
             {branch ? (
               <SimpleTooltip content={branch.tooltip ?? undefined} side="right">
                 <span
-                  className={`min-w-0 truncate font-mono text-xs ${
+                  className={`min-w-0 truncate font-mono text-sm ${
                     branch.warn ? "text-amber-500" : "text-muted-foreground"
                   }`}
                 >
@@ -772,7 +776,7 @@ export function AppSidebar() {
               <img src="/dux-logo.png" alt="dux" className="size-8 rounded-lg" />
               <div className="flex flex-1 flex-col gap-0.5 leading-none">
                 <span className="font-semibold">dux</span>
-                <span className="text-xs text-sidebar-foreground/70">
+                <span className="text-sm text-sidebar-foreground/70">
                   {viewModel?.dux_version}
                 </span>
               </div>
