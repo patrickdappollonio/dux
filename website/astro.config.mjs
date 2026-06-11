@@ -5,6 +5,8 @@ import pagefind from "astro-pagefind";
 import { unified } from "@astrojs/markdown-remark";
 import rehypeSlug from "rehype-slug";
 import rehypeAutolinkHeadings from "rehype-autolink-headings";
+import rehypeProseImages from "./src/lib/rehype-prose-images.mjs";
+import remarkGemoji from "remark-gemoji";
 
 export default defineConfig({
   site: "https://getdux.app",
@@ -15,9 +17,17 @@ export default defineConfig({
   //
   // pagefind() builds the static search index on `astro build` (shipped in
   // dist/pagefind/) and serves a prebuilt index during `astro dev`. Only pages
-  // carrying `data-pagefind-body` are indexed — see DocsLayout.astro — so the
-  // index stays scoped to the docs and excludes the marketing homepage.
-  integrations: [mdx(), pagefind(), sitemap()],
+  // carrying `data-pagefind-body` are indexed — the docs (DocsLayout.astro) and
+  // blog posts (BlogLayout.astro) — so the index covers docs and blog while
+  // excluding the marketing homepage.
+  // The sitemap excludes the RSS endpoint (it's a feed, not a page). Draft
+  // posts never reach the sitemap because they're dropped from the production
+  // build entirely (see src/pages/blog/[...slug].astro).
+  integrations: [
+    mdx(),
+    pagefind(),
+    sitemap({ filter: (page) => !page.endsWith("/rss.xml") }),
+  ],
   build: {
     inlineStylesheets: "auto",
   },
@@ -30,6 +40,10 @@ export default defineConfig({
     // Astro 6 deprecated top-level markdown.rehypePlugins/remarkPlugins in
     // favor of a processor built with unified() from @astrojs/markdown-remark.
     processor: unified({
+      // GitHub-style emoji shortcodes (`:smile:` -> 😄) in any Markdown page.
+      // Operates on text nodes only, so shortcodes inside code spans/blocks are
+      // left literal.
+      remarkPlugins: [remarkGemoji],
       rehypePlugins: [
         // Give every heading a stable slug id, then append a clickable "#"
         // anchor so docs headings are linkable. The slug ids also power the
@@ -49,6 +63,9 @@ export default defineConfig({
             content: { type: "element", tagName: "span", properties: {}, children: [] },
           },
         ],
+        // Markdown image upgrades: `#left|#right|#center|#full` alignment via
+        // the URL hash, plus a <picture>/webp wrapper for local raster images.
+        rehypeProseImages,
       ],
     }),
   },

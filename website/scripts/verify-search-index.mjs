@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-// Post-build guard for the docs search index. Run after `astro build` (the
-// Pagefind index is generated into dist/pagefind/). It proves three things so a
-// future change can't silently break or re-scope search:
+// Post-build guard for the search index. Run after `astro build` (the Pagefind
+// index is generated into dist/pagefind/). It proves four things so a future
+// change can't silently break or re-scope search:
 //
 //   1. The Pagefind runtime (pagefind.js) actually shipped.
 //   2. The docs are in the index (at least one /docs URL).
-//   3. The marketing homepage is NOT in the index (docs-only scope holds).
+//   3. The blog is in the index (at least one /blog URL).
+//   4. The marketing homepage is NOT in the index (scope stays docs + blog).
 //
 // Pagefind stores each indexed page as a gzip-compressed JSON "fragment"; we
 // decompress them to read the indexed URLs without booting the WASM runtime.
@@ -75,6 +76,7 @@ for (const file of fragments) {
 
 const norm = (u) => u.replace(/index\.html$/i, "").replace(/\.html$/i, "");
 const isDocs = (u) => norm(u).includes("/docs");
+const isBlog = (u) => norm(u).includes("/blog");
 const isHomepage = (u) => {
   const p = norm(u).split(/[?#]/)[0].replace(/\/+$/, "");
   return p === "" || p === "/";
@@ -87,16 +89,25 @@ if (!urls.some(isDocs)) {
   );
 }
 
-// 3. The homepage must NOT be indexed (docs-only scope).
+// 3. The blog must be indexed.
+if (!urls.some(isBlog)) {
+  fail(
+    `no /blog pages are indexed. Is \`data-pagefind-body\` present on the blog post <article> (BlogLayout.astro)? Indexed URLs: ${JSON.stringify(urls)}`,
+  );
+}
+
+// 4. The homepage must NOT be indexed (scope stays docs + blog).
 const leaked = urls.filter(isHomepage);
 if (leaked.length > 0) {
   fail(
     `the homepage leaked into the search index (${JSON.stringify(
       leaked,
-    )}). Search scope must stay docs-only — only docs pages should carry \`data-pagefind-body\`.`,
+    )}). Search scope must stay docs + blog — only docs and blog pages should carry \`data-pagefind-body\`.`,
   );
 }
 
+const docsCount = urls.filter(isDocs).length;
+const blogCount = urls.filter(isBlog).length;
 console.log(
-  `verify-search-index: OK — ${urls.length} docs page(s) indexed, homepage excluded.`,
+  `verify-search-index: OK — ${docsCount} docs + ${blogCount} blog page(s) indexed, homepage excluded.`,
 );

@@ -124,6 +124,7 @@ const sd = {
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/site.webmanifest" />
     <link rel="sitemap" type="application/xml" href="/sitemap-index.xml" />
+    <link rel="alternate" type="application/rss+xml" title="dux blog" href="/rss.xml" />
 
     {/* Open Graph */}
     <meta property="og:type" content="website" />
@@ -182,8 +183,8 @@ const sd = {
   <body class="text-[color:var(--color-text)]">
     <slot />
 
-    {/* Global docs search modal. Opened from the header button or Cmd/Ctrl-K;
-        the Pagefind engine is lazy-loaded only when first opened. */}
+    {/* Global search modal (docs + blog). Opened from the header button or
+        Cmd/Ctrl-K; the Pagefind engine is lazy-loaded only when first opened. */}
     <DocsSearch />
 
     {/* Mark every off-site link: open in a new tab, harden rel, and (for
