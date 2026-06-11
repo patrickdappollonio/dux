@@ -1,0 +1,55 @@
+---
+// "Latest from the blog" teaser for the homepage. Shows the most recent few
+// published posts; renders nothing at all when the blog is empty so the
+// homepage never shows a hollow section.
+import { getPublishedPosts } from "../lib/blog";
+import PostMeta from "./PostMeta.astro";
+
+const posts = (await getPublishedPosts()).slice(0, 3);
+---
+
+{
+  posts.length > 0 && (
+    <section class="anchor-offset py-16 sm:py-24">
+      <div class="container-app">
+        <div class="flex flex-wrap items-end justify-between gap-4">
+          <div class="max-w-2xl">
+            <span class="pill">▸ from the blog</span>
+            <h2 class="heading mt-3 text-3xl font-bold tracking-tight sm:text-4xl">
+              Latest <span class="text-[color:var(--color-accent)]">updates</span>
+            </h2>
+            <p class="mt-4 text-[color:var(--color-muted)] leading-relaxed">
+              Release notes, what's being worked on, and the occasional deep dive.
+            </p>
+          </div>
+          <a
+            href="/blog"
+            class="inline-flex items-center gap-1.5 text-sm font-medium text-[color:var(--color-accent)] hover:text-[color:var(--color-accent-soft)]"
+          >
+            Read the blog
+            <span aria-hidden="true">→</span>
+          </a>
+        </div>
+
+        <div class="mt-8 grid gap-4 sm:grid-cols-3">
+          {posts.map((post) => (
+            <div class="card relative flex flex-col p-5 transition-colors hover:border-[color:var(--color-accent)]/50">
+              <PostMeta pubDate={post.data.pubDate} author={post.data.author} />
+              <div class="heading mt-1.5 font-semibold text-[color:var(--color-text)]">
+                <a
+                  href={`/blog/${post.id}`}
+                  class="transition-colors after:absolute after:inset-0 after:content-[''] hover:text-[color:var(--color-accent)]"
+                >
+                  {post.data.title}
+                </a>
+              </div>
+              <p class="mt-1.5 text-sm text-[color:var(--color-muted)]">
+                {post.data.description}
+              </p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  )
+}
