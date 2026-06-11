@@ -29,9 +29,15 @@ analytics, no JSON-RPC, no background uploads.
 
 ### Which AI tools can I use?
 
-Claude Code, Codex, OpenCode, and Gemini are wired in out of the box, and any
+Claude Code, Codex, and OpenCode are wired in out of the box, and any
 other CLI that supports an interactive session and a headless one-shot mode can
 be added. See [Custom CLI Agents](/docs/custom-agents).
+
+### Why was the Gemini provider removed?
+
+[Google deprecated the Gemini CLI](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/),
+so dux no longer ships it as a built-in provider. If a worktree was still pinned
+to Gemini, dux won't launch it — switch it to a supported provider and relaunch.
 
 ### How do I add my own CLI as an agent?
 

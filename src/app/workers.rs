@@ -2375,6 +2375,30 @@ pub(crate) fn run_create_agent_job(
         updated_at: Utc::now(),
     };
     let provider_cfg = provider_config(&config, &session.provider);
+    // A provider must be configured to launch. A worktree pinned to one that
+    // isn't (e.g. a retired default like Gemini after its stock block is pruned)
+    // is refused rather than spawned as a bare command from PATH.
+    if config.providers.get(session.provider.as_str()).is_none() {
+        let name = session.provider.as_str();
+        let message = format!(
+            "Can't create agent \"{}\": provider \"{name}\" isn't configured. Add a \
+             [providers.{name}] block to config.toml, or change the project's provider.",
+            session.branch_name
+        );
+        logger::error(&format!(
+            "provider not configured for {}: {message}",
+            session.id
+        ));
+        if owns_worktree {
+            let _ = git::remove_worktree(
+                &repo_path,
+                Path::new(&session.worktree_path),
+                &session.branch_name,
+            );
+        }
+        let _ = worker_tx.send(WorkerEvent::CreateAgentFailed(message));
+        return;
+    }
     if let Err(hint) = check_provider_available(&provider_cfg) {
         logger::error(&format!("provider not found for {}: {hint}", session.id));
         if owns_worktree {
@@ -3095,6 +3119,87 @@ mod tests {
             _ => panic!("expected pre-create pull failure"),
         }
         assert!(worker_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn create_worker_refuses_provider_not_in_config() {
+        // A project pinned to a provider that isn't configured (the state a
+        // project is left in after a default like Gemini is retired and its
+        // stock block pruned). dux must refuse rather than spawn a bare command
+        // from PATH, and must point the user at config.
+        let repo = tempdir().expect("repo tempdir");
+        run_git(repo.path(), &["init", "-b", "main"]);
+        run_git(repo.path(), &["config", "user.email", "test@example.com"]);
+        run_git(repo.path(), &["config", "user.name", "Test"]);
+        std::fs::write(repo.path().join("README.md"), "hi").expect("seed file");
+        run_git(repo.path(), &["add", "."]);
+        run_git(repo.path(), &["commit", "-m", "init"]);
+
+        let work = tempdir().expect("work tempdir");
+        let paths = DuxPaths {
+            config_path: work.path().join("config.toml"),
+            sessions_db_path: work.path().join("sessions.sqlite3"),
+            worktrees_root: work.path().join("worktrees"),
+            lock_path: work.path().join("dux.lock"),
+            root: work.path().to_path_buf(),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).expect("worktrees root");
+
+        let project = Project {
+            id: "project-1".to_string(),
+            name: "demo".to_string(),
+            path: repo.path().to_string_lossy().to_string(),
+            explicit_default_provider: None,
+            default_provider: ProviderKind::from_str("no-such-provider"),
+            leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: Default::default(),
+            current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Unknown,
+            path_missing: false,
+        };
+
+        let config = Config::default();
+        assert!(
+            config.providers.get("no-such-provider").is_none(),
+            "precondition: the pinned provider must be unconfigured"
+        );
+
+        let (worker_tx, worker_rx) = mpsc::channel();
+        run_create_agent_job(
+            CreateAgentRequest::NewProject {
+                project,
+                custom_name: Some("agent-branch".to_string()),
+                use_existing_branch: false,
+                pull_before_create: false,
+            },
+            paths,
+            config,
+            worker_tx,
+            (80, 24),
+        );
+
+        let mut failure = None;
+        loop {
+            match worker_rx.recv() {
+                Ok(WorkerEvent::CreateAgentFailed(message)) => {
+                    failure = Some(message);
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        let message = failure.expect("expected a create failure for the unconfigured provider");
+        assert!(
+            message.contains("no-such-provider"),
+            "failure should name the provider, got: {message}"
+        );
+        assert!(
+            message.contains("config.toml"),
+            "failure should point the user at config, got: {message}"
+        );
     }
 
     #[test]
