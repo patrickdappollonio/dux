@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
-    "build": "node scripts/copy-install.mjs && astro build",
+    "build": "node scripts/copy-install.mjs && node scripts/generate-webp.mjs && astro build",
     "preview": "astro preview",
     "astro": "astro",
     "test": "vitest run",
@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@astrojs/mdx": "^6.0.1",
+    "@astrojs/rss": "^4.0.18",
     "@astrojs/sitemap": "^3.7.3",
     "@tailwindcss/postcss": "^4.3.0",
     "astro": "^6.4.3",
@@ -21,6 +22,8 @@
     "pagefind": "^1.5.2",
     "rehype-autolink-headings": "^7.1.0",
     "rehype-slug": "^6.0.0",
+    "remark-gemoji": "^8.0.0",
+    "sharp": "^0.34.5",
     "tailwindcss": "^4.3.0"
   },
   "devDependencies": {
