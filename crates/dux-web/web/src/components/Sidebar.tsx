@@ -14,6 +14,7 @@ import {
 import { CSS } from "@dnd-kit/utilities"
 import {
   Bot,
+  ClipboardCopy,
   Cpu,
   Download,
   Ellipsis,
@@ -39,6 +40,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import type * as React from "react"
+import { copyToClipboard } from "@/lib/clipboard"
 import { git } from "@/lib/git"
 
 import { AgentBeam } from "@/components/AgentBeam"
@@ -376,6 +378,18 @@ function SessionSubItem({
             <DropdownMenuItem onClick={() => openEditor(session.id)}>
               <FileCode2 />
               Open editor
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => {
+                void copyToClipboard(session.worktree_path).then((ok) =>
+                  ok
+                    ? toast.success("Copied local path to clipboard")
+                    : toast.error("Couldn't copy the path"),
+                )
+              }}
+            >
+              <ClipboardCopy />
+              Copy local path
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => createTerminal(session.id)}>

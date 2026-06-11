@@ -524,41 +524,65 @@ pub fn remove_worktree(
     })
 }
 
-/// List every file in the worktree that git considers — tracked plus untracked
-/// files that are NOT ignored (`git ls-files --cached --others --exclude-standard`).
-/// Paths are worktree-relative, NUL-parsed (so spaces/Unicode/newlines are safe),
-/// sorted and deduped. Excludes `.git/` internals and gitignored files, giving a
-/// clean browsable set for the editor's file tree. Editing is gated separately by
+/// List the worktree's browsable files for the editor tree: tracked files, plus
+/// untracked-not-ignored files, plus "loose" gitignored FILES (e.g. `.env`, a
+/// local config, a generated file you want to tweak). Paths are worktree-relative,
+/// NUL-parsed (so spaces/Unicode/newlines are safe), sorted and deduped.
+///
+/// Ignored files are surfaced because the editor edits the worktree, not git's
+/// changed set. A WHOLLY-ignored DIRECTORY (every entry ignored, e.g.
+/// `node_modules`, `target`, `dist`) is collapsed by `--directory` to a single
+/// `dir/` entry which we drop, so build output doesn't flood the tree. Ignored
+/// files sitting in a directory that ALSO has tracked content (a stray `*.log` or
+/// `.env` next to source) are not collapsed and appear individually — like the
+/// tracked/untracked listing itself, this set is uncapped, so a repo with
+/// thousands of such scattered ignored files will list them all. `.git/`
+/// internals are never listed by `ls-files`. Editing is gated separately by
 /// [`resolve_worktree_path`] containment, so a path need not appear here to be
 /// editable (e.g. a brand-new, uncommitted file).
 pub fn worktree_files(worktree_path: &Path) -> Result<Vec<String>> {
     let wt = worktree_path.to_string_lossy();
-    let output = Command::new("git")
-        .args([
-            "-C",
-            wt.as_ref(),
-            "ls-files",
-            "--cached",
+    // Tracked + untracked-not-ignored — the bulk of the set. Required.
+    let mut files = ls_files(&wt, &["--cached", "--others", "--exclude-standard", "-z"])?;
+    // Loose ignored files. Best-effort: a failure here (e.g. an older git) must
+    // not blank the whole listing. `--directory` collapses a fully-ignored dir to
+    // a single `dir/` entry, which we drop, so node_modules/target/etc. don't
+    // flood the tree; ignored files outside such a dir come through as real paths.
+    if let Ok(ignored) = ls_files(
+        &wt,
+        &[
             "--others",
+            "--ignored",
             "--exclude-standard",
+            "--directory",
             "-z",
-        ])
-        .output()?;
+        ],
+    ) {
+        files.extend(ignored.into_iter().filter(|p| !p.ends_with('/')));
+    }
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+/// Run `git -C <wt> ls-files <extra...>` and NUL-parse the output into
+/// worktree-relative paths. `extra` must include `-z` for the NUL parsing below.
+fn ls_files(wt: &str, extra: &[&str]) -> Result<Vec<String>> {
+    let mut args = vec!["-C", wt, "ls-files"];
+    args.extend_from_slice(extra);
+    let output = Command::new("git").args(&args).output()?;
     if !output.status.success() {
         return Err(anyhow!(
             "git ls-files failed: {}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    let mut files: Vec<String> = output
+    Ok(output
         .stdout
         .split(|b| *b == 0)
         .filter(|s| !s.is_empty())
         .map(|s| String::from_utf8_lossy(s).into_owned())
-        .collect();
-    files.sort();
-    files.dedup();
-    Ok(files)
+        .collect())
 }
 
 pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<ChangedFile>)> {
@@ -1411,7 +1435,7 @@ mod tests {
     }
 
     #[test]
-    fn worktree_files_lists_tracked_and_untracked_but_not_ignored() {
+    fn worktree_files_lists_tracked_untracked_and_loose_ignored_but_collapses_ignored_dirs() {
         let repo = init_test_repo();
         let p = repo.path();
         let g = |args: &[&str]| {
@@ -1422,19 +1446,40 @@ mod tests {
                 .unwrap();
         };
         std::fs::write(p.join("tracked.txt"), "a").unwrap();
-        g(&["add", "tracked.txt"]);
+        std::fs::create_dir(p.join("src")).unwrap();
+        std::fs::write(p.join("src/main.rs"), "fn main() {}").unwrap();
+        g(&["add", "tracked.txt", "src/main.rs"]);
         g(&["commit", "-m", "add tracked"]);
         std::fs::write(p.join("untracked.txt"), "b").unwrap();
-        std::fs::write(p.join(".gitignore"), "ignored.txt\n").unwrap();
+        // Ignore a loose file, an entire directory, AND a glob that matches a file
+        // sitting in an otherwise-tracked directory (src/).
+        std::fs::write(p.join(".gitignore"), "ignored.txt\nnode_modules/\n*.log\n").unwrap();
         std::fs::write(p.join("ignored.txt"), "c").unwrap();
+        std::fs::create_dir(p.join("node_modules")).unwrap();
+        std::fs::write(p.join("node_modules/dep.js"), "d").unwrap();
+        std::fs::write(p.join("src/debug.log"), "e").unwrap();
 
         let files = worktree_files(p).unwrap();
         assert!(files.contains(&"tracked.txt".to_string()));
         assert!(files.contains(&"untracked.txt".to_string()));
         assert!(files.contains(&".gitignore".to_string()));
+        // A loose gitignored FILE is now surfaced so the editor can open it.
         assert!(
-            !files.contains(&"ignored.txt".to_string()),
-            "gitignored file must be excluded: {files:?}"
+            files.contains(&"ignored.txt".to_string()),
+            "loose ignored file should be listed: {files:?}"
+        );
+        // An ignored file inside a directory that ALSO has tracked content is not
+        // collapsed (only wholly-ignored dirs are) — so it is listed too.
+        assert!(
+            files.contains(&"src/debug.log".to_string()),
+            "ignored file in a partially-tracked dir should be listed: {files:?}"
+        );
+        // A fully-ignored DIRECTORY is collapsed out by `--directory` (and the
+        // collapsed `node_modules/` entry is dropped), so its contents never
+        // flood the tree.
+        assert!(
+            !files.iter().any(|f| f.starts_with("node_modules")),
+            "ignored directory contents must be collapsed out: {files:?}"
         );
         assert!(
             !files.iter().any(|f| f.starts_with(".git/")),

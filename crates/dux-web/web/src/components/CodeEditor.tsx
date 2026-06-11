@@ -73,6 +73,10 @@ export default function CodeEditor({
       options={{
         // 14px matches the app's text-sm body size; 13 read as too small.
         fontSize: 14,
+        // A touch more than Monaco's default (~1.35–1.5×) for breathing room
+        // between lines. Values below 8 are taken as a multiple of the font size
+        // (8 and up are absolute pixels), so 1.6 → 1.6 × 14 ≈ 22px.
+        lineHeight: 1.6,
         // Wrap long lines: Monaco keeps the line number on the first row, blanks
         // continuation rows, and indents wrapped text under the code (mirrors the
         // TUI diff wrapping). No horizontal scroll for overflowing lines.
