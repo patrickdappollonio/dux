@@ -1,6 +1,7 @@
 ---
-// Docs search modal. Mounted once globally in Layout.astro and opened from the
-// header button (which dispatches the `open-search` event) or via the
+// Site search modal — covers the docs and the blog (every page that carries
+// `data-pagefind-body`). Mounted once globally in Layout.astro and opened from
+// the header button (which dispatches the `open-search` event) or via the
 // Cmd/Ctrl-K and "/" shortcuts. The Pagefind engine is dynamically imported
 // only on first open, so pages that never search ship none of it.
 //
@@ -16,7 +17,7 @@
     aria-modal="true"
     aria-labelledby="docs-search-label"
   >
-    <h2 id="docs-search-label" class="sr-only">Search the documentation</h2>
+    <h2 id="docs-search-label" class="sr-only">Search across documentation and blog posts</h2>
 
     <div class="search-input-row">
       <svg
@@ -37,7 +38,7 @@
         id="docs-search-input"
         type="search"
         class="search-input"
-        placeholder="Search the docs…"
+        placeholder="Search across documentation and blog posts"
         autocomplete="off"
         autocorrect="off"
         autocapitalize="off"
@@ -58,7 +59,7 @@
       role="status"
       aria-live="polite"
     >
-      Type to search the docs.
+      Type to search the docs and the blog.
     </div>
 
     <ul
@@ -99,6 +100,23 @@
     let selected = -1; // index into the flat list of selectable anchors
     let lastFocused: HTMLElement | null = null;
     let searchToken = 0; // guards against out-of-order async responses
+
+    // Sassy prompt-state lines, rotated one at a time so the empty search box
+    // always has a bit of dux personality. Sequential (not random) so the same
+    // line never repeats back to back.
+    const DUX_FACTS = [
+      "Type to search the docs and the blog. dux runs your agents in parallel, one git worktree each.",
+      "Looking for something? dux spawns real CLIs in real PTYs. No protocol layer, no JSON-RPC, no nonsense.",
+      "Search away. And yes, it really is pronounced dooks.",
+      "Start typing. dux can write your commit messages too, so you don't have to.",
+      "Find your answer here while dux juggles Claude, Codex, Gemini, and OpenCode side by side.",
+      "Type to begin. dux is a Rust TUI, so it sips RAM while the agents do the heavy lifting.",
+    ];
+    let factIndex = 0;
+    function promptStatus() {
+      setStatus(DUX_FACTS[factIndex % DUX_FACTS.length]);
+      factIndex += 1;
+    }
 
     const isOpen = () => !overlay.hasAttribute("hidden");
 
@@ -225,7 +243,7 @@
       const trimmed = query.trim();
       if (trimmed === "") {
         clearResults();
-        setStatus("Type to search the docs.");
+        promptStatus();
         return;
       }
 
@@ -235,7 +253,7 @@
 
       if (!pf) {
         clearResults();
-        setStatus("Search index isn't built yet — run `npm run build`.");
+        setStatus("Search index isn't built yet. Run `npm run build` first.");
         return;
       }
 
@@ -259,6 +277,8 @@
       lastFocused = document.activeElement as HTMLElement | null;
       overlay!.removeAttribute("hidden");
       document.body.style.overflow = "hidden";
+      // Fresh sassy line each time the box opens.
+      promptStatus();
       // Warm the engine up so the first keystroke feels instant.
       void loadPagefind();
       requestAnimationFrame(() => {
@@ -273,7 +293,7 @@
       document.body.style.overflow = "";
       input!.value = "";
       clearResults();
-      setStatus("Type to search the docs.");
+      promptStatus();
       lastFocused?.focus?.();
     }
 

@@ -3,13 +3,14 @@ const nav = [
   { href: "/#demo", label: "Demo" },
   { href: "/#features", label: "Features" },
   { href: "/docs", label: "Docs" },
+  { href: "/blog", label: "Blog" },
   { href: "/#install", label: "Install" },
   { href: "https://github.com/patrickdappollonio/dux", label: "GitHub", external: true },
 ];
 ---
 
 <header class="sticky top-0 z-50 border-b border-[color:var(--color-border-soft)] bg-[color:var(--color-ink)]/70 backdrop-blur-xl">
-  <div class="container-app flex h-14 items-center justify-between gap-3">
+  <div class="container-app flex h-14 items-center gap-3">
     <a href="/" class="flex items-center gap-2.5 group min-w-0">
       <img
         src="/dux-logo.png"
@@ -23,37 +24,44 @@ const nav = [
       </span>
     </a>
 
-    <div class="flex items-center gap-1.5">
-      {/* Opens the global docs search modal (see DocsSearch.astro). Also bound
-          to Cmd/Ctrl-K and "/". Icon-only on small screens; the label and
-          shortcut hint appear at lg, where the inline nav also has room. */}
-      <button
-        type="button"
-        data-open-search
-        aria-label="Search the documentation"
-        aria-keyshortcuts="Meta+K Control+K"
-        class="inline-flex h-9 w-9 items-center justify-center gap-2 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-panel)]/60 text-sm text-[color:var(--color-muted)] transition-colors hover:border-[color:var(--color-accent)]/50 hover:text-[color:var(--color-text)] lg:w-auto lg:justify-start lg:px-2.5"
+    {/* Opens the global search modal (docs + blog; see DocsSearch.astro). Also
+        bound to Cmd/Ctrl-K and "/". Icon-only on small screens; the label and
+        shortcut hint appear at lg. `lg:mx-auto` gives it auto margins on both
+        sides so it centres in the free space between the logo and the nav
+        (without forcing either to a fixed width and squeezing the links); on
+        small screens `ml-auto` parks it next to the hamburger. */}
+    <button
+      type="button"
+      data-open-search
+      aria-label="Search docs and blog"
+      aria-keyshortcuts="Meta+K Control+K"
+      class="ml-auto inline-flex h-9 w-9 items-center justify-center gap-2 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-panel)]/60 text-sm text-[color:var(--color-muted)] transition-colors hover:border-[color:var(--color-accent)]/50 hover:text-[color:var(--color-text)] lg:mx-auto lg:w-auto lg:justify-start lg:px-2.5"
+    >
+      <svg
+        class="h-4 w-4 shrink-0"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
       >
-        <svg
-          class="h-4 w-4 shrink-0"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <circle cx="11" cy="11" r="8"></circle>
-          <path d="m21 21-4.3-4.3"></path>
-        </svg>
-        <span class="hidden lg:inline">Search docs</span>
-        <kbd
-          class="mono hidden rounded border border-[color:var(--color-border)] bg-[color:var(--color-panel-2)] px-1.5 py-0.5 text-[10px] text-[color:var(--color-dim)] lg:inline"
-          aria-hidden="true">⌘K</kbd
-        >
-      </button>
+        <circle cx="11" cy="11" r="8"></circle>
+        <path d="m21 21-4.3-4.3"></path>
+      </svg>
+      <span class="hidden lg:inline">Search</span>
+      <kbd
+        class="mono hidden rounded border border-[color:var(--color-border)] bg-[color:var(--color-panel-2)] px-1.5 py-0.5 text-[10px] text-[color:var(--color-dim)] lg:inline"
+        aria-hidden="true">⌘K</kbd
+      >
+    </button>
 
+    {/* Right cluster: the desktop nav and (on small screens) the hamburger.
+        Natural width — the search button's auto margins center it in the gap to
+        the left of this cluster, so the nav keeps its full width and the links
+        never get squeezed. */}
+    <div class="flex items-center gap-1.5">
       {/* Full inline nav — desktop only. Below lg it collapses into the
           hamburger menu so the bar never crowds or wraps. */}
       <nav class="hidden items-center gap-1 lg:flex">

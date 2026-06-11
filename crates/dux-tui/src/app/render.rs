@@ -1251,6 +1251,19 @@ impl App {
                                 .fg(self.theme.input_cursor_fg)
                                 .bg(self.theme.prompt_cursor),
                         );
+                        // Move the real terminal cursor onto the embedded PTY
+                        // cursor cell. IME composition popups (e.g. a Korean
+                        // IME) are drawn by the terminal/OS at the hardware
+                        // cursor; without this the composing character appears
+                        // at the terminal origin instead of the agent prompt
+                        // (issue #258). The styled cell above keeps the block
+                        // cursor look; this aligns the hardware cursor with it.
+                        //
+                        // This must stay the last use of `buf` in this block:
+                        // `set_cursor_position` reborrows `frame`, which is only
+                        // valid because the `buf = frame.buffer_mut()` borrow
+                        // above has ended. Do not add `buf[...]` accesses below.
+                        frame.set_cursor_position((cx, cy));
                     }
                 }
 
