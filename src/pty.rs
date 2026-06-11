@@ -96,6 +96,9 @@ pub struct PtyClient {
     /// the terminal parser on resume. Bounded by `PAUSE_BUFFER_CAP`; oldest
     /// bytes are dropped on overflow.
     pending_bytes: Arc<Mutex<PendingIngest>>,
+    /// Handle to the background reader thread. Joined in `Drop` (after the
+    /// child is killed and reaped) so the thread does not outlive the client.
+    reader_thread: Option<thread::JoinHandle<()>>,
 }
 
 #[derive(Default)]
@@ -181,7 +184,7 @@ impl PtyClient {
         let received_data_ref = Arc::clone(&received_data);
         let scroll_paused_ref = Arc::clone(&scroll_paused);
         let pending_bytes_ref = Arc::clone(&pending_bytes);
-        thread::spawn(move || {
+        let reader_thread = thread::spawn(move || {
             Self::reader_loop(
                 reader,
                 terminal_ref,
@@ -207,6 +210,7 @@ impl PtyClient {
             last_resize_at: Mutex::new(None),
             scroll_paused,
             pending_bytes,
+            reader_thread: Some(reader_thread),
         })
     }
 
@@ -532,7 +536,16 @@ impl PtyClient {
 
 impl Drop for PtyClient {
     fn drop(&mut self) {
+        // Kill the child, then reap it so it does not linger as a zombie.
         let _ = self.child.kill();
+        let _ = self.child.wait();
+        // The child is dead, so the PTY slave is closed and the reader thread
+        // observes EOF (or a read error) and returns. Join it so the thread
+        // does not outlive this client — otherwise detached reader threads
+        // accumulate across a long session and across the test suite.
+        if let Some(handle) = self.reader_thread.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -1254,6 +1267,26 @@ mod tests {
         panic!(
             "expected custom env output, got {:?}",
             viewport_lines(&snapshot)
+        );
+    }
+
+    #[test]
+    fn drop_kills_child_and_joins_reader_without_hanging() {
+        // The child sleeps far longer than the test. Drop must kill + reap it
+        // and join the reader thread promptly — it must NOT block until the
+        // child would have exited on its own, and the join must not deadlock.
+        let args = vec!["-c".to_string(), "sleep 120".to_string()];
+        let client =
+            PtyClient::spawn("/bin/sh", &args, Path::new("."), 5, 40, 100).expect("spawn pty");
+
+        let start = Instant::now();
+        drop(client);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "PtyClient::drop took {elapsed:?}; it must kill the child and join \
+             the reader thread promptly, not wait for the child to finish"
         );
     }
 
