@@ -64,67 +64,47 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     75% { transform: translateY(10%); }
 }
 
-/* A faint constant-length light that crawls the LEFT edge of a working agent's
-   row and races the other three sides, fading in and out each lap so it reads as
-   a barely-there pulse rather than a constant ring. Implemented as an SVG rect
-   outline with one dash — the dash length is measured in PATH LENGTH (not angle),
-   so the comet stays the SAME length the whole way around, corners included (a
-   conic-gradient arc, by contrast, stretched badly on a wide/short row).
-   `pathLength="100"` normalizes the perimeter to 100 units. */
+/* A soft band of light that sweeps LEFT → RIGHT across a working agent's row,
+   over a faint static outline, so the "working" state reads at a glance next to
+   the bouncing Bot icon. The sweep loops while the agent works; when it stops,
+   AgentBeam keeps the row mounted until the current pass finishes (it unmounts on
+   the next animation-iteration), so the light never freezes mid-name. Colors are
+   theme-driven (`--primary`); the row clips the beam to its rounded corners. */
 .agent-beam {
     position: absolute;
     inset: 0;
-    /* An inline <svg> is a replaced element — insets alone won't stretch it (it
-       falls back to its intrinsic size and ends up a small box over the icon).
-       Explicit 100%/100% makes it fill the whole row. */
-    width: 100%;
-    height: 100%;
+    border-radius: 6px;
     pointer-events: none;
+    overflow: hidden;
+    /* Faint static outline so the row still reads as active between sweeps and
+       under reduced motion (where the sweep below is disabled). */
+    box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 30%, transparent);
 }
-.agent-beam rect {
-    /* Inset the RECT (not the SVG) by 1px so the centered 1.5px stroke stays
-       inside the row, and round the corners to match it. (CSS geometry props;
-       the element's width/height="100%" attributes are the fallback.) */
-    x: 1px;
-    y: 1px;
-    width: calc(100% - 2px);
-    height: calc(100% - 2px);
-    rx: 6px;
-    fill: none;
-    stroke: none;
-    stroke-width: 1.5px;
-    stroke-linecap: round;
-    stroke-dasharray: 10 90; /* a short 10%-of-perimeter comet + the rest as gap */
-}
-
-/* The rect outline is drawn top → right → bottom → LEFT, so the left edge is the
-   final slice of the perimeter. `--beam-left-start` (set per row in AgentBeam.tsx
-   from the measured aspect ratio) is where that slice begins; spending HALF the
-   lap from there to the end (-100) makes the comet crawl the left edge slowly and
-   race the other three sides in the other half. The default matches a square row. */
-@keyframes agent-beam-travel {
-    0% { stroke-dashoffset: 0; }
-    50% { stroke-dashoffset: calc(-1 * var(--beam-left-start, 75)); }
-    100% { stroke-dashoffset: -100; }
+.agent-beam-light {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -35%;
+    width: 35%;
+    /* A soft beam, transparent at both edges so it fades in/out as it crosses. */
+    background: linear-gradient(
+        90deg,
+        transparent,
+        color-mix(in oklch, var(--primary) 55%, transparent),
+        transparent
+    );
 }
 
-/* Fade in as the comet is born and out as it dies, every lap, so the effect is a
-   gentle pulse and stays barely noticeable (peak ~22% opacity). */
-@keyframes agent-beam-fade {
-    0%, 100% { stroke-opacity: 0; }
-    15%, 85% { stroke-opacity: 0.22; }
+/* `left` from fully off the left edge to fully off the right — ratio-independent
+   (percent of the row), so it traverses cleanly on any row width. */
+@keyframes agent-beam-sweep {
+    from { left: -35%; }
+    to { left: 100%; }
 }
 
 @media (prefers-reduced-motion: no-preference) {
-    .agent-beam rect {
-        stroke: var(--primary);
-        /* ease-in-out on the travel brings velocity to ~0 at each keyframe stop
-           (top-left seam AND the bottom-left corner where fast→slow meet), so
-           there's no abrupt jolt as the comet hands off from the fast lap to the
-           slow left crawl — it decelerates in and accelerates out smoothly. */
-        animation:
-            agent-beam-travel 2.4s ease-in-out infinite,
-            agent-beam-fade 2.4s ease-in-out infinite;
+    .agent-beam-light {
+        animation: agent-beam-sweep 1.5s linear infinite;
     }
 }
 

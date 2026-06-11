@@ -128,7 +128,7 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
       {/* File path — monospace (it's a path/code identifier). Long paths
           ellipsize at the START (direction:rtl) so the filename at the end stays
           visible; text-left keeps short paths normally left-aligned. */}
-      <span className="min-w-0 flex-1 truncate text-left font-mono text-xs text-foreground [direction:rtl]">
+      <span className="min-w-0 flex-1 truncate text-left font-mono text-sm text-foreground [direction:rtl]">
         {file.path}
       </span>
 
