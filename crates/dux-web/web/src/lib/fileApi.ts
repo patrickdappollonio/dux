@@ -2,10 +2,12 @@
 // copy. Request/response (like `git.ts`) so the editor can await the content,
 // show per-file loading/saving state, and surface a real error message.
 //
-// The server validates every request (session resolution + that the path is a
-// real git-changed file inside the worktree, plus an independent path-escape and
-// binary/size guard), so the UI never has to. A write triggers an engine
-// changed-files recompute that reaches every client over the WebSocket.
+// The server validates every request (session resolution + that the path stays
+// inside the worktree root — a path-escape/`.git`/symlink guard — plus a
+// binary/size guard), so the UI never has to. There is NO git-tracked/changed
+// gate: any path inside the worktree is editable, ignored or not. A write
+// triggers an engine changed-files recompute that reaches every client over the
+// WebSocket.
 
 export interface WorktreeFile {
   path: string
@@ -45,9 +47,10 @@ async function postFileNoContent(
 }
 
 export const fileApi = {
-  // The worktree's git-relevant files (tracked + untracked-not-ignored) for the
-  // editor's browse tree. Editing is NOT limited to this set — any path inside
-  // the worktree can be read/written/created (the server enforces containment).
+  // The worktree's browsable files for the editor tree: tracked, untracked, and
+  // loose gitignored files (fully-ignored dirs like node_modules are collapsed
+  // out server-side). Editing is NOT limited to this set — any path inside the
+  // worktree can be read/written/created (the server enforces containment).
   list: (sessionId: string) =>
     postFile<{ files: string[] }>("/api/file/list", {
       session_id: sessionId,
@@ -60,4 +63,12 @@ export const fileApi = {
       path,
       content,
     }),
+  // Open the file in a locally-installed GUI editor (server-side spawn) and
+  // resolve with the chosen editor's label for a toast. Only useful when the
+  // server is the user's own machine — the UI gates this to local-access URLs.
+  openInEditor: (sessionId: string, path: string) =>
+    postFile<{ editor: string }>("/api/file/open-in-editor", {
+      session_id: sessionId,
+      path,
+    }).then((r) => r.editor),
 }

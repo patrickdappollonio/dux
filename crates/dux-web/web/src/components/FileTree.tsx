@@ -72,13 +72,13 @@ function TreeItem({
           )}
         >
           <FileIcon className="size-3.5 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 flex-1 truncate font-mono text-xs">
+          <span className="min-w-0 flex-1 truncate font-mono text-sm">
             {node.name}
           </span>
           {glyph && (
             <Badge
               variant="outline"
-              className="shrink-0 font-mono text-[10px] leading-none"
+              className="shrink-0 font-mono text-xs leading-none"
             >
               {glyph}
             </Badge>
@@ -126,7 +126,7 @@ function FolderItem({
             open && "rotate-90",
           )}
         />
-        <span className="min-w-0 flex-1 truncate text-xs font-medium">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">
           {node.name}
         </span>
       </button>

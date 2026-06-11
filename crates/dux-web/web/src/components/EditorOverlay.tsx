@@ -1,16 +1,29 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react"
-import { FileCode2, FilePlus, Loader2, Save, Search, X } from "lucide-react"
+import {
+  ExternalLink,
+  Eye,
+  FileCode2,
+  FilePlus,
+  Loader2,
+  Pencil,
+  Save,
+  Search,
+  X,
+} from "lucide-react"
 import { toast } from "sonner"
 import { fileApi } from "@/lib/fileApi"
 import type { WorktreeFile } from "@/lib/fileApi"
 import { shouldShowChangedFiles, statusGlyph } from "@/lib/changedFiles"
 import { ancestorDirs, buildFileTree } from "@/lib/fileTree"
+import { isLocalAccessHost } from "@/lib/localAccess"
+import { isMarkdownPath } from "@/lib/markdown"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { FileTree } from "@/components/FileTree"
+import { SimpleTooltip } from "@/components/SimpleTooltip"
 import {
   Dialog,
   DialogContent,
@@ -26,6 +39,9 @@ import { closeEditor, useDux } from "@/lib/store"
 // Monaco is multiple MB; keep it off the main bundle by loading it only when the
 // editor actually opens.
 const CodeEditor = lazy(() => import("./CodeEditor"))
+// react-markdown is only needed when previewing a markdown file — lazy-load it
+// into its own chunk so it never weighs on the main bundle or the editor open.
+const MarkdownPreview = lazy(() => import("./MarkdownPreview"))
 
 // Cap how many results the search list renders so a 1-char query in a huge repo
 // can't mount thousands of rows.
@@ -102,10 +118,23 @@ function EditorBody({ sessionId, initialPath, closeReqRef }: EditorBodyProps) {
   const [newFileOpen, setNewFileOpen] = useState(false)
   const [newFilePath, setNewFilePath] = useState("")
   const [creating, setCreating] = useState(false)
+  // Markdown preview toggle: render the buffer instead of the Monaco editor.
+  const [preview, setPreview] = useState(false)
+  // "Open in editor" request in flight.
+  const [openingEditor, setOpeningEditor] = useState(false)
   // Monotonic token so a slow earlier read can never clobber a later one.
   const reqId = useRef(0)
 
   const dirty = openPath !== null && !binary && draft !== loaded
+  const isMarkdown = openPath !== null && isMarkdownPath(openPath)
+  // Markdown preview is available only for a loaded, non-binary markdown file —
+  // one source of truth for both the toggle button and the render branch below.
+  const canPreview = isMarkdown && !loading && !binary
+  const showPreview = preview && canPreview
+  // "Open in editor" spawns a GUI editor on the SERVER, so it only helps when the
+  // server is the user's own machine. Enable for local-access URLs; for remote
+  // URLs keep the button but disable it with an explanatory tooltip.
+  const localAccess = isLocalAccessHost(window.location.hostname)
 
   // Badge the tree's changed files. Sourced from the (watched) changed-files
   // broadcast, guarded so a different session's list never leaks in.
@@ -188,6 +217,9 @@ function EditorBody({ sessionId, initialPath, closeReqRef }: EditorBodyProps) {
     setOpenPath(path)
     setLoading(true)
     setBinary(false)
+    // A fresh file starts in edit mode (the previous file may have been markdown
+    // shown as a preview; the new one might not be markdown at all).
+    setPreview(false)
     fileApi
       .read(sessionId, path)
       .then((f) => applyLoaded(token, f))
@@ -247,6 +279,22 @@ function EditorBody({ sessionId, initialPath, closeReqRef }: EditorBodyProps) {
       .finally(() => setSaving(false))
   }
 
+  // Open the current file in a locally-installed GUI editor (server-side). Only
+  // reachable when `localAccess` is true (the button is otherwise disabled).
+  function openInEditorAction(): void {
+    if (openPath === null || openingEditor) return
+    setOpeningEditor(true)
+    fileApi
+      .openInEditor(sessionId, openPath)
+      // "Opening" not "Opened": we spawned the editor but can't confirm a window
+      // actually appeared (e.g. a headless server would launch-then-exit).
+      .then((editor) => toast.success(`Opening in ${editor}…`))
+      .catch((e) =>
+        toast.error(e instanceof Error ? e.message : "could not open in editor"),
+      )
+      .finally(() => setOpeningEditor(false))
+  }
+
   function createFile(): void {
     const path = newFilePath.trim()
     if (!path || creating) return
@@ -288,6 +336,45 @@ function EditorBody({ sessionId, initialPath, closeReqRef }: EditorBodyProps) {
             <span className="sr-only">unsaved changes</span>
           </>
         )}
+        {canPreview && (
+          <Button
+            size="sm"
+            variant={showPreview ? "default" : "ghost"}
+            aria-pressed={showPreview}
+            onClick={() => setPreview((p) => !p)}
+          >
+            {showPreview ? <Pencil /> : <Eye />}
+            {showPreview ? "Edit" : "Preview"}
+          </Button>
+        )}
+        {openPath !== null && (
+          // A disabled <button> swallows hover events (pointer-events:none), so
+          // the tooltip lives on a wrapping span that always receives them.
+          <SimpleTooltip
+            content={
+              localAccess
+                ? undefined
+                : "Only available when dux is opened locally — not over a remote URL."
+            }
+          >
+            <span className="inline-flex">
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={!localAccess || openingEditor}
+                aria-busy={openingEditor}
+                onClick={openInEditorAction}
+              >
+                {openingEditor ? (
+                  <Loader2 className="motion-safe:animate-spin" />
+                ) : (
+                  <ExternalLink />
+                )}
+                Open in editor
+              </Button>
+            </span>
+          </SimpleTooltip>
+        )}
         <Button
           size="sm"
           disabled={!dirty || saving}
@@ -313,7 +400,7 @@ function EditorBody({ sessionId, initialPath, closeReqRef }: EditorBodyProps) {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search files…"
-                className="h-8 pl-7 text-xs"
+                className="h-8 pl-7 text-sm"
               />
             </div>
             <Button
@@ -334,7 +421,7 @@ function EditorBody({ sessionId, initialPath, closeReqRef }: EditorBodyProps) {
                 </div>
               ) : search.trim() ? (
                 filtered.length === 0 ? (
-                  <p className="px-1 py-2 text-xs text-muted-foreground">
+                  <p className="px-1 py-2 text-sm text-muted-foreground">
                     No files match.
                   </p>
                 ) : (
@@ -351,20 +438,20 @@ function EditorBody({ sessionId, initialPath, closeReqRef }: EditorBodyProps) {
                       {changedMap.has(p) && (
                         <Badge
                           variant="outline"
-                          className="shrink-0 font-mono text-[10px] leading-none"
+                          className="shrink-0 font-mono text-xs leading-none"
                         >
                           {changedMap.get(p)}
                         </Badge>
                       )}
                       {/* Full path → start-ellipsize so the filename stays visible. */}
-                      <span className="min-w-0 flex-1 truncate text-left font-mono text-xs [direction:rtl]">
+                      <span className="min-w-0 flex-1 truncate text-left font-mono text-sm [direction:rtl]">
                         {p}
                       </span>
                     </button>
                   ))
                 )
               ) : tree.length === 0 ? (
-                <p className="px-1 py-2 text-xs text-muted-foreground">
+                <p className="px-1 py-2 text-sm text-muted-foreground">
                   No files in this worktree.
                 </p>
               ) : (
@@ -393,6 +480,20 @@ function EditorBody({ sessionId, initialPath, closeReqRef }: EditorBodyProps) {
             <div className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
               This file is binary and can&rsquo;t be edited here.
             </div>
+          ) : showPreview ? (
+            // Rendered markdown of the current buffer (unsaved edits included).
+            // Lazy like Monaco, so the same ChunkBoundary + Suspense applies.
+            <ChunkBoundary>
+              <Suspense
+                fallback={
+                  <div className="flex h-full items-center justify-center text-muted-foreground">
+                    <Loader2 className="size-5 motion-safe:animate-spin" />
+                  </div>
+                }
+              >
+                <MarkdownPreview content={draft} />
+              </Suspense>
+            </ChunkBoundary>
           ) : (
             // ChunkBoundary (outside Suspense) catches a failed lazy import after
             // a redeploy — a 404 on the hashed Monaco chunk — and offers reload,

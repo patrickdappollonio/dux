@@ -55,6 +55,10 @@ pub enum EngineRequest {
     /// Resolve a session's worktree path (instant lookup; diff I/O happens
     /// off-thread in the server handler).
     SessionWorktree(String, oneshot::Sender<Option<String>>),
+    /// The configured preferred editor name (`config.editor.default`, e.g.
+    /// "cursor"/"vscode"/"zed"). Instant clone; the detect + launch I/O for the
+    /// "open in editor" action runs off-thread in the server handler.
+    EditorDefault(oneshot::Sender<String>),
     /// Ask the engine to recompute the changed-files lists for a worktree (after
     /// an HTTP git mutation ran the git op off-thread). Fire-and-forget: the
     /// engine spawns its off-thread refresh worker, whose result flows back
@@ -486,6 +490,22 @@ impl EngineHandle {
             return None;
         }
         rx.await.unwrap_or(None)
+    }
+
+    /// The configured preferred editor name for the "open in editor" action
+    /// (`config.editor.default`). Empty if the engine is gone — the handler then
+    /// falls back to the first detected editor.
+    pub async fn editor_default(&self) -> String {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::EditorDefault(tx))
+            .await
+            .is_err()
+        {
+            return String::new();
+        }
+        rx.await.unwrap_or_default()
     }
 
     /// Fire-and-forget: ask the engine to recompute changed-files for `worktree`
@@ -1014,6 +1034,9 @@ fn handle_request(engine: &mut Engine, req: EngineRequest, status_tx: &mut Statu
                 .find(|s| s.id == session_id)
                 .map(|s| s.worktree_path.clone());
             let _ = reply.send(worktree);
+        }
+        EngineRequest::EditorDefault(reply) => {
+            let _ = reply.send(engine.config.editor.default.clone());
         }
         EngineRequest::RefreshChangedFiles(worktree) => {
             // Spawn the off-thread refresh unconditionally. If this worktree is
