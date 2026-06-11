@@ -26,3 +26,6 @@ pnpm-debug.log*
 public/install.sh
 public/dux-logo.png
 public/dux-screenshot.svg
+
+# generated at build time from raster images by scripts/generate-webp.mjs
+public/**/*.webp

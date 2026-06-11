@@ -1,0 +1,98 @@
+---
+// The byline shared by every place a post is listed: the post page header, the
+// /blog index, and the homepage teaser. Keeps the date/author treatment (and
+// its icons) identical everywhere. The author name links to their site when the
+// authors registry knows one; `relative z-10` keeps that link clickable when it
+// sits inside a stretched-link card (see LatestPosts / blog index).
+import { formatDate, isoDate } from "../lib/date";
+import { getAuthor } from "../lib/authors";
+
+interface Props {
+  pubDate: Date;
+  /** Optional last-updated date; rendered as "Updated …" when present. */
+  updatedDate?: Date;
+  /** Author name, resolved to an optional site link via the registry. */
+  author: string;
+}
+
+const { pubDate, updatedDate, author: authorName } = Astro.props;
+const author = getAuthor(authorName);
+---
+
+<div class="mono flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-[color:var(--color-dim)]">
+  <span class="inline-flex items-center gap-1.5">
+    <svg
+      class="h-3.5 w-3.5 shrink-0"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="3" y="4" width="18" height="18" rx="2" />
+      <path d="M16 2v4M8 2v4M3 10h18" />
+    </svg>
+    <time datetime={isoDate(pubDate)}>{formatDate(pubDate)}</time>
+  </span>
+
+  <span aria-hidden="true">·</span>
+
+  <span class="inline-flex items-center gap-1.5 text-[color:var(--color-muted)]">
+    <svg
+      class="h-3.5 w-3.5 shrink-0 text-[color:var(--color-dim)]"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />
+      <circle cx="12" cy="7" r="4" />
+    </svg>
+    {
+      author.url ? (
+        <a
+          href={author.url}
+          target="_blank"
+          rel="noopener"
+          data-no-ext-icon
+          class="relative z-10 transition-colors hover:text-[color:var(--color-accent)]"
+        >
+          {author.name}
+        </a>
+      ) : (
+        author.name
+      )
+    }
+  </span>
+
+  {
+    updatedDate && (
+      <>
+        <span aria-hidden="true">·</span>
+        <span class="inline-flex items-center gap-1.5">
+          <svg
+            class="h-3.5 w-3.5 shrink-0"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+            <path d="M21 3v5h-5" />
+          </svg>
+          <span>
+            Updated <time datetime={isoDate(updatedDate)}>{formatDate(updatedDate)}</time>
+          </span>
+        </span>
+      </>
+    )
+  }
+</div>

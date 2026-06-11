@@ -449,8 +449,44 @@
     max-width: 100%;
     height: auto;
     border-radius: 0.5rem;
-    border: 1px solid var(--color-border);
     margin: 1.25rem 0;
+  }
+  /* Image layout helpers for prose. The classes are applied from Markdown via
+     a URL-hash convention (`![alt](/img.png#right)`) handled by the
+     rehype-prose-images plugin — never hand-written HTML. `full-width` fills
+     the column; `align-left`/`align-right` float the image so text wraps beside
+     it; `align-center` centers a block. On narrow screens the floats drop to
+     full width so they're never squeezed into an unreadable sliver. */
+  .prose-docs img.full-width {
+    width: 100%;
+  }
+  .prose-docs img.align-center {
+    display: block;
+    margin-inline: auto;
+  }
+  .prose-docs img.align-left {
+    float: left;
+    width: min(45%, 14rem);
+    margin: 0.35rem 1.5rem 1rem 0;
+  }
+  .prose-docs img.align-right {
+    float: right;
+    width: min(45%, 14rem);
+    margin: 0.35rem 0 1rem 1.5rem;
+  }
+  @media (max-width: 640px) {
+    .prose-docs img.align-left,
+    .prose-docs img.align-right {
+      float: none;
+      width: 100%;
+      margin: 1.25rem 0;
+    }
+  }
+  /* The <picture> wrapper (rehype-prose-images, for webp) is layout-neutral so
+     the alignment/sizing on the inner <img> behaves as if it were in the flow
+     directly. */
+  .prose-docs picture {
+    display: contents;
   }
   /* Clickable "#" appended to each heading by rehype-autolink-headings. The
      anchor itself is empty; the glyph is drawn here so it stays out of the
