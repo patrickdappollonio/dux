@@ -762,9 +762,11 @@ impl Drop for PtyClient {
         // Kill the child, then reap it so it does not linger as a zombie.
         let _ = self.child.kill();
         let _ = self.child.wait();
-        // The child is dead, so the PTY slave is closed and the reader thread
-        // observes EOF (or a read error) and returns. Join it so the thread
-        // does not outlive this client — otherwise detached reader threads
+        // The slave fd was closed at spawn time; the child held the last
+        // remaining reference to it, so now that the child is dead the master
+        // read returns EOF (on Linux it returns EIO, which portable-pty maps
+        // to Ok(0)) and the reader thread returns. Join it so the thread does
+        // not outlive this client — otherwise detached reader threads
         // accumulate across a long session and across the test suite.
         if let Some(handle) = self.reader_thread.take() {
             let _ = handle.join();
@@ -1809,14 +1811,30 @@ mod tests {
         let client =
             PtyClient::spawn("/bin/sh", &args, Path::new("."), 5, 40, 100).expect("spawn pty");
 
+        // `exited` is set only by the reader thread, immediately before it
+        // returns. Hold a clone so we can prove, after the drop, that the
+        // reader actually finished — which only the `join()` in `Drop`
+        // guarantees synchronously. Without the join, drop would return while
+        // the reader is still catching up and this flag would still be false.
+        let reader_exited = Arc::clone(&client.exited);
+
         let start = Instant::now();
         drop(client);
         let elapsed = start.elapsed();
 
+        // A correct drop completes in well under 100ms; 3s is generous for a
+        // heavily loaded CI host while still catching a genuine hang (e.g. a
+        // join that waits for the 120s child instead of killing it).
         assert!(
-            elapsed < std::time::Duration::from_secs(10),
+            elapsed < std::time::Duration::from_secs(3),
             "PtyClient::drop took {elapsed:?}; it must kill the child and join \
              the reader thread promptly, not wait for the child to finish"
+        );
+        // Proves the join was actually performed: if a regression removed it,
+        // drop would return before the reader set this flag.
+        assert!(
+            reader_exited.load(Ordering::Acquire),
+            "after drop, the reader thread must have exited (Drop must join it)"
         );
     }
 

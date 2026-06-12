@@ -6382,11 +6382,11 @@ fn set_create_agent_request_custom_name(request: &mut CreateAgentRequest, name: 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::{Arc, Mutex, mpsc};
+    use std::sync::Arc;
 
     use super::DOUBLE_CLICK_THRESHOLD;
     use super::components::{ButtonPressedTarget, PressedButton};
+    use crate::app::test_support::*;
     use crate::app::{
         AgentLaunchKind, App, BranchWarningKind, CenterMode, ConfigReloadFailedFocus,
         ConfirmKillRunningPrompt, ConfirmNonDefaultBranchFocus, CreateAgentBranchInspection,
@@ -6394,13 +6394,12 @@ mod tests {
         KillRunningAction, KillRunningFocus, KillRunningFooterAction, KillRunningPrompt,
         KillableRuntime, KillableRuntimeKind, LeftItem, LeftSection, MacroBarState,
         MouseClickTarget, MouseLayoutState, NameNewAgentFocus, NonDefaultBranchAction,
-        OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout, OverlayMouseLayoutState,
-        PickProjectWorktreePrompt, ProcessInfo, ProjectWorktreeEntry, PromptState, PullTarget,
-        ResourceStats, RightSection, RuntimeTargetId, StartupCommandLogPrompt, TextInput,
-        WorkerEvent,
+        OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout, PickProjectWorktreePrompt,
+        ProcessInfo, ProjectWorktreeEntry, PromptState, PullTarget, ResourceStats, RightSection,
+        RuntimeTargetId, StartupCommandLogPrompt, TextInput, WorkerEvent,
     };
     use crate::clipboard::Clipboard;
-    use crate::config::{Config, DuxPaths, ProjectConfig};
+    use crate::config::{Config, ProjectConfig};
     use crate::editor::{DetectedEditor, EditorKind};
     use crate::keybindings::{Action, BINDING_DEFS, BindingScope, RuntimeBindings};
     use crate::model::{
@@ -6408,9 +6407,6 @@ mod tests {
         ProjectBranchStatus, ProviderKind, SessionStatus, SessionSurface,
     };
     use crate::pty::PtyClient;
-    use crate::statusline::StatusLine;
-    use crate::storage::SessionStore;
-    use crate::theme::Theme;
     use chrono::Utc;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -6420,19 +6416,6 @@ mod tests {
     use ratatui::text::Line;
     use std::process::Command;
     use tempfile::tempdir;
-
-    fn default_bindings() -> RuntimeBindings {
-        RuntimeBindings::new(
-            |action| {
-                BINDING_DEFS
-                    .iter()
-                    .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default()
-            },
-            true,
-        )
-    }
 
     fn bindings_with_overrides(overrides: &[(Action, &[&str])]) -> RuntimeBindings {
         RuntimeBindings::new(
@@ -6453,27 +6436,6 @@ mod tests {
             },
             true,
         )
-    }
-
-    fn run_git(cwd: &std::path::Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    fn init_test_repo(path: &std::path::Path) {
-        run_git(path, &["init", "-b", "main"]);
-        run_git(path, &["config", "user.name", "test"]);
-        run_git(path, &["config", "user.email", "t@t"]);
-        run_git(path, &["commit", "--allow-empty", "-m", "init"]);
     }
 
     fn set_remote_default(path: &std::path::Path, branch: &str) {
@@ -6508,188 +6470,6 @@ mod tests {
             })
             .unwrap();
         app.drain_events();
-    }
-
-    fn test_app(bindings: RuntimeBindings) -> App {
-        let tmp = tempdir().expect("tempdir");
-        let root = tmp.path().to_path_buf();
-        std::mem::forget(tmp);
-        init_test_repo(&root);
-
-        let paths = DuxPaths {
-            config_path: root.join("config.toml"),
-            sessions_db_path: root.join("sessions.sqlite3"),
-            worktrees_root: root.join("worktrees"),
-            lock_path: root.join("dux.lock"),
-            root: root.clone(),
-        };
-        std::fs::create_dir_all(&paths.worktrees_root).expect("worktrees dir");
-        let session_store = SessionStore::open(&paths.sessions_db_path).expect("session store");
-        let now = Utc::now();
-        let project = Project {
-            id: "project-1".to_string(),
-            name: "demo".to_string(),
-            path: root.to_string_lossy().to_string(),
-            explicit_default_provider: None,
-            default_provider: ProviderKind::from_str("codex"),
-            leading_branch: Some("main".to_string()),
-            auto_reopen_agents: None,
-            startup_command: None,
-            env: Default::default(),
-            current_branch: "main".to_string(),
-            branch_status: ProjectBranchStatus::Unknown,
-            path_missing: false,
-            created_at: None,
-        };
-        session_store
-            .upsert_project(&ProjectConfig {
-                id: project.id.clone(),
-                path: project.path.clone(),
-                name: Some(project.name.clone()),
-                default_provider: None,
-                leading_branch: project.leading_branch.clone(),
-                auto_reopen_agents: project.auto_reopen_agents,
-                startup_command: project.startup_command.clone(),
-                env: project.env.clone(),
-            })
-            .expect("seed project");
-        let session = AgentSession {
-            id: "session-1".to_string(),
-            project_id: project.id.clone(),
-            project_path: Some(project.path.clone()),
-            provider: ProviderKind::from_str("codex"),
-            source_branch: "main".to_string(),
-            branch_name: "agent-branch".to_string(),
-            worktree_path: paths.worktrees_root.to_string_lossy().to_string(),
-            title: None,
-            started_providers: Vec::new(),
-            desired_running: false,
-            auto_reopen_enabled: true,
-            status: SessionStatus::Detached,
-            created_at: now,
-            updated_at: now,
-        };
-        let (worker_tx, worker_rx) = mpsc::channel();
-        let single_instance_lock = crate::lockfile::SingleInstanceLock::acquire(&paths.lock_path)
-            .expect("single-instance lock for test App");
-        let engine = dux_core::engine::Engine {
-            config: Config::default(),
-            paths,
-            session_store,
-            projects: vec![project],
-            sessions: vec![session],
-            staged_files: Vec::new(),
-            unstaged_files: Vec::new(),
-            terminal_counter: 0,
-            github_integration_enabled: false,
-            single_instance_lock,
-            worker_tx,
-            worker_rx,
-            config_saver: Box::new(crate::TuiConfigSaver),
-            providers: std::collections::HashMap::new(),
-            running_provider_pins: std::collections::HashMap::new(),
-            companion_terminals: std::collections::HashMap::new(),
-            gh_status: crate::model::GhStatus::Unknown,
-            pr_statuses: std::collections::HashMap::new(),
-            branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-            pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
-            pr_sync_enabled: Arc::new(AtomicBool::new(false)),
-            refs_watcher: None,
-            refs_watch_paths: std::collections::HashMap::new(),
-            resume_fallback_candidates: std::collections::HashMap::new(),
-            pending_deletions: std::collections::HashSet::new(),
-            deletion_busy_messages: std::collections::HashMap::new(),
-            watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
-            watched_session_id: None,
-            has_active_processes: Arc::new(AtomicBool::new(false)),
-            in_flight: std::collections::HashSet::new(),
-            pr_last_checked: std::collections::HashMap::new(),
-            changed_files_poller_started: AtomicBool::new(false),
-            branch_sync_worker_started: AtomicBool::new(false),
-            pty_activity: std::collections::HashMap::new(),
-            pty_input: std::collections::HashMap::new(),
-            last_foreground_refresh: None,
-        };
-        let mut app = App {
-            engine,
-            bindings,
-            selected_left: 0,
-            left_section: crate::app::LeftSection::Projects,
-            selected_terminal_index: 0,
-            right_section: RightSection::Unstaged,
-            files_index: 0,
-            files_search: TextInput::new(),
-            files_search_active: false,
-            commit_input: TextInput::new()
-                .with_multiline(4)
-                .with_placeholder("Type your commit message\u{2026}"),
-            show_diff_line_numbers: false,
-            left_width_pct: 20,
-            right_width_pct: 23,
-            terminal_pane_height_pct: 35,
-            staged_pane_height_pct: 50,
-            commit_pane_height_pct: 40,
-            focus: FocusPane::Left,
-            center_mode: CenterMode::Agent,
-            left_collapsed: false,
-            right_collapsed: false,
-            right_hidden: false,
-            resize_mode: false,
-            help_scroll: None,
-            last_help_height: 0,
-            last_help_lines: 0,
-            fullscreen_overlay: FullscreenOverlay::None,
-            startup_log_viewer: None,
-            status: StatusLine::new("ready"),
-            prompt: PromptState::None,
-            input_target: InputTarget::None,
-            session_surface: crate::model::SessionSurface::Agent,
-            clipboard: Clipboard::new(),
-            active_terminal_id: None,
-            terminal_return_to_list: false,
-            last_pty_size: (0, 0),
-            prev_scrollback_offset: 0,
-            last_diff_height: 0,
-            last_diff_visual_lines: 0,
-            theme: Theme::default_dark(),
-            tick_count: 0,
-            start_time: std::time::Instant::now(),
-            readonly_nudge_tick: None,
-            collapsed_projects: std::collections::HashSet::new(),
-            left_items_cache: Vec::new(),
-            mouse_layout: MouseLayoutState::default(),
-            overlay_layout: OverlayMouseLayoutState::default(),
-            mouse_drag: None,
-            last_mouse_click: None,
-            pressed_button: None,
-            interactive_patterns: crate::keybindings::InteractiveBytePatterns {
-                bindings: Vec::new(),
-            },
-            raw_input_parser: crate::raw_input::RawInputParser::default(),
-            raw_input_buf: Vec::new(),
-            loading_input_buf: Vec::new(),
-            in_bracket_paste: false,
-            macro_bar: None,
-            sigwinch_flag: Arc::new(AtomicBool::new(false)),
-            sigwinch_sig_id: None,
-            force_redraw: false,
-            welcome_tip_index: 0,
-            welcome_logo_visible: false,
-            welcome_logo_alt: false,
-            welcome_tip_selection: usize::MAX,
-            pr_banner_at_bottom: true,
-            syntax_cache: crate::diff::SyntaxCache::new(),
-            snapshot_buf: crate::pty::TerminalSnapshot::empty(),
-            last_snapshot_id: None,
-            terminal_selection: None,
-            startup_log_selection: None,
-            pending_server_flip: None,
-            server_flip_preflight_pending: false,
-        };
-        app.interactive_patterns = app.bindings.interactive_byte_patterns();
-        app.rebuild_left_items();
-        app.selected_left = 1;
-        app
     }
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
@@ -12927,184 +12707,6 @@ cyan = "#00ffff"
             app.engine.pty_input.is_empty(),
             "typing into a companion terminal must not suppress the agent indicator"
         );
-    }
-
-    /// Deterministically wait until the agent PTY child has parked its cursor
-    /// at the given (row, col), polling the live snapshot instead of guessing a
-    /// fixed sleep. Requires `session_surface == Agent` and a selected session
-    /// whose provider is in `app.engine.providers`. Panics with the observed cursor if
-    /// the child does not reach the expected position within ~2s.
-    fn wait_for_agent_cursor(app: &mut App, row: u16, col: u16) {
-        for _ in 0..200 {
-            app.refresh_snapshot_buf();
-            if matches!(app.snapshot_buf.cursor, Some(c) if c.row == row && c.col == col) {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        panic!(
-            "PTY did not park its cursor at row {row}, col {col} within 2s (got {:?})",
-            app.snapshot_buf.cursor
-        );
-    }
-
-    /// Regression test for issue #258: while the interactive agent terminal is
-    /// rendered, the real (hardware) terminal cursor must be moved onto the
-    /// embedded PTY cursor cell. IME composition popups (e.g. a Korean IME) are
-    /// drawn by the terminal/OS at the hardware cursor position, so if it is
-    /// left at the origin the composing character appears detached from the
-    /// prompt near the top-left instead of at the agent's cursor.
-    #[test]
-    fn interactive_agent_aligns_hardware_cursor_with_pty_cursor() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
-
-        // `ESC[5;9H` parks the cursor at row 5, col 9 (1-based); printing 'X'
-        // then advances it to row 4, col 9 (0-based). `sleep` keeps the child
-        // alive so the snapshot keeps a live cursor.
-        let args = vec![
-            "-c".to_string(),
-            "printf '\\033[5;9HX'; sleep 30".to_string(),
-        ];
-        let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
-            .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
-
-        // Enter interactive fullscreen agent mode.
-        app.input_target = InputTarget::Agent;
-        app.session_surface = SessionSurface::Agent;
-        app.fullscreen_overlay = FullscreenOverlay::Agent;
-
-        // Wait until the child's cursor escape has been parsed (no fixed sleep).
-        wait_for_agent_cursor(&mut app, 4, 9);
-
-        let backend = TestBackend::new(100, 40);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| app.render(frame))
-            .expect("render frame");
-
-        let term_area = app
-            .mouse_layout
-            .agent_term
-            .expect("agent terminal area should be recorded after render");
-        // Confirm the renderer's input cursor really is the parked PTY cursor,
-        // then derive the expected screen cell from the KNOWN (row 4, col 9)
-        // literals — not from snapshot_buf — so a transposed or mis-offset
-        // production computation cannot make this assertion tautologically true.
-        let cursor = app
-            .snapshot_buf
-            .cursor
-            .expect("interactive agent snapshot should expose a PTY cursor");
-        assert_eq!(
-            (cursor.row, cursor.col),
-            (4, 9),
-            "PTY should have parked its cursor at the expected cell"
-        );
-        let expected = (term_area.x + 9, term_area.y + 4);
-        terminal.backend_mut().assert_cursor_position(expected);
-    }
-
-    /// The same hardware-cursor alignment must hold in the normal (non-
-    /// fullscreen) center-pane agent view, not just the fullscreen overlay.
-    #[test]
-    fn inline_agent_aligns_hardware_cursor_with_pty_cursor() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
-        let args = vec![
-            "-c".to_string(),
-            "printf '\\033[5;9HX'; sleep 30".to_string(),
-        ];
-        let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
-            .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
-
-        // Inline agent view: no fullscreen overlay, center pane focused.
-        app.input_target = InputTarget::Agent;
-        app.session_surface = SessionSurface::Agent;
-        app.fullscreen_overlay = FullscreenOverlay::None;
-        app.center_mode = CenterMode::Agent;
-        app.focus = FocusPane::Center;
-
-        wait_for_agent_cursor(&mut app, 4, 9);
-
-        let backend = TestBackend::new(100, 40);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| app.render(frame))
-            .expect("render frame");
-
-        let term_area = app
-            .mouse_layout
-            .agent_term
-            .expect("agent terminal area should be recorded after render");
-        let cursor = app
-            .snapshot_buf
-            .cursor
-            .expect("inline agent snapshot should expose a PTY cursor");
-        assert_eq!((cursor.row, cursor.col), (4, 9));
-        let expected = (term_area.x + 9, term_area.y + 4);
-        terminal.backend_mut().assert_cursor_position(expected);
-    }
-
-    /// The hardware cursor must only track the PTY in interactive (input) mode.
-    /// In a non-interactive agent view there is no IME input, so the cursor
-    /// must not be repositioned — otherwise it leaves a stray blinking cursor
-    /// over read-only output.
-    #[test]
-    fn non_interactive_agent_leaves_hardware_cursor_at_origin() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
-        let args = vec![
-            "-c".to_string(),
-            "printf '\\033[5;9HX'; sleep 30".to_string(),
-        ];
-        let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
-            .expect("spawn pty");
-        app.engine.providers.insert(session_id, client);
-
-        // session_surface is Agent so the snapshot is populated, but input is
-        // NOT routed to the agent.
-        app.session_surface = SessionSurface::Agent;
-        app.fullscreen_overlay = FullscreenOverlay::Agent;
-        wait_for_agent_cursor(&mut app, 4, 9);
-        app.input_target = InputTarget::None;
-
-        let backend = TestBackend::new(100, 40);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| app.render(frame))
-            .expect("render frame");
-
-        let term_area = app
-            .mouse_layout
-            .agent_term
-            .expect("agent terminal area should be recorded after render");
-        // The PTY genuinely has an off-origin cursor that the renderer COULD
-        // have placed: term_area is offset and the PTY cursor is at (4, 9), so
-        // a regression that wrongly set the hardware cursor would move it away
-        // from the origin and fail the assertion below.
-        assert!(
-            term_area.x > 0 || term_area.y > 0,
-            "test setup: agent terminal should be offset from the origin"
-        );
-        assert!(
-            app.snapshot_buf.cursor.is_some(),
-            "test setup: the PTY should still expose a cursor to (not) place"
-        );
-
-        // Not in input mode → the hardware cursor is never positioned and stays
-        // at the backend origin.
-        terminal.backend_mut().assert_cursor_position((0u16, 0u16));
     }
 
     #[test]
