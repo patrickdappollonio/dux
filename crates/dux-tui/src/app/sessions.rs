@@ -2017,6 +2017,7 @@ impl App {
             }
             Some(LeftItem::EmptyProjectsSpacer) => None,
             Some(LeftItem::EmptyProjectsSeparator) => None,
+            Some(LeftItem::OrphanProject(_)) => None,
             None => None,
         };
         match path {

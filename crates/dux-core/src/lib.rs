@@ -24,6 +24,7 @@ pub mod project_browser;
 pub mod provider;
 pub mod pty;
 pub mod resource_stats;
+pub mod sidebar;
 pub mod startup;
 pub mod statusline;
 pub mod storage;

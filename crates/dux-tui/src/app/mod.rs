@@ -1106,6 +1106,12 @@ pub(crate) enum LeftSection {
 pub(crate) enum LeftItem {
     Project(usize),
     Session(usize),
+    /// Header for a group of orphaned sessions whose project record is gone
+    /// (a removed project whose sessions outlived it). Carries a representative
+    /// session index so the renderer can recover the ghost project id and its
+    /// short display name. Non-selectable; its sessions are normal `Session`
+    /// rows the user can still select and delete.
+    OrphanProject(usize),
     EmptyProjectsSpacer,
     EmptyProjectsSeparator,
 }
@@ -1122,73 +1128,54 @@ pub(crate) fn build_left_items(
     collapsed_projects: &HashSet<String>,
     empty_project_separator_min_projects: u16,
 ) -> Vec<LeftItem> {
-    let split_empty_projects = empty_project_separator_min_projects > 0
-        && projects.len() >= usize::from(empty_project_separator_min_projects);
-    let mut items = Vec::new();
-    let mut empty_projects = Vec::new();
+    // Grouping, ordering, the agent-less split, and orphan detection are owned by
+    // dux_core::sidebar so the TUI and web render an identical tree. Here we only
+    // translate that core model into the TUI's index-based render items and apply
+    // display state (collapse).
+    let model =
+        dux_core::sidebar::build_sidebar(projects, sessions, empty_project_separator_min_projects);
+    let project_index: std::collections::HashMap<&str, usize> = projects
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.id.as_str(), i))
+        .collect();
+    let session_index: std::collections::HashMap<&str, usize> = sessions
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.id.as_str(), i))
+        .collect();
 
-    for (project_index, project) in projects.iter().enumerate() {
-        let has_sessions = sessions
+    let mut items = Vec::new();
+    for (group_index, group) in model.groups.iter().enumerate() {
+        if model.agentless_start == Some(group_index) {
+            items.push(LeftItem::EmptyProjectsSpacer);
+            items.push(LeftItem::EmptyProjectsSeparator);
+        }
+        let session_indices: Vec<usize> = group
+            .session_ids
             .iter()
-            .any(|session| session.project_id == project.id);
-        if split_empty_projects && !has_sessions {
-            empty_projects.push(project_index);
+            .filter_map(|id| session_index.get(id.as_str()).copied())
+            .collect();
+        if group.orphaned {
+            // Orphan groups always carry at least one session; use the first
+            // index so the renderer can recover the ghost id and short name.
+            let Some(&first) = session_indices.first() else {
+                continue;
+            };
+            items.push(LeftItem::OrphanProject(first));
+        } else if let Some(&index) = project_index.get(group.project_id.as_str()) {
+            items.push(LeftItem::Project(index));
+        } else {
             continue;
         }
-        push_project_left_items(
-            &mut items,
-            project_index,
-            project,
-            sessions,
-            collapsed_projects,
-        );
-    }
-
-    if !items.is_empty() && !empty_projects.is_empty() {
-        items.push(LeftItem::EmptyProjectsSpacer);
-        items.push(LeftItem::EmptyProjectsSeparator);
-        for project_index in empty_projects {
-            let project = &projects[project_index];
-            push_project_left_items(
-                &mut items,
-                project_index,
-                project,
-                sessions,
-                collapsed_projects,
-            );
+        if group.path_missing || collapsed_projects.contains(&group.project_id) {
+            continue;
         }
-    } else {
-        for project_index in empty_projects {
-            let project = &projects[project_index];
-            push_project_left_items(
-                &mut items,
-                project_index,
-                project,
-                sessions,
-                collapsed_projects,
-            );
+        for index in session_indices {
+            items.push(LeftItem::Session(index));
         }
     }
-
     items
-}
-
-fn push_project_left_items(
-    items: &mut Vec<LeftItem>,
-    project_index: usize,
-    project: &Project,
-    sessions: &[AgentSession],
-    collapsed_projects: &HashSet<String>,
-) {
-    items.push(LeftItem::Project(project_index));
-    if project.path_missing || collapsed_projects.contains(&project.id) {
-        return;
-    }
-    for (session_index, session) in sessions.iter().enumerate() {
-        if session.project_id == project.id {
-            items.push(LeftItem::Session(session_index));
-        }
-    }
 }
 
 mod auth_users;
@@ -2424,6 +2411,8 @@ impl App {
             }
             Some(LeftItem::EmptyProjectsSpacer) => None,
             Some(LeftItem::EmptyProjectsSeparator) => None,
+            // An orphaned group has no project record to return.
+            Some(LeftItem::OrphanProject(_)) => None,
             None => None,
         }
     }

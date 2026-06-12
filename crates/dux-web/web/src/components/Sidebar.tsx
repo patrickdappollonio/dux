@@ -750,6 +750,7 @@ export function AppSidebar() {
   )
 
   const { grouped, withAgents, withoutAgents, projectName } = partitionProjects(
+    viewModel?.sidebar,
     projects,
     sessions,
   )

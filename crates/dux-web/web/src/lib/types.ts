@@ -153,9 +153,31 @@ export interface FileDiff {
  * (`config.rs`). Keep in sync if the Rust default changes. */
 export const DEFAULT_SCROLLBACK_LINES = 10000
 
+/** One project's sessions, grouped for the sidebar. `orphaned` marks a group
+ * whose project record is gone (its sessions outlived a removed project); its
+ * `name` is then a short id slice. Mirrors `dux_core::sidebar::SidebarGroup`. */
+export interface SidebarGroup {
+  project_id: string
+  name: string
+  orphaned: boolean
+  path_missing: boolean
+  session_ids: string[]
+}
+
+/** Core-computed sidebar grouping. `agentless_start`, when non-null, is the
+ * index in `groups` where the "projects with no agents" section begins.
+ * Mirrors `dux_core::sidebar::SidebarModel`. */
+export interface SidebarModel {
+  groups: SidebarGroup[]
+  agentless_start: number | null
+}
+
 export interface ViewModel {
   projects: ProjectView[]
   sessions: SessionView[]
+  /** Core-computed sidebar grouping (projects + sessions, orphans surfaced) so
+   * both surfaces render an identical tree without re-deriving grouping. */
+  sidebar: SidebarModel
   changed_files: ChangedFiles
   global_env: Record<string, string>
   available_providers: string[]

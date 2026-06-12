@@ -605,6 +605,7 @@ function HomeScreen() {
     pendingProjectOrder,
   )
   const { grouped, withAgents, withoutAgents, projectName } = partitionProjects(
+    viewModel?.sidebar,
     projects,
     sessions,
   )
