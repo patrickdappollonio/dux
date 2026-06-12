@@ -49,6 +49,16 @@ pub enum Command {
     /// threshold (`ProjectPersistenceAction` is 248 bytes unboxed).
     PersistProject(Box<ProjectPersistenceAction>),
 
+    /// Remove a project AND cascade-delete its agents' records + runtime,
+    /// KEEPING their worktrees on disk. Tolerates a "ghost" project id that
+    /// exists only via orphaned sessions (no project record): the orphaned
+    /// sessions are cleared and the project-record delete is a harmless no-op.
+    /// The project-record + config removal run via the persistence worker.
+    RemoveProject {
+        project_id: String,
+        project_name: String,
+    },
+
     /// Spawn the create-agent worker. Returns `EventReaction::Status(Error)` if
     /// another create is already in flight; otherwise marks `InFlightKey::CreateAgent`,
     /// spawns the worker, and returns `EventReaction::Status(Busy(busy_message))`.
@@ -294,6 +304,32 @@ impl Engine {
             }
             Command::PersistProject(action) => {
                 self.spawn_project_persistence(*action);
+                Ok(EventReaction::Nothing)
+            }
+
+            Command::RemoveProject {
+                project_id,
+                project_name,
+            } => {
+                // Cascade-delete the project's agents — records + runtime —
+                // KEEPING their worktrees on disk ("just in case"):
+                // finish_delete_session never removes a worktree and tolerates a
+                // missing project, so this also clears a ghost project's orphaned
+                // sessions. The project record + config are then removed via the
+                // persistence worker (a harmless no-op delete for a ghost id).
+                let session_ids: Vec<String> = self
+                    .sessions
+                    .iter()
+                    .filter(|s| s.project_id == project_id)
+                    .map(|s| s.id.clone())
+                    .collect();
+                for id in &session_ids {
+                    self.finish_delete_session(id)?;
+                }
+                self.spawn_project_persistence(ProjectPersistenceAction::Remove {
+                    project_id,
+                    project_name,
+                });
                 Ok(EventReaction::Nothing)
             }
 

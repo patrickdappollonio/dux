@@ -1418,19 +1418,22 @@ impl Engine {
                 }))
             }
             WireCommand::RemoveProject { project_id } => {
-                let project_name = self.project_name(&project_id)?;
-                // Mirror the TUI guard: refuse to remove a project that still has
-                // agents, otherwise their sessions would be orphaned (pointing at a
-                // vanished project id). The user must delete the agents first.
-                if self.sessions.iter().any(|s| s.project_id == project_id) {
-                    anyhow::bail!(
-                        "Delete this project's agents before removing \"{project_name}\"."
-                    );
-                }
-                Command::PersistProject(Box::new(ProjectPersistenceAction::Remove {
-                    project_name,
+                // Resolve a display name, falling back to a short id slice for a
+                // "ghost" project that exists only via orphaned sessions (no
+                // project record). Removal cascades the project's agents
+                // (records + runtime) but KEEPS their worktrees on disk, so
+                // there is deliberately no "delete agents first" guard — see
+                // `Command::RemoveProject`.
+                let project_name = self
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project_id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| project_id.chars().take(8).collect());
+                Command::RemoveProject {
                     project_id,
-                }))
+                    project_name,
+                }
             }
             WireCommand::CreateAgent { project_id, name } => {
                 let project = self
@@ -3234,35 +3237,55 @@ mod tests {
             })
             .expect("reconstruct");
         match cmd {
-            Command::PersistProject(action) => match *action {
-                ProjectPersistenceAction::Remove {
-                    project_id,
-                    project_name,
-                } => {
-                    assert_eq!(project_id, "p1");
-                    assert_eq!(project_name, "p1-name");
-                }
-                other => panic!("expected Remove, got {other:?}"),
-            },
-            _ => panic!("expected Command::PersistProject variant"),
+            Command::RemoveProject {
+                project_id,
+                project_name,
+            } => {
+                assert_eq!(project_id, "p1");
+                assert_eq!(project_name, "p1-name");
+            }
+            _ => panic!("expected Command::RemoveProject variant"),
         }
     }
 
     #[test]
-    fn wire_to_command_remove_project_with_sessions_errors() {
+    fn wire_to_command_remove_project_with_sessions_cascades() {
+        // Removing a project with agents no longer errors — it cascades,
+        // deleting the agents' records while keeping their worktrees on disk.
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/repo"));
         engine.sessions.push(sample_session("s1", "p1", "feat"));
-        let err = engine
+        let cmd = engine
             .wire_to_command(WireCommand::RemoveProject {
                 project_id: "p1".to_string(),
             })
-            .map(|_| ())
-            .expect_err("removing a project with agents must be refused");
-        assert!(
-            err.to_string().contains("Delete this project's agents"),
-            "unexpected error: {err}"
-        );
+            .expect("removing a project with agents now cascades, not refused");
+        assert!(matches!(cmd, Command::RemoveProject { .. }));
+    }
+
+    #[test]
+    fn wire_to_command_remove_ghost_project_uses_short_id_name() {
+        // A "ghost" project id (orphaned sessions, no project record) must not
+        // error with "unknown project"; the name falls back to a short id slice.
+        let (mut engine, _tmp) = test_engine();
+        engine
+            .sessions
+            .push(sample_session("s1", "3fc34174-ghost", "feat"));
+        let cmd = engine
+            .wire_to_command(WireCommand::RemoveProject {
+                project_id: "3fc34174-ghost".to_string(),
+            })
+            .expect("ghost removal must not error");
+        match cmd {
+            Command::RemoveProject {
+                project_id,
+                project_name,
+            } => {
+                assert_eq!(project_id, "3fc34174-ghost");
+                assert_eq!(project_name, "3fc34174");
+            }
+            _ => panic!("expected Command::RemoveProject"),
+        }
     }
 
     #[test]

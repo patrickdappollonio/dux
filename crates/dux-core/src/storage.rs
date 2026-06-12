@@ -658,6 +658,12 @@ impl SessionStore {
     }
 
     pub fn delete_session(&self, id: &str) -> Result<()> {
+        // Clear the session's PR associations first. `session_prs` declares an
+        // ON DELETE CASCADE FK to `agent_sessions`, but the connection never
+        // enables `PRAGMA foreign_keys`, so that cascade does not fire — delete
+        // the rows explicitly to avoid leaking orphaned PR records.
+        self.conn
+            .execute("delete from session_prs where session_id = ?1", params![id])?;
         self.conn
             .execute("delete from agent_sessions where id = ?1", params![id])?;
         Ok(())

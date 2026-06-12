@@ -803,20 +803,21 @@ impl Engine {
             "deleting session {} at {} (delete_worktree={}, sync)",
             session.id, session.worktree_path, delete_worktree
         ));
-        let Some(project) = self
+        // The project may be ABSENT for an orphaned session; we can still delete
+        // the record but cannot remove its worktree without the project repo, so
+        // an orphan always keeps its worktree.
+        let project = self
             .projects
             .iter()
             .find(|project| project.id == session.project_id)
-            .cloned()
-        else {
-            return Ok(None);
-        };
+            .cloned();
         let other_sessions_on_worktree = self
             .sessions
             .iter()
             .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
 
-        let should_remove_worktree = delete_worktree && !other_sessions_on_worktree;
+        let should_remove_worktree =
+            delete_worktree && !other_sessions_on_worktree && project.is_some();
 
         if self.pending_deletions.contains(session_id) {
             crate::logger::error(&format!(
@@ -825,6 +826,9 @@ impl Engine {
             return Ok(None);
         }
         let remove_outcome = if should_remove_worktree {
+            let project = project
+                .as_ref()
+                .expect("should_remove_worktree implies a project");
             let result = crate::git::remove_worktree(
                 std::path::Path::new(&project.path),
                 std::path::Path::new(&session.worktree_path),
@@ -867,19 +871,21 @@ impl Engine {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
             return BeginDeleteSessionOutcome::NotFound;
         };
-        let Some(project) = self
+        // The project may be ABSENT for an orphaned session (its project was
+        // removed but the session record outlived it). We can still delete the
+        // session record; we just cannot run `git worktree remove` without the
+        // project repo, so an orphan keeps its worktree and takes the inline path.
+        let project = self
             .projects
             .iter()
             .find(|project| project.id == session.project_id)
-            .cloned()
-        else {
-            return BeginDeleteSessionOutcome::NotFound;
-        };
+            .cloned();
         let other_sessions_on_worktree = self
             .sessions
             .iter()
             .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
-        let should_remove_worktree = delete_worktree && !other_sessions_on_worktree;
+        let should_remove_worktree =
+            delete_worktree && !other_sessions_on_worktree && project.is_some();
 
         if should_remove_worktree {
             logger::info(&format!(
@@ -891,7 +897,11 @@ impl Engine {
             // handler clears the entry on completion (Ok or Err).
             self.pending_deletions.insert(session.id.clone());
             let sid = session.id.clone();
-            let project_path = project.path.clone();
+            let project_path = project
+                .as_ref()
+                .expect("should_remove_worktree implies a project")
+                .path
+                .clone();
             let worktree_path = session.worktree_path.clone();
             let branch_name = session.branch_name.clone();
             let tx = self.worker_tx.clone();
