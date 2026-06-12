@@ -456,7 +456,39 @@ impl App {
         }
     }
 
+    /// Whether a worktree's provider can be launched. A provider must be present
+    /// in config to run; a worktree pinned to one that isn't configured (such as
+    /// the retired Gemini default after its stock block is pruned) is refused.
+    pub(crate) fn provider_is_available(&self, provider: &ProviderKind) -> bool {
+        self.config.providers.get(provider.as_str()).is_some()
+    }
+
+    /// Actionable warning shown when a worktree is pinned to a provider that
+    /// isn't configured. dux refuses to launch it and keeps running; the user
+    /// switches the provider or adds a `[providers.<name>]` block. Kept short
+    /// enough to read on one status line.
+    pub(crate) fn unavailable_provider_warning(
+        &self,
+        branch_name: &str,
+        provider: &ProviderKind,
+    ) -> String {
+        let change_key = self.bindings.label_for(Action::ChangeAgentProvider);
+        let name = provider.as_str();
+        format!(
+            "Agent \"{branch_name}\" uses provider \"{name}\", which isn't configured. \
+             Press {change_key} to switch providers, or add a [providers.{name}] block to config.toml."
+        )
+    }
+
     pub(crate) fn dispatch_agent_launch(&mut self, request: AgentLaunchRequest) -> bool {
+        if !self.provider_is_available(&request.session.provider) {
+            let warning = self.unavailable_provider_warning(
+                &request.session.branch_name,
+                &request.session.provider,
+            );
+            self.set_warning(warning);
+            return false;
+        }
         let session_id = request.session.id.clone();
         if !self.agent_launches_in_flight.insert(session_id.clone()) {
             self.set_info(format!(
