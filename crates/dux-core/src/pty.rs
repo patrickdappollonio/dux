@@ -723,13 +723,17 @@ impl PtyClient {
         self.child.process_id()
     }
 
-    /// Politely ask the child to exit (SIGTERM), so CLIs can flush state before
-    /// the hard `kill()` in `Drop` (or process teardown) reaps stragglers.
+    /// Politely ask the child's whole process group to exit (SIGTERM), so the
+    /// CLI and any helpers it spawned can flush state before the hard group
+    /// `kill()` in `Drop` (or process teardown) reaps stragglers. Signals the
+    /// group rather than just the direct child for the same reason `Drop` does:
+    /// the child is a process-group leader (portable-pty calls `setsid`), so a
+    /// SIGTERM aimed at the lone PID would leave its descendants running.
     pub fn terminate(&self) {
         if let Some(pid) = self.child_process_id()
             && let Some(pid) = rustix::process::Pid::from_raw(pid as i32)
         {
-            let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::TERM);
         }
     }
 
@@ -759,15 +763,50 @@ impl PtyClient {
 
 impl Drop for PtyClient {
     fn drop(&mut self) {
-        // Kill the child, then reap it so it does not linger as a zombie.
+        // Kill the child's whole process group, not just the direct child. The
+        // child is its own session/process-group leader (portable-pty calls
+        // `setsid` before exec, so its PGID equals its PID), and anything it
+        // spawned inherits both that group and the PTY slave fd. If we killed
+        // only the direct child, a surviving grandchild that ignores the
+        // kernel's SIGHUP (or escapes it) would keep the slave open, the master
+        // read would never see EOF, and the `join` below would block the
+        // dropping thread (the UI thread) indefinitely. SIGKILL to the group
+        // reaps those descendants so the slave is released. (A descendant that
+        // has left this process group — a double-forked daemon, or a
+        // job-control background job under an interactive-shell provider — is
+        // out of reach here. A well-behaved daemon redirects its inherited
+        // terminal fds away before detaching so it will not hold the slave
+        // open; a misbehaving one that keeps the slave open could still stall
+        // the join, though that has not been observed with the supported
+        // providers.)
+        if let Some(pid) = self.child.process_id()
+            && let Some(pid) = rustix::process::Pid::from_raw(pid as i32)
+        {
+            // ESRCH just means the group already exited (benign). Anything else
+            // (e.g. EPERM) means the group kill did not happen, so the reader
+            // join below could stall — leave a breadcrumb in the log.
+            if let Err(err) =
+                rustix::process::kill_process_group(pid, rustix::process::Signal::KILL)
+                && err != rustix::io::Errno::SRCH
+            {
+                logger::debug(&format!(
+                    "PtyClient::drop: kill_process_group failed: {err}"
+                ));
+            }
+        }
+        // Reap the direct child so it does not linger as a zombie. After the
+        // group kill the child is already dead, so this `kill` returns at once;
+        // it remains the fallback that actually signals the child when its PID
+        // was unavailable above (without it, `wait` could block on a child that
+        // nothing has asked to exit).
         let _ = self.child.kill();
         let _ = self.child.wait();
-        // The slave fd was closed at spawn time; the child held the last
-        // remaining reference to it, so now that the child is dead the master
-        // read returns EOF (on Linux it returns EIO, which portable-pty maps
-        // to Ok(0)) and the reader thread returns. Join it so the thread does
-        // not outlive this client — otherwise detached reader threads
-        // accumulate across a long session and across the test suite.
+        // With the child group dead, the PTY slave is fully released (the slave
+        // fd itself was dropped at spawn time; the child group held the last
+        // references). The master read then returns EOF (on Linux, EIO, which
+        // portable-pty maps to Ok(0)) and the reader thread returns. Join it so
+        // the thread does not outlive this client — otherwise detached reader
+        // threads accumulate across a long session and across the test suite.
         if let Some(handle) = self.reader_thread.take() {
             let _ = handle.join();
         }
@@ -1836,6 +1875,67 @@ mod tests {
             reader_exited.load(Ordering::Acquire),
             "after drop, the reader thread must have exited (Drop must join it)"
         );
+    }
+
+    #[test]
+    fn drop_kills_whole_process_group_so_a_surviving_grandchild_cannot_stall_it() {
+        // The direct child backgrounds a grandchild that IGNORES SIGHUP and then
+        // blocks reading the controlling terminal (`</dev/tty`, i.e. the PTY
+        // slave), holding the slave open. `</dev/tty` is required: a shell
+        // redirects a background job's stdin to /dev/null, so reading plain
+        // stdin would hit immediate EOF and the grandchild would exit on its
+        // own. Killing only the direct child — even combined with the kernel's
+        // SIGHUP to the foreground process group when the session leader dies —
+        // leaves that grandchild alive with the slave open, so the master read
+        // never sees EOF and the reader-thread join in `Drop` would block
+        // forever. The fix SIGKILLs the whole process group, which the
+        // grandchild cannot ignore, so the slave is released and the join
+        // completes. (POSIX `kill(-pgid)` + `setsid` behave the same on Linux
+        // and macOS, so this holds on both.)
+        let args = vec![
+            "-c".to_string(),
+            "sh -c 'trap \"\" HUP; echo GRANDKID_READY; read _x </dev/tty' & sleep 300".to_string(),
+        ];
+        let client =
+            PtyClient::spawn("/bin/sh", &args, Path::new("."), 5, 40, 100).expect("spawn pty");
+
+        // Wait until the grandchild has actually started and printed its marker
+        // — proof it is running and holding the slave open — rather than
+        // guessing with a fixed sleep. Without this, on a slow host the drop
+        // could run before the grandchild grabs the slave, and the test would
+        // pass without exercising the group kill at all.
+        let mut grandchild_ready = false;
+        for _ in 0..300 {
+            if viewport_lines(&client.snapshot())
+                .iter()
+                .any(|line| line.contains("GRANDKID_READY"))
+            {
+                grandchild_ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            grandchild_ready,
+            "grandchild did not start and hold the PTY slave within 3s"
+        );
+
+        // Run the drop on a worker thread so that, if a regression reintroduces
+        // the hang, the test fails the assertion cleanly instead of blocking the
+        // whole suite forever.
+        let dropper = std::thread::spawn(move || drop(client));
+        let start = Instant::now();
+        while !dropper.is_finished() && start.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            dropper.is_finished(),
+            "PtyClient::drop is still blocked after {:?}; it must SIGKILL the whole \
+             process group so a SIGHUP-ignoring grandchild cannot hold the PTY \
+             slave open and stall the reader-thread join",
+            start.elapsed()
+        );
+        dropper.join().expect("dropper thread panicked");
     }
 
     #[test]
