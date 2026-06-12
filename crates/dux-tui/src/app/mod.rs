@@ -1196,6 +1196,8 @@ mod components;
 mod input;
 mod render;
 mod sessions;
+#[cfg(test)]
+mod test_support;
 pub(crate) mod text_input;
 mod workers;
 

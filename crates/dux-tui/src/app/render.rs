@@ -7349,6 +7349,237 @@ fn status_footer_lines(status_text: &str, width: u16) -> u16 {
 mod tests {
     use super::*;
 
+    use crate::app::test_support::{default_bindings, test_app, wait_for_agent_cursor};
+    use crate::model::{CompanionTerminal, SessionSurface};
+    use crate::pty::PtyClient;
+
+    /// Regression test for issue #258: while the interactive agent terminal is
+    /// rendered, the real (hardware) terminal cursor must be moved onto the
+    /// embedded PTY cursor cell. IME composition popups (e.g. a Korean IME) are
+    /// drawn by the terminal/OS at the hardware cursor position, so if it is
+    /// left at the origin the composing character appears detached from the
+    /// prompt near the top-left instead of at the agent's cursor.
+    #[test]
+    fn interactive_agent_aligns_hardware_cursor_with_pty_cursor() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+
+        // `ESC[5;9H` moves the cursor to row 5, col 9 (1-based) = row 4, col 8
+        // (0-based); printing 'X' there advances it to row 4, col 9 (0-based).
+        // `sleep` keeps the child alive so the snapshot keeps a live cursor.
+        let args = vec![
+            "-c".to_string(),
+            "printf '\\033[5;9HX'; sleep 30".to_string(),
+        ];
+        let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
+            .expect("spawn pty");
+        app.engine.providers.insert(session_id, client);
+
+        // Enter interactive fullscreen agent mode.
+        app.input_target = InputTarget::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        // Wait until the child's cursor escape has been parsed (no fixed sleep).
+        wait_for_agent_cursor(&mut app, 4, 9);
+
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let term_area = app
+            .mouse_layout
+            .agent_term
+            .expect("agent terminal area should be recorded after render");
+        // Confirm the renderer's input cursor really is the parked PTY cursor,
+        // then derive the expected screen cell from the KNOWN (row 4, col 9)
+        // literals — not from snapshot_buf — so a transposed or mis-offset
+        // production computation cannot make this assertion tautologically true.
+        let cursor = app
+            .snapshot_buf
+            .cursor
+            .expect("interactive agent snapshot should expose a PTY cursor");
+        assert_eq!(
+            (cursor.row, cursor.col),
+            (4, 9),
+            "PTY should have parked its cursor at the expected cell"
+        );
+        let expected = (term_area.x + 9, term_area.y + 4);
+        terminal.backend_mut().assert_cursor_position(expected);
+    }
+
+    /// The same hardware-cursor alignment must hold in the normal (non-
+    /// fullscreen) center-pane agent view, not just the fullscreen overlay.
+    #[test]
+    fn inline_agent_aligns_hardware_cursor_with_pty_cursor() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let args = vec![
+            "-c".to_string(),
+            "printf '\\033[5;9HX'; sleep 30".to_string(),
+        ];
+        let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
+            .expect("spawn pty");
+        app.engine.providers.insert(session_id, client);
+
+        // Inline agent view: no fullscreen overlay, center pane focused.
+        app.input_target = InputTarget::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::None;
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Center;
+
+        wait_for_agent_cursor(&mut app, 4, 9);
+
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let term_area = app
+            .mouse_layout
+            .agent_term
+            .expect("agent terminal area should be recorded after render");
+        // Guard against a tautological pass: the terminal must be offset from
+        // the origin so the +9/+4 offset below is actually exercised (mirrors
+        // the non-interactive test's setup assertion).
+        assert!(
+            term_area.x > 0 || term_area.y > 0,
+            "test setup: agent terminal should be offset from the origin"
+        );
+        let cursor = app
+            .snapshot_buf
+            .cursor
+            .expect("inline agent snapshot should expose a PTY cursor");
+        assert_eq!((cursor.row, cursor.col), (4, 9));
+        let expected = (term_area.x + 9, term_area.y + 4);
+        terminal.backend_mut().assert_cursor_position(expected);
+    }
+
+    /// The hardware cursor must only track the PTY in interactive (input) mode.
+    /// In a non-interactive agent view there is no IME input, so the cursor
+    /// must not be repositioned — otherwise it leaves a stray blinking cursor
+    /// over read-only output.
+    #[test]
+    fn non_interactive_agent_leaves_hardware_cursor_at_origin() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let args = vec![
+            "-c".to_string(),
+            "printf '\\033[5;9HX'; sleep 30".to_string(),
+        ];
+        let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
+            .expect("spawn pty");
+        app.engine.providers.insert(session_id, client);
+
+        // session_surface is Agent so the snapshot is populated, but input is
+        // NOT routed to the agent.
+        app.session_surface = SessionSurface::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        wait_for_agent_cursor(&mut app, 4, 9);
+        app.input_target = InputTarget::None;
+
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let term_area = app
+            .mouse_layout
+            .agent_term
+            .expect("agent terminal area should be recorded after render");
+        // The PTY genuinely has an off-origin cursor that the renderer COULD
+        // have placed: term_area is offset and the PTY cursor is at (4, 9), so
+        // a regression that wrongly set the hardware cursor would move it away
+        // from the origin and fail the assertion below.
+        assert!(
+            term_area.x > 0 || term_area.y > 0,
+            "test setup: agent terminal should be offset from the origin"
+        );
+        assert!(
+            app.snapshot_buf.cursor.is_some(),
+            "test setup: the PTY should still expose a cursor to (not) place"
+        );
+
+        // Not in input mode → the hardware cursor is never positioned and stays
+        // at the backend origin.
+        terminal.backend_mut().assert_cursor_position((0u16, 0u16));
+    }
+
+    /// The same hardware-cursor alignment must also hold for a companion
+    /// terminal (the `SessionSurface::Terminal` path), which renders through the
+    /// same `render_agent_terminal` code as the agent surface. Without coverage
+    /// here, a future change that special-cased the agent surface could
+    /// silently break IME composition placement for companion terminals.
+    #[test]
+    fn companion_terminal_aligns_hardware_cursor_with_pty_cursor() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let args = vec![
+            "-c".to_string(),
+            "printf '\\033[5;9HX'; sleep 30".to_string(),
+        ];
+        let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
+            .expect("spawn pty");
+
+        let terminal_id = "term-1".to_string();
+        app.engine.companion_terminals.insert(
+            terminal_id.clone(),
+            CompanionTerminal {
+                session_id,
+                label: "shell".to_string(),
+                foreground_cmd: None,
+                client,
+            },
+        );
+        app.active_terminal_id = Some(terminal_id);
+
+        // Interactive fullscreen companion-terminal mode.
+        app.input_target = InputTarget::Terminal;
+        app.session_surface = SessionSurface::Terminal;
+        app.fullscreen_overlay = FullscreenOverlay::Terminal;
+
+        wait_for_agent_cursor(&mut app, 4, 9);
+
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let term_area = app
+            .mouse_layout
+            .agent_term
+            .expect("terminal area should be recorded after render");
+        assert!(
+            term_area.x > 0 || term_area.y > 0,
+            "test setup: companion terminal should be offset from the origin"
+        );
+        let cursor = app
+            .snapshot_buf
+            .cursor
+            .expect("companion terminal snapshot should expose a PTY cursor");
+        assert_eq!((cursor.row, cursor.col), (4, 9));
+        let expected = (term_area.x + 9, term_area.y + 4);
+        terminal.backend_mut().assert_cursor_position(expected);
+    }
+
     #[test]
     fn scrollback_indicator_uses_fractional_label() {
         assert_eq!(
