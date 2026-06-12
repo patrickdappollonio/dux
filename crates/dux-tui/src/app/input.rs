@@ -5602,6 +5602,8 @@ impl App {
             }
             Some(LeftItem::EmptyProjectsSpacer) => {}
             Some(LeftItem::EmptyProjectsSeparator) => {}
+            // Non-selectable header; selection never lands here, so no action.
+            Some(LeftItem::OrphanProject(_)) => {}
             None => {}
         }
         Ok(())

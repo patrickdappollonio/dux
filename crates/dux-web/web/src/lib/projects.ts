@@ -1,8 +1,8 @@
-import type { ProjectView, SessionView } from "@/lib/types"
+import type { ProjectView, SessionView, SidebarModel } from "@/lib/types"
 
 // The shape both the desktop sidebar and the mobile home screen render from.
 export interface PartitionedProjects {
-  // Sessions grouped under their owning project id.
+  // Sessions grouped under their owning project id, in display order.
   grouped: Map<string, SessionView[]>
   // Project ids that have at least one agent (active projects first, with any
   // orphaned project ids — a session whose project is absent — appended so a
@@ -14,41 +14,52 @@ export interface PartitionedProjects {
   projectName: (id: string) => string
 }
 
-// Group sessions under EVERY project, then partition like the TUI: projects
-// with agents first, agent-less ones under their own "Projects with no agents"
-// heading. Shared verbatim by the sidebar and the mobile home screen so both
-// surfaces order projects identically.
+// Project GROUPING is owned by dux_core (`dux_core::sidebar`, surfaced as
+// `viewModel.sidebar`): which sessions belong to which project, which ids are
+// orphaned (a session whose project record was removed), the display names, and
+// whether the agent-less projects are split below a separator. This function
+// only PROJECTS that core model into the shape the components render — it makes
+// no grouping decisions of its own. Ordering follows the caller's already
+// reordered `projects`/`sessions`, since optimistic drag-reorder is display-only
+// state the server has not confirmed yet. Because the TUI consumes the same core
+// model, both surfaces group identically by construction.
 export function partitionProjects(
+  sidebar: SidebarModel | undefined,
   projects: ProjectView[],
   sessions: SessionView[],
 ): PartitionedProjects {
-  const grouped = new Map<string, SessionView[]>()
-  for (const project of projects) {
-    grouped.set(project.id, [])
-  }
+  const groups = sidebar?.groups ?? []
+  const agentlessStart = sidebar?.agentless_start ?? null
+
+  const names = new Map<string, string>()
   const orphanIds: string[] = []
-  for (const session of sessions) {
-    let bucket = grouped.get(session.project_id)
-    if (!bucket) {
-      bucket = []
-      grouped.set(session.project_id, bucket)
-      orphanIds.push(session.project_id)
+  const agentless = new Set<string>()
+  groups.forEach((group, index) => {
+    names.set(group.project_id, group.name)
+    if (group.orphaned) orphanIds.push(group.project_id)
+    if (agentlessStart !== null && index >= agentlessStart) {
+      agentless.add(group.project_id)
     }
-    bucket.push(session)
+  })
+
+  // Sessions grouped under their project, in display (reordered) order.
+  const grouped = new Map<string, SessionView[]>()
+  for (const id of names.keys()) grouped.set(id, [])
+  for (const session of sessions) {
+    grouped.get(session.project_id)?.push(session)
   }
+
+  // Real projects in display order, partitioned by core's agent-less set; orphan
+  // groups (always with agents) appended after the agent-bearing projects.
   const withAgents: string[] = []
   const withoutAgents: string[] = []
   for (const project of projects) {
-    if ((grouped.get(project.id)?.length ?? 0) > 0) {
-      withAgents.push(project.id)
-    } else {
-      withoutAgents.push(project.id)
-    }
+    if (!names.has(project.id)) continue
+    if (agentless.has(project.id)) withoutAgents.push(project.id)
+    else withAgents.push(project.id)
   }
   withAgents.push(...orphanIds)
 
-  const projectName = (id: string) =>
-    projects.find((p) => p.id === id)?.name ?? id.slice(0, 8)
-
+  const projectName = (id: string) => names.get(id) ?? id.slice(0, 8)
   return { grouped, withAgents, withoutAgents, projectName }
 }

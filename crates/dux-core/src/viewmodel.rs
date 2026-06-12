@@ -14,6 +14,10 @@ use crate::model::{AgentSession, ChangedFile, PrInfo, PrState, Project, ProjectB
 pub struct ViewModel {
     pub projects: Vec<ProjectView>,
     pub sessions: Vec<SessionView>,
+    /// Core-computed sidebar grouping (projects + sessions, with orphaned
+    /// sessions surfaced) so both surfaces render an identical tree without
+    /// re-deriving grouping at the interface.
+    pub sidebar: crate::sidebar::SidebarModel,
     pub changed_files: ChangedFilesView,
     /// Global environment variables from `[env]` in `config.toml`, applied to
     /// every spawned provider/terminal. Surfaced so a client can pre-fill an
@@ -331,6 +335,11 @@ impl Engine {
                     )
                 })
                 .collect(),
+            sidebar: crate::sidebar::build_sidebar(
+                &self.projects,
+                &self.sessions,
+                self.config.ui.empty_project_separator_min_projects,
+            ),
             changed_files: ChangedFilesView {
                 staged: self
                     .staged_files

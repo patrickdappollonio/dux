@@ -458,6 +458,10 @@ impl App {
                             Span::styled(dot.to_string(), Style::default().fg(dot_color)),
                         ]))
                     }
+                    LeftItem::OrphanProject(_) => ListItem::new(Line::from(Span::styled(
+                        "⚠",
+                        Style::default().fg(self.theme.project_missing_fg),
+                    ))),
                     LeftItem::EmptyProjectsSpacer => ListItem::new(Line::from("")),
                     LeftItem::EmptyProjectsSeparator => ListItem::new(Line::from(Span::styled(
                         "─",
@@ -567,6 +571,21 @@ impl App {
                         }
                         ListItem::new(Line::from(spans))
                     }
+                }
+                LeftItem::OrphanProject(session_index) => {
+                    // A removed project whose sessions outlived it. Read the
+                    // ghost id from a representative session and show its short
+                    // name + a hint; its sessions render as normal rows below.
+                    let id = &self.engine.sessions[*session_index].project_id;
+                    let name = dux_core::sidebar::short_project_id(id);
+                    ListItem::new(Line::from(vec![
+                        Span::styled("⚠ ", Style::default().fg(self.theme.project_missing_fg)),
+                        Span::styled(name, Style::default().fg(self.theme.project_missing_fg)),
+                        Span::styled(
+                            " (removed project)",
+                            Style::default().fg(self.theme.provider_label_fg),
+                        ),
+                    ]))
                 }
                 LeftItem::EmptyProjectsSpacer => ListItem::new(Line::from("")),
                 LeftItem::Session(index) => {
