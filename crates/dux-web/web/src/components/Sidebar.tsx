@@ -187,7 +187,6 @@ function TerminalSubItem({
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem
-            className="text-destructive"
             onClick={() => openDeleteTerminal(terminal.id)}
           >
             <Trash2 />
@@ -402,7 +401,6 @@ function SessionSubItem({
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
-              className="text-destructive"
               onClick={() => openDelete(session.id)}
             >
               <Trash2 />
@@ -606,7 +604,6 @@ function ProjectItem({
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
-              className="text-destructive"
               onClick={() => openRemoveProject(id)}
             >
               <Trash2 />

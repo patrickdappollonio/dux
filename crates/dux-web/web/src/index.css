@@ -64,48 +64,17 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     75% { transform: translateY(10%); }
 }
 
-/* A soft band of light that sweeps LEFT → RIGHT across a working agent's row,
-   over a faint static outline, so the "working" state reads at a glance next to
-   the bouncing Bot icon. The sweep loops while the agent works; when it stops,
-   AgentBeam keeps the row mounted until the current pass finishes (it unmounts on
-   the next animation-iteration), so the light never freezes mid-name. Colors are
-   theme-driven (`--primary`); the row clips the beam to its rounded corners. */
+/* Positioning shell for the working-agent beam. The glow itself is drawn by the
+   border-beam library's `line` preset (a bottom-edge traveling beam) in
+   AgentBeam; this just lays it over the row as a click-through overlay
+   (pointer-events: none, so clicks reach the row beneath), clipped to the row's
+   rounded corners. Shown while an agent works, next to the bouncing Bot icon. */
 .agent-beam {
     position: absolute;
     inset: 0;
     border-radius: 6px;
     pointer-events: none;
     overflow: hidden;
-    /* Faint static outline so the row still reads as active between sweeps and
-       under reduced motion (where the sweep below is disabled). */
-    box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 30%, transparent);
-}
-.agent-beam-light {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: -35%;
-    width: 35%;
-    /* A soft beam, transparent at both edges so it fades in/out as it crosses. */
-    background: linear-gradient(
-        90deg,
-        transparent,
-        color-mix(in oklch, var(--primary) 55%, transparent),
-        transparent
-    );
-}
-
-/* `left` from fully off the left edge to fully off the right — ratio-independent
-   (percent of the row), so it traverses cleanly on any row width. */
-@keyframes agent-beam-sweep {
-    from { left: -35%; }
-    to { left: 100%; }
-}
-
-@media (prefers-reduced-motion: no-preference) {
-    .agent-beam-light {
-        animation: agent-beam-sweep 1.5s linear infinite;
-    }
 }
 
 :root {

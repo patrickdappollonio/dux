@@ -1,6 +1,7 @@
 import { useMemo, useState, useSyncExternalStore } from "react"
 import {
   Check,
+  Ellipsis,
   EllipsisVertical,
   Hash,
   Loader2,
@@ -15,6 +16,7 @@ import {
 import { toast } from "sonner"
 import { git } from "@/lib/git"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
+import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -29,6 +31,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
@@ -60,9 +63,9 @@ import {
   subscribeHighlighter,
 } from "@/lib/highlight"
 import {
+  fileStatusMeta,
   filterChangedFiles,
   shouldShowChangedFiles,
-  statusGlyph,
 } from "@/lib/changedFiles"
 import {
   closeDiff,
@@ -84,11 +87,10 @@ interface FileRowProps {
 }
 
 function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
-  const glyph = statusGlyph(file.status)
+  const { kind } = fileStatusMeta(file.status)
   const [busy, setBusy] = useState(false)
 
-  async function handleAction(e: React.MouseEvent) {
-    e.stopPropagation()
+  async function runAction() {
     setBusy(true)
     try {
       if (action === "stage") {
@@ -108,9 +110,8 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
   // Discard is only offered on unstaged files (the "stage" action rows), mirroring
   // the TUI which blocks discarding staged files. An untracked file ("?") will be
   // deleted; a tracked one is restored — the dialog distinguishes them.
-  function handleDiscard(e: React.MouseEvent) {
-    e.stopPropagation()
-    openDiscard({ sessionId, path: file.path, untracked: statusGlyph(file.status) === "?" })
+  function runDiscard() {
+    openDiscard({ sessionId, path: file.path, untracked: kind === "untracked" })
   }
 
   return (
@@ -119,11 +120,9 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
       className="group flex cursor-pointer items-center gap-2 rounded px-1 py-1 hover:bg-muted max-md:min-h-11"
       onClick={() => onOpenDiff(file.path)}
     >
-      {/* Status glyph. leading-none so the single uppercase letter centers in
-          the fixed-height badge instead of riding high. */}
-      <Badge variant="outline" className="shrink-0 font-mono leading-none">
-        {glyph}
-      </Badge>
+      {/* Status marker — a neutral file-status icon (shared FileStatusIcon),
+          with a tooltip naming the status (Modified/Added/Deleted/…). */}
+      <FileStatusIcon status={file.status} />
 
       {/* File path — monospace (it's a path/code identifier). Long paths
           ellipsize at the START (direction:rtl) so the filename at the end stays
@@ -146,61 +145,65 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
         </span>
       )}
 
-      {/* Action buttons. On desktop the wrapper consumes NO width until the row
-          is hovered — its max-width animates open, so the path/counts use the
-          full row otherwise and the content slides left to make room (not a hard
-          cut). On touch (no hover) it's always visible at a ≥44px target. */}
-      <div className="flex shrink-0 items-center gap-0.5 overflow-hidden transition-[max-width,opacity] duration-200 ease-out max-md:max-w-none motion-reduce:transition-none md:max-w-0 md:opacity-0 md:group-hover:max-w-64 md:group-hover:opacity-100">
-        {/* Open in editor — desktop only (Monaco is poor on touch). Skipped for
-            deleted files (nothing on disk to edit). */}
-        {glyph !== "D" && (
-          <Button
-            variant="ghost"
-            size="sm"
-            aria-label={`Open ${file.path} in editor`}
-            className="hidden shrink-0 md:inline-flex"
-            onClick={(e) => {
-              e.stopPropagation()
-              openEditor(sessionId, file.path)
-            }}
+      {/* Row actions consolidated into a single ⋯ menu (like the sidebar's
+          project/session rows). The wrapper consumes NO width until the row is
+          hovered, the menu is open (trigger aria-expanded), or an action is in
+          flight (trigger aria-busy — so the spinner stays visible after the menu
+          closes) — its max-width animates open, so the path/counts use the full
+          row otherwise. Always visible on touch at a ≥44px target. The
+          stopPropagation keeps clicks on the trigger AND on the (portaled) menu
+          items from bubbling to the row's open-diff onClick — React routes portal
+          events through this React-tree ancestor. */}
+      <div
+        className="flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out max-md:max-w-none motion-reduce:transition-none md:max-w-0 md:opacity-0 md:group-hover:max-w-10 md:group-hover:opacity-100 md:has-[[aria-expanded=true]]:max-w-10 md:has-[[aria-expanded=true]]:opacity-100 md:has-[[aria-busy=true]]:max-w-10 md:has-[[aria-busy=true]]:opacity-100"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <Button
+                variant="ghost"
+                size="icon"
+                disabled={busy}
+                aria-busy={busy}
+                aria-label={`Actions for ${file.path}`}
+                className="shrink-0 max-md:size-11"
+              />
+            }
           >
-            <Pencil />
-            Edit
-          </Button>
-        )}
-
-        {/* Discard — unstaged rows only (the TUI blocks discarding staged files).
-            Destructive-tinted; opens a confirm dialog (it's destructive). */}
-        {action === "stage" && (
-          <Button
-            variant="ghost"
-            size="sm"
-            aria-label={`Discard changes to ${file.path}`}
-            className="shrink-0 text-destructive hover:text-destructive max-md:min-h-11"
-            onClick={handleDiscard}
-          >
-            <Undo2 />
-            Discard
-          </Button>
-        )}
-
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={busy}
-          aria-busy={busy}
-          className="shrink-0 max-md:min-h-11"
-          onClick={handleAction}
-        >
-          {busy ? (
-            <Loader2 className="motion-safe:animate-spin" />
-          ) : action === "stage" ? (
-            <Plus />
-          ) : (
-            <Minus />
-          )}
-          {action === "stage" ? "Stage" : "Unstage"}
-        </Button>
+            {busy ? <Loader2 className="motion-safe:animate-spin" /> : <Ellipsis />}
+          </DropdownMenuTrigger>
+          <DropdownMenuContent side="bottom" align="end">
+            {/* Open in editor — desktop only (Monaco is poor on touch). Skipped
+                for deleted files (nothing on disk to edit). */}
+            {kind !== "deleted" && (
+              <DropdownMenuItem
+                className="hidden md:flex"
+                onClick={() => openEditor(sessionId, file.path)}
+              >
+                <Pencil />
+                Edit
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuItem onClick={() => void runAction()}>
+              {action === "stage" ? <Plus /> : <Minus />}
+              {action === "stage" ? "Stage" : "Unstage"}
+            </DropdownMenuItem>
+            {/* Discard — unstaged rows only (the TUI blocks discarding staged
+                files). Destructive: a trailing "…" + a confirm dialog signal the
+                danger; the item is left neutral (no red), the … + confirmation
+                are the cue. */}
+            {action === "stage" && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={runDiscard}>
+                  <Undo2 />
+                  Discard…
+                </DropdownMenuItem>
+              </>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </div>
   )

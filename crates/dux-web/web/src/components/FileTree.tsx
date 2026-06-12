@@ -1,12 +1,12 @@
 import { useState } from "react"
 import { ChevronRight, File as FileIcon } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { Badge } from "@/components/ui/badge"
+import { FileStatusIcon } from "@/components/FileStatusIcon"
 import type { FileTreeNode } from "@/lib/fileTree"
 
 interface FileTreeBase {
   openPath: string | null
-  // path → status glyph, for badging changed files in the tree.
+  // path → raw git status code, for marking changed files in the tree.
   changed: Map<string, string>
   // dir paths to expand on first render (the open file's ancestors).
   defaultExpanded: Set<string>
@@ -59,7 +59,7 @@ function TreeItem({
   const indent = { paddingLeft: `${depth * 0.75 + 0.25}rem` }
 
   if (!node.isDir) {
-    const glyph = changed.get(node.path)
+    const status = changed.get(node.path)
     return (
       <li>
         <button
@@ -75,14 +75,7 @@ function TreeItem({
           <span className="min-w-0 flex-1 truncate font-mono text-sm">
             {node.name}
           </span>
-          {glyph && (
-            <Badge
-              variant="outline"
-              className="shrink-0 font-mono text-xs leading-none"
-            >
-              {glyph}
-            </Badge>
-          )}
+          {status && <FileStatusIcon status={status} />}
         </button>
       </li>
     )

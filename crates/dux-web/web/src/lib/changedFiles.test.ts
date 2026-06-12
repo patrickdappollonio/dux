@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  fileStatusMeta,
   filterChangedFiles,
   shouldShowChangedFiles,
-  statusGlyph,
 } from "./changedFiles"
 import type { ChangedFileView } from "./types"
 
@@ -63,16 +63,40 @@ describe("shouldShowChangedFiles", () => {
   })
 })
 
-describe("statusGlyph", () => {
-  it("maps known codes to a single glyph", () => {
-    expect(statusGlyph("M")).toBe("M")
-    expect(statusGlyph("a")).toBe("A")
-    expect(statusGlyph("??")).toBe("?")
-    expect(statusGlyph("?")).toBe("?")
+describe("fileStatusMeta", () => {
+  it("maps known codes to a kind and label", () => {
+    expect(fileStatusMeta("M")).toEqual({ kind: "modified", label: "Modified" })
+    expect(fileStatusMeta("a")).toEqual({ kind: "added", label: "Added" })
+    expect(fileStatusMeta("D")).toEqual({ kind: "deleted", label: "Deleted" })
+    expect(fileStatusMeta("R")).toEqual({ kind: "renamed", label: "Renamed" })
+    expect(fileStatusMeta("??")).toEqual({
+      kind: "untracked",
+      label: "Untracked",
+    })
+    expect(fileStatusMeta("?")).toEqual({
+      kind: "untracked",
+      label: "Untracked",
+    })
   })
 
-  it("falls back to the first uppercased char for unknown codes", () => {
-    expect(statusGlyph("rm")).toBe("R")
-    expect(statusGlyph("")).toBe("?")
+  it("keys off the first significant char for multi-char codes", () => {
+    expect(fileStatusMeta("rm")).toEqual({ kind: "renamed", label: "Renamed" })
+    expect(fileStatusMeta("MM")).toEqual({ kind: "modified", label: "Modified" })
+    expect(fileStatusMeta("R ")).toEqual({ kind: "renamed", label: "Renamed" })
+  })
+
+  it("maps copy, conflict, and type-change codes", () => {
+    expect(fileStatusMeta("C")).toEqual({ kind: "copied", label: "Copied" })
+    expect(fileStatusMeta("U")).toEqual({ kind: "conflict", label: "Conflict" })
+    expect(fileStatusMeta("UU")).toEqual({ kind: "conflict", label: "Conflict" })
+    expect(fileStatusMeta("T")).toEqual({
+      kind: "type-changed",
+      label: "Type changed",
+    })
+  })
+
+  it("falls back to a generic 'Changed' label for unknown or empty codes", () => {
+    expect(fileStatusMeta("")).toEqual({ kind: "other", label: "Changed" })
+    expect(fileStatusMeta("X")).toEqual({ kind: "other", label: "Changed" })
   })
 })
