@@ -13,13 +13,13 @@ import {
 import { toast } from "sonner"
 import { fileApi } from "@/lib/fileApi"
 import type { WorktreeFile } from "@/lib/fileApi"
-import { shouldShowChangedFiles, statusGlyph } from "@/lib/changedFiles"
+import { shouldShowChangedFiles } from "@/lib/changedFiles"
 import { ancestorDirs, buildFileTree } from "@/lib/fileTree"
 import { isLocalAccessHost } from "@/lib/localAccess"
 import { isMarkdownPath } from "@/lib/markdown"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
-import { Badge } from "@/components/ui/badge"
+import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { Button } from "@/components/ui/button"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { FileTree } from "@/components/FileTree"
@@ -136,15 +136,16 @@ function EditorBody({ sessionId, initialPath, closeReqRef }: EditorBodyProps) {
   // URLs keep the button but disable it with an explanatory tooltip.
   const localAccess = isLocalAccessHost(window.location.hostname)
 
-  // Badge the tree's changed files. Sourced from the (watched) changed-files
-  // broadcast, guarded so a different session's list never leaks in.
+  // Mark the tree's changed files. Sourced from the (watched) changed-files
+  // broadcast, guarded so a different session's list never leaks in. Stores the
+  // raw git status code per path; FileStatusIcon maps it to an icon + label.
   const watched = viewModel?.changed_files.watched_session_id ?? null
   const changedMap = useMemo(() => {
     const map = new Map<string, string>()
     if (!shouldShowChangedFiles(watched, sessionId) || !viewModel) return map
     const { staged, unstaged } = viewModel.changed_files
     for (const f of [...unstaged, ...staged]) {
-      if (!map.has(f.path)) map.set(f.path, statusGlyph(f.status))
+      if (!map.has(f.path)) map.set(f.path, f.status)
     }
     return map
   }, [viewModel, watched, sessionId])
@@ -436,12 +437,7 @@ function EditorBody({ sessionId, initialPath, closeReqRef }: EditorBodyProps) {
                       )}
                     >
                       {changedMap.has(p) && (
-                        <Badge
-                          variant="outline"
-                          className="shrink-0 font-mono text-xs leading-none"
-                        >
-                          {changedMap.get(p)}
-                        </Badge>
+                        <FileStatusIcon status={changedMap.get(p)!} />
                       )}
                       {/* Full path → start-ellipsize so the filename stays visible. */}
                       <span className="min-w-0 flex-1 truncate text-left font-mono text-sm [direction:rtl]">

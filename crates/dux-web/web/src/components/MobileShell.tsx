@@ -186,7 +186,6 @@ function SessionActions({ session }: { session: SessionView }) {
       </DropdownMenuItem>
       <DropdownMenuSeparator />
       <DropdownMenuItem
-        className="text-destructive"
         onClick={() => openDelete(session.id)}
       >
         <Trash2 />
@@ -492,7 +491,6 @@ function ProjectBlock({
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
-              className="text-destructive"
               onClick={() => openRemoveProject(id)}
             >
               <Trash2 />

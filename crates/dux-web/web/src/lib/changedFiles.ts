@@ -1,28 +1,58 @@
-// Pure filter helper for the changed-files search box. Kept free of React so
-// it's trivially unit-testable: case-insensitive substring match on the file
-// path. An empty (or whitespace-only) query passes everything through, so the
-// list is unfiltered until the user actually types.
+// Shared, React-free changed-files helpers (so they stay trivially
+// unit-testable): git-status interpretation (`fileStatusMeta` → kind + label,
+// consumed by FileStatusIcon) and the changed-files search filter
+// (`filterChangedFiles`: a case-insensitive substring match on the path; an
+// empty or whitespace-only query passes everything through).
 
 import type { ChangedFileView } from "./types"
 
-// Map a raw git status code to a short display glyph, shared by the changes pane
-// and the editor's file list so they stay consistent.
-export function statusGlyph(status: string): string {
-  const upper = status.toUpperCase()
-  switch (upper) {
+// A file's git status, interpreted once here (kept React-free so it's trivially
+// unit-testable) and shared by the changes pane and the editor's file
+// tree/search so the marker reads identically everywhere. `kind` selects the
+// icon (see FileStatusIcon); `label` is the human-readable tooltip/aria text.
+export type FileStatusKind =
+  | "modified"
+  | "added"
+  | "deleted"
+  | "renamed"
+  | "copied"
+  | "conflict"
+  | "type-changed"
+  | "untracked"
+  | "other"
+
+export interface FileStatusMeta {
+  kind: FileStatusKind
+  label: string
+}
+
+export function fileStatusMeta(status: string): FileStatusMeta {
+  const code = status.trim().toUpperCase()
+  // Untracked covers both the porcelain two-char code "??" and a bare "?".
+  if (code === "?" || code === "??") {
+    return { kind: "untracked", label: "Untracked" }
+  }
+  // Everything else keys off the first significant char, so porcelain forms like
+  // "MM", "R ", or the conflict code "UU" collapse to the same kind as their
+  // leading single-letter code.
+  switch (code[0]) {
     case "M":
-      return "M"
+      return { kind: "modified", label: "Modified" }
     case "A":
-      return "A"
+      return { kind: "added", label: "Added" }
     case "D":
-      return "D"
-    case "?":
-    case "??":
-      return "?"
+      return { kind: "deleted", label: "Deleted" }
     case "R":
-      return "R"
+      return { kind: "renamed", label: "Renamed" }
+    case "C":
+      return { kind: "copied", label: "Copied" }
+    case "U":
+      return { kind: "conflict", label: "Conflict" }
+    case "T":
+      return { kind: "type-changed", label: "Type changed" }
     default:
-      return status.slice(0, 1).toUpperCase() || "?"
+      // Unknown code — show a neutral label rather than leaking the raw letter.
+      return { kind: "other", label: "Changed" }
   }
 }
 
