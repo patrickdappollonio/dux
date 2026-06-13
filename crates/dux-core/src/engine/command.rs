@@ -323,18 +323,21 @@ impl Engine {
                         "An agent in \"{project_name}\" is still being removed — try again in a moment."
                     ))));
                 }
-                // Delete every session record (+ its PR rows) for the project in a
-                // SINGLE transaction up front, so a mid-way failure cannot leave the
-                // project half-removed — the rows are gone before any in-memory
-                // state changes, and on error nothing is mutated.
-                let removed = self
-                    .session_store
-                    .delete_sessions_for_project(&project_id)?;
+                // Was this a real, config-backed project (vs. a ghost id that only
+                // exists as orphaned session rows)? A ghost was never written to
+                // config, so there is nothing to rewrite for it below.
+                let was_real = self.projects.iter().any(|p| p.id == project_id);
+                // Delete the project row, every session record, and their PR rows in
+                // a SINGLE transaction, so a mid-way failure cannot leave the project
+                // half-removed (e.g. agents gone but the project row surviving to
+                // reappear on restart). The rows are gone before any in-memory state
+                // changes, and on error nothing is mutated. Tolerates a ghost id.
+                let removed = self.session_store.remove_project_records(&project_id)?;
                 // The DB rows are gone; finish_delete_session now only runs the
                 // (infallible) in-memory/runtime teardown per session — its own
                 // delete_session is a no-op on the already-removed row. Dropping
                 // each provider SIGKILLs the PTY process group; worktrees are
-                // deliberately left on disk. Tolerates a ghost (project-less) id.
+                // deliberately left on disk.
                 for id in &removed {
                     let _ = self.finish_delete_session(id);
                 }
@@ -346,12 +349,17 @@ impl Engine {
                     1 => " and its agent".to_string(),
                     n => format!(" and its {n} agents"),
                 };
-                // Persist the project-record removal + config rewrite off the UI
-                // thread (a harmless no-op project delete for a ghost id).
-                self.spawn_project_persistence(ProjectPersistenceAction::Remove {
-                    project_id,
-                    project_name: project_name.clone(),
-                });
+                // Keep portable config in sync with the now-removed project. Only a
+                // real project needs this (a ghost was never in config). The DB delete
+                // already committed, so a config-write failure is reported but does not
+                // undo the removal — it warns that the project may reappear on restart.
+                if was_real && let Err(e) = self.persist_projects_to_config() {
+                    return Ok(EventReaction::Status(StatusUpdate::error(format!(
+                        "Removed \"{project_name}\"{detail} from dux, but updating config.toml \
+                         failed: {e}. The project may reappear on restart — check the file is \
+                         writable."
+                    ))));
+                }
                 Ok(EventReaction::Status(StatusUpdate::info(format!(
                     "Removed project \"{project_name}\"{detail}. Worktrees were kept on disk."
                 ))))

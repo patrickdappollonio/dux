@@ -10,6 +10,10 @@ export interface PartitionedProjects {
   withAgents: string[]
   // Project ids with no agents, sunk below under their own heading.
   withoutAgents: string[]
+  // The drag-reorder payload the server expects: every REAL project id in
+  // display order (agent-bearing first, then agent-less), with orphan ids
+  // excluded — the server has no project record to reorder for a ghost id.
+  realOrder: string[]
   // Resolve a project id to its display name, falling back to a short id slice.
   projectName: (id: string) => string
 }
@@ -60,6 +64,13 @@ export function partitionProjects(
   }
   withAgents.push(...orphanIds)
 
+  // Order for the reorder payload: real ids only (orphans were appended to
+  // withAgents above; the server rejects ids it has no project record for).
+  const orphanSet = new Set(orphanIds)
+  const realOrder = [...withAgents, ...withoutAgents].filter(
+    (id) => !orphanSet.has(id),
+  )
+
   const projectName = (id: string) => names.get(id) ?? id.slice(0, 8)
-  return { grouped, withAgents, withoutAgents, projectName }
+  return { grouped, withAgents, withoutAgents, realOrder, projectName }
 }

@@ -27,6 +27,16 @@ impl SessionStore {
     pub fn open(path: &std::path::Path) -> Result<Self> {
         let conn =
             Connection::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        // The engine keeps one connection open for the lifetime of the process
+        // while background workers open their own to the same file. WAL lets a
+        // writer and readers proceed without blocking each other, and a busy
+        // timeout turns the rare writer/writer overlap into a short wait-and-retry
+        // instead of an immediate `SQLITE_BUSY` failure (the default timeout is 0).
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // `journal_mode` returns the resulting mode as a row, so use a statement
+        // that tolerates it (a `:memory:` DB stays in "memory" mode — a harmless
+        // no-op). `execute_batch` ignores the returned row.
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         let store = Self { conn };
         store.migrate()?;
         Ok(store)
@@ -371,11 +381,14 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Delete every session record (and its PR rows) for a project in a single
-    /// transaction, returning the deleted session ids. Atomic: a failure leaves
-    /// all rows intact, so a project removal can never half-delete its agents.
-    /// The `projects` row itself is left to the caller (the persistence worker).
-    pub fn delete_sessions_for_project(&self, project_id: &str) -> Result<Vec<String>> {
+    /// Remove a project and every record that belongs to it — each session's PR
+    /// rows, the session rows, and the `projects` row — in a single transaction,
+    /// returning the deleted session ids. Atomic: a failure leaves all rows
+    /// intact, so a removal can never half-delete a project (e.g. agents gone but
+    /// the project row surviving to reappear on restart). Deleting a project row
+    /// that does not exist (a ghost id) is a harmless no-op within the same
+    /// transaction.
+    pub fn remove_project_records(&self, project_id: &str) -> Result<Vec<String>> {
         let tx = self.conn.unchecked_transaction()?;
         let ids: Vec<String> = {
             let mut stmt = tx.prepare("select id from agent_sessions where project_id = ?1")?;
@@ -391,6 +404,7 @@ impl SessionStore {
             "delete from agent_sessions where project_id = ?1",
             params![project_id],
         )?;
+        tx.execute("delete from projects where id = ?1", params![project_id])?;
         tx.commit()?;
         Ok(ids)
     }
@@ -839,9 +853,31 @@ mod tests {
     }
 
     #[test]
-    fn delete_sessions_for_project_clears_records_and_prs_atomically() {
+    fn remove_project_records_clears_project_sessions_and_prs_atomically() {
         let store = test_store();
         let now = Utc::now();
+        let p1 = ProjectConfig {
+            id: "p1".to_string(),
+            path: "/tmp/p1".to_string(),
+            name: Some("p1".to_string()),
+            default_provider: None,
+            leading_branch: None,
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: BTreeMap::new(),
+        };
+        let p2 = ProjectConfig {
+            id: "p2".to_string(),
+            path: "/tmp/p2".to_string(),
+            name: Some("p2".to_string()),
+            default_provider: None,
+            leading_branch: None,
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: BTreeMap::new(),
+        };
+        store.upsert_project(&p1).unwrap();
+        store.upsert_project(&p2).unwrap();
         store
             .upsert_session(&test_session_in("a", "p1", now, now))
             .unwrap();
@@ -853,7 +889,7 @@ mod tests {
             .unwrap();
         store.upsert_pr(&stored_pr("a", 1)).unwrap();
 
-        let removed = store.delete_sessions_for_project("p1").unwrap();
+        let removed = store.remove_project_records("p1").unwrap();
 
         assert_eq!(removed.len(), 2);
         assert!(removed.contains(&"a".to_string()));
@@ -867,6 +903,15 @@ mod tests {
             .collect();
         assert_eq!(remaining, vec!["c".to_string()]);
         assert!(store.load_all_latest_prs().unwrap().is_empty());
+        // The project row itself is deleted in the same transaction — only p2
+        // remains, so a removal cannot leave a row that reappears on restart.
+        let project_ids: Vec<String> = store
+            .load_projects()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(project_ids, vec!["p2".to_string()]);
     }
 
     #[test]

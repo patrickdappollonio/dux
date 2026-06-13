@@ -2339,13 +2339,45 @@ mod tests {
     #[test]
     fn remove_project_command_cascades_sessions_keeping_worktrees() {
         let (mut engine, _tmp) = test_engine();
+        // Two projects so the removal must keep the OTHER one untouched, and both
+        // exist as real store rows so we can prove the project row itself is gone.
         engine.projects.push(sample_project("p1", "/tmp/p1"));
+        engine.projects.push(sample_project("p2", "/tmp/p2"));
+        engine
+            .session_store
+            .upsert_project(&crate::engine::project_to_project_config(
+                &engine.projects[0],
+            ))
+            .unwrap();
+        engine
+            .session_store
+            .upsert_project(&crate::engine::project_to_project_config(
+                &engine.projects[1],
+            ))
+            .unwrap();
         let s1 = sample_session("s1", "p1", "feat/a");
         let s2 = sample_session("s2", "p1", "feat/b");
-        engine.session_store.upsert_session(&s1).unwrap();
-        engine.session_store.upsert_session(&s2).unwrap();
+        let s3 = sample_session("s3", "p2", "feat/c");
+        for s in [&s1, &s2, &s3] {
+            engine.session_store.upsert_session(s).unwrap();
+        }
         engine.sessions.push(s1);
         engine.sessions.push(s2);
+        engine.sessions.push(s3);
+        // A PR row on a doomed session proves the cascade clears session_prs too
+        // (the FK cascade is unenforced, so the engine path must do it explicitly).
+        engine
+            .session_store
+            .upsert_pr(&StoredPr {
+                session_id: "s1".to_string(),
+                pr_number: 7,
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+                state: "open".to_string(),
+                title: "t".to_string(),
+                url: "u".to_string(),
+            })
+            .unwrap();
 
         let reaction = engine
             .apply(crate::engine::Command::RemoveProject {
@@ -2354,13 +2386,65 @@ mod tests {
             })
             .expect("remove project");
 
-        // Sessions and the project are gone from memory and the store records
-        // synchronously (the project row delete is the async worker's job).
-        assert!(engine.sessions.is_empty());
-        assert!(engine.projects.is_empty());
-        assert!(engine.session_store.load_sessions().unwrap().is_empty());
-        // A user-facing status is emitted (no silent removal).
-        assert!(matches!(reaction, EventReaction::Status(_)));
+        // Only p1 and its sessions are gone — from memory AND the store records,
+        // synchronously and atomically (sessions, PR rows, and the project row).
+        let session_ids: Vec<String> = engine.sessions.iter().map(|s| s.id.clone()).collect();
+        assert_eq!(session_ids, vec!["s3".to_string()]);
+        let project_ids: Vec<String> = engine.projects.iter().map(|p| p.id.clone()).collect();
+        assert_eq!(project_ids, vec!["p2".to_string()]);
+        let stored_sessions: Vec<String> = engine
+            .session_store
+            .load_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(stored_sessions, vec!["s3".to_string()]);
+        let stored_projects: Vec<String> = engine
+            .session_store
+            .load_projects()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(stored_projects, vec!["p2".to_string()]);
+        assert!(
+            engine
+                .session_store
+                .load_all_latest_prs()
+                .unwrap()
+                .is_empty()
+        );
+        // A single success status is emitted (no silent removal).
+        let status = unwrap_status(reaction);
+        assert_eq!(status.tone, StatusTone::Info);
+        assert!(status.message.contains("Removed project \"p1-name\""));
+    }
+
+    #[test]
+    fn remove_project_command_refuses_while_an_agent_deletion_is_pending() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let s1 = sample_session("s1", "p1", "feat/a");
+        engine.session_store.upsert_session(&s1).unwrap();
+        engine.sessions.push(s1);
+        // One of the project's agents has an in-flight async worktree removal.
+        engine.pending_deletions.insert("s1".to_string());
+
+        let reaction = engine
+            .apply(crate::engine::Command::RemoveProject {
+                project_id: "p1".to_string(),
+                project_name: "p1-name".to_string(),
+            })
+            .expect("remove project");
+
+        // The guard refuses with an error and mutates nothing — the session row,
+        // the project, and the in-memory state all survive for a later retry.
+        let status = unwrap_status(reaction);
+        assert_eq!(status.tone, StatusTone::Error);
+        assert_eq!(engine.sessions.len(), 1);
+        assert_eq!(engine.projects.len(), 1);
+        assert_eq!(engine.session_store.load_sessions().unwrap().len(), 1);
     }
 
     #[test]
