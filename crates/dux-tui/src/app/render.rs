@@ -422,7 +422,9 @@ impl App {
                 .enumerate()
                 .map(|(i, item)| match item {
                     LeftItem::Project(index) => {
-                        let project = &self.engine.projects[*index];
+                        let Some(project) = self.engine.projects.get(*index) else {
+                            return ListItem::new(Line::from(""));
+                        };
                         if project.path_missing {
                             ListItem::new(Line::from(Span::styled(
                                 "⚠",
@@ -447,7 +449,9 @@ impl App {
                         }
                     }
                     LeftItem::Session(index) => {
-                        let session = &self.engine.sessions[*index];
+                        let Some(session) = self.engine.sessions.get(*index) else {
+                            return ListItem::new(Line::from(""));
+                        };
                         let (dot, dot_color) = self.theme.session_dot(&session.status);
                         let is_last = !collapsed_left_items
                             .get(i + 1)
@@ -528,7 +532,9 @@ impl App {
             .map(|(i, item)| match item {
                 LeftItem::Project(index) => {
                     let is_below_empty_projects_separator = after_empty_projects_separator;
-                    let project = &self.engine.projects[*index];
+                    let Some(project) = self.engine.projects.get(*index) else {
+                        return ListItem::new(Line::from(""));
+                    };
                     if project.path_missing {
                         let spans = vec![
                             Span::styled("⚠ ", Style::default().fg(self.theme.project_missing_fg)),
@@ -594,7 +600,9 @@ impl App {
                 }
                 LeftItem::EmptyProjectsSpacer => ListItem::new(Line::from("")),
                 LeftItem::Session(index) => {
-                    let session = &self.engine.sessions[*index];
+                    let Some(session) = self.engine.sessions.get(*index) else {
+                        return ListItem::new(Line::from(""));
+                    };
                     let is_last = !left_items
                         .get(i + 1)
                         .is_some_and(|next| matches!(next, LeftItem::Session(_)));
