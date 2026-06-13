@@ -20,20 +20,16 @@ import {
   Ellipsis,
   FileCode2,
   Folder,
-  FolderGit2,
   FolderOpen,
-  GitBranch,
   GitCommitHorizontal,
   GitFork,
   GitPullRequest,
-  Info,
   Pencil,
   Plug,
   Plus,
   RefreshCw,
   RotateCcw,
   Send,
-  Settings,
   SquareTerminal,
   Terminal,
   Trash2,
@@ -44,6 +40,7 @@ import { copyToClipboard } from "@/lib/clipboard"
 import { git } from "@/lib/git"
 
 import { AgentBeam } from "@/components/AgentBeam"
+import { ProjectMenuItems } from "@/components/ProjectMenuItems"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StatusBadge } from "@/components/StatusBadge"
 import { Badge } from "@/components/ui/badge"
@@ -105,21 +102,13 @@ import {
 import {
   createTerminal,
   openAddProject,
-  openAttachWorktree,
   openChangeProvider,
-  openCheckoutDefaultBranch,
   openCommit,
   openEditor,
-  openCreateAgent,
-  openCreateAgentFromPr,
   openDelete,
   openDeleteTerminal,
   openForkAgent,
-  openProjectInfo,
-  openProjectSettings,
-  openRemoveProject,
   openRename,
-  pullProject,
   reconnectSession,
   reorderProjects,
   reorderSessions,
@@ -499,15 +488,6 @@ function ProjectItem({
   sessions: SessionView[]
   selectedTarget: SelectedTarget | null
 }) {
-  // The "New agent from PR…" item is hidden when GitHub integration / `gh` is
-  // unavailable, mirroring the TUI, which gates its `new-agent-from-pr` command
-  // on the same condition. The server also rejects the command in that state.
-  const { viewModel } = useDux()
-  const ghAvailable = viewModel?.gh_available ?? false
-  // An orphaned group (a session whose project record is gone) has no real
-  // project to act on — most actions would 404 on the server — so its menu shows
-  // only "Remove project…", which clears the ghost's orphaned sessions.
-  const orphaned = !viewModel?.projects.some((p) => p.id === id)
   // Only the project HEADER row is the project drag handle (not the whole
   // block, whose body hosts the sessions' own SortableContext). `isDragging`
   // dims the lifted project for a clear affordance.
@@ -575,46 +555,7 @@ function ProjectItem({
             <Ellipsis />
           </SidebarMenuAction>
           <DropdownMenuContent side="right" align="start">
-            {!orphaned && (
-              <>
-                <DropdownMenuItem onClick={() => openCreateAgent(id)}>
-                  <Bot />
-                  New agent…
-                </DropdownMenuItem>
-                {ghAvailable && (
-                  <DropdownMenuItem onClick={() => openCreateAgentFromPr(id)}>
-                    <GitPullRequest />
-                    New agent from PR…
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuItem onClick={() => openAttachWorktree(id)}>
-                  <FolderGit2 />
-                  Attach worktree…
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => pullProject(id)}>
-                  <Download />
-                  Pull project…
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => openCheckoutDefaultBranch(id)}>
-                  <GitBranch />
-                  Checkout default branch…
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => openProjectInfo(id)}>
-                  <Info />
-                  Project info…
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => openProjectSettings(id)}>
-                  <Settings />
-                  Project settings…
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-              </>
-            )}
-            <DropdownMenuItem onClick={() => openRemoveProject(id)}>
-              <Trash2 />
-              Remove project…
-            </DropdownMenuItem>
+            <ProjectMenuItems id={id} />
           </DropdownMenuContent>
         </DropdownMenu>
         <CollapsibleContent>
@@ -755,11 +696,8 @@ export function AppSidebar() {
     pendingProjectOrder,
   )
 
-  const { grouped, withAgents, withoutAgents, projectName } = partitionProjects(
-    viewModel?.sidebar,
-    projects,
-    sessions,
-  )
+  const { grouped, withAgents, withoutAgents, realOrder, projectName } =
+    partitionProjects(viewModel?.sidebar, projects, sessions)
   // Resolve a project id to its branch-row display (or null when there's
   // nothing to render — empty/unknown branch). Orphan ids (a session whose
   // project is absent) resolve to null, so no stray branch span is emitted.
@@ -767,14 +705,6 @@ export function AppSidebar() {
     const project = projects.find((p) => p.id === id)
     return project ? projectBranchDisplay(project) : null
   }
-  // The complete ordered project set the server demands for `reorder_projects`:
-  // with-agents first, then no-agents, matching the display order. Orphan ids are
-  // display-only (no project record), so exclude them — the server validates the
-  // payload against the real project set and would reject an unknown id.
-  const realProjectIds = new Set(projects.map((p) => p.id))
-  const fullOrder = [...withAgents, ...withoutAgents].filter((id) =>
-    realProjectIds.has(id),
-  )
 
   return (
     <Sidebar collapsible="icon">
@@ -814,7 +744,7 @@ export function AppSidebar() {
           ) : (
             <ProjectGroup
               members={withAgents}
-              fullOrder={fullOrder}
+              fullOrder={realOrder}
               grouped={grouped}
               projectName={projectName}
               projectBranch={projectBranch}
@@ -830,7 +760,7 @@ export function AppSidebar() {
             <SidebarGroupLabel>Projects with no agents</SidebarGroupLabel>
             <ProjectGroup
               members={withoutAgents}
-              fullOrder={fullOrder}
+              fullOrder={realOrder}
               grouped={grouped}
               projectName={projectName}
               projectBranch={projectBranch}

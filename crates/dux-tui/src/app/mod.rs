@@ -3387,6 +3387,44 @@ mod tests {
     }
 
     #[test]
+    fn build_left_items_never_collapses_orphan_groups() {
+        // A real (collapsible) project plus an orphan group — sessions whose
+        // project record is gone. Both ids are in the collapsed set, but an orphan
+        // group must stay expanded: it has no project header the user could click
+        // to re-expand it, so collapsing would strand its sessions out of reach.
+        let projects = vec![test_project("real")];
+        let sessions = vec![
+            test_session("real-s", "real", 0),
+            test_session("ghost-s", "ghost", 0),
+        ];
+        let mut collapsed = HashSet::new();
+        collapsed.insert("real".to_string());
+        collapsed.insert("ghost".to_string());
+
+        let items = build_left_items(&projects, &sessions, &collapsed, 5);
+
+        let session_id = |idx: &usize| sessions[*idx].id.as_str();
+        // The real project is collapsed: header shown, its session hidden.
+        assert!(items.contains(&LeftItem::Project(0)));
+        assert!(
+            !items
+                .iter()
+                .any(|i| matches!(i, LeftItem::Session(idx) if session_id(idx) == "real-s"))
+        );
+        // The orphan group is exempt: its header AND its session stay visible.
+        assert!(
+            items
+                .iter()
+                .any(|i| matches!(i, LeftItem::OrphanProject(_)))
+        );
+        assert!(
+            items
+                .iter()
+                .any(|i| matches!(i, LeftItem::Session(idx) if session_id(idx) == "ghost-s"))
+        );
+    }
+
+    #[test]
     fn config_only_project_is_synced_to_sqlite_and_preserved() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let root = dir.path().to_path_buf();
