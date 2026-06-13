@@ -1717,30 +1717,48 @@ impl App {
     }
 
     pub(crate) fn remove_selected_project(&mut self) -> Result<()> {
-        let Some(project) = self.selected_project().cloned() else {
-            self.set_error("Select a project first.");
-            return Ok(());
-        };
-        let has_sessions = self
-            .engine
-            .sessions
-            .iter()
-            .any(|s| s.project_id == project.id);
-        if has_sessions {
-            self.set_error("Delete all agents in this project first.");
+        if let Some(project) = self.selected_project().cloned() {
+            // Real project: keep the guard. Removing one that still has agents
+            // here would orphan them — use "delete project" to remove agents too.
+            let has_sessions = self
+                .engine
+                .sessions
+                .iter()
+                .any(|s| s.project_id == project.id);
+            if has_sessions {
+                self.set_error("Delete all agents in this project first.");
+                return Ok(());
+            }
+            let reaction = self.engine.apply(Command::PersistProject(Box::new(
+                ProjectPersistenceAction::Remove {
+                    project_id: project.id.clone(),
+                    project_name: project.name.clone(),
+                },
+            )))?;
+            self.apply_reaction(reaction);
+            self.set_busy(format!(
+                "Removing project \"{}\" from workspace...",
+                project.name
+            ));
             return Ok(());
         }
-        let reaction = self.engine.apply(Command::PersistProject(Box::new(
-            ProjectPersistenceAction::Remove {
-                project_id: project.id.clone(),
-                project_name: project.name.clone(),
-            },
-        )))?;
-        self.apply_reaction(reaction);
-        self.set_busy(format!(
-            "Removing project \"{}\" from workspace...",
-            project.name
-        ));
+        // No real project is selected. If an ORPHANED session is selected (its
+        // project record is gone), clear the whole ghost group: Command::RemoveProject
+        // cascades the orphaned session records and keeps their worktrees on disk.
+        if let Some(session) = self.selected_session().cloned() {
+            let project_id = session.project_id.clone();
+            let project_name = dux_core::sidebar::short_project_id(&project_id);
+            let reaction = self.engine.apply(Command::RemoveProject {
+                project_id,
+                project_name,
+            })?;
+            self.apply_reaction(reaction);
+            // The cascade mutates engine.sessions synchronously; refresh the cache
+            // (and fix the selection) so render never indexes a stale row.
+            self.rebuild_left_items();
+            return Ok(());
+        }
+        self.set_error("Select a project first.");
         Ok(())
     }
 

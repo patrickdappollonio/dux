@@ -1168,7 +1168,11 @@ pub(crate) fn build_left_items(
         } else {
             continue;
         }
-        if group.path_missing || collapsed_projects.contains(&group.project_id) {
+        // Orphan groups are never collapsed: their header is non-selectable, so a
+        // stale collapsed-projects entry for a ghost id could otherwise hide their
+        // sessions permanently with no way to re-expand them.
+        if group.path_missing || (!group.orphaned && collapsed_projects.contains(&group.project_id))
+        {
             continue;
         }
         for index in session_indices {

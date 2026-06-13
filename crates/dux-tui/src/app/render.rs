@@ -573,11 +573,16 @@ impl App {
                     }
                 }
                 LeftItem::OrphanProject(session_index) => {
-                    // A removed project whose sessions outlived it. Read the
-                    // ghost id from a representative session and show its short
-                    // name + a hint; its sessions render as normal rows below.
-                    let id = &self.engine.sessions[*session_index].project_id;
-                    let name = dux_core::sidebar::short_project_id(id);
+                    // A removed project whose sessions outlived it. Read the ghost
+                    // id from a representative session — defensively via get(), in
+                    // case the cached index lags engine.sessions — and show its
+                    // short name + a hint; its sessions render as normal rows below.
+                    let name = self
+                        .engine
+                        .sessions
+                        .get(*session_index)
+                        .map(|s| dux_core::sidebar::short_project_id(&s.project_id))
+                        .unwrap_or_default();
                     ListItem::new(Line::from(vec![
                         Span::styled("⚠ ", Style::default().fg(self.theme.project_missing_fg)),
                         Span::styled(name, Style::default().fg(self.theme.project_missing_fg)),
