@@ -1429,7 +1429,7 @@ impl Engine {
                     .iter()
                     .find(|p| p.id == project_id)
                     .map(|p| p.name.clone())
-                    .unwrap_or_else(|| project_id.chars().take(8).collect());
+                    .unwrap_or_else(|| crate::sidebar::short_project_id(&project_id));
                 Command::RemoveProject {
                     project_id,
                     project_name,

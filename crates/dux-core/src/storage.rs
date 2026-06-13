@@ -371,6 +371,30 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Delete every session record (and its PR rows) for a project in a single
+    /// transaction, returning the deleted session ids. Atomic: a failure leaves
+    /// all rows intact, so a project removal can never half-delete its agents.
+    /// The `projects` row itself is left to the caller (the persistence worker).
+    pub fn delete_sessions_for_project(&self, project_id: &str) -> Result<Vec<String>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let ids: Vec<String> = {
+            let mut stmt = tx.prepare("select id from agent_sessions where project_id = ?1")?;
+            let rows = stmt.query_map(params![project_id], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<String>>>()?
+        };
+        tx.execute(
+            "delete from session_prs where session_id in \
+             (select id from agent_sessions where project_id = ?1)",
+            params![project_id],
+        )?;
+        tx.execute(
+            "delete from agent_sessions where project_id = ?1",
+            params![project_id],
+        )?;
+        tx.commit()?;
+        Ok(ids)
+    }
+
     /// Insert a PR association or update its state and title if it already exists.
     pub fn upsert_pr(&self, pr: &StoredPr) -> Result<()> {
         self.conn.execute(
@@ -785,6 +809,65 @@ fn test_session_in(
 mod tests {
     use super::*;
     use chrono::Duration;
+
+    fn stored_pr(session_id: &str, pr_number: u64) -> StoredPr {
+        StoredPr {
+            session_id: session_id.to_string(),
+            pr_number,
+            host: "github.com".to_string(),
+            owner_repo: "o/r".to_string(),
+            state: "OPEN".to_string(),
+            title: "t".to_string(),
+            url: "u".to_string(),
+        }
+    }
+
+    #[test]
+    fn delete_session_also_removes_its_pr_rows() {
+        let store = test_store();
+        let now = Utc::now();
+        store.upsert_session(&test_session("s1", now, now)).unwrap();
+        store.upsert_pr(&stored_pr("s1", 7)).unwrap();
+        assert_eq!(store.load_all_latest_prs().unwrap().len(), 1);
+
+        store.delete_session("s1").unwrap();
+
+        assert!(store.load_sessions().unwrap().is_empty());
+        // The ON DELETE CASCADE FK is unenforced (PRAGMA foreign_keys is off), so
+        // the explicit session_prs delete is what keeps the PR row from leaking.
+        assert!(store.load_all_latest_prs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_sessions_for_project_clears_records_and_prs_atomically() {
+        let store = test_store();
+        let now = Utc::now();
+        store
+            .upsert_session(&test_session_in("a", "p1", now, now))
+            .unwrap();
+        store
+            .upsert_session(&test_session_in("b", "p1", now, now))
+            .unwrap();
+        store
+            .upsert_session(&test_session_in("c", "p2", now, now))
+            .unwrap();
+        store.upsert_pr(&stored_pr("a", 1)).unwrap();
+
+        let removed = store.delete_sessions_for_project("p1").unwrap();
+
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&"a".to_string()));
+        assert!(removed.contains(&"b".to_string()));
+        // Only p2's session survives; p1's sessions AND their PR rows are gone.
+        let remaining: Vec<String> = store
+            .load_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(remaining, vec!["c".to_string()]);
+        assert!(store.load_all_latest_prs().unwrap().is_empty());
+    }
 
     #[test]
     fn new_sessions_land_at_top_of_their_project() {

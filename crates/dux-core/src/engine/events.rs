@@ -780,10 +780,12 @@ impl Engine {
     /// and project, optionally calls `git::remove_worktree`, then runs the full
     /// `finish_delete_session` cascade.
     ///
-    /// Returns `Ok(None)` if the session was already gone, the project record
-    /// is missing, or an async delete worker is already in flight for this
-    /// session; `Ok(Some(outcome))` otherwise; `Err` if `git::remove_worktree`
-    /// or `session_store.delete_session` fails.
+    /// Returns `Ok(None)` if the session was already gone or an async delete
+    /// worker is already in flight for this session; `Ok(Some(outcome))`
+    /// otherwise; `Err` if `git::remove_worktree` or
+    /// `session_store.delete_session` fails. A missing project record does NOT
+    /// abort the deletion — the session record is still removed, but its worktree
+    /// is kept (we cannot run `git worktree remove` without the project repo).
     ///
     /// Callers must ensure no async worker is already removing this worktree
     /// (`pending_deletions` should not contain `session_id`). If a caller
@@ -2318,6 +2320,66 @@ mod tests {
             }
         ));
         assert!(!engine.pending_deletions.contains("s1"));
+    }
+
+    #[test]
+    fn begin_delete_orphan_session_returns_inline_not_not_found() {
+        // A session whose project record is gone (orphan): no projects.push.
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "ghost", "feat/x");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        // Even requesting worktree removal, a missing project takes the inline
+        // path (we cannot run git worktree remove without the repo) — NOT NotFound,
+        // which would silently no-op the user's delete.
+        let outcome = engine.begin_delete_session("s1", true);
+        assert!(matches!(outcome, BeginDeleteSessionOutcome::Inline { .. }));
+    }
+
+    #[test]
+    fn remove_project_command_cascades_sessions_keeping_worktrees() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let s1 = sample_session("s1", "p1", "feat/a");
+        let s2 = sample_session("s2", "p1", "feat/b");
+        engine.session_store.upsert_session(&s1).unwrap();
+        engine.session_store.upsert_session(&s2).unwrap();
+        engine.sessions.push(s1);
+        engine.sessions.push(s2);
+
+        let reaction = engine
+            .apply(crate::engine::Command::RemoveProject {
+                project_id: "p1".to_string(),
+                project_name: "p1-name".to_string(),
+            })
+            .expect("remove project");
+
+        // Sessions and the project are gone from memory and the store records
+        // synchronously (the project row delete is the async worker's job).
+        assert!(engine.sessions.is_empty());
+        assert!(engine.projects.is_empty());
+        assert!(engine.session_store.load_sessions().unwrap().is_empty());
+        // A user-facing status is emitted (no silent removal).
+        assert!(matches!(reaction, EventReaction::Status(_)));
+    }
+
+    #[test]
+    fn remove_ghost_project_command_clears_orphaned_sessions() {
+        let (mut engine, _tmp) = test_engine();
+        // Orphaned sessions: a project_id present on sessions with no project row.
+        let s1 = sample_session("s1", "ghost", "feat/a");
+        engine.session_store.upsert_session(&s1).unwrap();
+        engine.sessions.push(s1);
+
+        engine
+            .apply(crate::engine::Command::RemoveProject {
+                project_id: "ghost".to_string(),
+                project_name: "ghost".to_string(),
+            })
+            .expect("remove ghost project");
+
+        assert!(engine.sessions.is_empty());
+        assert!(engine.session_store.load_sessions().unwrap().is_empty());
     }
 
     #[test]

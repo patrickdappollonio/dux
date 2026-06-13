@@ -49,21 +49,30 @@ pub fn build_sidebar(
     sessions: &[AgentSession],
     empty_separator_min_projects: u16,
 ) -> SidebarModel {
+    use std::collections::{HashMap, HashSet};
+
     let split = empty_separator_min_projects > 0
         && projects.len() >= usize::from(empty_separator_min_projects);
 
-    let session_ids_for = |project_id: &str| -> Vec<String> {
-        sessions
-            .iter()
-            .filter(|s| s.project_id == project_id)
-            .map(|s| s.id.clone())
-            .collect()
-    };
+    // Bucket sessions by project id in one O(sessions) pass, preserving engine
+    // order within each project, so the per-project lookups below are O(1) and
+    // the whole function is O(projects + sessions).
+    let mut by_project: HashMap<&str, Vec<String>> = HashMap::new();
+    for session in sessions {
+        by_project
+            .entry(session.project_id.as_str())
+            .or_default()
+            .push(session.id.clone());
+    }
+    let known: HashSet<&str> = projects.iter().map(|p| p.id.as_str()).collect();
 
     let mut groups: Vec<SidebarGroup> = Vec::new();
     let mut agentless: Vec<SidebarGroup> = Vec::new();
     for project in projects {
-        let session_ids = session_ids_for(&project.id);
+        let session_ids = by_project
+            .get(project.id.as_str())
+            .cloned()
+            .unwrap_or_default();
         let group = SidebarGroup {
             project_id: project.id.clone(),
             name: project.name.clone(),
@@ -80,17 +89,16 @@ pub fn build_sidebar(
 
     // Orphan groups: distinct session.project_id values with no project record,
     // in first-seen order, appended after the agent-bearing projects.
-    let mut seen: Vec<&str> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
     for session in sessions {
         let id = session.project_id.as_str();
-        if !projects.iter().any(|p| p.id == id) && !seen.contains(&id) {
-            seen.push(id);
+        if !known.contains(id) && seen.insert(id) {
             groups.push(SidebarGroup {
                 project_id: session.project_id.clone(),
                 name: short_project_id(id),
                 orphaned: true,
                 path_missing: false,
-                session_ids: session_ids_for(id),
+                session_ids: by_project.get(id).cloned().unwrap_or_default(),
             });
         }
     }

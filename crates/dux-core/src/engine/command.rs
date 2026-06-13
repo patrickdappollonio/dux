@@ -311,26 +311,50 @@ impl Engine {
                 project_id,
                 project_name,
             } => {
-                // Cascade-delete the project's agents — records + runtime —
-                // KEEPING their worktrees on disk ("just in case"):
-                // finish_delete_session never removes a worktree and tolerates a
-                // missing project, so this also clears a ghost project's orphaned
-                // sessions. The project record + config are then removed via the
-                // persistence worker (a harmless no-op delete for a ghost id).
-                let session_ids: Vec<String> = self
+                // Refuse while one of the project's agents has an in-flight async
+                // worktree removal: proceeding could race `git::remove_worktree`
+                // and delete a worktree we promised to keep.
+                if self
                     .sessions
                     .iter()
-                    .filter(|s| s.project_id == project_id)
-                    .map(|s| s.id.clone())
-                    .collect();
-                for id in &session_ids {
-                    self.finish_delete_session(id)?;
+                    .any(|s| s.project_id == project_id && self.pending_deletions.contains(&s.id))
+                {
+                    return Ok(EventReaction::Status(StatusUpdate::error(format!(
+                        "An agent in \"{project_name}\" is still being removed — try again in a moment."
+                    ))));
                 }
+                // Delete every session record (+ its PR rows) for the project in a
+                // SINGLE transaction up front, so a mid-way failure cannot leave the
+                // project half-removed — the rows are gone before any in-memory
+                // state changes, and on error nothing is mutated.
+                let removed = self
+                    .session_store
+                    .delete_sessions_for_project(&project_id)?;
+                // The DB rows are gone; finish_delete_session now only runs the
+                // (infallible) in-memory/runtime teardown per session — its own
+                // delete_session is a no-op on the already-removed row. Dropping
+                // each provider SIGKILLs the PTY process group; worktrees are
+                // deliberately left on disk. Tolerates a ghost (project-less) id.
+                for id in &removed {
+                    let _ = self.finish_delete_session(id);
+                }
+                // Remove the project from memory synchronously so a concurrent
+                // CreateAgent cannot attach a new session to a project mid-removal.
+                self.projects.retain(|p| p.id != project_id);
+                let detail = match removed.len() {
+                    0 => String::new(),
+                    1 => " and its agent".to_string(),
+                    n => format!(" and its {n} agents"),
+                };
+                // Persist the project-record removal + config rewrite off the UI
+                // thread (a harmless no-op project delete for a ghost id).
                 self.spawn_project_persistence(ProjectPersistenceAction::Remove {
                     project_id,
-                    project_name,
+                    project_name: project_name.clone(),
                 });
-                Ok(EventReaction::Nothing)
+                Ok(EventReaction::Status(StatusUpdate::info(format!(
+                    "Removed project \"{project_name}\"{detail}. Worktrees were kept on disk."
+                ))))
             }
 
             Command::DispatchCreateAgentRequest {

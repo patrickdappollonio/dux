@@ -382,6 +382,10 @@ function ProjectBlock({
   // unavailable, mirroring the TUI and the desktop sidebar.
   const { viewModel } = useDux()
   const ghAvailable = viewModel?.gh_available ?? false
+  // An orphaned group (a session whose project record is gone) has no real
+  // project to act on — most actions would 404 — so its menu shows only
+  // "Remove project…", which clears the ghost's orphaned sessions.
+  const orphaned = !viewModel?.projects.some((p) => p.id === id)
   // The project HEADER is the drag handle (not the whole block, whose body
   // hosts the sessions' own SortableContext). Long-press starts the drag.
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
@@ -458,41 +462,43 @@ function ProjectBlock({
             <Ellipsis />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={() => openCreateAgent(id)}>
-              <Bot />
-              New agent…
-            </DropdownMenuItem>
-            {ghAvailable && (
-              <DropdownMenuItem onClick={() => openCreateAgentFromPr(id)}>
-                <GitPullRequest />
-                New agent from PR…
-              </DropdownMenuItem>
+            {!orphaned && (
+              <>
+                <DropdownMenuItem onClick={() => openCreateAgent(id)}>
+                  <Bot />
+                  New agent…
+                </DropdownMenuItem>
+                {ghAvailable && (
+                  <DropdownMenuItem onClick={() => openCreateAgentFromPr(id)}>
+                    <GitPullRequest />
+                    New agent from PR…
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem onClick={() => openAttachWorktree(id)}>
+                  <FolderGit2 />
+                  Attach worktree…
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => pullProject(id)}>
+                  <Download />
+                  Pull project…
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => openCheckoutDefaultBranch(id)}>
+                  <GitBranch />
+                  Checkout default branch…
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={() => openProjectInfo(id)}>
+                  <Info />
+                  Project info…
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => openProjectSettings(id)}>
+                  <Settings />
+                  Project settings…
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+              </>
             )}
-            <DropdownMenuItem onClick={() => openAttachWorktree(id)}>
-              <FolderGit2 />
-              Attach worktree…
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => pullProject(id)}>
-              <Download />
-              Pull project…
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => openCheckoutDefaultBranch(id)}>
-              <GitBranch />
-              Checkout default branch…
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => openProjectInfo(id)}>
-              <Info />
-              Project info…
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => openProjectSettings(id)}>
-              <Settings />
-              Project settings…
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              onClick={() => openRemoveProject(id)}
-            >
+            <DropdownMenuItem onClick={() => openRemoveProject(id)}>
               <Trash2 />
               Remove project…
             </DropdownMenuItem>
@@ -616,7 +622,12 @@ function HomeScreen() {
     const project = projects.find((p) => p.id === id)
     return project ? projectBranchDisplay(project) : null
   }
-  const fullOrder = [...withAgents, ...withoutAgents]
+  // Orphan ids are display-only (no project record); exclude them from the
+  // reorder payload, which the server validates against the real project set.
+  const realProjectIds = new Set(projects.map((p) => p.id))
+  const fullOrder = [...withAgents, ...withoutAgents].filter((id) =>
+    realProjectIds.has(id),
+  )
   const hasProjects = projects.length > 0 || sessions.length > 0
 
   return (

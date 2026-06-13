@@ -14,7 +14,15 @@ export function RemoveProjectDialog() {
 
   const isOpen = removeProjectTarget !== null
   const project = viewModel?.projects.find((p) => p.id === removeProjectTarget)
-  const name = project?.name ?? "this project"
+  // For an orphaned ("ghost") project there is no project record — fall back to
+  // the short-id name the sidebar shows for its group.
+  const orphanName = viewModel?.sidebar.groups.find(
+    (g) => g.project_id === removeProjectTarget,
+  )?.name
+  const name = project?.name ?? orphanName ?? "this project"
+  const agentCount =
+    viewModel?.sessions.filter((s) => s.project_id === removeProjectTarget)
+      .length ?? 0
 
   function handleConfirm() {
     if (!removeProjectTarget) return
@@ -32,8 +40,11 @@ export function RemoveProjectDialog() {
         <DialogHeader>
           <DialogTitle>Remove project?</DialogTitle>
           <DialogDescription>
-            This removes &ldquo;{name}&rdquo; from the workspace. Worktrees on
-            disk are not deleted.
+            This removes &ldquo;{name}&rdquo;
+            {agentCount > 0
+              ? ` and deletes its ${agentCount} agent${agentCount === 1 ? "" : "s"}`
+              : ""}{" "}
+            from dux. Worktrees on disk are kept.
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
