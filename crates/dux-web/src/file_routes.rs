@@ -24,15 +24,20 @@
 
 use axum::{
     Json, Router,
-    extract::State,
-    http::StatusCode,
+    extract::{Query, State},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::git_routes::resolve_worktree;
 use crate::server::AppState;
+
+/// Largest raw asset the markdown-preview proxy will serve. Bigger than the
+/// editable-file cap (images/screenshots run larger than source files) but still
+/// bounded so a single request can't buffer an unbounded blob into memory.
+const MAX_RAW_BYTES: u64 = 25 * 1024 * 1024;
 
 #[derive(Deserialize)]
 struct SessionOp {
@@ -63,6 +68,14 @@ struct OpenInEditorOp {
     editor: Option<String>,
 }
 
+/// Query for the raw-asset proxy. A GET so it can back an `<img src>`; the
+/// session resolves the worktree, `path` is worktree-relative.
+#[derive(Deserialize)]
+struct RawQuery {
+    session_id: String,
+    path: String,
+}
+
 #[derive(Serialize)]
 struct FileList {
     files: Vec<String>,
@@ -80,6 +93,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/file/list", post(list_files))
         .route("/api/file/read", post(read_file))
         .route("/api/file/diff", post(diff_contents))
+        .route("/api/file/raw", get(read_raw))
         .route("/api/file/write", post(write_file))
         .route("/api/file/open-in-editor", post(open_in_editor))
 }
@@ -142,6 +156,87 @@ async fn diff_contents(State(state): State<AppState>, Json(op): Json<ReadOp>) ->
             format!("diff task failed: {e}"),
         )
             .into_response(),
+    }
+}
+
+/// Serve a worktree file's raw bytes for the markdown preview's relative-image
+/// proxy (an `<img src>` backed by this GET). Same worktree containment as the
+/// other file routes — `resolve_worktree_path` rejects `..`/absolute/`.git`, a
+/// no-follow stat refuses symlinks, and the size is capped before reading.
+/// Content-Type is guessed from the extension; SVGs served to `<img>` never run
+/// scripts. Auth-gated like every `/api/file/*` route.
+async fn read_raw(State(state): State<AppState>, Query(q): Query<RawQuery>) -> Response {
+    let worktree = match resolve_worktree(&state, q.session_id).await {
+        Ok(w) => w,
+        Err(r) => return r,
+    };
+    let path = q.path;
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(&'static str, Vec<u8>)> {
+        let abs = dux_core::git::resolve_worktree_path(&worktree, &path)?;
+        let meta = std::fs::symlink_metadata(&abs)?;
+        if meta.file_type().is_symlink() {
+            anyhow::bail!("refusing to serve a symlink");
+        }
+        if meta.len() > MAX_RAW_BYTES {
+            anyhow::bail!(
+                "file too large to serve: {} bytes (limit {MAX_RAW_BYTES})",
+                meta.len()
+            );
+        }
+        let bytes = std::fs::read(&abs)?;
+        Ok((mime_for_path(&path), bytes))
+    })
+    .await;
+    match result {
+        Ok(Ok((mime, bytes))) => (
+            [
+                (header::CONTENT_TYPE, mime),
+                // Working-copy content can change between views; don't let a stale
+                // image stick in the browser cache.
+                (header::CACHE_CONTROL, "no-cache"),
+                // Defense against a same-origin stored XSS: an `<img src>` never
+                // runs scripts, but navigating DIRECTLY to this URL ("open image in
+                // new tab") would render the response as a top-level document in
+                // dux's origin — and an SVG document can carry <script>. CSP sandbox
+                // strips script execution from such a top-level render; nosniff
+                // blocks MIME-confusion; attachment makes a direct navigation
+                // download instead of render. None of these affect <img> subresource
+                // rendering, so legit markdown images still display.
+                (header::CONTENT_SECURITY_POLICY, "sandbox"),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+                (header::CONTENT_DISPOSITION, "attachment"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        // Path/containment/symlink/size are client-actionable.
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("raw task failed: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// Best-effort Content-Type from a path's extension — enough for the image types
+/// markdown references; anything else falls back to a generic binary type.
+fn mime_for_path(path: &str) -> &'static str {
+    let ext = path
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.rsplit_once('.'))
+        .map(|(_, ext)| ext.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("svg") => "image/svg+xml",
+        Some("webp") => "image/webp",
+        Some("avif") => "image/avif",
+        Some("bmp") => "image/bmp",
+        Some("ico") => "image/x-icon",
+        _ => "application/octet-stream",
     }
 }
 
@@ -244,5 +339,28 @@ async fn open_in_editor(State(state): State<AppState>, Json(op): Json<OpenInEdit
             format!("open-in-editor task failed: {e}"),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mime_for_path_maps_image_extensions_case_insensitively() {
+        assert_eq!(mime_for_path("assets/logo.png"), "image/png");
+        assert_eq!(mime_for_path("a/b/Photo.JPG"), "image/jpeg");
+        assert_eq!(mime_for_path("x.jpeg"), "image/jpeg");
+        assert_eq!(mime_for_path("icon.svg"), "image/svg+xml");
+        assert_eq!(mime_for_path("anim.GIF"), "image/gif");
+        assert_eq!(mime_for_path("p.webp"), "image/webp");
+    }
+
+    #[test]
+    fn mime_for_path_falls_back_for_unknown_or_extensionless() {
+        assert_eq!(mime_for_path("README"), "application/octet-stream");
+        assert_eq!(mime_for_path("notes.txt"), "application/octet-stream");
+        // A dot in a directory name must not be read as the file's extension.
+        assert_eq!(mime_for_path("v1.2/Makefile"), "application/octet-stream");
     }
 }

@@ -282,6 +282,56 @@ async fn http_file_diff_returns_sides_and_rejects_traversal() {
     assert_eq!(resp.status(), 400, "path traversal must be rejected");
 }
 
+/// HTTP `/api/file/raw` (the markdown-preview image proxy) serves a worktree
+/// file's bytes with a guessed content type, and rejects a path that escapes the
+/// worktree.
+#[tokio::test]
+async fn http_file_raw_serves_bytes_and_rejects_traversal() {
+    let (addr, _tmp) = boot_with_repo().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!(
+            "http://{addr}/api/file/raw?session_id=s1&path=f.txt"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    // No image extension → generic content type; body is the working copy on disk.
+    assert_eq!(
+        resp.headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/octet-stream")
+    );
+    // Hardening headers must be present so a direct navigation to a worktree .svg
+    // can't run script in dux's origin (same-origin stored XSS).
+    let header = |name: reqwest::header::HeaderName| {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert_eq!(header(reqwest::header::CONTENT_SECURITY_POLICY), "sandbox");
+    assert_eq!(header(reqwest::header::X_CONTENT_TYPE_OPTIONS), "nosniff");
+    assert!(
+        header(reqwest::header::CONTENT_DISPOSITION).contains("attachment"),
+        "raw responses must be Content-Disposition: attachment"
+    );
+    assert_eq!(resp.text().await.unwrap(), "line1\nCHANGED\nline3\n");
+
+    let resp = client
+        .get(format!(
+            "http://{addr}/api/file/raw?session_id=s1&path=../escape"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "path traversal must be rejected");
+}
+
 /// Like `boot()`, but project `p1`'s path is a REAL git repo (init + commit) so
 /// `git worktree add` succeeds, and no session is seeded (the test creates one).
 /// `pull_before_creating_agent_by_default` is disabled because the test repo has
