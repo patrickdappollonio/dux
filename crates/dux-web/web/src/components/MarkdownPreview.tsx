@@ -1,19 +1,54 @@
 import type { MouseEvent } from "react"
-import Markdown from "react-markdown"
+import Markdown, { defaultUrlTransform } from "react-markdown"
+import rehypeRaw from "rehype-raw"
+import rehypeSanitize from "rehype-sanitize"
+import remarkFrontmatter from "remark-frontmatter"
 import remarkGfm from "remark-gfm"
+import { markdownAssetUrl } from "@/lib/markdown"
 
 interface MarkdownPreviewProps {
   // The current editor buffer (so the preview reflects unsaved edits).
   content: string
+  // The session whose worktree backs the relative-image proxy.
+  sessionId: string
+  // The markdown file's worktree path — relative image `src`s resolve against its
+  // directory. Null when no file is open (relative images then aren't rewritten).
+  path: string | null
 }
 
 // Rendered markdown for the editor's preview toggle. Lazy-loaded (react-markdown
 // is pulled in only when the user previews), styled with theme tokens via
 // arbitrary child-element variants so it tracks the app palette without the
-// Tailwind typography plugin. remark-gfm adds tables, task lists, strikethrough,
-// and autolinks. Raw HTML is NOT enabled (no rehype-raw), so any embedded HTML
-// renders as text — a safe default for previewing arbitrary worktree files.
-export default function MarkdownPreview({ content }: MarkdownPreviewProps) {
+// Tailwind typography plugin.
+//
+// Plugins: remark-gfm (tables, task lists, strikethrough, autolinks);
+// remark-frontmatter (recognizes a leading YAML `--- … ---` block so it's omitted
+// from the preview instead of rendering as a stray rule + key:value text);
+// rehype-raw (renders embedded HTML rather than escaping it); then rehype-sanitize
+// (its default = GitHub's schema). Embedded HTML therefore renders the way it does
+// on GitHub — common formatting tags (div, details/summary, table, kbd, sub/sup,
+// task-list inputs, …) are kept, while <script>, inline event handlers, and
+// javascript: URLs are stripped. Previewed markdown is NOT always author-trusted
+// (a cloned repo's README, a PR under review, agent-generated output), and a
+// preview runs in dux's authenticated origin — so we render "what markdown
+// expects" without opening a script-injection hole. sanitize must run AFTER raw.
+export default function MarkdownPreview({
+  content,
+  sessionId,
+  path,
+}: MarkdownPreviewProps) {
+  // Rewrite a relative image `src` to the auth-gated worktree asset proxy so a
+  // README's relative images resolve against the markdown file's directory rather
+  // than the SPA's URL (where they'd 404). Links and external/absolute URLs fall
+  // through to react-markdown's default (safe) URL handling unchanged.
+  function transformUrl(url: string, key: string): string {
+    if (key === "src" && path !== null) {
+      const proxied = markdownAssetUrl(sessionId, path, url)
+      if (proxied !== null) return proxied
+    }
+    return defaultUrlTransform(url)
+  }
+
   // Open links in a new tab via event delegation rather than a custom `a`
   // renderer — a click in the preview must never navigate the SPA away, and this
   // keeps the markdown component free of react-markdown's injected `node` prop.
@@ -55,7 +90,13 @@ export default function MarkdownPreview({ content }: MarkdownPreviewProps) {
           "[&_img]:max-w-full [&_img]:rounded",
         ].join(" ")}
       >
-        <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+        <Markdown
+          remarkPlugins={[remarkFrontmatter, remarkGfm]}
+          rehypePlugins={[rehypeRaw, rehypeSanitize]}
+          urlTransform={transformUrl}
+        >
+          {content}
+        </Markdown>
       </div>
     </div>
   )

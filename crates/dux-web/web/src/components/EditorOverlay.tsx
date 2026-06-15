@@ -730,7 +730,11 @@ function EditorBody({
                   </div>
                 }
               >
-                <MarkdownPreview content={draft} />
+                <MarkdownPreview
+                  content={draft}
+                  sessionId={sessionId}
+                  path={openPath}
+                />
               </Suspense>
             </ChunkBoundary>
           ) : (

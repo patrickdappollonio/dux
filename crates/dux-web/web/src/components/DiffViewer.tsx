@@ -40,6 +40,10 @@ export default function DiffViewer({ path, original, modified }: DiffViewerProps
         renderSideBySide: false,
         fontSize: 14,
         lineHeight: 1.6,
+        // Breathing room between the line-number gutter and the code so the text
+        // isn't flush against the numbers. The +/- line background still fills the
+        // row; this only insets the text (Monaco default is a cramped ~10px).
+        lineDecorationsWidth: 16,
         wordWrap: "on",
         minimap: { enabled: false },
         scrollBeyondLastLine: false,
