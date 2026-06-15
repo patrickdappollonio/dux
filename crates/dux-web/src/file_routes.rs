@@ -52,6 +52,17 @@ struct WriteOp {
     content: String,
 }
 
+#[derive(Deserialize)]
+struct OpenInEditorOp {
+    session_id: String,
+    path: String,
+    /// Which editor to open, as a dux-core editor config key/alias (e.g.
+    /// "vscode", "zed"). When absent, the configured/preferred editor is used —
+    /// the original auto-pick behavior.
+    #[serde(default)]
+    editor: Option<String>,
+}
+
 #[derive(Serialize)]
 struct FileList {
     files: Vec<String>,
@@ -68,6 +79,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/file/list", post(list_files))
         .route("/api/file/read", post(read_file))
+        .route("/api/file/diff", post(diff_contents))
         .route("/api/file/write", post(write_file))
         .route("/api/file/open-in-editor", post(open_in_editor))
 }
@@ -108,6 +120,31 @@ async fn read_file(State(state): State<AppState>, Json(op): Json<ReadOp>) -> Res
     }
 }
 
+/// Return the two raw sides (HEAD vs working copy) of a changed file so the web
+/// editor can render a Monaco diff. Same worktree-relative path security as
+/// `read`; binary content is reported via the `binary` flag with empty sides.
+async fn diff_contents(State(state): State<AppState>, Json(op): Json<ReadOp>) -> Response {
+    let worktree = match resolve_worktree(&state, op.session_id).await {
+        Ok(w) => w,
+        Err(r) => return r,
+    };
+    let path = op.path;
+    match tokio::task::spawn_blocking(move || dux_core::diff::file_diff_contents(&worktree, &path))
+        .await
+    {
+        Ok(Ok(contents)) => Json(contents).into_response(),
+        // file_diff_contents errors are mostly client conditions (path/containment,
+        // too-large, symlink); a git/IO failure also lands here as 400, matching
+        // read_file (both wrap dux_core errors without classifying them).
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("diff task failed: {e}"),
+        )
+            .into_response(),
+    }
+}
+
 async fn write_file(State(state): State<AppState>, Json(op): Json<WriteOp>) -> Response {
     let worktree = match resolve_worktree(&state, op.session_id).await {
         Ok(w) => w,
@@ -139,21 +176,25 @@ async fn write_file(State(state): State<AppState>, Json(op): Json<WriteOp>) -> R
     StatusCode::OK.into_response()
 }
 
-/// Open a worktree file in a locally-installed GUI editor (Cursor/VS Code/Zed/…),
-/// reusing the same detection + launch path as the TUI's open-in-editor and the
-/// configured preferred editor (`config.editor.default`). The editor is spawned
-/// on the SERVER machine, so this is only useful when the browser is on that same
-/// machine — the web UI gates the button to local-access URLs and disables it for
-/// remote clients. On a headless/remote server the spawn simply fails and we
-/// return the error. Containment is enforced by `resolve_worktree_path` exactly
-/// like read/write, so no path outside the worktree can be targeted.
-async fn open_in_editor(State(state): State<AppState>, Json(op): Json<ReadOp>) -> Response {
+/// Open a worktree file in a locally-installed GUI editor, reusing the TUI's
+/// detection + launch path. `op.editor` (a dux-core editor config key like
+/// "vscode") picks a specific editor — the web picker always sends one — and we
+/// report "<editor> isn't installed" when it isn't on PATH. With no pick we fall
+/// back to the configured/preferred editor (`config.editor.default`). The editor
+/// is spawned on the SERVER machine, so this is only useful when the browser is on
+/// that same machine — the web UI gates the picker to local-access URLs and
+/// disables it for remote clients. On a headless/remote server the spawn simply
+/// fails and we return the error. Containment is enforced by
+/// `resolve_worktree_path` exactly like read/write, so no path outside the
+/// worktree can be targeted.
+async fn open_in_editor(State(state): State<AppState>, Json(op): Json<OpenInEditorOp>) -> Response {
     let worktree = match resolve_worktree(&state, op.session_id).await {
         Ok(w) => w,
         Err(r) => return r,
     };
     let configured = state.engine.editor_default().await;
     let path = op.path;
+    let requested = op.editor;
     // Detecting editors scans PATH and launching spawns a process — both blocking,
     // so run them off the async reactor.
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
@@ -162,12 +203,34 @@ async fn open_in_editor(State(state): State<AppState>, Json(op): Json<ReadOp>) -
             anyhow::bail!("file does not exist in the worktree");
         }
         let editors = dux_core::editor::detect_installed_editors();
-        let choice =
-            dux_core::editor::preferred_editor(&editors, &configured).ok_or_else(|| {
+        let choice = match requested {
+            // An explicit pick from the web editor menu: launch THAT editor, or
+            // report it isn't installed (naming it even when absent from PATH).
+            Some(name) => {
+                // The key comes from the fixed editor menu. Bound the length by
+                // CHARS (never byte-slice user-facing input) and don't echo the raw
+                // value back in the error — it could carry control characters.
+                if name.chars().count() > 64 {
+                    anyhow::bail!("unrecognized editor key");
+                }
+                let label = dux_core::editor::editor_label(&name)
+                    .ok_or_else(|| anyhow::anyhow!("unrecognized editor key"))?;
+                editors
+                    .into_iter()
+                    .find(|editor| dux_core::editor::matches_configured_editor(editor, &name))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "{label} isn't installed on this machine (no matching command on PATH)"
+                        )
+                    })?
+            }
+            // No pick: fall back to the configured/preferred editor.
+            None => dux_core::editor::preferred_editor(&editors, &configured).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "No supported editor found on PATH (install cursor, code, zed, or antigravity)"
+                    "No supported editor found on PATH (install cursor, code, zed, vscodium, or sublime)"
                 )
-            })?;
+            })?,
+        };
         dux_core::editor::launch_editor(&choice, &abs)?;
         Ok(choice.label.to_string())
     })

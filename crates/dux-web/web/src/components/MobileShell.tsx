@@ -774,7 +774,7 @@ function TerminalScreen() {
 }
 
 // The changes spoke: a slim back bar over the full-screen shared changed-files
-// pane (its diff Sheet is already 90vw-wide, i.e. near-full on phones).
+// pane (diffs open in the full-screen Monaco editor, not a sheet).
 function ChangesScreen() {
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">

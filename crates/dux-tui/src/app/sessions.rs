@@ -2067,7 +2067,7 @@ impl App {
             editor::preferred_editor(&editors, &self.engine.config.editor.default)
         else {
             self.set_error(
-                "No supported editor CLI found on PATH. Install cursor, code, zed, or antigravity.",
+                "No supported editor CLI found on PATH. Install cursor, code, zed, vscodium, or sublime.",
             );
             return Ok(());
         };
@@ -2096,7 +2096,7 @@ impl App {
         let editors = editor::detect_installed_editors();
         if editors.is_empty() {
             self.set_error(
-                "No supported editor CLI found on PATH. Install cursor, code, zed, or antigravity.",
+                "No supported editor CLI found on PATH. Install cursor, code, zed, vscodium, or sublime.",
             );
             return Ok(());
         }

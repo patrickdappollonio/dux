@@ -20,7 +20,6 @@ import type {
   BranchWarningView,
   ConnState,
   DirEntryView,
-  FileDiff,
   MacroView,
   ProjectWorktreeEntryView,
   ViewModel,
@@ -211,24 +210,23 @@ export interface DuxState {
   // See `armCreateFocus` and `focusNewlyCreatedSession`.
   pendingCreateFocus: { knownIds: string[]; projectId: string } | null
   sidebarWidth: string
-  // Whether the diff viewer shows the old/new line-number gutters. Mirrors the
-  // TUI's `toggle-diff-line-numbers` (config `ui.show_diff_line_numbers`),
-  // defaulting ON; persisted in localStorage like the sidebar width.
-  showDiffLineNumbers: boolean
-  currentDiff: {
+  // The session whose code-editor overlay is open, the file to auto-open on
+  // launch (null = none preselected), and the view it opens in: "file" (editable
+  // Monaco buffer) or "diff" (read-only Monaco DiffEditor, HEAD vs working copy).
+  // The editor always operates on the SELECTED session, so opening it selects
+  // that session first and reuses the existing changed-files broadcast for its
+  // file list. Null = overlay closed.
+  editorTarget: {
     sessionId: string
-    path: string
-    diff: FileDiff | null
-    error: string | null
-    loading: boolean
+    initialPath: string | null
+    initialMode: EditorViewMode
   } | null
-  // The session whose code-editor overlay is open, plus the file to auto-open on
-  // launch (null = none preselected; the overlay just shows the changed-files
-  // list). The editor always operates on the SELECTED session, so opening it
-  // selects that session first and reuses the existing changed-files broadcast
-  // for its file list — no separate listing endpoint. Null = overlay closed.
-  editorTarget: { sessionId: string; initialPath: string | null } | null
 }
+
+// Which view the code editor opens in (and toggles between): the editable Monaco
+// buffer, or the read-only Monaco diff (HEAD vs working copy). Opening a changed
+// file defaults to "diff"; the file tree / edit actions default to "file".
+export type EditorViewMode = "file" | "diff"
 
 // The expanded sidebar width is drag-resizable and persisted across reloads.
 // 18rem gives agent names breathing room next to the PR/status badges; a
@@ -240,14 +238,10 @@ function loadSidebarWidth(): string {
   return localStorage.getItem(SIDEBAR_WIDTH_KEY) || DEFAULT_SIDEBAR_WIDTH
 }
 
-// Diff line-number gutters default ON (matching the TUI default and the prior
-// web behavior). Only an explicit persisted "false" turns them off, so a
-// missing key keeps the gutters visible.
-const SHOW_DIFF_LINE_NUMBERS_KEY = "dux:show-diff-line-numbers"
-
-function loadShowDiffLineNumbers(): boolean {
-  return localStorage.getItem(SHOW_DIFF_LINE_NUMBERS_KEY) !== "false"
-}
+// One-time cleanup: the diff line-number toggle (and its persisted preference)
+// went away when the web diff moved to Monaco, which manages its own gutters.
+// Drop the orphaned key so it can't linger or be misread by a future feature.
+localStorage.removeItem("dux:show-diff-line-numbers")
 
 let state: DuxState = {
   viewModel: null,
@@ -292,8 +286,6 @@ let state: DuxState = {
   pendingProjectOrder: null,
   pendingCreateFocus: null,
   sidebarWidth: loadSidebarWidth(),
-  showDiffLineNumbers: loadShowDiffLineNumbers(),
-  currentDiff: null,
   editorTarget: null,
 }
 
@@ -564,14 +556,6 @@ socket.onCommitMessageSnapshot = (sessionId, message) => {
   }
 }
 
-socket.onDiff = (sessionId, path, diff, error) => {
-  // Ignore stale responses for a file the user already navigated away from.
-  if (state.currentDiff?.path !== path || state.currentDiff?.sessionId !== sessionId) {
-    return
-  }
-  setState({ currentDiff: { sessionId, path, diff, error, loading: false } })
-}
-
 socket.onDirEntries = (path, entries, error) => {
   setState({ browsePath: path, browseEntries: error ? [] : entries, browseLoading: false })
   if (error) toast.error(error)
@@ -757,7 +741,6 @@ function clearSessionScopedState(): Partial<DuxState> {
     viewModel: null,
     selectedTarget: null,
     selectedSessionId: null,
-    currentDiff: null,
     editorTarget: null,
     commitTarget: null,
     commitDraft: "",
@@ -962,25 +945,18 @@ export function generateCommitMessage(sessionId: string): void {
   socket.sendCommand("generate_commit_message", { session_id: sessionId })
 }
 
-export function requestDiff(sessionId: string, path: string): void {
-  setState({ currentDiff: { sessionId, path, diff: null, error: null, loading: true } })
-  socket.getDiff(sessionId, path)
-}
-
-export function closeDiff(): void {
-  setState({ currentDiff: null })
-}
-
 // Open the code-editor overlay for a session. Selecting the session first points
 // the engine's changed-files watch at its worktree so the editor's file list
-// populates from the same broadcast the changes pane uses. `initialPath` (from
-// an "Open in editor" affordance on a specific file) auto-loads that file.
+// populates from the same broadcast the changes pane uses. `initialPath` (from a
+// per-file affordance) auto-loads that file; `mode` chooses the opening view —
+// "diff" when a changed file is clicked (show its diff first), "file" otherwise.
 export function openEditor(
   sessionId: string,
   initialPath: string | null = null,
+  mode: EditorViewMode = "file",
 ): void {
   if (state.selectedSessionId !== sessionId) selectSession(sessionId)
-  setState({ editorTarget: { sessionId, initialPath } })
+  setState({ editorTarget: { sessionId, initialPath, initialMode: mode } })
 }
 
 export function closeEditor(): void {
@@ -1509,12 +1485,4 @@ export function setSidebarWidth(width: string, persist = false): void {
   if (persist) {
     localStorage.setItem(SIDEBAR_WIDTH_KEY, width)
   }
-}
-
-// Flip the diff line-number gutters and persist the choice (the TUI's
-// `toggle-diff-line-numbers`). Both the old and new gutters hide together.
-export function toggleDiffLineNumbers(): void {
-  const next = !state.showDiffLineNumbers
-  setState({ showDiffLineNumbers: next })
-  localStorage.setItem(SHOW_DIFF_LINE_NUMBERS_KEY, String(next))
 }

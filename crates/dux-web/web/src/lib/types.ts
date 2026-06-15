@@ -125,29 +125,6 @@ export interface ChangedFiles {
   watched_session_id: string | null
 }
 
-export type DiffLineKind = "context" | "insert" | "delete"
-
-export interface DiffLine {
-  kind: DiffLineKind
-  old_line: number | null
-  new_line: number | null
-  content: string
-}
-
-export interface DiffHunk {
-  header: string
-  lines: DiffLine[]
-}
-
-export interface FileDiff {
-  path: string
-  binary: boolean
-  unchanged: boolean
-  old_size: number
-  new_size: number
-  hunks: DiffHunk[]
-}
-
 /** Fallback xterm.js scrollback used only for the brief window before the first
  * ViewModel arrives; mirrors the core `agent_scrollback_lines` default
  * (`config.rs`). Keep in sync if the Rust default changes. */
@@ -237,13 +214,6 @@ export type ServerMessage =
       message: string
     }
   | {
-      type: "diff"
-      session_id: string
-      path: string
-      diff: FileDiff | null
-      error: string | null
-    }
-  | {
       type: "dir_entries"
       path: string
       entries: DirEntryView[]
@@ -286,7 +256,6 @@ export type ClientMessage =
   | { type: "subscribe_terminal"; terminal_id: string }
   | { type: "create_terminal"; session_id: string }
   | { type: "resize"; session_id: string; rows: number; cols: number }
-  | { type: "get_diff"; session_id: string; path: string }
   | { type: "browse_dir"; path: string | null }
   | { type: "generate_agent_name" }
   | { type: "list_project_worktrees"; project_id: string }

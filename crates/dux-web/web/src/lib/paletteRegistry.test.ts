@@ -27,7 +27,6 @@ const EXPECTED_WEB_COMMANDS = [
   "sort-agents-by-created",
   "sort-agents-by-name",
   "sort-agents-by-updated",
-  "toggle-diff-line-numbers",
 ]
 
 describe("paletteRegistry", () => {

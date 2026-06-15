@@ -446,7 +446,7 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "default",
             comment: Some(CommentSource::Static(
-                "# Preferred editor for \"open in editor\": the TUI's open-worktree action\n# and the web code editor's per-file \"Open in editor\" button (the web button is\n# only enabled for local-access URLs). Supported values are matched against\n# popular editor CLIs on PATH (for example: cursor, vscode/code, zed, antigravity).",
+                "# Preferred editor for \"open in editor\": the TUI's open-worktree action\n# and the web code editor's \"Open editor\" menu (the web menu lets you pick per\n# open and is only enabled for local-access URLs; this is its fallback). Supported\n# values are matched against popular editor CLIs on PATH (for example: cursor,\n# vscode/code, zed, vscodium, sublime).",
             )),
             value_fn: |c| FieldValue::Str(c.editor.default.clone()),
         },

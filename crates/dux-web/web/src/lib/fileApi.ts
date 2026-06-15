@@ -16,6 +16,16 @@ export interface WorktreeFile {
   content: string
 }
 
+// The two raw sides of a changed file (HEAD vs working copy) for the editor's
+// Monaco diff view. `original`/`modified` are "" for an added/deleted side;
+// `binary` means neither side is renderable text. Mirrors the Rust DiffContents.
+export interface FileDiffContents {
+  path: string
+  original: string
+  modified: string
+  binary: boolean
+}
+
 async function postFile<T>(path: string, body: Record<string, unknown>): Promise<T> {
   const resp = await fetch(path, {
     method: "POST",
@@ -57,6 +67,10 @@ export const fileApi = {
     }).then((r) => r.files),
   read: (sessionId: string, path: string) =>
     postFile<WorktreeFile>("/api/file/read", { session_id: sessionId, path }),
+  // The two raw sides (HEAD vs working copy) of a changed file for the Monaco
+  // diff view. The server resolves both sides and the binary flag.
+  diff: (sessionId: string, path: string) =>
+    postFile<FileDiffContents>("/api/file/diff", { session_id: sessionId, path }),
   write: (sessionId: string, path: string, content: string) =>
     postFileNoContent("/api/file/write", {
       session_id: sessionId,
@@ -64,11 +78,14 @@ export const fileApi = {
       content,
     }),
   // Open the file in a locally-installed GUI editor (server-side spawn) and
-  // resolve with the chosen editor's label for a toast. Only useful when the
-  // server is the user's own machine — the UI gates this to local-access URLs.
-  openInEditor: (sessionId: string, path: string) =>
+  // resolve with the chosen editor's label for a toast. `editor` is the dux-core
+  // editor config key (e.g. "vscode") the user picked; the server launches that
+  // one and errors if it isn't installed. Only useful when the server is the
+  // user's own machine — the UI gates this to local-access URLs.
+  openInEditor: (sessionId: string, path: string, editor: string) =>
     postFile<{ editor: string }>("/api/file/open-in-editor", {
       session_id: sessionId,
       path,
+      editor,
     }).then((r) => r.editor),
 }

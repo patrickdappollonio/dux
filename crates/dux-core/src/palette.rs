@@ -412,9 +412,9 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ToggleDiffLineNumbers,
         name: "toggle-diff-line-numbers",
         description: "Toggle line numbers in diff view",
-        // Both (GLOBAL): an app-wide diff-view preference — no target.
-        // Web flips its diff gutters via `toggleDiffLineNumbers()`.
-        surface: PaletteSurface::Both,
+        // TUI-only: toggles the TUI diff overlay's gutters. The web renders diffs
+        // in Monaco's DiffEditor, which manages its own line-number gutters.
+        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ResourceMonitor,
@@ -525,7 +525,6 @@ mod tests {
             "sort-agents-by-created",
             "sort-agents-by-name",
             "sort-agents-by-updated",
-            "toggle-diff-line-numbers",
         ];
         let mut actual: Vec<&str> = web_palette_commands().map(|c| c.name).collect();
         actual.sort_unstable();

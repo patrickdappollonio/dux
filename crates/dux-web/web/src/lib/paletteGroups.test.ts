@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from "vitest"
 
 import {
+  GROUPED_PALETTE_IDS,
   PALETTE_GROUP_ORDER,
   groupPaletteCommands,
   paletteGroupFor,
@@ -46,6 +47,13 @@ describe("paletteGroups", () => {
 
   it("returns null for an unmapped id (no crash on a stale id)", () => {
     expect(paletteGroupFor("does-not-exist")).toBeNull()
+  })
+
+  it("has no stale group mapping (every grouped id is a live web command)", async () => {
+    const live = new Set(await webCommandIds())
+    for (const id of GROUPED_PALETTE_IDS) {
+      expect(live.has(id), `stale group mapping for ${id}`).toBe(true)
+    }
   })
 
   it("buckets commands into groups in the configured group order", async () => {

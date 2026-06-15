@@ -1012,6 +1012,17 @@ pub fn load_config(paths: &DuxPaths) -> Config {
         Err(_) => Config::default(),
     };
     config.providers.ensure_defaults();
+    // Surface a stale/unrecognized editor preference instead of silently falling
+    // back to the first editor detected on PATH — e.g. a config left pointing at a
+    // now-removed editor like "antigravity"/"windsurf".
+    let configured_editor = config.editor.default.trim();
+    if !configured_editor.is_empty() && crate::editor::editor_label(configured_editor).is_none() {
+        crate::logger::warn(&format!(
+            "config editor.default = \"{configured_editor}\" is not a recognized editor; \
+             open-in-editor will fall back to the first one detected on PATH \
+             (supported: cursor, vscode/code, zed, vscodium, sublime)"
+        ));
+    }
     config
 }
 
