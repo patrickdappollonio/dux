@@ -978,6 +978,38 @@ pub fn file_bytes_at_head(worktree_path: &Path, path: &str) -> Result<Option<Vec
     Ok(Some(output.stdout))
 }
 
+/// Return the size in bytes of a file's blob at HEAD via the plumbing command
+/// `cat-file -s` — which reads the object header WITHOUT inflating the whole
+/// blob — or `None` for new (untracked) files. Lets a caller cap a diff/read by
+/// size before buffering the full HEAD content into memory.
+pub fn blob_size_at_head(worktree_path: &Path, path: &str) -> Result<Option<u64>> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            worktree_path.to_string_lossy().as_ref(),
+            "cat-file",
+            "-s",
+            &format!("HEAD:{path}"),
+        ])
+        .output()?;
+    if !output.status.success() {
+        // Not present at HEAD (new/untracked file).
+        return Ok(None);
+    }
+    // A successful `cat-file -s` always prints just the decimal byte size. A parse
+    // failure here means genuinely unexpected output (corrupt store, a wrapper
+    // injecting text) — propagate it rather than collapsing it into the `None`
+    // ("absent at HEAD") sentinel, which would silently skip the caller's size cap.
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let size = raw.trim().parse::<u64>().map_err(|e| {
+        anyhow!(
+            "git cat-file -s returned non-numeric output {:?}: {e}",
+            raw.trim()
+        )
+    })?;
+    Ok(Some(size))
+}
+
 pub fn is_under(base: &Path, candidate: &Path) -> bool {
     match (base.canonicalize(), candidate.canonicalize()) {
         (Ok(b), Ok(c)) => c.starts_with(b),

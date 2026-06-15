@@ -33,8 +33,12 @@ const GROUP_BY_ID: Record<string, PaletteGroup> = {
   "sort-agents-by-created": "View",
   "sort-agents-by-name": "View",
   "sort-agents-by-updated": "View",
-  "toggle-diff-line-numbers": "View",
 }
+
+// The ids that carry a group mapping — exported for the coverage test's REVERSE
+// check (every mapped id must still be a live web command, so a removed command
+// left behind here is caught rather than silently lingering).
+export const GROUPED_PALETTE_IDS = Object.keys(GROUP_BY_ID)
 
 // The group for a web command id, or null when none is mapped (a registry
 // addition without a group — caught by the coverage test). CommandPalette skips

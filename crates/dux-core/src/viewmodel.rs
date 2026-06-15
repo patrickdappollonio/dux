@@ -448,12 +448,15 @@ mod tests {
             assert_eq!(view.description, cmd.description);
         }
 
-        // Spot-check that a known web command is present and a known TUI-only
-        // command is absent.
+        // Spot-check that known web commands are present and known TUI-only
+        // commands are absent.
         assert!(actual.contains(&"add-project"));
-        assert!(actual.contains(&"toggle-diff-line-numbers"));
+        assert!(actual.contains(&"edit-macros"));
         assert!(!actual.contains(&"start-web-server"));
         assert!(!actual.contains(&"change-theme"));
+        // Demoted to TUI-only: the web renders diffs in Monaco's DiffEditor,
+        // which manages its own line-number gutters.
+        assert!(!actual.contains(&"toggle-diff-line-numbers"));
     }
 
     #[test]

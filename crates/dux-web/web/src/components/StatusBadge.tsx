@@ -10,26 +10,29 @@ import {
 import type { SessionStatus } from "@/lib/types"
 
 // Meaningful status color + icon, mirroring the dux TUI (active=green/●,
-// detached=amber/◐, exited=muted/○). Soft-color: tinted background + matching
-// text. This is the single source of truth for session-status badges.
+// detached=amber/◐, exited=muted/○). The color lives on the icon and label
+// only — no pill background — so the indicator stays minimal. `bg-transparent`
+// is explicit because the base Badge defaults to `variant="default"`, whose
+// `bg-primary` would otherwise show through. This is the single source of truth
+// for session-status badges.
 const STATUS: Record<
   SessionStatus,
   { className: string; Icon: typeof Circle; fill: boolean; label: string }
 > = {
   active: {
-    className: "border-transparent bg-green-600/15 text-green-500",
+    className: "border-transparent bg-transparent text-green-500",
     Icon: Circle,
     fill: true,
     label: "active",
   },
   detached: {
-    className: "border-transparent bg-amber-600/15 text-amber-500",
+    className: "border-transparent bg-transparent text-amber-500",
     Icon: CirclePause,
     fill: false,
     label: "detached",
   },
   exited: {
-    className: "border-transparent bg-muted text-muted-foreground",
+    className: "border-transparent bg-transparent text-muted-foreground",
     Icon: Circle,
     fill: false,
     label: "exited",

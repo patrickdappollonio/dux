@@ -1,9 +1,8 @@
-import { useMemo, useState, useSyncExternalStore } from "react"
+import { useState } from "react"
 import {
   Check,
   Ellipsis,
   EllipsisVertical,
-  Hash,
   Loader2,
   Minus,
   MousePointerClick,
@@ -11,13 +10,10 @@ import {
   Plus,
   Search,
   Undo2,
-  X,
 } from "lucide-react"
 import { toast } from "sonner"
 import { git } from "@/lib/git"
-import { BrailleSpinner } from "@/components/BrailleSpinner"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
-import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -50,34 +46,12 @@ import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
 import {
-  Sheet,
-  SheetClose,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet"
-import {
-  getHighlighterReady,
-  highlightLine,
-  languageForPath,
-  subscribeHighlighter,
-} from "@/lib/highlight"
-import {
   fileStatusMeta,
   filterChangedFiles,
   shouldShowChangedFiles,
 } from "@/lib/changedFiles"
-import {
-  closeDiff,
-  openCommit,
-  openDiscard,
-  openEditor,
-  requestDiff,
-  toggleDiffLineNumbers,
-  useDux,
-} from "@/lib/store"
-import type { DuxState } from "@/lib/store"
-import type { ChangedFileView, DiffLine, FileDiff } from "@/lib/types"
+import { openCommit, openDiscard, openEditor, useDux } from "@/lib/store"
+import type { ChangedFileView } from "@/lib/types"
 
 interface FileRowProps {
   file: ChangedFileView
@@ -255,8 +229,7 @@ function FileGroup({ heading, files, total, filtering, action, sessionId, onOpen
 }
 
 export function ChangedFiles() {
-  const { viewModel, selectedSessionId, currentDiff, showDiffLineNumbers } =
-    useDux()
+  const { viewModel, selectedSessionId } = useDux()
 
   // Changed-files search filter (frontend-only). The query is stored alongside
   // the session id it belongs to, so switching sessions yields an empty filter
@@ -394,7 +367,7 @@ export function ChangedFiles() {
             </div>
           )}
 
-          <ScrollArea className="flex-1">
+          <ScrollArea className="min-h-0 flex-1">
             <div className="flex flex-col gap-1 p-3">
               {!hasChanges && (
                 <Empty className="border-0 py-6">
@@ -429,7 +402,7 @@ export function ChangedFiles() {
                 filtering={filtering}
                 action="unstage"
                 sessionId={selectedSessionId}
-                onOpenDiff={(path) => requestDiff(selectedSessionId, path)}
+                onOpenDiff={(path) => openEditor(selectedSessionId, path, "diff")}
               />
 
               {showSeparator && <Separator className="my-1" />}
@@ -441,230 +414,12 @@ export function ChangedFiles() {
                 filtering={filtering}
                 action="stage"
                 sessionId={selectedSessionId}
-                onOpenDiff={(path) => requestDiff(selectedSessionId, path)}
+                onOpenDiff={(path) => openEditor(selectedSessionId, path, "diff")}
               />
             </div>
           </ScrollArea>
         </CardContent>
       </Card>
-
-      {/* Diff sheet — renders the structured per-file diff from the server */}
-      <Sheet
-        open={currentDiff !== null}
-        onOpenChange={(open) => {
-          if (!open) closeDiff()
-        }}
-      >
-        {/* Width is set with the same data-[side=right] modifier the Sheet
-            primitive uses for its 3/4 default, so tailwind-merge dedupes
-            deterministically (a plain w-* would not override the modified one):
-            near-full on phones, capped to 3xl on desktop. */}
-        <SheetContent
-          side="right"
-          showCloseButton={false}
-          className="data-[side=right]:w-[92vw] data-[side=right]:sm:max-w-3xl"
-        >
-          <SheetHeader className="flex-row items-center justify-between gap-2">
-            {/* Left-ellipsize (direction:rtl) so the filename at the path's end
-                stays visible — the title is how you know which file the diff is. */}
-            <SimpleTooltip content={currentDiff?.path ?? ""}>
-              <SheetTitle className="min-w-0 truncate text-left font-mono text-sm [direction:rtl]">
-                {currentDiff?.path ?? ""}
-              </SheetTitle>
-            </SimpleTooltip>
-            {/* Labeled (icon + text) buttons of the same size so they sit on one
-                baseline — the diff sheet replaces the Sheet's default icon-only
-                close with an explicit "Close" for consistency. */}
-            <div className="flex shrink-0 items-center gap-1">
-              {/* Open the current file in the editor (desktop only — Monaco is
-                  poor on touch). Closes the diff so the editor takes the screen. */}
-              <Button
-                variant="ghost"
-                size="sm"
-                className="hidden md:inline-flex"
-                onClick={() => {
-                  if (!currentDiff) return
-                  openEditor(currentDiff.sessionId, currentDiff.path)
-                  closeDiff()
-                }}
-              >
-                <Pencil />
-                Edit
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                className={
-                  showDiffLineNumbers
-                    ? "max-md:min-h-11 text-primary"
-                    : "max-md:min-h-11"
-                }
-                aria-pressed={showDiffLineNumbers}
-                onClick={toggleDiffLineNumbers}
-              >
-                <Hash />
-                Line numbers
-              </Button>
-              <SheetClose
-                render={
-                  <Button variant="ghost" size="sm" className="max-md:min-h-11" />
-                }
-              >
-                <X />
-                Close
-              </SheetClose>
-            </div>
-          </SheetHeader>
-          <div className="min-h-0 flex-1 overflow-auto px-4 pb-4">
-            <DiffBody state={currentDiff} showLineNumbers={showDiffLineNumbers} />
-          </div>
-        </SheetContent>
-      </Sheet>
     </>
-  )
-}
-
-type DiffState = DuxState["currentDiff"]
-
-function DiffBody({
-  state,
-  showLineNumbers,
-}: {
-  state: DiffState
-  showLineNumbers: boolean
-}) {
-  if (!state) return null
-  if (state.loading) {
-    return (
-      <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
-        <BrailleSpinner className="text-primary" /> Loading diff…
-      </div>
-    )
-  }
-  if (state.error) {
-    return <div className="py-6 text-sm text-destructive">{state.error}</div>
-  }
-  const diff = state.diff
-  if (!diff) return null
-  if (diff.binary) {
-    return (
-      <div className="py-6 text-sm text-muted-foreground">
-        Binary file ({diff.old_size} → {diff.new_size} bytes). No text diff available.
-      </div>
-    )
-  }
-  if (diff.unchanged || diff.hunks.length === 0) {
-    return <div className="py-6 text-sm text-muted-foreground">No changes.</div>
-  }
-  return <DiffHunks diff={diff} showLineNumbers={showLineNumbers} />
-}
-
-// Renders the hunk rows for a real (non-binary, non-empty) diff. Lives in its
-// own component so its hooks always run in a stable order — DiffBody's early
-// returns must not gate the `useMemo`s below (React rules-of-hooks).
-function DiffHunks({
-  diff,
-  showLineNumbers,
-}: {
-  diff: FileDiff
-  showLineNumbers: boolean
-}) {
-  const language = useMemo(() => languageForPath(diff.path), [diff.path])
-  // The highlighter (highlight.js) loads lazily in its own async chunk. Subscribe
-  // so this component re-renders the moment it's ready; until then highlightLine
-  // returns escaped plain text. `highlighterReady` flips false → true once and
-  // feeds the useMemo below so the lines re-highlight on arrival.
-  const highlighterReady = useSyncExternalStore(
-    subscribeHighlighter,
-    getHighlighterReady,
-  )
-  // Precompute highlighted HTML per line to avoid re-highlighting on re-render.
-  const hunks = useMemo(
-    () =>
-      diff.hunks.map((hunk) => ({
-        header: hunk.header,
-        lines: hunk.lines.map((line) => ({
-          line,
-          html: highlightLine(line.content, language, highlighterReady),
-        })),
-      })),
-    [diff, language, highlighterReady],
-  )
-  return (
-    <div className="rounded border font-mono text-sm leading-relaxed">
-      {/* Full container width (no horizontal scroll): long lines wrap within the
-          code column instead of growing the block, and every row's +/- tint
-          spans the full visible width. Rows below inherit this width. */}
-      <div className="w-full">
-        {hunks.map((hunk, hi) => (
-          <div key={hi}>
-            <div className="bg-muted px-2 py-0.5 text-muted-foreground">
-              {hunk.header}
-            </div>
-            {hunk.lines.map(({ line, html }, li) => (
-              <DiffRow
-                key={li}
-                line={line}
-                html={html}
-                showLineNumbers={showLineNumbers}
-              />
-            ))}
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function DiffRow({
-  line,
-  html,
-  showLineNumbers,
-}: {
-  line: DiffLine
-  html: string
-  showLineNumbers: boolean
-}) {
-  const sign = line.kind === "insert" ? "+" : line.kind === "delete" ? "-" : " "
-  const rowClass =
-    line.kind === "insert"
-      ? "bg-green-600/15"
-      : line.kind === "delete"
-        ? "bg-red-600/15"
-        : ""
-  const signClass =
-    line.kind === "insert"
-      ? "text-green-500"
-      : line.kind === "delete"
-        ? "text-red-500"
-        : "text-muted-foreground"
-  return (
-    <div className={`flex items-start ${rowClass}`}>
-      {/* Old/new line-number gutters hide together when the toggle is off. The
-          sign column always stays, so add/delete coloring reads without them. */}
-      {showLineNumbers ? (
-        <>
-          <span className="w-12 shrink-0 select-none px-1 text-right text-muted-foreground tabular-nums">
-            {line.old_line ?? ""}
-          </span>
-          <span className="w-12 shrink-0 select-none px-1 text-right text-muted-foreground tabular-nums">
-            {line.new_line ?? ""}
-          </span>
-        </>
-      ) : null}
-      <span className={`w-4 shrink-0 select-none text-center ${signClass}`}>
-        {sign}
-      </span>
-      <span
-        // Wrap long lines within the code column: the gutters/sign stay on the
-        // first visual row (the row is top-aligned via items-start) and wrapped
-        // text aligns under the code, mirroring the TUI diff wrapping. min-w-0
-        // lets the column shrink so it actually wraps; overflow-wrap:anywhere
-        // force-breaks a pathological unbroken token (no horizontal scroll now).
-        className="min-w-0 flex-1 whitespace-pre-wrap [overflow-wrap:anywhere]"
-        // Safe: highlight.js escapes the source; `html` is escaped plain text when no language.
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
-    </div>
   )
 }

@@ -4,7 +4,6 @@ import type {
   CommandStatus,
   ConnState,
   DirEntryView,
-  FileDiff,
   ProjectWorktreeEntryView,
   ServerMessage,
   ViewModel,
@@ -38,12 +37,6 @@ export class DuxSocket {
   onCommitMessage: (sessionId: string, message: string) => void = () => {}
   onCommitMessageSnapshot: (sessionId: string, message: string) => void =
     () => {}
-  onDiff: (
-    sessionId: string,
-    path: string,
-    diff: FileDiff | null,
-    error: string | null,
-  ) => void = () => {}
   onDirEntries: (
     path: string,
     entries: DirEntryView[],
@@ -142,9 +135,6 @@ export class DuxSocket {
       case "commit_message_snapshot":
         this.onCommitMessageSnapshot(message.session_id, message.message)
         break
-      case "diff":
-        this.onDiff(message.session_id, message.path, message.diff, message.error)
-        break
       case "dir_entries":
         this.onDirEntries(message.path, message.entries, message.error)
         break
@@ -220,10 +210,6 @@ export class DuxSocket {
 
   resize(sessionId: string, rows: number, cols: number): void {
     this.sendJson({ type: "resize", session_id: sessionId, rows, cols })
-  }
-
-  getDiff(sessionId: string, path: string): void {
-    this.sendJson({ type: "get_diff", session_id: sessionId, path })
   }
 
   browseDir(path: string | null): void {

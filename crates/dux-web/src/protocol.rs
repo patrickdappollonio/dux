@@ -4,7 +4,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use dux_core::diff::FileDiff;
 use dux_core::wire::WireStatus;
 
 /// Browser -> server (JSON text frames). PTY input is sent as binary frames instead.
@@ -30,8 +29,6 @@ pub enum ClientMessage {
     SubscribeTerminal { terminal_id: String },
     /// Create a new companion terminal for a session (distinct from its agent).
     CreateTerminal { session_id: String },
-    /// Request the working-tree-vs-HEAD diff for one changed file.
-    GetDiff { session_id: String, path: String },
     /// List subdirectories of a server-side path so the client can pick a git
     /// repo to add as a project. `None` starts at the user's `$HOME`.
     BrowseDir { path: Option<String> },
@@ -43,7 +40,7 @@ pub enum ClientMessage {
     /// orphaned one as a new agent (the TUI's `new-agent-from-worktree`). The
     /// reply is a `ProjectWorktrees` frame. The server resolves the project from
     /// the engine (a cheap lookup) then classifies the worktrees in
-    /// `spawn_blocking` (it shells to git), following the `get_diff` precedent.
+    /// `spawn_blocking` (it shells to git), following the `browse_dir` precedent.
     ListProjectWorktrees { project_id: String },
     /// Inspect a candidate project path's branch BEFORE it is added, mirroring
     /// the TUI add flow's pre-flight (`add_project` runs `current_branch` +
@@ -114,13 +111,6 @@ pub enum ServerMessage {
     /// a background push/pull completing, an agent launch failing, or a PTY
     /// exiting. Same tone+message shape as a command result's status.
     Status { tone: String, message: String },
-    /// Response to `GetDiff`: the file's diff, or an error string.
-    Diff {
-        session_id: String,
-        path: String,
-        diff: Option<FileDiff>,
-        error: Option<String>,
-    },
     /// An AI-generated commit message produced by a one-shot provider run,
     /// pushed asynchronously after a `generate_commit_message` command. The
     /// `session_id` scopes the result to the dialog that requested it so the
@@ -203,19 +193,6 @@ mod tests {
             }
             _ => panic!("expected Command variant"),
         }
-    }
-
-    #[test]
-    fn get_diff_message_parses() {
-        let json = r#"{"type":"get_diff","session_id":"s1","path":"a.txt"}"#;
-        let msg: ClientMessage = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            msg,
-            ClientMessage::GetDiff {
-                session_id: "s1".to_string(),
-                path: "a.txt".to_string(),
-            }
-        );
     }
 
     #[test]

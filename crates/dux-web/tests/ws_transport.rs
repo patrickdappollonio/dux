@@ -235,6 +235,53 @@ async fn boot_with_repo() -> (SocketAddr, tempfile::TempDir) {
     (addr, tmp)
 }
 
+/// HTTP `/api/file/diff` returns both raw sides of a changed file and rejects a
+/// path that escapes the worktree — the HTTP-layer coverage that replaced the
+/// deleted WS `get_diff` test (route wiring, session resolution, the boundary,
+/// and JSON shape).
+#[tokio::test]
+async fn http_file_diff_returns_sides_and_rejects_traversal() {
+    let (addr, _tmp) = boot_with_repo().await;
+    let client = reqwest::Client::new();
+
+    // The seeded repo has f.txt = "line2" at HEAD, "CHANGED" in the working copy.
+    let resp = client
+        .post(format!("http://{addr}/api/file/diff"))
+        .json(&serde_json::json!({ "session_id": "s1", "path": "f.txt" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["binary"], false, "{body}");
+    assert!(
+        body["original"].as_str().unwrap().contains("line2"),
+        "original (HEAD) side missing committed content: {body}"
+    );
+    assert!(
+        body["modified"].as_str().unwrap().contains("CHANGED"),
+        "modified (working) side missing the edit: {body}"
+    );
+    // Pin which side each string lands on — catch an original/modified swap.
+    assert!(
+        !body["original"].as_str().unwrap().contains("CHANGED"),
+        "original (HEAD) side must not carry the working edit: {body}"
+    );
+    assert!(
+        !body["modified"].as_str().unwrap().contains("line2"),
+        "modified (working) side must not carry the replaced HEAD line: {body}"
+    );
+
+    // A path escaping the worktree is rejected at the boundary → 400.
+    let resp = client
+        .post(format!("http://{addr}/api/file/diff"))
+        .json(&serde_json::json!({ "session_id": "s1", "path": "../escape" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "path traversal must be rejected");
+}
+
 /// Like `boot()`, but project `p1`'s path is a REAL git repo (init + commit) so
 /// `git worktree add` succeeds, and no session is seeded (the test creates one).
 /// `pull_before_creating_agent_by_default` is disabled because the test repo has
@@ -452,75 +499,6 @@ async fn generate_commit_message_streams_result() {
         Some("s1"),
         "commit_message frame must carry its originating session id: {commit_frame}"
     );
-}
-
-/// Fetching the diff for a changed file returns hunks carrying the insert/delete
-/// content; a path-traversal request returns an error frame with a null diff.
-#[tokio::test]
-async fn get_diff_returns_hunks_for_a_changed_file() {
-    let (addr, _tmp) = boot_with_repo().await;
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
-        .await
-        .unwrap();
-    let _ = ws.next().await; // initial view_model
-
-    ws.send(Message::Text(
-        r#"{"type":"get_diff","session_id":"s1","path":"f.txt"}"#.into(),
-    ))
-    .await
-    .unwrap();
-
-    let mut diff_frame = String::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
-    while tokio::time::Instant::now() < deadline && diff_frame.is_empty() {
-        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
-            && let Ok(t) = m.into_text()
-            && t.contains("\"type\":\"diff\"")
-        {
-            diff_frame = t.to_string();
-        }
-    }
-    assert!(!diff_frame.is_empty(), "never received a diff frame");
-
-    let v: serde_json::Value = serde_json::from_str(&diff_frame).expect("parse diff frame");
-    assert!(v["diff"].is_object(), "diff missing: {diff_frame}");
-    assert!(v["error"].is_null(), "unexpected error: {diff_frame}");
-    let hunks = v["diff"]["hunks"].as_array().expect("hunks array");
-    assert!(!hunks.is_empty(), "hunks empty: {diff_frame}");
-    assert!(
-        diff_frame.contains("CHANGED"),
-        "missing inserted content: {diff_frame}"
-    );
-    assert!(
-        diff_frame.contains("line2"),
-        "missing deleted content: {diff_frame}"
-    );
-
-    // A path that escapes the worktree must yield an error frame with a null diff.
-    ws.send(Message::Text(
-        r#"{"type":"get_diff","session_id":"s1","path":"../escape"}"#.into(),
-    ))
-    .await
-    .unwrap();
-
-    let mut err_frame = String::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
-    while tokio::time::Instant::now() < deadline && err_frame.is_empty() {
-        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
-            && let Ok(t) = m.into_text()
-            && t.contains("\"type\":\"diff\"")
-            && t.contains("../escape")
-        {
-            err_frame = t.to_string();
-        }
-    }
-    assert!(
-        !err_frame.is_empty(),
-        "never received the escape diff frame"
-    );
-    let v: serde_json::Value = serde_json::from_str(&err_frame).expect("parse escape frame");
-    assert!(v["diff"].is_null(), "diff should be null: {err_frame}");
-    assert!(!v["error"].is_null(), "error should be set: {err_frame}");
 }
 
 /// Anti-regression for the empty web changed-files pane: the web never set
