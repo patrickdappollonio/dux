@@ -372,8 +372,9 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
       socket.resize(id, term.rows, term.cols)
     }, 50)
 
-    // (Known edge: background tabs throttle rAF but not timers, so a resize
-    // while hidden can send pre-fit dims; the next foreground tick corrects it.)
+    // (A background tab throttles rAF but not timers, so a resize received
+    // while hidden refits late or not at all and its debounced send dedupes to
+    // a no-op — the visibilitychange handler below re-syncs the PTY on return.)
     const ro = new ResizeObserver(() => {
       cancelAnimationFrame(fitFrame)
       fitFrame = requestAnimationFrame(() => fit.fit())
@@ -381,6 +382,25 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
       sendTimer = setTimeout(sendSize, 200)
     })
     ro.observe(container)
+
+    // Re-sync the size when the tab returns to the foreground. While a tab is
+    // hidden its rAF is throttled, so the ResizeObserver's deferred fit() never
+    // runs; if the window is resized in the meantime, coming back leaves both
+    // the canvas AND the PTY pinned to the stale pre-switch size, with no
+    // further ResizeObserver callback to self-correct (the size already changed
+    // once, while hidden). Re-fit and report once visible again so the child
+    // gets a SIGWINCH and redraws at the true size. The fit runs on the next
+    // now-unthrottled frame so layout has settled; sendSize() dedupes, so an
+    // unchanged size is a kernel no-op and never forces a spurious redraw.
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return
+      cancelAnimationFrame(fitFrame)
+      fitFrame = requestAnimationFrame(() => {
+        fit.fit()
+        sendSize()
+      })
+    }
+    document.addEventListener("visibilitychange", onVisible)
 
     return () => {
       cancelAnimationFrame(fitFrame)
@@ -392,6 +412,7 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
       container.removeEventListener("touchend", endTouch)
       container.removeEventListener("touchcancel", endTouch)
       ro.disconnect()
+      document.removeEventListener("visibilitychange", onVisible)
       dataSub.dispose()
       socket.onPtyBytes = () => {}
       termRef.current = null
