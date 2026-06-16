@@ -24,6 +24,7 @@ fn main() {
     println!("cargo:rerun-if-changed=web/public");
     println!("cargo:rerun-if-changed=web/index.html");
     println!("cargo:rerun-if-changed=web/package.json");
+    println!("cargo:rerun-if-changed=web/package-lock.json");
     println!("cargo:rerun-if-changed=web/vite.config.ts");
 
     // Always (re)build when this script runs. The `rerun-if-changed` lines above
@@ -33,7 +34,13 @@ fn main() {
     // build only when the frontend actually changed.
     let dist = web.join("dist");
     let dist_index = dist.join("index.html");
-    if !web.join("node_modules").exists() {
+    // Install dependencies when the lockfile is out of sync with what's on disk
+    // — not only when `node_modules` is missing entirely. A `git pull` that adds
+    // a frontend dependency leaves the existing `node_modules` in place but
+    // stale; without this the next `tsc`/Vite build fails with "cannot find
+    // module" and only the placeholder page gets embedded. `npm ci` is clean and
+    // reproducible; fall back to `npm install` if the lockfile itself is stale.
+    if deps_stale(web) {
         let _ = run(web, "npm", &["ci"]).or_else(|| run(web, "npm", &["install"]));
     }
     if run(web, "npm", &["run", "build"]).is_none() {
@@ -48,7 +55,8 @@ fn main() {
             .ok();
         }
         println!(
-            "cargo:warning=dux-web: frontend build failed; embedded the existing/placeholder page"
+            "cargo:warning=dux-web: frontend build failed; embedded the existing/placeholder page. \
+             Run `npm ci` in crates/dux-web/web, or `cargo build -vv` to see the npm/tsc/Vite error."
         );
     }
 
@@ -57,6 +65,30 @@ fn main() {
     // Runs after the Vite build (which writes raw files); idempotent via the gzip
     // magic-byte check, so a kept-from-last-time dist isn't double-compressed.
     gzip_dist(&dist);
+}
+
+/// Whether `node_modules` is missing or older than the dependency manifests, so
+/// a checkout whose `package.json`/`package-lock.json` changed since the last
+/// install gets a reinstall instead of a "cannot find module" build failure.
+///
+/// npm writes `node_modules/.package-lock.json` after every install/ci as a
+/// snapshot of exactly what it laid down; comparing its mtime against the two
+/// manifests tells us whether the install is current. If the snapshot is absent
+/// (never installed, or `package-lock=false`) we treat deps as stale and let the
+/// caller install.
+fn deps_stale(web: &Path) -> bool {
+    let snapshot = web.join("node_modules").join(".package-lock.json");
+    let Ok(snapshot_mtime) = std::fs::metadata(&snapshot).and_then(|m| m.modified()) else {
+        return true;
+    };
+    ["package.json", "package-lock.json"]
+        .iter()
+        .any(|manifest| {
+            std::fs::metadata(web.join(manifest))
+                .and_then(|m| m.modified())
+                .map(|mtime| mtime > snapshot_mtime)
+                .unwrap_or(false)
+        })
 }
 
 fn gzip_dist(dir: &Path) {
