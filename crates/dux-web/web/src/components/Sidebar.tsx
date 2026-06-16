@@ -140,14 +140,14 @@ function TerminalSubItem({
   // tooltip so "Terminal 1" stays discoverable when a command is shown.
   const title = terminalTitle(terminal)
   return (
-    <SidebarMenuSubItem>
-      {/* The close button's slot only exists while THIS row is hovered/focused
-          (always on touch layouts), so the label keeps the full width otherwise.
-          Visibility is scoped to the row's own group — shadcn's showOnHover keys
-          off the ancestor menu-item, which here is the whole project block. */}
+    <SidebarMenuSubItem className="flex items-center">
+      {/* In-flow ⋯ (mirrors the changes pane): the button is the flex-1 label and
+          the ⋯ is a sibling whose max-width expands on reveal, so the label
+          re-ellipsizes and slides to make room rather than the ⋯ popping in over
+          it. Reveal is scoped to this row's own group/menu-sub-item. */}
       <SidebarMenuSubButton
         isActive={active}
-        className="max-md:pr-8 group-focus-within/menu-sub-item:pr-8 group-hover/menu-sub-item:pr-8 group-has-[[aria-expanded=true]]/menu-sub-item:pr-8"
+        className="flex-1"
         onClick={() => selectTerminal(terminal.id, sessionId)}
       >
         <SquareTerminal />
@@ -160,15 +160,15 @@ function TerminalSubItem({
           away after selecting), and Close… routes through the same confirm
           dialog the old ✕ opened. */}
       <DropdownMenu>
-        <SidebarMenuAction
-          render={<DropdownMenuTrigger />}
-          aria-label="Terminal actions"
-          // top-1 vertically centers the 20px action in the 28px sub row; the
-          // component's default offsets are calibrated for the taller menu button.
-          className="top-1 md:translate-x-1 md:opacity-0 group-focus-within/menu-sub-item:translate-x-0 group-focus-within/menu-sub-item:opacity-100 group-hover/menu-sub-item:translate-x-0 group-hover/menu-sub-item:opacity-100 aria-expanded:translate-x-0 aria-expanded:opacity-100"
-        >
-          <Ellipsis />
-        </SidebarMenuAction>
+        <div className="flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/menu-sub-item:max-w-6 md:group-hover/menu-sub-item:opacity-100 md:group-focus-within/menu-sub-item:max-w-6 md:group-focus-within/menu-sub-item:opacity-100 md:has-[[data-popup-open]]:max-w-6 md:has-[[data-popup-open]]:opacity-100">
+          <SidebarMenuAction
+            render={<DropdownMenuTrigger />}
+            aria-label="Terminal actions"
+            className="static shrink-0"
+          >
+            <Ellipsis />
+          </SidebarMenuAction>
+        </div>
         <DropdownMenuContent side="right" align="start">
           <DropdownMenuItem onClick={() => selectTerminal(terminal.id, sessionId)}>
             <Terminal />
@@ -229,17 +229,17 @@ function SessionSubItem({
   }
 
   return (
-    <SidebarMenuSubItem ref={setNodeRef} style={style}>
-      {/* The ⋯ slot only exists while THIS row is hovered/focused or its menu
-          is open (always on touch layouts), so badges sit flush right
-          otherwise. Reveal is scoped to the row's own group — shadcn's
-          showOnHover keys off the ancestor menu-item, i.e. the whole project. */}
+    <SidebarMenuSubItem ref={setNodeRef} style={style} className="flex items-center">
+      {/* In-flow ⋯ (mirrors the changes pane): the button is the flex-1 row and
+          the ⋯ is a sibling whose max-width expands on reveal, so the agent's
+          right-aligned badges slide left to make room rather than the ⋯ popping
+          in over them. Reveal is scoped to this row's own group/menu-sub-item. */}
       <SidebarMenuSubButton
         {...attributes}
         {...listeners}
         isActive={agentSelected}
         className={cn(
-          "max-md:pr-8 touch-manipulation group-focus-within/menu-sub-item:pr-8 group-hover/menu-sub-item:pr-8 group-has-[[aria-expanded=true]]/menu-sub-item:pr-8",
+          "flex-1 touch-manipulation",
           // Positioning context for the beam overlay. Always relative: the beam
           // self-manages its lifetime (it lingers a moment past `working` to
           // finish its sweep), so the row can't gate the positioning context on
@@ -312,15 +312,15 @@ function SessionSubItem({
       </SidebarMenuSubButton>
 
       <DropdownMenu>
-        <SidebarMenuAction
-          render={<DropdownMenuTrigger />}
-          aria-label="Session actions"
-          // top-1 vertically centers the 20px action in the 28px sub row; the
-          // component's default offsets are calibrated for the taller menu button.
-          className="top-1 md:translate-x-1 md:opacity-0 group-focus-within/menu-sub-item:translate-x-0 group-focus-within/menu-sub-item:opacity-100 group-hover/menu-sub-item:translate-x-0 group-hover/menu-sub-item:opacity-100 aria-expanded:translate-x-0 aria-expanded:opacity-100"
-        >
-          <Ellipsis />
-        </SidebarMenuAction>
+        <div className="flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/menu-sub-item:max-w-6 md:group-hover/menu-sub-item:opacity-100 md:group-focus-within/menu-sub-item:max-w-6 md:group-focus-within/menu-sub-item:opacity-100 md:has-[[data-popup-open]]:max-w-6 md:has-[[data-popup-open]]:opacity-100">
+          <SidebarMenuAction
+            render={<DropdownMenuTrigger />}
+            aria-label="Session actions"
+            className="static shrink-0"
+          >
+            <Ellipsis />
+          </SidebarMenuAction>
+        </div>
         <DropdownMenuContent side="right" align="start">
           <DropdownMenuGroup>
             <DropdownMenuItem onClick={() => selectSession(session.id)}>
@@ -503,61 +503,73 @@ function ProjectItem({
     // Agent-less projects start collapsed — there's nothing inside to show.
     <Collapsible defaultOpen={sessions.length > 0} className="group/collapsible">
       <SidebarMenuItem ref={setNodeRef} style={style}>
-        <CollapsibleTrigger
-          {...attributes}
-          {...listeners}
-          render={<SidebarMenuButton className="touch-manipulation" />}
-        >
-          {/* The folder itself signals the expand state — open when the project
-              is expanded, closed when collapsed — instead of a chevron. */}
-          <Folder className="group-data-[state=open]/collapsible:hidden" />
-          <FolderOpen className="hidden group-data-[state=open]/collapsible:block" />
-          {/* Name + branch share a baseline-aligned inner flex so the smaller
-              text-xs branch sits on the name's baseline instead of floating
-              high like a superscript (the outer button is items-center, which
-              would vertically-center the two different font sizes). Keeping the
-              folder icon and count badge outside this inner flex leaves them
-              vertically centered against the row. min-w-0 lets both the inner
-              flex and each span shrink-truncate. */}
-          <span className="flex min-w-0 items-baseline gap-1.5">
-            {/* font-semibold makes project names visually distinct from agent rows. */}
-            <span className="min-w-0 truncate font-semibold">{name}</span>
-            {/* Current branch as a muted, monospace secondary span after the
-                name. A non-leading branch is tinted with the web's warning
-                convention and explains itself via the title tooltip. Omitted
-                entirely for empty/unknown branches (e.g. path_missing). */}
-            {branch ? (
-              <SimpleTooltip content={branch.tooltip ?? undefined} side="right">
-                <span
-                  className={`min-w-0 truncate font-mono text-sm ${
-                    branch.warn ? "text-amber-500" : "text-muted-foreground"
-                  }`}
-                >
-                  {branch.branch}
-                </span>
-              </SimpleTooltip>
-            ) : null}
-          </span>
-          {/* Session count badge sits inline, right after the name — omitted
-              for agent-less projects (their group heading already says so). */}
-          {sessions.length > 0 ? (
-            <Badge variant="secondary" className="shrink-0">{sessions.length}</Badge>
-          ) : null}
-        </CollapsibleTrigger>
-        {/* The dropdown trigger is a sibling of the CollapsibleTrigger so its
-            click does not toggle the collapsible. */}
-        <DropdownMenu>
-          <SidebarMenuAction
-            showOnHover
-            render={<DropdownMenuTrigger />}
-            aria-label="Project actions"
+        {/* The header is its own flex line with a scoped group: the in-flow ⋯ is
+            a sibling of the project button, so on reveal it expands its max-width
+            and the flex-1 label + count badge slide to make room (mirroring the
+            changes pane). Hover/reveal is scoped to this header group, NOT the
+            whole menu-item — whose collapsible agent list would otherwise reveal
+            the project ⋯ when an agent row is hovered. */}
+        <div className="flex items-center group/project-header">
+          <CollapsibleTrigger
+            {...attributes}
+            {...listeners}
+            render={
+              <SidebarMenuButton className="min-w-0 flex-1 touch-manipulation group-has-data-[sidebar=menu-action]/menu-item:pr-2" />
+            }
           >
-            <Ellipsis />
-          </SidebarMenuAction>
-          <DropdownMenuContent side="right" align="start">
-            <ProjectMenuItems id={id} />
-          </DropdownMenuContent>
-        </DropdownMenu>
+            {/* The folder itself signals the expand state — open when the project
+                is expanded, closed when collapsed — instead of a chevron. */}
+            <Folder className="group-data-[state=open]/collapsible:hidden" />
+            <FolderOpen className="hidden group-data-[state=open]/collapsible:block" />
+            {/* Name + branch share a baseline-aligned inner flex so the smaller
+                text-xs branch sits on the name's baseline instead of floating
+                high like a superscript (the outer button is items-center, which
+                would vertically-center the two different font sizes). flex-1 lets
+                the label fill the row so the count badge rides the right edge and
+                slides when the ⋯ opens; min-w-0 lets each span shrink-truncate. */}
+            <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
+              {/* font-semibold makes project names visually distinct from agent rows. */}
+              <span className="min-w-0 truncate font-semibold">{name}</span>
+              {/* Current branch as a muted, monospace secondary span after the
+                  name. A non-leading branch is tinted with the web's warning
+                  convention and explains itself via the title tooltip. Omitted
+                  entirely for empty/unknown branches (e.g. path_missing). */}
+              {branch ? (
+                <SimpleTooltip content={branch.tooltip ?? undefined} side="right">
+                  <span
+                    className={`min-w-0 truncate font-mono text-sm ${
+                      branch.warn ? "text-amber-500" : "text-muted-foreground"
+                    }`}
+                  >
+                    {branch.branch}
+                  </span>
+                </SimpleTooltip>
+              ) : null}
+            </span>
+            {/* Session count badge rides the right edge (after the flex-1 label)
+                so it slides left as the ⋯ opens — omitted for agent-less projects
+                (their group heading already says so). */}
+            {sessions.length > 0 ? (
+              <Badge variant="secondary" className="shrink-0">{sessions.length}</Badge>
+            ) : null}
+          </CollapsibleTrigger>
+          {/* The dropdown trigger is a sibling of the CollapsibleTrigger so its
+              click does not toggle the collapsible. */}
+          <DropdownMenu>
+            <div className="flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/project-header:max-w-6 md:group-hover/project-header:opacity-100 md:group-focus-within/project-header:max-w-6 md:group-focus-within/project-header:opacity-100 md:has-[[data-popup-open]]:max-w-6 md:has-[[data-popup-open]]:opacity-100">
+              <SidebarMenuAction
+                render={<DropdownMenuTrigger />}
+                aria-label="Project actions"
+                className="static shrink-0"
+              >
+                <Ellipsis />
+              </SidebarMenuAction>
+            </div>
+            <DropdownMenuContent side="right" align="start">
+              <ProjectMenuItems id={id} />
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
         <CollapsibleContent>
           {sessions.length > 0 ? (
             <SessionList
