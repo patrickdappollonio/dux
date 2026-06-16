@@ -573,9 +573,13 @@ function SidebarMenuAction({
         className: cn(
           "absolute top-1.5 right-1 flex aspect-square w-5 items-center justify-center rounded-md p-0 text-sidebar-foreground ring-sidebar-ring outline-hidden transition-[opacity,transform] duration-200 ease-out group-data-[collapsible=icon]:hidden peer-hover/menu-button:text-sidebar-accent-foreground peer-data-[size=default]/menu-button:top-1.5 peer-data-[size=lg]/menu-button:top-2.5 peer-data-[size=sm]/menu-button:top-1 after:absolute after:-inset-2 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 motion-reduce:transition-none md:after:hidden [&>svg]:size-4 [&>svg]:shrink-0",
           // On hover the action fades AND slides in from the right (translate +
-          // opacity transition) instead of popping in instantly.
+          // opacity transition) instead of popping in instantly. It also stays
+          // revealed while its menu is open: Base UI marks the open trigger with
+          // `data-popup-open` (NOT `aria-expanded=true`), so the pin keys off
+          // that — otherwise the action un-reveals the moment the cursor leaves
+          // the row, dragging the anchored popover with it.
           showOnHover &&
-            "group-focus-within/menu-item:translate-x-0 group-focus-within/menu-item:opacity-100 group-hover/menu-item:translate-x-0 group-hover/menu-item:opacity-100 peer-data-active/menu-button:text-sidebar-accent-foreground aria-expanded:translate-x-0 aria-expanded:opacity-100 md:translate-x-1 md:opacity-0",
+            "group-focus-within/menu-item:translate-x-0 group-focus-within/menu-item:opacity-100 group-hover/menu-item:translate-x-0 group-hover/menu-item:opacity-100 peer-data-active/menu-button:text-sidebar-accent-foreground data-[popup-open]:translate-x-0 data-[popup-open]:opacity-100 md:translate-x-1 md:opacity-0",
           className
         ),
       },

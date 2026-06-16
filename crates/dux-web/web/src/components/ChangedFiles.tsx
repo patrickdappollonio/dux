@@ -121,7 +121,7 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
 
       {/* Row actions consolidated into a single ⋯ menu (like the sidebar's
           project/session rows). The wrapper consumes NO width until the row is
-          hovered, the menu is open (trigger aria-expanded), or an action is in
+          hovered, the menu is open (trigger data-popup-open), or an action is in
           flight (trigger aria-busy — so the spinner stays visible after the menu
           closes) — its max-width animates open, so the path/counts use the full
           row otherwise. Always visible on touch at a ≥44px target. The
@@ -129,7 +129,7 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
           items from bubbling to the row's open-diff onClick — React routes portal
           events through this React-tree ancestor. */}
       <div
-        className="flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out max-md:max-w-none motion-reduce:transition-none md:max-w-0 md:opacity-0 md:group-hover:max-w-10 md:group-hover:opacity-100 md:has-[[aria-expanded=true]]:max-w-10 md:has-[[aria-expanded=true]]:opacity-100 md:has-[[aria-busy=true]]:max-w-10 md:has-[[aria-busy=true]]:opacity-100"
+        className="flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out max-md:max-w-none motion-reduce:transition-none md:max-w-0 md:opacity-0 md:group-hover:max-w-10 md:group-hover:opacity-100 md:has-[[data-popup-open]]:max-w-10 md:has-[[data-popup-open]]:opacity-100 md:has-[[aria-busy=true]]:max-w-10 md:has-[[aria-busy=true]]:opacity-100"
         onClick={(e) => e.stopPropagation()}
       >
         <DropdownMenu>
