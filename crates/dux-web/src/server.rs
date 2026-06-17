@@ -215,6 +215,39 @@ pub fn build_app(
     extra_gated: Router<AppState>,
     params: RouterParams,
 ) -> (Router, SweepableMemoryStore) {
+    // In-memory session store: sessions die with the server (documented v1
+    // limitation — a restart forces re-login). It is a `SweepableMemoryStore`
+    // rather than tower-sessions' `MemoryStore` because that store never evicts
+    // EXPIRED records (its `load` skips them, but they linger in the map until the
+    // process exits). The sweepable store implements `ExpiredDeletion`; the serve
+    // paths spawn a periodic `delete_expired` sweep against the returned handle so
+    // memory stays bounded on a long-lived server with login churn. (Deferral 3.)
+    // Returned alongside the router so the caller owns that sweep handle.
+    let store = SweepableMemoryStore::new();
+    let router = build_app_with_store(engine, auth, extra_gated, params, store.clone());
+    (router, store)
+}
+
+/// Store-injectable core of [`build_app`]. Production always uses [`build_app`],
+/// which creates a [`SweepableMemoryStore`] and returns it so the serve paths can
+/// run the expiry sweep against it; this generic form lets an in-crate test inject
+/// a `tower_sessions::SessionStore` that fails on demand to exercise the handlers'
+/// session-error branches (e.g. a `cycle_id`/`insert` failure during login, which
+/// must still refund the rate-limit charge). The `store` is consumed by the session
+/// layer, so a caller that needs the sweep handle (see [`build_app`]) must clone its
+/// `Arc`-backed store before passing it here. `Clone` is required because
+/// `Router::layer` needs the session service to be cloneable. `pub(crate)`: a test
+/// seam, not part of the crate's public API.
+pub(crate) fn build_app_with_store<S>(
+    engine: EngineHandle,
+    auth: SharedAuth,
+    extra_gated: Router<AppState>,
+    params: RouterParams,
+    store: S,
+) -> Router
+where
+    S: tower_sessions::SessionStore + Clone + 'static,
+{
     // A zero cap is a valid-but-drastic setting ("refuse all new connections").
     // Warn loudly at startup so an accidental 0 isn't a silent web-UI lock-out —
     // every upgrade would 503 with no other clue (explicit failure over silence).
@@ -236,19 +269,10 @@ pub fn build_app(
         )),
     };
 
-    // In-memory session store: sessions die with the server (documented v1
-    // limitation — a restart forces re-login). HttpOnly and SameSite=Strict are
-    // the tower-sessions defaults but we set them explicitly so the intent is
-    // visible and a future default change can't silently weaken the cookie.
-    //
-    // The store is a `SweepableMemoryStore` rather than tower-sessions'
-    // `MemoryStore` because that store never evicts EXPIRED records (its `load`
-    // skips them, but they linger in the map until the process exits). The
-    // sweepable store implements `ExpiredDeletion`; the serve paths spawn a
-    // periodic `delete_expired` sweep against the returned handle so memory stays
-    // bounded on a long-lived server with login churn. (Deferral 3.)
-    let store = SweepableMemoryStore::new();
-    let session_layer = SessionManagerLayer::new(store.clone())
+    // HttpOnly and SameSite=Strict are the tower-sessions defaults but we set them
+    // explicitly so the intent is visible and a future default change can't
+    // silently weaken the cookie.
+    let session_layer = SessionManagerLayer::new(store)
         .with_name(auth::SESSION_COOKIE_NAME)
         .with_http_only(true)
         .with_same_site(SameSite::Strict)
@@ -272,7 +296,7 @@ pub fn build_app(
         .route_layer(middleware::from_fn_with_state(state.clone(), gate));
 
     // OPEN routes: reachable without a session so the SPA can boot and log in.
-    let router = Router::new()
+    Router::new()
         .merge(gated)
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/login", post(auth::login))
@@ -294,8 +318,7 @@ pub fn build_app(
         // challenge/redirect router DOES log its 421s: there the access log is the
         // true outermost layer — see `tls::build_http_challenge_router`.)
         .layer(middleware::from_fn_with_state(state.clone(), access_log))
-        .with_state(state);
-    (router, store)
+        .with_state(state)
 }
 
 /// Per-request access-log middleware for the main app: print
@@ -1135,6 +1158,156 @@ mod tests {
         let engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
         let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
         handle
+    }
+
+    /// A session store that delegates to a real in-memory store but can be ARMED to
+    /// fail `delete` on demand. `delete` is the store call `Session::cycle_id` makes
+    /// during login: on a fresh (cookieless) login there is no persisted prior
+    /// session, but tower-sessions still calls `store.delete` UNCONDITIONALLY on the
+    /// freshly-generated id (see `session.rs` `cycle_id`). Arming this therefore makes
+    /// `session.cycle_id().await` in the login handler return `Err` — the exact
+    /// "correct password, then session error" branch we need. Injected via
+    /// [`build_app_with_store`].
+    #[derive(Clone, Debug)]
+    struct FaultOnDeleteStore {
+        inner: SweepableMemoryStore,
+        fail_delete: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl FaultOnDeleteStore {
+        fn new() -> Self {
+            Self {
+                inner: SweepableMemoryStore::new(),
+                fail_delete: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }
+        }
+        /// Make every subsequent `delete` fail.
+        fn arm(&self) {
+            self.fail_delete
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl tower_sessions::session_store::SessionStore for FaultOnDeleteStore {
+        async fn create(
+            &self,
+            record: &mut tower_sessions::session::Record,
+        ) -> tower_sessions::session_store::Result<()> {
+            tower_sessions::session_store::SessionStore::create(&self.inner, record).await
+        }
+        async fn save(
+            &self,
+            record: &tower_sessions::session::Record,
+        ) -> tower_sessions::session_store::Result<()> {
+            tower_sessions::session_store::SessionStore::save(&self.inner, record).await
+        }
+        async fn load(
+            &self,
+            id: &tower_sessions::session::Id,
+        ) -> tower_sessions::session_store::Result<Option<tower_sessions::session::Record>>
+        {
+            tower_sessions::session_store::SessionStore::load(&self.inner, id).await
+        }
+        async fn delete(
+            &self,
+            id: &tower_sessions::session::Id,
+        ) -> tower_sessions::session_store::Result<()> {
+            if self.fail_delete.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(tower_sessions::session_store::Error::Backend(
+                    "injected delete failure".to_string(),
+                ));
+            }
+            tower_sessions::session_store::SessionStore::delete(&self.inner, id).await
+        }
+    }
+
+    /// The ghost-charge ordering fix, exercised end-to-end: a CORRECT password whose
+    /// session commit then fails must STILL refund the rate-limit charge. The
+    /// handler charges before the bcrypt verify and calls `clear()` immediately
+    /// after a correct verify — BEFORE `cycle_id()`/`insert()` — so a session error
+    /// returns 500 without leaving the attempt counted as a failure. If `clear()`
+    /// ran after the session ops (the pre-fix ordering) the budget would be stuck at
+    /// the limit and the next attempt would 429. This faults `cycle_id`'s `delete`;
+    /// the `insert` branch is symmetric (the single `clear()` precedes both ops), so
+    /// one fault path proves the ordering for both.
+    #[tokio::test]
+    async fn correct_login_with_session_error_still_refunds_the_budget() {
+        fn login_req(user: &str, pw: &str) -> axum::http::Request<axum::body::Body> {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/login")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(format!(
+                    r#"{{"username":"{user}","password":"{pw}"}}"#
+                )))
+                .unwrap()
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let hash = dux_core::auth::hash_password("secret-pw").unwrap();
+        let auth = auth::shared_auth(&[format!("alice:{hash}")], false);
+
+        let store = FaultOnDeleteStore::new();
+        // The login handler needs ConnectInfo<SocketAddr> for the per-IP limiter;
+        // MockConnectInfo supplies a fixed peer so every request shares one bucket.
+        let peer: SocketAddr = "10.9.9.9:4242".parse().unwrap();
+        let app = build_app_with_store(
+            handle,
+            auth,
+            Router::new(),
+            RouterParams::plain_http(),
+            store.clone(),
+        )
+        .layer(axum::extract::connect_info::MockConnectInfo(peer));
+
+        // (max-1) wrong logins → budget at exactly one below the limit, so the next
+        // (correct) login charges to the limit. Referencing the constant — rather
+        // than a bare `4` — keeps the test discriminating at ANY value of
+        // RATE_LIMIT_MAX_FAILURES: a literal would go vacuous if the limit were
+        // raised (the correct login would no longer sit at the limit, so a missing
+        // refund wouldn't 429). Wrong logins 401 before any session op, so they
+        // never touch the store.
+        for _ in 0..(auth::RATE_LIMIT_MAX_FAILURES - 1) {
+            let resp = app
+                .clone()
+                .oneshot(login_req("alice", "WRONG"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        // Arm the store so cycle_id()'s delete fails during the next (correct) login.
+        store.arm();
+
+        // Correct password: charges to the limit, bcrypt ok, clear() refunds (→0),
+        // then cycle_id() hits the failing delete → 500.
+        let errored = app
+            .clone()
+            .oneshot(login_req("alice", "secret-pw"))
+            .await
+            .unwrap();
+        assert_eq!(
+            errored.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a session error after a correct password must surface as 500"
+        );
+
+        // The next wrong login must be a normal 401, NOT 429 — proof the correct
+        // login refunded its charge despite the session error.
+        let after = app
+            .clone()
+            .oneshot(login_req("alice", "WRONG"))
+            .await
+            .unwrap();
+        assert_eq!(
+            after.status(),
+            StatusCode::UNAUTHORIZED,
+            "a correct login that hit a session error must still refund its rate-limit \
+             charge (got {} — the budget was not refunded)",
+            after.status()
+        );
     }
 
     /// A representative data route added to the GATED sub-router must 401 without
