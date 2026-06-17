@@ -1407,6 +1407,24 @@ pub fn resolve_server_plan(
     if let Some(offender) = public.first() {
         let allow_remote = cli.insecure_allow_remote || server.insecure_allow_remote;
         let auth_ok = auth_enabled || allow_remote;
+        // If the offender is a Tailscale CGNAT address (100.64.0.0/10) but Tailscale
+        // was NOT detected at startup, the operator most likely meant a tailnet-only
+        // bind and the daemon is simply down — without detection dux can't recognize
+        // it as local and treats it as public, so name that so the refusal is not
+        // mystifying.
+        let offender_is_tailscale_cgnat = matches!(
+            offender.ip(),
+            std::net::IpAddr::V4(v4)
+                if v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1])
+        );
+        let tailscale_note = if tailscale_ip.is_none() && offender_is_tailscale_cgnat {
+            " Note: this is a Tailscale CGNAT address (100.64.0.0/10), but the Tailscale \
+             daemon was not detected at startup, so dux is treating it as a public bind; \
+             if you meant a tailnet-only bind, make sure the Tailscale daemon is running so \
+             dux can classify it as local."
+        } else {
+            ""
+        };
         match (auth_ok, cli.dangerously_listen_http) {
             (false, false) => bail!(
                 "refusing to serve plain HTTP on the non-loopback listen address {offender}: \
@@ -1417,7 +1435,7 @@ pub fn resolve_server_plan(
                  OR pass --insecure-allow-remote if an upstream auth proxy handles login; \
                  then ALSO enable built-in TLS via [server.acme], or pass \
                  --dangerously-listen-http to acknowledge the unencrypted public bind \
-                 explicitly."
+                 explicitly.{tailscale_note}"
             ),
             (false, true) => bail!(
                 "refusing to bind the non-loopback listen address {offender}: the dux web UI \
@@ -1426,7 +1444,7 @@ pub fn resolve_server_plan(
                  (or use the server-add-user palette command) so the login gate protects it. \
                  Alternatively, if an upstream auth proxy handles authentication, \
                  re-run with --insecure-allow-remote or set insecure_allow_remote = true \
-                 under [server] in config.toml."
+                 under [server] in config.toml.{tailscale_note}"
             ),
             (true, false) => bail!(
                 "refusing to serve plain HTTP on the non-loopback listen address {offender}: \
@@ -1434,7 +1452,7 @@ pub fn resolve_server_plan(
                  To serve encrypted, enable built-in TLS via [server.acme] (set enabled = true \
                  and configure domains). If TLS is terminated by an upstream proxy, or you \
                  accept the risk on a trusted network, re-run with --dangerously-listen-http \
-                 to acknowledge the unencrypted public bind explicitly."
+                 to acknowledge the unencrypted public bind explicitly.{tailscale_note}"
             ),
             (true, true) => {}
         }
