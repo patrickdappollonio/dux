@@ -494,10 +494,11 @@ fn status_color(status: u16) -> Option<&'static str> {
 }
 
 /// Format one access-log line: `<ts> <METHOD> <path> <status> <latency>ms`. The
-/// status code is colored by class in color mode; plain otherwise. The path is
-/// printed AS-IS, including any query string — the only query strings that reach
-/// the server are public ACME challenge tokens; nothing sensitive rides paths
-/// today.
+/// status code is colored by class in color mode; plain otherwise. The `path`
+/// argument is printed VERBATIM — this formatter does not interpret or sanitize
+/// it. The CALLER decides what to pass: `server.rs`'s `log_request` strips the
+/// query string before calling here, because query params can carry secrets
+/// (e.g. `/api/file/raw?session_id=…`). Do not pass a full path-and-query.
 fn format_access_line(
     color: bool,
     hms: &str,
@@ -924,12 +925,14 @@ mod tests {
     }
 
     #[test]
-    fn access_line_preserves_query_string() {
-        // Challenge tokens (and query strings generally) are printed as-is.
+    fn access_line_prints_path_argument_verbatim() {
+        // The formatter is a passthrough: it prints whatever `path` it is given,
+        // unchanged. Stripping the query string (to avoid leaking secrets) is the
+        // CALLER's job — server.rs's log_request does it before calling here.
         let line = format_access_line(false, "t", "GET", "/x?a=1&b=2", 200, 1);
         assert!(
             line.contains("/x?a=1&b=2"),
-            "query must be preserved: {line}"
+            "the formatter must print its path argument verbatim: {line}"
         );
     }
 

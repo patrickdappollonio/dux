@@ -298,7 +298,7 @@ pub(crate) const RATE_LIMIT_MAX_BUCKETS: usize = 4096;
 /// The map is kept bounded so a pre-auth caller rotating source addresses can't
 /// grow it without limit (an IPv6 `/64` is 2^64 addresses):
 /// - **Opportunistic eviction:** whenever a request inserts a NEW ip,
-///   `record_failure` first sweeps out every bucket whose window has fully
+///   `check_and_charge` first sweeps out every bucket whose window has fully
 ///   elapsed. The sweep is O(n) but only runs on the rarer new-ip insert path
 ///   (a repeat offender's bucket already exists, so it skips the sweep), making
 ///   it amortized-rare under normal traffic and self-limiting under a flood
@@ -341,47 +341,46 @@ impl RateLimiter {
     /// entries.
     pub(crate) fn with_cap(max_failures: u32, window: Duration, max_buckets: usize) -> Self {
         Self {
-            max_failures,
+            // Clamp to at least 1: max_failures = 0 would make the budget check
+            // `bucket.failures >= self.max_failures` (i.e. `0 >= 0`) true on the
+            // very first attempt and lock every IP out of login entirely.
+            max_failures: max_failures.max(1),
             window,
             max_buckets: max_buckets.max(1),
             buckets: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// If the IP is currently over its failure budget, returns the number of
-    /// seconds the caller should advise via `Retry-After`. Returns `None` when
-    /// the IP may attempt a login.
-    fn retry_after_secs(&self, ip: IpAddr) -> Option<u64> {
-        let mut buckets = self.buckets.write().ok()?;
-        let bucket = buckets.get_mut(&ip)?;
-        let elapsed = bucket.window_start.elapsed();
-        if elapsed >= self.window {
-            // Window rolled over: reset and allow.
-            bucket.failures = 0;
-            bucket.window_start = Instant::now();
-            return None;
-        }
-        if bucket.failures >= self.max_failures {
-            let remaining = self.window.saturating_sub(elapsed);
-            Some(remaining.as_secs().max(1))
-        } else {
-            None
-        }
-    }
-
-    /// Record a failed attempt for the IP, starting or extending its window.
+    /// Atomically check the per-IP failure budget AND charge this attempt against
+    /// it under a single write lock. This closes the check-then-act race: when
+    /// several logins from one IP arrive at once, each charges here BEFORE the
+    /// slow, lock-free bcrypt verify runs, so the budget is consumed atomically
+    /// instead of every concurrent attempt reading the same pre-charge count and
+    /// slipping through.
     ///
-    /// On the NEW-ip path (the only path that can grow the map) this first sweeps
+    /// Returns `Some(retry_after_secs)` when the IP is already over budget — the
+    /// attempt is refused with `429` and is NOT charged further. Returns `None`
+    /// when the attempt is allowed; on the normal path it has now been charged
+    /// (one failure unit), but on the fail-open poison path below it is allowed
+    /// WITHOUT a charge. Any outcome that is NOT a confirmed wrong password (a
+    /// success, an infra error, or a session error) is refunded by the login
+    /// handler with a single [`RateLimiter::clear`] call — placed before the
+    /// session commit so every error return after a correct verify is already
+    /// covered — which resets the IP's whole bucket so a legitimate user is never
+    /// left throttled; only a confirmed wrong password leaves the charge in place,
+    /// so the retained count reflects failures.
+    ///
+    /// On the NEW-ip path (the only path that can grow the map) it first sweeps
     /// expired buckets, then enforces the hard cap by evicting the stalest entry
-    /// if still full. A repeat offender's bucket already exists, so the common
-    /// hot path skips both — see [`RateLimiter`] for the bounding rationale.
-    fn record_failure(&self, ip: IpAddr) {
+    /// if still full — see [`RateLimiter`] for the bounding rationale. A repeat
+    /// offender's bucket already exists, so the common hot path skips both.
+    fn check_and_charge(&self, ip: IpAddr) -> Option<u64> {
         let Ok(mut buckets) = self.buckets.write() else {
             // Deliberate fail-OPEN: a poisoned limiter must not lock out
             // legitimate users (the asymmetry vs `username_exists`, which fails
-            // closed). Skipping the record only loosens throttling, and the
+            // closed). Allowing the attempt only loosens throttling, and the
             // per-attempt bcrypt cost still rate-limits each guess.
-            return;
+            return None;
         };
         let now = Instant::now();
 
@@ -390,8 +389,8 @@ impl RateLimiter {
         // O(n) work entirely.
         if !buckets.contains_key(&ip) {
             // Opportunistic eviction: drop every bucket whose window has fully
-            // elapsed (those are dead weight — `retry_after_secs` would reset
-            // them on next sight anyway).
+            // elapsed (those are dead weight — they would reset on next sight
+            // anyway).
             buckets.retain(|_, b| b.window_start.elapsed() < self.window);
 
             // Hard cap: if every surviving bucket is still within its window,
@@ -411,10 +410,19 @@ impl RateLimiter {
             window_start: now,
         });
         if bucket.window_start.elapsed() >= self.window {
+            // Window rolled over: start a fresh budget for this IP.
             bucket.failures = 0;
             bucket.window_start = now;
         }
+        if bucket.failures >= self.max_failures {
+            // Already over budget: refuse this attempt without charging further.
+            let remaining = self.window.saturating_sub(bucket.window_start.elapsed());
+            return Some(remaining.as_secs().max(1));
+        }
+        // Charge this in-flight attempt against the budget BEFORE the verify, so
+        // concurrent attempts can't all slip through on a stale count.
         bucket.failures = bucket.failures.saturating_add(1);
+        None
     }
 
     /// Current number of retained buckets. Test-only visibility into the map
@@ -495,9 +503,11 @@ pub(crate) async fn login(
 
     let ip = peer.ip();
 
-    // Backoff check BEFORE doing the (expensive) bcrypt verify, so a throttled IP
-    // can't keep us burning CPU.
-    if let Some(retry_after) = state.rate_limiter.retry_after_secs(ip) {
+    // Atomic check-and-charge BEFORE the (expensive) bcrypt verify: a throttled
+    // IP can't keep us burning CPU, AND charging the attempt under the same lock
+    // closes the check-then-act race where concurrent attempts from one IP would
+    // all pass a separate check before any recorded a failure.
+    if let Some(retry_after) = state.rate_limiter.check_and_charge(ip) {
         // Console: rate-limited attempt (IP only — never the attempted username,
         // per the auth-slice log-hygiene rule).
         state.console.login_rate_limited(ip);
@@ -523,18 +533,29 @@ pub(crate) async fn login(
     {
         Ok(ok) => ok,
         Err(e) => {
+            // Infrastructure failure (the bcrypt task panicked or the runtime is
+            // winding down), NOT a wrong password — refund the attempt charged by
+            // check_and_charge so a transient error can't burn a legit user's budget.
+            state.rate_limiter.clear(ip);
             dux_core::logger::error(&format!("login verify task failed: {e}"));
             return (StatusCode::INTERNAL_SERVER_ERROR, "verify error").into_response();
         }
     };
     if !ok {
-        state.rate_limiter.record_failure(ip);
+        // A CONFIRMED wrong password — the ONLY outcome that keeps the charge
+        // check_and_charge placed against the budget above.
         // Console: failed login (IP ONLY — never the attempted username, per the
         // auth-slice log-hygiene rule: a username in the log is an enumeration
         // leak).
         state.console.login_failed(ip);
         return (StatusCode::UNAUTHORIZED, LOGIN_FAILED_MESSAGE).into_response();
     }
+
+    // The password was correct, so this attempt is not a failure. Refund the
+    // pre-charged attempt NOW — before the session commit below — so a session
+    // error on a correct-password login cannot leave the attempt counted against
+    // the IP's budget and eventually 429 a legitimate user.
+    state.rate_limiter.clear(ip);
 
     // Anti-fixation: rotate the id BEFORE associating the user with the session.
     if let Err(e) = session.cycle_id().await {
@@ -545,8 +566,6 @@ pub(crate) async fn login(
         dux_core::logger::error(&format!("failed to persist session on login: {e}"));
         return (StatusCode::INTERNAL_SERVER_ERROR, "session error").into_response();
     }
-
-    state.rate_limiter.clear(ip);
 
     // Console: successful login. The username IS logged on success (the operator
     // wants to know who got in — this is not an enumeration leak).
@@ -809,31 +828,43 @@ mod tests {
         let limiter = RateLimiter::new(3, Duration::from_secs(60));
         let addr = ip("10.0.0.1");
 
-        // Under the budget: allowed.
+        // Under the budget: each attempt is allowed and charges itself.
         for _ in 0..3 {
-            assert!(limiter.retry_after_secs(addr).is_none());
-            limiter.record_failure(addr);
+            assert!(limiter.check_and_charge(addr).is_none());
         }
-        // Now over the budget: blocked with a positive retry-after.
-        let retry = limiter.retry_after_secs(addr).expect("should be throttled");
+        // Now over the budget: blocked with a positive retry-after (a blocked
+        // attempt does not charge further).
+        let retry = limiter.check_and_charge(addr).expect("should be throttled");
         assert!(retry >= 1);
 
         // A success clears the bucket, so the IP can try again immediately.
         limiter.clear(addr);
-        assert!(limiter.retry_after_secs(addr).is_none());
+        assert!(limiter.check_and_charge(addr).is_none());
     }
 
     #[test]
-    fn rate_limiter_window_rollover_allows_again() {
-        // A zero-length window means every check sees the window as elapsed, so
-        // the limiter never blocks — proves the rollover branch resets the count.
-        let limiter = RateLimiter::new(1, Duration::from_millis(0));
+    fn rate_limiter_window_rollover_resets_an_over_budget_ip() {
+        // Saturate the budget so the IP is throttled, THEN let the window elapse
+        // and prove the next attempt is allowed again — i.e. the rollover branch
+        // resets an OVER-budget bucket, not merely an under-budget one (a
+        // regression that only reset under-budget buckets would leave a throttled
+        // IP blocked forever).
+        let window = Duration::from_millis(20);
+        let limiter = RateLimiter::new(1, window);
         let addr = ip("10.0.0.2");
-        limiter.record_failure(addr);
-        limiter.record_failure(addr);
+        // First attempt is allowed (charges to the max of 1)...
+        assert!(limiter.check_and_charge(addr).is_none());
+        // ...the second is over budget and throttled.
         assert!(
-            limiter.retry_after_secs(addr).is_none(),
-            "an elapsed window must reset the counter and allow attempts"
+            limiter.check_and_charge(addr).is_some(),
+            "the IP must be throttled once it is over budget"
+        );
+        // After the window fully elapses, the rollover must reset the over-budget
+        // count and allow attempts again.
+        std::thread::sleep(window + Duration::from_millis(20));
+        assert!(
+            limiter.check_and_charge(addr).is_none(),
+            "an elapsed window must reset an over-budget counter and allow attempts"
         );
     }
 
@@ -842,11 +873,13 @@ mod tests {
         let limiter = RateLimiter::new(1, Duration::from_secs(60));
         let a = ip("10.0.0.3");
         let b = ip("10.0.0.4");
-        limiter.record_failure(a);
-        limiter.record_failure(a);
-        assert!(limiter.retry_after_secs(a).is_some(), "a is throttled");
         assert!(
-            limiter.retry_after_secs(b).is_none(),
+            limiter.check_and_charge(a).is_none(),
+            "a's one attempt charges"
+        );
+        assert!(limiter.check_and_charge(a).is_some(), "a is now throttled");
+        assert!(
+            limiter.check_and_charge(b).is_none(),
             "b has its own bucket and is unaffected"
         );
     }
@@ -862,7 +895,7 @@ mod tests {
 
         // Seed several distinct IPs; each is immediately stale (window is 0).
         for i in 0..10u8 {
-            limiter.record_failure(ip(&format!("10.1.0.{i}")));
+            let _ = limiter.check_and_charge(ip(&format!("10.1.0.{i}")));
         }
         // Each new-ip insert swept the prior stale entries first, so the map
         // never accumulates: after the last insert only that one bucket remains.
@@ -874,7 +907,7 @@ mod tests {
 
         // Inserting one more new ip proves the shrink again (sweep leaves only
         // the freshly inserted bucket).
-        limiter.record_failure(ip("10.1.0.250"));
+        let _ = limiter.check_and_charge(ip("10.1.0.250"));
         assert_eq!(limiter.bucket_count(), 1, "the sweep keeps the map bounded");
     }
 
@@ -887,12 +920,50 @@ mod tests {
 
         // Insert more distinct IPs than the cap; all are within-window.
         for i in 0..(cap as u16 + 5) {
-            limiter.record_failure(ip(&format!("10.2.{}.{}", i / 256, i % 256)));
+            let _ = limiter.check_and_charge(ip(&format!("10.2.{}.{}", i / 256, i % 256)));
         }
         assert_eq!(
             limiter.bucket_count(),
             cap,
             "the map must never exceed the hard cap even when nothing expires"
+        );
+    }
+
+    #[test]
+    fn rate_limiter_check_and_charge_is_atomic_under_concurrency() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        // Regression guard for the check-then-charge race: many concurrent
+        // attempts from ONE ip must collectively consume the budget exactly once.
+        // EXACTLY `max_failures` are allowed; every attempt beyond that is blocked
+        // (the assertion below is `== max`). With a non-atomic check-then-record
+        // (the old two-method design) all of them would slip through. This is
+        // deterministic only because check_and_charge holds the write lock across
+        // the whole check+charge body — it guards against a refactor that splits
+        // that lock, not a probabilistic race.
+        let max = 5u32;
+        let limiter = RateLimiter::new(max, Duration::from_secs(60));
+        let addr = ip("10.3.0.1");
+        let attempts = 64;
+        let allowed = Arc::new(AtomicU32::new(0));
+
+        let handles: Vec<_> = (0..attempts)
+            .map(|_| {
+                let l = limiter.clone();
+                let a = allowed.clone();
+                std::thread::spawn(move || {
+                    if l.check_and_charge(addr).is_none() {
+                        a.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(
+            allowed.load(Ordering::SeqCst),
+            max,
+            "concurrent attempts from one IP must not exceed the failure budget"
         );
     }
 }

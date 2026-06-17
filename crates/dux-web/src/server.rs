@@ -312,9 +312,13 @@ async fn access_log(State(state): State<AppState>, request: Request, next: Next)
 /// does not flood the log, and is gated on `access_log && console.is_active()` so
 /// the flip/disabled paths emit nothing.
 ///
-/// The path is printed AS-IS, query string included: the only query strings that
-/// reach the server today are public ACME challenge tokens (the CA fetches them
-/// over plain HTTP), so there is nothing sensitive to strip.
+/// The path is printed WITHOUT its query string. Query parameters can carry
+/// sensitive values — `GET /api/file/raw?session_id=…&path=…` puts the session
+/// cookie id and an absolute filesystem path in the query — and this log is the
+/// `dux server` stdout an operator may forward to a file or aggregator, so the
+/// query is dropped to avoid leaking secrets. The ACME challenge token rides the
+/// PATH (`/.well-known/acme-challenge/{token}`), not the query, so challenge
+/// fetches are still visible.
 async fn log_request(
     console: &Console,
     access_log: bool,
@@ -329,23 +333,15 @@ async fn log_request(
         return next.run(request).await;
     }
     let method = request.method().as_str().to_string();
-    // Path + query, printed verbatim (challenge tokens are public; nothing
-    // sensitive rides queries today). Falls back to the bare path when there is no
-    // path-and-query form.
-    let uri = request.uri();
-    let path_and_query = uri
-        .path_and_query()
-        .map(|pq| pq.as_str().to_string())
-        .unwrap_or_else(|| uri.path().to_string());
+    // Log the PATH ONLY — never the query string. Query params can carry secrets
+    // (e.g. /api/file/raw?session_id=…&path=…), and this log is stdout an operator
+    // may persist; the ACME challenge token is in the path, so dropping the query
+    // loses nothing useful.
+    let path = request.uri().path().to_string();
     let started = std::time::Instant::now();
     let response = next.run(request).await;
     let latency_ms = started.elapsed().as_millis();
-    console.access(
-        &method,
-        &path_and_query,
-        response.status().as_u16(),
-        latency_ms,
-    );
+    console.access(&method, &path, response.status().as_u16(), latency_ms);
     response
 }
 

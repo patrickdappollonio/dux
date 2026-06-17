@@ -671,19 +671,23 @@ fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool, version: String
             let http_addr = plan.http_addr;
             let h = http_handle.clone();
             let shutdown = shutdown.clone();
+            let console = console.clone();
             tasks.spawn(async move {
                 let r = tls::serve_http_challenge(http_addr, http_router, h).await;
                 if let Err(e) = &r {
-                    dux_core::logger::error(&format!(
-                        "[server] the ACME challenge/redirect listener on {http_addr} failed: {e} \
-                         — is something already listening on that port? While it is down, \
-                         Let's Encrypt cannot reach the HTTP-01 challenge, so TLS certificates \
-                         will not issue or renew. Free the port (or stop the other listener) and \
-                         restart dux."
-                    ));
-                    shutdown.record_failure(anyhow::anyhow!(
-                        "the ACME challenge/redirect listener on {http_addr} failed: {e}"
-                    ));
+                    let msg = format!(
+                        "the ACME challenge/redirect listener on {http_addr} failed: {e} — is \
+                         something already listening on that port? (For a port below 1024, dux may \
+                         instead lack the privilege to bind it — run as root or grant \
+                         CAP_NET_BIND_SERVICE.) While it is down, Let's Encrypt cannot reach the \
+                         HTTP-01 challenge, so TLS certificates will not issue or renew. Resolve \
+                         the bind and restart dux."
+                    );
+                    dux_core::logger::error(&format!("[server] {msg}"));
+                    // Surface on the `dux server` console too — dux.log is not the
+                    // operator's primary watch surface.
+                    console.acme(true, &msg);
+                    shutdown.record_failure(anyhow::anyhow!(msg));
                 }
                 r
             });
@@ -692,16 +696,18 @@ fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool, version: String
             let https_addr = plan.https_addr;
             let h = https_handle.clone();
             let shutdown = shutdown.clone();
+            let console = console.clone();
             tasks.spawn(async move {
                 let r = tls::serve_https_acme(https_addr, https_app, acceptor, h).await;
                 if let Err(e) = &r {
-                    dux_core::logger::error(&format!(
-                        "[server] the TLS listener on {https_addr} failed: {e} \
-                         — is something already listening there?"
-                    ));
-                    shutdown.record_failure(anyhow::anyhow!(
-                        "the TLS listener on {https_addr} failed: {e}"
-                    ));
+                    let msg = format!(
+                        "the TLS listener on {https_addr} failed: {e} — is something already \
+                         listening on that port? (For a port below 1024, dux may instead lack the \
+                         privilege to bind it — run as root or grant CAP_NET_BIND_SERVICE.)"
+                    );
+                    dux_core::logger::error(&format!("[server] {msg}"));
+                    console.acme(true, &msg);
+                    shutdown.record_failure(anyhow::anyhow!(msg));
                 }
                 r
             });
@@ -1200,14 +1206,39 @@ pub fn serve_with_engine(
 /// signals an operator or supervisor sends to stop the server.
 async fn shutdown_signal() {
     let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            // Registering the SIGINT (Ctrl-C) handler failed: say so loudly instead
+            // of dropping the error. We park this arm so it can't fire spuriously;
+            // SIGTERM (systemctl stop / docker stop) still gives a graceful stop.
+            let msg = format!(
+                "[server] failed to install the SIGINT (Ctrl-C) handler: {e} — Ctrl-C will not \
+                 stop the server gracefully; use SIGTERM (systemctl stop / docker stop) instead."
+            );
+            dux_core::logger::error(&msg);
+            eprintln!("ERROR: {msg}");
+            std::future::pending::<()>().await
+        }
     };
     let terminate = async {
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
             Ok(mut sig) => {
                 sig.recv().await;
             }
-            Err(_) => std::future::pending::<()>().await,
+            Err(e) => {
+                // Registering the SIGTERM handler failed: say so loudly instead of
+                // dropping the error. With no handler installed, SIGTERM keeps its
+                // OS default — the process is terminated immediately and UNGRACEFULLY
+                // (no clean wind-down of agents/sessions). We park this arm so it
+                // can't fire spuriously; SIGINT (Ctrl-C) still gives a graceful stop.
+                let msg = format!(
+                    "[server] failed to install the SIGTERM handler: {e} — the server will NOT \
+                     stop gracefully on SIGTERM (systemctl stop / docker stop / kubectl delete); \
+                     use Ctrl-C (SIGINT) to stop it cleanly."
+                );
+                dux_core::logger::error(&msg);
+                eprintln!("ERROR: {msg}");
+                std::future::pending::<()>().await
+            }
         }
     };
     tokio::select! {
