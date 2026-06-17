@@ -236,12 +236,109 @@ fn clamp_replay_top(full_top: i32, bottom: i32) -> i32 {
     full_top.max(bottom + 1 - MAX_RECONNECT_REPLAY_LINES)
 }
 
+/// Bounded depth (in chunks) of the PTY outbound write queue. Keystrokes and the
+/// terminal parser's query replies are queued here for the dedicated writer
+/// thread. When a child stops reading its input the writer thread blocks and the
+/// queue fills; past this cap, new chunks are dropped rather than blocking the
+/// caller — a child that is not reading would discard the input anyway.
+const PTY_WRITE_QUEUE_CAP: usize = 1024;
+
+/// Push a chunk onto a PTY write queue without ever blocking. A full queue (the
+/// child is not draining its terminal) logs and drops the chunk rather than
+/// blocking the caller — a child that is not reading would discard the bytes
+/// anyway. A disconnected channel (the writer thread is gone) is a no-op. Shared
+/// by [`PtyWriter::send`] (user input) and the reader thread (terminal parser
+/// replies) so both log drops identically.
+fn pty_queue_send(tx: &std::sync::mpsc::SyncSender<Vec<u8>>, bytes: Vec<u8>) {
+    if let Err(std::sync::mpsc::TrySendError::Full(_)) = tx.try_send(bytes) {
+        logger::debug(
+            "PTY write queue full; dropping bytes for a child that is not draining its terminal",
+        );
+    }
+}
+
+/// Owns the PTY master writer on a dedicated thread and accepts outbound byte
+/// chunks over a bounded channel.
+///
+/// This decouples *writing to the child* from the threads that must stay
+/// responsive. The web engine runs every request on a single thread, and the PTY
+/// reader thread must keep draining the child's output; a raw blocking `write()`
+/// to a child that has stopped reading its input (e.g. a CLI paused on a network
+/// call) would wedge whichever thread called it. Routing every write through this
+/// one thread means only it can ever block — never the engine thread and never
+/// the reader — which is what prevents one stalled child from freezing the whole
+/// server. A single writer thread also serializes input and parser replies in
+/// submission order.
+struct PtyWriter {
+    /// `None` only transiently during `Drop`, once the sender is released so the
+    /// writer thread's `recv` disconnects and the join can complete.
+    tx: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl PtyWriter {
+    /// Spawn the writer thread around the PTY master `writer`.
+    fn spawn(mut writer: Box<dyn Write + Send>) -> Self {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(PTY_WRITE_QUEUE_CAP);
+        let thread = thread::spawn(move || {
+            // A blocking write here only ever stalls THIS thread. On teardown the
+            // child's process group is killed first, which closes the PTY and makes
+            // the write return an error, so the loop exits promptly.
+            while let Ok(chunk) = rx.recv() {
+                if writer.write_all(&chunk).is_err() {
+                    break;
+                }
+                let _ = writer.flush();
+            }
+        });
+        Self {
+            tx: Some(tx),
+            thread: Some(thread),
+        }
+    }
+
+    /// A clonable handle for the reader thread to push the terminal parser's query
+    /// replies through the same single writer (preserving submission order).
+    fn sender(&self) -> std::sync::mpsc::SyncSender<Vec<u8>> {
+        self.tx
+            .as_ref()
+            .expect("PtyWriter sender taken before Drop")
+            .clone()
+    }
+
+    /// Queue bytes for the child. Never blocks: a full queue (child not draining)
+    /// drops the chunk (logged), and a gone writer thread (child exited) is a
+    /// no-op.
+    fn send(&self, bytes: Vec<u8>) {
+        if let Some(tx) = self.tx.as_ref() {
+            pty_queue_send(tx, bytes);
+        }
+    }
+}
+
+impl Drop for PtyWriter {
+    fn drop(&mut self) {
+        // Release our sender so the writer thread's `recv` disconnects, then join
+        // it so the thread never outlives the client. A PtyClient drops this only
+        // after it has killed the child group and joined the reader thread, so any
+        // stalled write has already errored out (PTY closed) and the reader's
+        // cloned sender is gone — leaving this the last sender, so the disconnect
+        // fires and the join returns at once.
+        self.tx.take();
+        if let Some(handle) = self.thread.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 /// A PTY-based client that spawns a CLI tool in a pseudo-terminal and keeps a
 /// full terminal grid with scrollback using `alacritty_terminal`.
 pub struct PtyClient {
     #[allow(dead_code)]
     master: Box<dyn MasterPty + Send>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// Dedicated writer thread for the PTY master, fed over a bounded queue so a
+    /// child that stops reading its input can never block the engine thread.
+    writer: PtyWriter,
     terminal: Arc<Mutex<TerminalState>>,
     child: Box<dyn Child + Send + Sync>,
     exited: Arc<AtomicBool>,
@@ -335,13 +432,14 @@ impl PtyClient {
             .master
             .try_clone_reader()
             .context("failed to clone PTY reader")?;
-        let writer = pair
+        let pty_writer = pair
             .master
             .take_writer()
             .context("failed to take PTY writer")?;
 
         let terminal = Arc::new(Mutex::new(TerminalState::new(rows, cols, scrollback_lines)));
-        let writer = Arc::new(Mutex::new(writer));
+        let writer = PtyWriter::spawn(pty_writer);
+        let writer_tx = writer.sender();
         let exited = Arc::new(AtomicBool::new(false));
         let has_output = Arc::new(AtomicBool::new(false));
         let dirty = Arc::new(AtomicBool::new(true));
@@ -352,7 +450,6 @@ impl PtyClient {
             Arc::new(Mutex::new(Vec::new()));
 
         let terminal_ref = Arc::clone(&terminal);
-        let writer_ref = Arc::clone(&writer);
         let exited_ref = Arc::clone(&exited);
         let has_output_ref = Arc::clone(&has_output);
         let dirty_ref = Arc::clone(&dirty);
@@ -364,7 +461,7 @@ impl PtyClient {
             Self::reader_loop(
                 reader,
                 terminal_ref,
-                writer_ref,
+                writer_tx,
                 exited_ref,
                 has_output_ref,
                 dirty_ref,
@@ -396,7 +493,7 @@ impl PtyClient {
     fn reader_loop(
         mut reader: Box<dyn std::io::Read + Send>,
         terminal: Arc<Mutex<TerminalState>>,
-        writer: Arc<Mutex<Box<dyn Write + Send>>>,
+        writer_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
         exited: Arc<AtomicBool>,
         has_output: Arc<AtomicBool>,
         dirty: Arc<AtomicBool>,
@@ -446,13 +543,24 @@ impl PtyClient {
                         let replies = terminal.process(data);
                         dirty.store(true, Ordering::Release);
                         received_data.store(true, Ordering::Release);
-                        if !replies.is_empty()
-                            && let Ok(mut w) = writer.lock()
-                        {
-                            let _ = w.write_all(&replies);
-                            let _ = w.flush();
+                        // Capture the visibility transition while we still hold the
+                        // terminal lock, then release it BEFORE handing the parser's
+                        // replies to the writer. Holding `terminal` across the write
+                        // is what let a stalled writer freeze the drain loop (and,
+                        // with it, every session): the reader must always return to
+                        // `read()` promptly so the child can never block on output.
+                        let newly_visible =
+                            !has_output.load(Ordering::Acquire) && terminal.has_visible_output();
+                        drop(terminal);
+                        if !replies.is_empty() {
+                            // Same non-blocking, drop-with-log policy as user input
+                            // (`PtyWriter::send`). Replies are tiny and the queue is
+                            // large, so a drop here needs a wedged writer AND a full
+                            // queue — practically unreachable, but logged if it ever
+                            // happens so a desynced child is diagnosable.
+                            pty_queue_send(&writer_tx, replies);
                         }
-                        if !has_output.load(Ordering::Acquire) && terminal.has_visible_output() {
+                        if newly_visible {
                             has_output.store(true, Ordering::Release);
                         }
                     }
@@ -472,9 +580,14 @@ impl PtyClient {
     /// pre-marking dirty avoids a one-frame delay waiting for the reader
     /// thread to process the echo.
     pub fn write_bytes(&self, bytes: &[u8]) -> Result<()> {
-        let mut writer = self.writer.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-        writer.write_all(bytes).context("failed to write to PTY")?;
-        writer.flush().context("failed to flush PTY writer")?;
+        // Hand the bytes to the dedicated writer thread and return immediately.
+        // The write itself may block on a child that has stopped reading its
+        // input, but that can only ever stall the writer thread — never this
+        // caller, which on the web server is the single engine thread that must
+        // stay responsive for every other session. Delivery is best-effort: a
+        // full queue drops the chunk (logged) rather than blocking. The `Result`
+        // is retained for API stability with existing callers.
+        self.writer.send(bytes.to_vec());
         self.dirty.store(true, Ordering::Release);
         Ok(())
     }
@@ -617,11 +730,8 @@ impl PtyClient {
         }
         drop(terminal);
 
-        if !replies.is_empty()
-            && let Ok(mut w) = self.writer.lock()
-        {
-            let _ = w.write_all(&replies);
-            let _ = w.flush();
+        if !replies.is_empty() {
+            self.writer.send(replies);
         }
     }
 
@@ -1936,6 +2046,149 @@ mod tests {
             start.elapsed()
         );
         dropper.join().expect("dropper thread panicked");
+    }
+
+    #[test]
+    fn pty_writer_send_never_blocks_when_the_write_stalls() {
+        // The core of the deadlock fix. A child that has stopped reading its input
+        // is modelled by a writer whose `write` blocks until released. The web
+        // engine runs every request on one thread and forwards input through this
+        // writer; `send` must return immediately regardless — queueing or dropping
+        // — but never blocking the caller. (Done with a mock writer because a real
+        // PTY's blocking is platform- and mode-dependent: macOS blocks the master
+        // write when the slave input buffer fills, while a Linux tty in canonical
+        // mode drops overflow at the line discipline instead — so flooding a real
+        // PTY is not a reliable cross-platform reproduction.)
+        struct BlockingWriter {
+            gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        }
+        impl Write for BlockingWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                let (lock, cvar) = &*self.gate;
+                let mut open = lock.lock().unwrap();
+                while !*open {
+                    open = cvar.wait(open).unwrap();
+                }
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let writer = PtyWriter::spawn(Box::new(BlockingWriter {
+            gate: Arc::clone(&gate),
+        }));
+
+        // Flood past the queue cap from a worker thread; the writer thread is
+        // wedged on the first write, so the queue fills and the rest is dropped —
+        // but no `send` may block.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let flooder = std::thread::spawn(move || {
+            for _ in 0..(PTY_WRITE_QUEUE_CAP * 2) {
+                writer.send(vec![b'x'; 64]);
+            }
+            let _ = done_tx.send(());
+            writer
+        });
+
+        let finished = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+
+        // Release the stalled write so the writer thread can drain and exit, then
+        // drop the writer (its Drop joins the thread) once observed.
+        {
+            let (lock, cvar) = &*gate;
+            *lock.lock().unwrap() = true;
+            cvar.notify_all();
+        }
+        let writer = flooder.join().expect("flooder thread panicked");
+        drop(writer);
+
+        assert!(
+            finished.is_ok(),
+            "PtyWriter::send blocked while the underlying write was stalled; it must \
+             queue-or-drop and never block the calling thread"
+        );
+    }
+
+    #[test]
+    fn pty_writer_delivers_queued_bytes_in_order() {
+        // Happy path: the writer thread must actually deliver queued bytes to the
+        // underlying writer, in submission order.
+        struct CollectingWriter {
+            seen: Arc<Mutex<Vec<u8>>>,
+        }
+        impl Write for CollectingWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.seen.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let writer = PtyWriter::spawn(Box::new(CollectingWriter {
+            seen: Arc::clone(&seen),
+        }));
+        writer.send(b"abc".to_vec());
+        writer.send(b"def".to_vec());
+
+        // Dropping the writer joins its thread, which guarantees every queued
+        // chunk has been written — so this is the synchronization point, no sleep.
+        drop(writer);
+        let delivered = seen.lock().unwrap().clone();
+        assert_eq!(
+            delivered, b"abcdef",
+            "queued bytes must be delivered to the underlying writer in order"
+        );
+    }
+
+    #[test]
+    fn write_bytes_delivers_input_to_a_child_that_reads_stdin() {
+        // Happy-path guard for routing writes through a dedicated writer: the
+        // bytes must still reach the child. The shell reads one line and echoes
+        // it with a marker; we send the line and expect the marker back.
+        let args = vec![
+            "-c".to_string(),
+            "printf READY; read line; printf 'GOT:%s' \"$line\"".to_string(),
+        ];
+        let mut client =
+            PtyClient::spawn("/bin/sh", &args, Path::new("."), 5, 40, 100).expect("spawn pty");
+
+        // Wait until the shell signals it has reached `read` (instead of a blind
+        // sleep that can lose the race on a loaded host), then send the line.
+        let mut ready = false;
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            if viewport_lines(&client.snapshot())
+                .iter()
+                .any(|line| line.contains("READY"))
+            {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "shell did not reach `read` within 2s");
+        client.write_bytes(b"hello\n").expect("write_bytes");
+
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            if viewport_lines(&client.snapshot())
+                .iter()
+                .any(|line| line.contains("GOT:hello"))
+            {
+                let _ = client.try_wait();
+                return;
+            }
+        }
+
+        panic!(
+            "expected the child to receive and echo the written input, got {:?}",
+            viewport_lines(&client.snapshot())
+        );
     }
 
     #[test]

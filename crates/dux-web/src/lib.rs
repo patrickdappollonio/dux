@@ -1202,48 +1202,97 @@ pub fn serve_with_engine(
     Ok((engine, exit))
 }
 
-/// Resolves when the process receives SIGINT (Ctrl-C) or SIGTERM, the standard
-/// signals an operator or supervisor sends to stop the server.
+/// Resolves when the process receives SIGINT (Ctrl-C) or SIGTERM. The first such
+/// signal resolves this future — the caller then triggers a graceful shutdown —
+/// and also arms a watcher so a SECOND signal forces an immediate exit, rather
+/// than leaving the operator trapped if the graceful drain wedges.
 async fn shutdown_signal() {
-    let ctrl_c = async {
-        if let Err(e) = tokio::signal::ctrl_c().await {
-            // Registering the SIGINT (Ctrl-C) handler failed: say so loudly instead
-            // of dropping the error. We park this arm so it can't fire spuriously;
-            // SIGTERM (systemctl stop / docker stop) still gives a graceful stop.
+    // Install both handlers ONCE up front and reuse the same streams for the
+    // first wait AND the second-signal force-quit watcher. Re-subscribing fresh
+    // after the first signal fired would race: a rapid second signal could arrive
+    // in the window before a newly-created listener is registered and be missed.
+    // A persistent `Signal` stream stays armed and catches the next delivery
+    // whenever it is next polled.
+    let mut interrupt = install_signal(
+        tokio::signal::unix::SignalKind::interrupt(),
+        "SIGINT (Ctrl-C)",
+    );
+    let mut terminate = install_signal(tokio::signal::unix::SignalKind::terminate(), "SIGTERM");
+
+    if interrupt.is_none() && terminate.is_none() {
+        // Neither handler installed — we can observe no stop signal. Park so this
+        // future never resolves spuriously; `install_signal` already logged loudly.
+        std::future::pending::<()>().await;
+    }
+
+    next_terminate_signal(&mut interrupt, &mut terminate).await;
+
+    // A graceful shutdown has now been requested. If it wedges — a stuck PTY
+    // write, a client socket that never closes, an unbounded connection drain — a
+    // SECOND Ctrl-C/SIGTERM must NOT be swallowed, or the operator is trapped and
+    // forced to `kill -9`. Reuse the already-armed streams (so there is no
+    // re-registration gap) and force-exit on the next signal. This deliberately
+    // bypasses the (possibly stuck) graceful path: the "I really mean stop" escape
+    // hatch, mirroring how most servers treat a second Ctrl-C. 130 = 128 + SIGINT,
+    // the conventional interrupted-exit code.
+    tokio::spawn(async move {
+        next_terminate_signal(&mut interrupt, &mut terminate).await;
+        let msg = "[server] second interrupt received during shutdown — forcing immediate exit.";
+        dux_core::logger::error(msg);
+        eprintln!("{msg}");
+        std::process::exit(130);
+    });
+}
+
+/// Install a SIGINT/SIGTERM handler, returning the stream — or `None` (logged
+/// loudly) if registration fails, so the caller can still rely on the other
+/// signal. `label` is the human name used in the failure message.
+fn install_signal(
+    kind: tokio::signal::unix::SignalKind,
+    label: &str,
+) -> Option<tokio::signal::unix::Signal> {
+    match tokio::signal::unix::signal(kind) {
+        Ok(sig) => Some(sig),
+        Err(e) => {
+            // Registering this handler failed: say so loudly instead of dropping
+            // the error. The other signal still gives a graceful stop; if BOTH
+            // fail, `shutdown_signal` parks rather than firing spuriously.
             let msg = format!(
-                "[server] failed to install the SIGINT (Ctrl-C) handler: {e} — Ctrl-C will not \
-                 stop the server gracefully; use SIGTERM (systemctl stop / docker stop) instead."
+                "[server] failed to install the {label} handler: {e} — {label} will not stop the \
+                 server; rely on the other signal (Ctrl-C for SIGINT, systemctl/docker stop for \
+                 SIGTERM)."
             );
             dux_core::logger::error(&msg);
             eprintln!("ERROR: {msg}");
-            std::future::pending::<()>().await
+            None
         }
-    };
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut sig) => {
-                sig.recv().await;
+    }
+}
+
+/// Await the next delivery of either signal stream. A stream that failed to
+/// install (`None`) is treated as never-firing so the other still works.
+async fn next_terminate_signal(
+    interrupt: &mut Option<tokio::signal::unix::Signal>,
+    terminate: &mut Option<tokio::signal::unix::Signal>,
+) {
+    async fn recv(sig: &mut Option<tokio::signal::unix::Signal>) {
+        match sig {
+            Some(s) => {
+                // `recv()` yields `None` only when the stream closes (runtime
+                // teardown), which is NOT a delivered signal — resolving on it
+                // would make the second-signal watcher force-exit spuriously
+                // during a clean shutdown. Park on a closed stream so this arm
+                // never fires (and so we don't busy-loop on a persistent `None`).
+                if s.recv().await.is_none() {
+                    std::future::pending::<()>().await;
+                }
             }
-            Err(e) => {
-                // Registering the SIGTERM handler failed: say so loudly instead of
-                // dropping the error. With no handler installed, SIGTERM keeps its
-                // OS default — the process is terminated immediately and UNGRACEFULLY
-                // (no clean wind-down of agents/sessions). We park this arm so it
-                // can't fire spuriously; SIGINT (Ctrl-C) still gives a graceful stop.
-                let msg = format!(
-                    "[server] failed to install the SIGTERM handler: {e} — the server will NOT \
-                     stop gracefully on SIGTERM (systemctl stop / docker stop / kubectl delete); \
-                     use Ctrl-C (SIGINT) to stop it cleanly."
-                );
-                dux_core::logger::error(&msg);
-                eprintln!("ERROR: {msg}");
-                std::future::pending::<()>().await
-            }
+            None => std::future::pending::<()>().await,
         }
-    };
+    }
     tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
+        _ = recv(interrupt) => {},
+        _ = recv(terminate) => {},
     }
 }
 
