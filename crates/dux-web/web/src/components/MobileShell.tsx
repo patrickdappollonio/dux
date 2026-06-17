@@ -16,10 +16,8 @@ import {
   Bot,
   ChevronLeft,
   Cpu,
-  Download,
   Ellipsis,
   FolderOpen,
-  GitCommitHorizontal,
   GitFork,
   GitPullRequest,
   LogOut,
@@ -29,15 +27,12 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
-  Send,
   SquareTerminal,
   Trash2,
   X,
 } from "lucide-react"
-import { toast } from "sonner"
 import type { CSSProperties } from "react"
 import { Suspense } from "react"
-import { git } from "@/lib/git"
 
 import { AgentBeam } from "@/components/AgentBeam"
 import { ChangedFiles } from "@/components/ChangedFiles"
@@ -80,7 +75,6 @@ import {
   mobileNavigate,
   openAddProject,
   openChangeProvider,
-  openCommit,
   openDelete,
   openDeleteTerminal,
   openForkAgent,
@@ -110,24 +104,8 @@ function SessionActions({ session }: { session: SessionView }) {
     })
   }
 
-  function handlePush() {
-    git
-      .push(session.id)
-      .catch((e) => toast.error(e instanceof Error ? e.message : "push failed"))
-  }
-
-  function handlePull() {
-    git
-      .pull(session.id)
-      .catch((e) => toast.error(e instanceof Error ? e.message : "pull failed"))
-  }
-
   return (
     <DropdownMenuGroup>
-      <DropdownMenuItem onClick={() => selectAndOpen(session.id)}>
-        <SquareTerminal />
-        Stream
-      </DropdownMenuItem>
       <DropdownMenuItem onClick={() => reconnectSession(session.id, false)}>
         <Plug />
         Reconnect
@@ -139,7 +117,7 @@ function SessionActions({ session }: { session: SessionView }) {
       <DropdownMenuSeparator />
       <DropdownMenuItem onClick={() => openRename(session.id)}>
         <Pencil />
-        Rename…
+        Rename agent…
       </DropdownMenuItem>
       <DropdownMenuItem onClick={() => openForkAgent(session.id)}>
         <GitFork />
@@ -147,26 +125,14 @@ function SessionActions({ session }: { session: SessionView }) {
       </DropdownMenuItem>
       <DropdownMenuItem onClick={() => openChangeProvider(session.id)}>
         <Cpu />
-        Change provider…
+        Change agent provider…
       </DropdownMenuItem>
       <DropdownMenuSeparator />
       <DropdownMenuItem onClick={handleToggleAutoReopen}>
         <RefreshCw />
         {session.auto_reopen_enabled
-          ? "Disable auto-reopen"
-          : "Enable auto-reopen"}
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={handlePush}>
-        <Send />
-        Push
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={handlePull}>
-        <Download />
-        Pull
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => openCommit(session.id)}>
-        <GitCommitHorizontal />
-        Commit…
+          ? "Disable agent auto-reopen"
+          : "Enable agent auto-reopen"}
       </DropdownMenuItem>
       <DropdownMenuSeparator />
       <DropdownMenuItem onClick={() => createTerminal(session.id)}>
@@ -178,7 +144,7 @@ function SessionActions({ session }: { session: SessionView }) {
         onClick={() => openDelete(session.id)}
       >
         <Trash2 />
-        Delete…
+        Delete agent…
       </DropdownMenuItem>
     </DropdownMenuGroup>
   )
