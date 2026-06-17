@@ -16,12 +16,10 @@ import {
   Bot,
   ClipboardCopy,
   Cpu,
-  Download,
   Ellipsis,
   FileCode2,
   Folder,
   FolderOpen,
-  GitCommitHorizontal,
   GitFork,
   GitPullRequest,
   Pencil,
@@ -29,7 +27,6 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
-  Send,
   SquareTerminal,
   Terminal,
   Trash2,
@@ -37,7 +34,6 @@ import {
 import { toast } from "sonner"
 import type * as React from "react"
 import { copyToClipboard } from "@/lib/clipboard"
-import { git } from "@/lib/git"
 
 import { AgentBeam } from "@/components/AgentBeam"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
@@ -103,7 +99,6 @@ import {
   createTerminal,
   openAddProject,
   openChangeProvider,
-  openCommit,
   openEditor,
   openDelete,
   openDeleteTerminal,
@@ -155,10 +150,10 @@ function TerminalSubItem({
           <span className="flex-1 truncate">{title}</span>
         </SimpleTooltip>
       </SidebarMenuSubButton>
-      {/* ⋯ menu replaces the bare ✕, matching the session rows' pattern: Stream
-          selects this terminal (the macro popover lives on the pane, one click
-          away after selecting), and Close… routes through the same confirm
-          dialog the old ✕ opened. */}
+      {/* ⋯ menu replaces the bare ✕: Stream selects this terminal (the macro
+          popover lives on the pane, one click away after selecting) — kept here
+          because Close… alone would not warrant a dropdown — and Close… routes
+          through the same confirm dialog the old ✕ opened. */}
       <DropdownMenu>
         <div className="flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/menu-sub-item:max-w-6 md:group-hover/menu-sub-item:opacity-100 md:group-focus-within/menu-sub-item:max-w-6 md:group-focus-within/menu-sub-item:opacity-100 md:has-[[data-popup-open]]:max-w-6 md:has-[[data-popup-open]]:opacity-100">
           <SidebarMenuAction
@@ -214,18 +209,6 @@ function SessionSubItem({
       session_id: session.id,
       enabled: !session.auto_reopen_enabled,
     })
-  }
-
-  function handlePush() {
-    git
-      .push(session.id)
-      .catch((e) => toast.error(e instanceof Error ? e.message : "push failed"))
-  }
-
-  function handlePull() {
-    git
-      .pull(session.id)
-      .catch((e) => toast.error(e instanceof Error ? e.message : "pull failed"))
   }
 
   return (
@@ -323,10 +306,6 @@ function SessionSubItem({
         </div>
         <DropdownMenuContent side="right" align="start">
           <DropdownMenuGroup>
-            <DropdownMenuItem onClick={() => selectSession(session.id)}>
-              <Terminal />
-              Stream
-            </DropdownMenuItem>
             <DropdownMenuItem onClick={() => reconnectSession(session.id, false)}>
               <Plug />
               Reconnect
@@ -338,7 +317,7 @@ function SessionSubItem({
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => openRename(session.id)}>
               <Pencil />
-              Rename…
+              Rename agent…
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => openForkAgent(session.id)}>
               <GitFork />
@@ -346,26 +325,14 @@ function SessionSubItem({
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => openChangeProvider(session.id)}>
               <Cpu />
-              Change provider…
+              Change agent provider…
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={handleToggleAutoReopen}>
               <RefreshCw />
               {session.auto_reopen_enabled
-                ? "Disable auto-reopen"
-                : "Enable auto-reopen"}
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={handlePush}>
-              <Send />
-              Push
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={handlePull}>
-              <Download />
-              Pull
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => openCommit(session.id)}>
-              <GitCommitHorizontal />
-              Commit…
+                ? "Disable agent auto-reopen"
+                : "Enable agent auto-reopen"}
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => openEditor(session.id)}>
               <FileCode2 />
@@ -393,7 +360,7 @@ function SessionSubItem({
               onClick={() => openDelete(session.id)}
             >
               <Trash2 />
-              Delete…
+              Delete agent…
             </DropdownMenuItem>
           </DropdownMenuGroup>
         </DropdownMenuContent>
